@@ -52,6 +52,23 @@ cd apps/extension && bun dev
 cargo run --package refine-server
 ```
 
+### Claude Code 选择性导入
+
+不想把所有 Claude Code 聊天都入库时，使用选择性导入脚本：
+
+```bash
+# 1) 查看最近会话候选
+scripts/import_claude_code.sh list --limit 10
+
+# 2) 仅导入指定会话（session id 或 jsonl 文件路径）
+scripts/import_claude_code.sh import --session <session-id>
+
+# 3) 按 marker 批量导入（例如你在聊天里约定 #refine）
+scripts/import_claude_code.sh import --marker "#refine" --since-days 7
+```
+
+默认不会全量导入；如果确实要全量，需显式加 `--all`。
+
 ## 项目结构
 
 ```
