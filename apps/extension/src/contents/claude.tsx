@@ -5,7 +5,11 @@
  */
 
 import type { PlasmoCSConfig } from 'plasmo'
-import { sendToDesktop } from '../lib/api'
+
+interface EnqueueResponse {
+  queued: boolean
+  message?: string
+}
 
 export const config: PlasmoCSConfig = {
   matches: ['https://claude.ai/*'],
@@ -60,17 +64,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         },
       })
 
-      // 发送到桌面应用
-      sendToDesktop(conversation, window.location.href, 'claude')
+      // 发送到 background 入队并异步同步到云端
+      enqueueConversation(conversation)
         .then((res) => {
-          if (res.success) {
-            showToast('对话已保存到 Refine')
+          if (res.queued) {
+            showToast('已加入同步队列，稍后上传到 Refine 云端')
           } else {
             showToast(res.message || '保存失败')
           }
         })
         .catch(() => {
-          showToast('对话已提取，请打开 Refine 桌面应用查看')
+          showToast('对话已提取，但入队失败，请稍后重试')
         })
 
       sendResponse({ success: true, length: conversation.length })
@@ -81,6 +85,33 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   return true
 })
+
+function enqueueConversation(content: string): Promise<EnqueueResponse> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      {
+        action: 'enqueueExtractedConversation',
+        payload: {
+          content,
+          url: window.location.href,
+          source: 'claude',
+          title: document.title || 'Claude Conversation',
+          capturedAt: Date.now(),
+        },
+      },
+      (response: EnqueueResponse) => {
+        if (chrome.runtime.lastError) {
+          resolve({
+            queued: false,
+            message: chrome.runtime.lastError.message || 'Background message failed',
+          })
+          return
+        }
+        resolve(response || { queued: false, message: 'No response from background' })
+      }
+    )
+  })
+}
 
 // 显示提示
 function showToast(message: string) {

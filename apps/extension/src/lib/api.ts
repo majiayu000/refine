@@ -1,57 +1,82 @@
 /**
- * Refine 桌面应用 API 客户端
+ * Refine 云端 API 客户端
  */
 
-const API_BASE = 'http://localhost:19527'
+import { getCloudApiBase } from './config'
+import type { CloudUploadRequest, CloudUploadResult, OutboxItem } from './types'
 
-interface ApiResponse {
+interface CloudIngestResponse {
   success: boolean
   message?: string
-  ids?: string[]
+  conversation_id?: string
+  status?: string
 }
 
-/**
- * 检查桌面应用是否运行
- */
-export async function checkHealth(): Promise<boolean> {
+function toRequestBody(item: OutboxItem): CloudUploadRequest {
+  return {
+    content: item.payload.content,
+    url: item.payload.url,
+    source: item.payload.source,
+    title: item.payload.title,
+    captured_at: new Date(item.payload.capturedAt).toISOString(),
+    idempotency_key: item.idempotencyKey,
+  }
+}
+
+export async function checkCloudHealth(): Promise<boolean> {
+  const apiBase = getCloudApiBase()
+
   try {
-    const res = await fetch(`${API_BASE}/health`, {
+    const res = await fetch(`${apiBase}/health`, {
       method: 'GET',
-      mode: 'cors',
       headers: {
         'X-Refine-Client': 'extension',
       },
     })
-    const data: ApiResponse = await res.json()
-    return data.success
+    if (!res.ok) return false
+    const data = (await res.json()) as { success?: boolean }
+    return data.success === true
   } catch {
     return false
   }
 }
 
-/**
- * 发送提取的对话到桌面应用
- */
-export async function sendToDesktop(
-  content: string,
-  url: string,
-  source: string
-): Promise<ApiResponse> {
+export async function uploadConversation(item: OutboxItem): Promise<CloudUploadResult> {
+  const apiBase = getCloudApiBase()
+
   try {
-    const res = await fetch(`${API_BASE}/extract`, {
+    const res = await fetch(`${apiBase}/v1/conversations`, {
       method: 'POST',
-      mode: 'cors',
       headers: {
         'Content-Type': 'application/json',
         'X-Refine-Client': 'extension',
       },
-      body: JSON.stringify({ content, url, source }),
+      body: JSON.stringify(toRequestBody(item)),
     })
-    return await res.json()
-  } catch (e) {
+
+    let data: CloudIngestResponse | null = null
+    try {
+      data = (await res.json()) as CloudIngestResponse
+    } catch {
+      data = null
+    }
+
+    if (!res.ok || !data?.success) {
+      return {
+        success: false,
+        message: data?.message || `Cloud API error (${res.status})`,
+      }
+    }
+
+    return {
+      success: true,
+      conversationId: data.conversation_id,
+      status: data.status || 'queued',
+    }
+  } catch {
     return {
       success: false,
-      message: '无法连接到桌面应用，请确保 Refine 正在运行',
+      message: '无法连接到云端服务，请检查网络或服务地址',
     }
   }
 }

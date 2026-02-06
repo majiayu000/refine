@@ -110,11 +110,14 @@ invoke('delete_item', {
 
 ---
 
-## 2. HTTP API
+## 2. Cloud HTTP API
 
-桌面应用提供本地 HTTP API，供浏览器扩展调用。
+浏览器扩展直接调用云端 API，不再依赖桌面端本地 HTTP 服务。
 
-**基础 URL**: `http://localhost:19527`
+**基础 URL（开发）**: `http://localhost:8787`  
+**基础 URL（生产）**: `https://api.refine.so`（示例）
+
+扩展会附带请求头：`X-Refine-Client: extension`。
 
 ### 2.1 健康检查
 
@@ -126,23 +129,27 @@ GET /health
 ```json
 {
   "success": true,
-  "message": "Refine is running"
+  "message": "Refine cloud API is running"
 }
 ```
 
 ---
 
-### 2.2 提取对话
+### 2.2 创建会话（扩展上传）
 
 ```http
-POST /extract
+POST /v1/conversations
 Content-Type: application/json
 X-Refine-Client: extension
+Authorization: Bearer <token>  // 可选，服务端开启鉴权时需要
 
 {
   "content": "对话内容文本",
   "url": "https://claude.ai/chat/xxx",
-  "source": "claude"
+  "source": "claude",
+  "title": "Claude Conversation",
+  "captured_at": "2026-02-06T12:00:00.000Z",
+  "idempotency_key": "uuid"
 }
 ```
 
@@ -150,24 +157,64 @@ X-Refine-Client: extension
 ```json
 {
   "success": true,
-  "ids": [
-    "550e8400-e29b-41d4-a716-446655440000"
-  ]
+  "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "queued"
 }
 ```
 
-**错误响应**：
+---
+
+### 2.3 创建提炼任务
+
+```http
+POST /v1/extraction-jobs
+Content-Type: application/json
+
+{
+  "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+  "mode": "auto"
+}
+```
+
+**响应**：
 ```json
 {
-  "success": false,
-  "message": "错误描述"
+  "success": true,
+  "job_id": "9cc2d6f9-b8c7-4ed2-a401-5b2d2ab6d4fc",
+  "status": "succeeded"
 }
 ```
 
+---
+
+### 2.4 查询提炼任务状态
+
+```http
+GET /v1/extraction-jobs/:job_id
+```
+
+---
+
+### 2.5 列出知识条目
+
+```http
+GET /v1/items?cursor=0&limit=20
+```
+
+---
+
+### 2.6 搜索知识
+
+```http
+GET /v1/search?q=rust&limit=20
+```
+
+---
+
 说明：
-- `/extract` 仅接受浏览器扩展来源请求（`chrome-extension://` / `moz-extension://`）
-- 请求头必须包含 `X-Refine-Client: extension`
-- 桌面端需配置 LLM Key（`REFINE_ANTHROPIC_API_KEY` 或 `REFINE_OPENAI_API_KEY`）
+- `idempotency_key` 用于去重，避免重复上传生成重复记录。
+- 生产环境建议启用 `Authorization: Bearer` 并绑定用户身份。
+- 当前 `apps/server` 是迁移联调用 MVP，实现为内存存储；生产需替换持久化存储与异步任务队列。
 
 ---
 
@@ -322,9 +369,9 @@ export async function deleteItem(id: string): Promise<boolean> {
 
 ```typescript
 // lib/api.ts
-const API_BASE = 'http://localhost:19527'
+const API_BASE = process.env.PLASMO_PUBLIC_REFINE_API_BASE || 'http://localhost:8787'
 
-export async function checkHealth(): Promise<boolean> {
+export async function checkCloudHealth(): Promise<boolean> {
   try {
     const res = await fetch(`${API_BASE}/health`)
     const data = await res.json()
@@ -334,15 +381,21 @@ export async function checkHealth(): Promise<boolean> {
   }
 }
 
-export async function sendToDesktop(
+export async function uploadConversation(
   content: string,
   url: string,
   source: string
-): Promise<{ success: boolean; id?: string; message?: string }> {
-  const res = await fetch(`${API_BASE}/extract`, {
+): Promise<{ success: boolean; conversation_id?: string; message?: string }> {
+  const res = await fetch(`${API_BASE}/v1/conversations`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content, url, source }),
+    body: JSON.stringify({
+      content,
+      url,
+      source,
+      captured_at: new Date().toISOString(),
+      idempotency_key: crypto.randomUUID(),
+    }),
   })
   return res.json()
 }
@@ -357,5 +410,5 @@ HTTP API 支持跨域请求：
 ```
 Access-Control-Allow-Origin: chrome-extension://<extension-id> 或 moz-extension://<extension-id>
 Access-Control-Allow-Methods: GET, POST, OPTIONS
-Access-Control-Allow-Headers: Content-Type, X-Refine-Client
+Access-Control-Allow-Headers: Content-Type, Authorization, X-Refine-Client
 ```

@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "plasmo dev",
     "build": "plasmo build",
-    "package": "plasmo package"
+    "package": "plasmo package",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "plasmo": "^0.89.0",
@@ -25,6 +26,8 @@
   },
   "manifest": {
     "host_permissions": [
+      "http://localhost:8787/*",
+      "https://api.refine.so/*",
       "https://chat.openai.com/*",
       "https://chatgpt.com/*",
       "https://claude.ai/*"

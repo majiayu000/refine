@@ -126,7 +126,7 @@
 - [x] CLI 命令实现 (extract, search, list, show, delete, add)
 - [x] Tauri 桌面应用 + Spotlight 组件
 - [x] 浏览器插件 (Plasmo, ChatGPT/Claude 支持)
-- [x] 扩展与桌面应用 HTTP API 通信
+- [x] 扩展云端同步链路（摆脱桌面端强依赖）
 
 ### 后续计划
 

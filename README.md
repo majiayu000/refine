@@ -23,11 +23,15 @@ cargo build --workspace
 # 前端
 cd apps/desktop/ui && bun install
 cd apps/extension && bun install
+cd apps/server && bun install
 
 # 配置 LLM（提炼功能必需，二选一）
 export REFINE_ANTHROPIC_API_KEY=your_key
 # 或
 export REFINE_OPENAI_API_KEY=your_key
+
+# 配置浏览器扩展云端 API（可选，默认 http://localhost:8787）
+export PLASMO_PUBLIC_REFINE_API_BASE=http://localhost:8787
 ```
 
 ### 运行
@@ -41,6 +45,9 @@ cd apps/desktop/src-tauri && cargo tauri dev
 
 # 浏览器扩展
 cd apps/extension && bun dev
+
+# 云端服务（扩展直连）
+cd apps/server && bun run dev
 ```
 
 ## 项目结构
@@ -59,7 +66,8 @@ refine/
 │   ├── desktop/          # Tauri 桌面应用
 │   │   ├── src-tauri/    # Rust 后端
 │   │   └── ui/           # React 前端
-│   └── extension/        # 浏览器插件 (Plasmo)
+│   ├── extension/        # 浏览器插件 (Plasmo)
+│   └── server/           # 云端 API 服务 (Bun)
 └── docs/                 # 文档
 ```
 
