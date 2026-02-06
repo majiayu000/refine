@@ -1,4 +1,4 @@
-export type ConversationSource = 'chatgpt' | 'claude' | 'gemini'
+export type ConversationSource = 'chatgpt' | 'claude' | 'gemini' | 'grok'
 
 export interface ConversationPayload {
   content: string
