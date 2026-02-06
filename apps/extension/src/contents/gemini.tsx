@@ -29,7 +29,7 @@ interface ConversationTarget {
   conversationKey: string
 }
 
-type QuickSaveButtonState = 'idle' | 'saving' | 'done' | 'error'
+type QuickSaveButtonState = 'idle' | 'saving' | 'done' | 'imported' | 'error'
 type DebugLevel = 'info' | 'warn' | 'error'
 
 interface DebugLogEntry {
@@ -51,12 +51,17 @@ const MESSAGE_POLL_INTERVAL_MS = 350
 const MESSAGE_POLL_TIMEOUT_MS = 20_000
 const HIDDEN_IFRAME_EXTRACT_TIMEOUT_MS = 18_000
 const QUICK_SAVE_DATA_FLAG = 'refineQuickSaveAttached'
+const IMPORTED_CONVERSATIONS_KEY = '__refine_imported_conversations_gemini'
+const IMPORTED_CONVERSATIONS_LIMIT = 1_500
 const INVALID_CONVERSATION_IDS = new Set(['', 'none', 'null', 'undefined', 'new', 'new_chat', 'newchat'])
 const DEBUG_LOG_KEY = '__refine_gemini_quicksave_logs'
 const DEBUG_LOG_LIMIT = 100
 
 // Gemini 当前对 iframe 提取是策略级封禁（X-Frame-Options: deny），默认直接禁用该路径。
 let hiddenIframeCapability: 'unknown' | 'supported' | 'blocked' = 'blocked'
+let importedConversations = new Map<string, number>()
+let importedConversationsLoaded = false
+let importedConversationsLoadPromise: Promise<void> | null = null
 
 function isHiddenIframeBlocked(): boolean {
   return hiddenIframeCapability === 'blocked'
@@ -400,9 +405,94 @@ function clearPendingSidebarImport(): void {
   }
 }
 
+function buildImportedConversationMap(raw: unknown): Map<string, number> {
+  const imported = new Map<string, number>()
+  if (!raw || typeof raw !== 'object') return imported
+
+  for (const [conversationKey, importedAt] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof conversationKey !== 'string' || conversationKey.length === 0) continue
+    if (typeof importedAt !== 'number' || !Number.isFinite(importedAt)) continue
+    imported.set(conversationKey, importedAt)
+  }
+
+  return imported
+}
+
+function trimImportedConversations(map: Map<string, number>): Map<string, number> {
+  if (map.size <= IMPORTED_CONVERSATIONS_LIMIT) return map
+
+  const sorted = Array.from(map.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, IMPORTED_CONVERSATIONS_LIMIT)
+
+  return new Map(sorted)
+}
+
+async function ensureImportedConversationsLoaded(): Promise<void> {
+  if (importedConversationsLoaded) return
+  if (importedConversationsLoadPromise) return importedConversationsLoadPromise
+
+  importedConversationsLoadPromise = chrome.storage.local
+    .get([IMPORTED_CONVERSATIONS_KEY])
+    .then((stored) => {
+      importedConversations = trimImportedConversations(
+        buildImportedConversationMap(stored[IMPORTED_CONVERSATIONS_KEY])
+      )
+      importedConversationsLoaded = true
+    })
+    .catch((error) => {
+      importedConversations = new Map()
+      importedConversationsLoaded = true
+      debugLog('warn', 'imported_state_read_fail', toErrorMessage(error))
+    })
+    .finally(() => {
+      importedConversationsLoadPromise = null
+    })
+
+  return importedConversationsLoadPromise
+}
+
+function isConversationImported(conversationKey: string): boolean {
+  return importedConversations.has(conversationKey)
+}
+
+async function persistImportedConversations(): Promise<void> {
+  const payload: Record<string, number> = {}
+  for (const [conversationKey, importedAt] of importedConversations.entries()) {
+    payload[conversationKey] = importedAt
+  }
+  await chrome.storage.local.set({
+    [IMPORTED_CONVERSATIONS_KEY]: payload,
+  })
+}
+
+async function markConversationImported(conversationKey: string): Promise<void> {
+  await ensureImportedConversationsLoaded()
+  if (isConversationImported(conversationKey)) return
+
+  importedConversations.set(conversationKey, Date.now())
+  importedConversations = trimImportedConversations(importedConversations)
+
+  try {
+    await persistImportedConversations()
+  } catch (error) {
+    debugLog('warn', 'imported_state_write_fail', toErrorMessage(error), {
+      conversationKey,
+    })
+  }
+}
+
+function setConversationButtonsState(conversationKey: string, state: QuickSaveButtonState): void {
+  const buttons = document.querySelectorAll<HTMLButtonElement>('.refine-quick-save-btn')
+  buttons.forEach((candidate) => {
+    if (candidate.dataset.conversationKey !== conversationKey) return
+    setQuickSaveButtonState(candidate, state)
+  })
+}
+
 function setQuickSaveButtonState(button: HTMLButtonElement, state: QuickSaveButtonState): void {
   button.dataset.state = state
-  button.disabled = state === 'saving'
+  button.disabled = state === 'saving' || state === 'imported'
 
   if (state === 'saving') {
     button.textContent = '…'
@@ -411,6 +501,12 @@ function setQuickSaveButtonState(button: HTMLButtonElement, state: QuickSaveButt
   }
 
   if (state === 'done') {
+    button.textContent = '✓'
+    button.title = '已入库'
+    return
+  }
+
+  if (state === 'imported') {
     button.textContent = '✓'
     button.title = '已入库'
     return
@@ -429,6 +525,7 @@ function setQuickSaveButtonState(button: HTMLButtonElement, state: QuickSaveButt
 function resetQuickSaveButtonStateLater(button: HTMLButtonElement): void {
   window.setTimeout(() => {
     if (!document.contains(button)) return
+    if (button.dataset.state === 'imported') return
     setQuickSaveButtonState(button, 'idle')
   }, 1_800)
 }
@@ -602,10 +699,15 @@ async function extractAndEnqueueWithoutNavigation(target: ConversationTarget, ti
     }
   }
 
-  return enqueueExtractedContent(iframeContent, {
+  const result = await enqueueExtractedContent(iframeContent, {
     title,
     url: target.url,
   })
+  if (result.success) {
+    await markConversationImported(target.conversationKey)
+    setConversationButtonsState(target.conversationKey, 'imported')
+  }
+  return result
 }
 
 async function waitForNavigationSignal(targetConversationKey: string, initialUrl: string): Promise<boolean> {
@@ -665,6 +767,7 @@ async function navigateToConversation(link: HTMLAnchorElement, target: Conversat
 async function extractAndEnqueueConversation(options?: {
   title?: string
   url?: string
+  conversationKey?: string
   waitForContent?: boolean
 }): Promise<ExtractResult> {
   const content = options?.waitForContent ? await waitForConversationContent() : extractConversation()
@@ -676,10 +779,18 @@ async function extractAndEnqueueConversation(options?: {
     }
   }
 
-  return enqueueExtractedContent(content, {
+  const result = await enqueueExtractedContent(content, {
     title: options?.title,
     url: options?.url,
   })
+  if (!result.success) return result
+
+  const conversationKey = options?.conversationKey || getConversationKey(options?.url || window.location.href)
+  if (!conversationKey) return result
+
+  await markConversationImported(conversationKey)
+  setConversationButtonsState(conversationKey, 'imported')
+  return result
 }
 
 async function handleSidebarQuickSaveClick(
@@ -698,6 +809,13 @@ async function handleSidebarQuickSaveClick(
     return
   }
 
+  await ensureImportedConversationsLoaded()
+  if (isConversationImported(target.conversationKey)) {
+    setConversationButtonsState(target.conversationKey, 'imported')
+    showToast('该会话已入库')
+    return
+  }
+
   const title = getConversationTitleFromLink(link)
   setQuickSaveButtonState(button, 'saving')
 
@@ -708,25 +826,25 @@ async function handleSidebarQuickSaveClick(
     const result = await extractAndEnqueueConversation({
       title,
       url: target.url,
+      conversationKey: target.conversationKey,
       waitForContent: true,
     })
 
     if (result.success) {
-      setQuickSaveButtonState(button, 'done')
+      setConversationButtonsState(target.conversationKey, 'imported')
       showToast('已加入同步队列，稍后上传到 Refine 云端')
     } else {
       setQuickSaveButtonState(button, 'error')
       showToast(result.message || '保存失败')
+      resetQuickSaveButtonStateLater(button)
     }
-    resetQuickSaveButtonStateLater(button)
     return
   }
 
   const silentResult = await extractAndEnqueueWithoutNavigation(target, title)
   if (silentResult.success) {
-    setQuickSaveButtonState(button, 'done')
+    setConversationButtonsState(target.conversationKey, 'imported')
     showToast('已后台入库，无需跳转')
-    resetQuickSaveButtonStateLater(button)
     return
   }
 
@@ -776,6 +894,9 @@ function enhanceSidebarConversationLinks(): void {
   const links = getSidebarConversationLinks()
 
   for (const link of links) {
+    const target = resolveConversationTarget(link)
+    if (!target) continue
+
     const host =
       link.closest<HTMLElement>('li, [role="listitem"], [data-testid*="conversation"], [data-test-id*="conversation"]') ||
       link
@@ -788,7 +909,8 @@ function enhanceSidebarConversationLinks(): void {
     button.type = 'button'
     button.className = 'refine-quick-save-btn'
     button.setAttribute('aria-label', '入库此会话')
-    setQuickSaveButtonState(button, 'idle')
+    button.dataset.conversationKey = target.conversationKey
+    setQuickSaveButtonState(button, isConversationImported(target.conversationKey) ? 'imported' : 'idle')
 
     const stopPropagation = (event: Event) => {
       event.preventDefault()
@@ -865,6 +987,7 @@ async function resumePendingSidebarImport(): Promise<void> {
     const result = await extractAndEnqueueConversation({
       title: pending.title,
       url: pending.url,
+      conversationKey: pending.conversationKey,
       waitForContent: true,
     })
     clearPendingSidebarImport()
@@ -1032,7 +1155,8 @@ style.textContent = `
     background: rgba(30, 64, 175, 0.84);
   }
 
-  .refine-quick-save-btn[data-state="done"] {
+  .refine-quick-save-btn[data-state="done"],
+  .refine-quick-save-btn[data-state="imported"] {
     color: #dcfce7;
     border-color: rgba(74, 222, 128, 0.62);
     background: rgba(22, 163, 74, 0.84);
@@ -1071,8 +1195,10 @@ function init(): void {
     hiddenIframeCapability,
   })
 
-  startSidebarQuickSaveObserver()
-  void resumePendingSidebarImport()
+  void ensureImportedConversationsLoaded().finally(() => {
+    startSidebarQuickSaveObserver()
+    void resumePendingSidebarImport()
+  })
 }
 
 if (document.readyState === 'loading') {
