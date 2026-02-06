@@ -89,7 +89,14 @@ export async function uploadConversation(item: OutboxItem): Promise<CloudUploadR
 }
 
 export async function fetchCloudTotalItems(): Promise<number | null> {
+  return fetchCloudTotalItemsWithOptions({ allowLegacyScan: true })
+}
+
+export async function fetchCloudTotalItemsWithOptions(options?: {
+  allowLegacyScan?: boolean
+}): Promise<number | null> {
   const apiBase = getCloudApiBase()
+  const allowLegacyScan = options?.allowLegacyScan ?? true
 
   try {
     const headers = {
@@ -100,6 +107,8 @@ export async function fetchCloudTotalItems(): Promise<number | null> {
     const first = (await firstRes.json()) as CloudItemsResponse
     if (first.success === false) return null
     if (typeof first.total === 'number') return first.total
+
+    if (!allowLegacyScan) return null
 
     // Backward-compatible fallback for older servers without `total` support.
     let legacyCount = 0

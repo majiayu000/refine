@@ -4,7 +4,7 @@
  * 处理后台任务与云端同步（不依赖本地桌面端服务）
  */
 
-import { checkCloudHealth, fetchCloudTotalItems, uploadConversation } from '../lib/api'
+import { checkCloudHealth, fetchCloudTotalItemsWithOptions, uploadConversation } from '../lib/api'
 import {
   getCloudApiBase,
   OUTBOX_FLUSH_ALARM,
@@ -25,6 +25,8 @@ import type {
 const STATS_KEY = 'stats'
 const OUTBOX_KEY = 'outbox'
 const SYNC_STATE_KEY = 'syncState'
+const SYNCING_RECOVERY_STALE_MS = 60_000
+const CLOUD_STATUS_CACHE_TTL_MS = 60_000
 
 const DEFAULT_STATS: ExtensionStats = {
   totalItems: 0,
@@ -34,11 +36,18 @@ const DEFAULT_STATS: ExtensionStats = {
 const DEFAULT_SYNC_STATE: SyncState = {}
 
 let flushPromise: Promise<void> | null = null
+let cloudStatusCache: CloudStatusCache | null = null
 
 interface StorageSnapshot {
   stats: ExtensionStats
   outbox: OutboxItem[]
   syncState: SyncState
+}
+
+interface CloudStatusCache {
+  updatedAt: number
+  cloudHealthy: boolean
+  remoteTotalItems: number | null
 }
 
 interface EnqueueMessage {
@@ -82,6 +91,23 @@ function pruneOutbox(outbox: OutboxItem[]): OutboxItem[] {
   return outbox.filter((item) => item.status !== 'sent' || now - item.updatedAt <= sentTtlMs)
 }
 
+function recoverStuckSyncingItems(outbox: OutboxItem[], now = Date.now()): boolean {
+  let changed = false
+
+  for (const item of outbox) {
+    if (item.status !== 'syncing') continue
+    if (now - item.updatedAt < SYNCING_RECOVERY_STALE_MS) continue
+
+    item.status = 'failed'
+    item.lastError = item.lastError || 'Sync interrupted, retry scheduled'
+    item.nextAttemptAt = now
+    item.updatedAt = now
+    changed = true
+  }
+
+  return changed
+}
+
 function buildSyncStatus(snapshot: StorageSnapshot): SyncStatus {
   const counts = {
     pending: 0,
@@ -121,8 +147,39 @@ async function saveSnapshot(snapshot: StorageSnapshot): Promise<void> {
 
 async function initializeStorage(): Promise<void> {
   const snapshot = await loadSnapshot()
+  const now = Date.now()
+  recoverStuckSyncingItems(snapshot.outbox, now)
   snapshot.outbox = pruneOutbox(snapshot.outbox)
   await saveSnapshot(snapshot)
+}
+
+async function getCloudStatusWithCache(): Promise<{
+  cloudHealthy: boolean
+  remoteTotalItems: number | null
+}> {
+  const now = Date.now()
+  if (cloudStatusCache && now - cloudStatusCache.updatedAt < CLOUD_STATUS_CACHE_TTL_MS) {
+    return {
+      cloudHealthy: cloudStatusCache.cloudHealthy,
+      remoteTotalItems: cloudStatusCache.remoteTotalItems,
+    }
+  }
+
+  const cloudHealthy = await checkCloudHealth()
+  const remoteTotalItems = cloudHealthy
+    ? await fetchCloudTotalItemsWithOptions({ allowLegacyScan: false })
+    : null
+
+  cloudStatusCache = {
+    updatedAt: now,
+    cloudHealthy,
+    remoteTotalItems,
+  }
+
+  return {
+    cloudHealthy,
+    remoteTotalItems,
+  }
 }
 
 async function resetDailyStats(): Promise<void> {
@@ -154,7 +211,7 @@ async function flushOutboxWithOptions(options: { forceRetry: boolean }): Promise
   const snapshot = await loadSnapshot()
   const now = Date.now()
   const forceRetry = options.forceRetry
-  let changed = false
+  let changed = recoverStuckSyncingItems(snapshot.outbox, now)
 
   for (const item of snapshot.outbox) {
     if (item.status === 'sent') continue
@@ -259,12 +316,11 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage, _sender, sendR
   if (message.action === 'getSyncStatus') {
     loadSnapshot()
       .then(async (snapshot) => {
-        const cloudHealthy = await checkCloudHealth()
-        const remoteTotalItems = cloudHealthy ? await fetchCloudTotalItems() : null
+        const cloud = await getCloudStatusWithCache()
         sendResponse({
-          cloudHealthy,
+          cloudHealthy: cloud.cloudHealthy,
           status: buildSyncStatus(snapshot),
-          remoteTotalItems: remoteTotalItems ?? undefined,
+          remoteTotalItems: cloud.remoteTotalItems ?? undefined,
         })
       })
       .catch((error: unknown) => {

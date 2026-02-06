@@ -50,6 +50,8 @@ const PENDING_SIDEBAR_IMPORT_TTL_MS = 2 * 60 * 1_000
 const MESSAGE_POLL_INTERVAL_MS = 350
 const MESSAGE_POLL_TIMEOUT_MS = 20_000
 const HIDDEN_IFRAME_EXTRACT_TIMEOUT_MS = 18_000
+const NAVIGATION_WAIT_TIMEOUT_MS = 5_000
+const NAVIGATION_POLL_INTERVAL_MS = 120
 const QUICK_SAVE_DATA_FLAG = 'refineQuickSaveAttached'
 const IMPORTED_CONVERSATIONS_KEY = '__refine_imported_conversations_gemini'
 const IMPORTED_CONVERSATIONS_LIMIT = 1_500
@@ -710,25 +712,21 @@ async function extractAndEnqueueWithoutNavigation(target: ConversationTarget, ti
   return result
 }
 
-async function waitForNavigationSignal(targetConversationKey: string, initialUrl: string): Promise<boolean> {
-  const timeoutMs = 2_400
-  const intervalMs = 120
+async function waitForTargetConversation(targetConversationKey: string): Promise<boolean> {
   const startedAt = Date.now()
 
-  while (Date.now() - startedAt <= timeoutMs) {
+  while (Date.now() - startedAt <= NAVIGATION_WAIT_TIMEOUT_MS) {
     const currentKey = getConversationKey(window.location.href)
     if (currentKey === targetConversationKey) return true
-    if (window.location.href !== initialUrl) return true
-    await delay(intervalMs)
+    await delay(NAVIGATION_POLL_INTERVAL_MS)
   }
 
   return false
 }
 
 async function navigateToConversation(link: HTMLAnchorElement, target: ConversationTarget): Promise<boolean> {
-  const initialUrl = window.location.href
   debugLog('info', 'nav_start', 'attempt navigation to target conversation', {
-    from: initialUrl,
+    from: window.location.href,
     to: target.url,
     conversationKey: target.conversationKey,
   })
@@ -742,13 +740,19 @@ async function navigateToConversation(link: HTMLAnchorElement, target: Conversat
     // 忽略 click 失败，继续回退 assign
   }
 
-  const clickedNavigated = await waitForNavigationSignal(target.conversationKey, initialUrl)
-  if (clickedNavigated) {
-    debugLog('info', 'nav_click_success', 'navigation detected after link click', {
+  const clickedToTarget = await waitForTargetConversation(target.conversationKey)
+  if (clickedToTarget) {
+    debugLog('info', 'nav_click_success', 'target conversation reached after link click', {
       to: target.url,
     })
     return true
   }
+
+  debugLog('warn', 'nav_click_miss', 'link click did not reach target conversation, falling back to assign', {
+    to: target.url,
+    currentUrl: window.location.href,
+    currentConversationKey: getConversationKey(window.location.href),
+  })
 
   try {
     window.location.assign(target.url)
