@@ -1,7 +1,7 @@
 /**
- * Claude Content Script
+ * Gemini Content Script
  *
- * 在 Claude.ai 页面注入提取功能
+ * 在 Gemini 页面注入提取功能
  */
 
 import type { PlasmoCSConfig } from 'plasmo'
@@ -11,39 +11,67 @@ interface EnqueueResponse {
   message?: string
 }
 
+interface Turn {
+  role: 'Human' | 'Assistant'
+  el: Element
+}
+
 export const config: PlasmoCSConfig = {
-  matches: ['https://claude.ai/*'],
+  matches: ['https://gemini.google.com/*'],
   all_frames: false,
 }
 
-// 提取对话内容
-function extractConversation(): string {
-  const messages: string[] = []
+function normalizeText(input: string): string {
+  return input
+    .replace(/\u200b/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
 
-  // Claude 的对话容器选择器
-  const humanMessages = document.querySelectorAll('[data-testid="human-message"]')
-  const assistantMessages = document.querySelectorAll('[data-testid="assistant-message"]')
+function collectTurns(): Turn[] {
+  const turns: Turn[] = []
 
-  // 合并并排序消息
-  const allMessages = [
-    ...Array.from(humanMessages).map((el) => ({ role: 'Human', el })),
-    ...Array.from(assistantMessages).map((el) => ({ role: 'Assistant', el })),
-  ]
+  const userNodes = document.querySelectorAll('main user-query, main [data-turn-role="user"], main [data-source="user"]')
+  userNodes.forEach((el) => {
+    turns.push({ role: 'Human', el })
+  })
 
-  // 按 DOM 位置排序
-  allMessages.sort((a, b) => {
+  const assistantNodes = document.querySelectorAll(
+    'main model-response, main [data-turn-role="model"], main [data-turn-role="assistant"], main [data-source="model"]'
+  )
+  assistantNodes.forEach((el) => {
+    turns.push({ role: 'Assistant', el })
+  })
+
+  // 去重并按 DOM 顺序排序
+  const deduped: Turn[] = []
+  const seen = new Set<Element>()
+  for (const turn of turns) {
+    if (seen.has(turn.el)) continue
+    seen.add(turn.el)
+    deduped.push(turn)
+  }
+
+  deduped.sort((a, b) => {
     const position = a.el.compareDocumentPosition(b.el)
     if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1
     if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1
     return 0
   })
 
-  allMessages.forEach(({ role, el }) => {
-    const content = el.textContent?.trim() || ''
-    if (content) {
-      messages.push(`${role}: ${content}`)
-    }
-  })
+  return deduped
+}
+
+function extractConversation(): string {
+  const turns = collectTurns()
+  const messages: string[] = []
+
+  for (const { role, el } of turns) {
+    const text = normalizeText((el as HTMLElement).innerText || el.textContent || '')
+    if (!text) continue
+    messages.push(`${role}: ${text}`)
+  }
 
   return messages.join('\n\n')
 }
@@ -54,17 +82,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const conversation = extractConversation()
 
     if (conversation) {
-      // 保存到 storage（备份）
       chrome.storage.local.set({
         lastExtracted: {
           content: conversation,
           url: window.location.href,
           timestamp: Date.now(),
-          source: 'claude',
+          source: 'gemini',
         },
       })
 
-      // 发送到 background 入队并异步同步到云端
       enqueueConversation(conversation)
         .then((res) => {
           if (res.queued) {
@@ -94,8 +120,8 @@ function enqueueConversation(content: string): Promise<EnqueueResponse> {
         payload: {
           content,
           url: window.location.href,
-          source: 'claude',
-          title: document.title || 'Claude Conversation',
+          source: 'gemini',
+          title: document.title || 'Gemini Conversation',
           capturedAt: Date.now(),
         },
       },
@@ -113,7 +139,6 @@ function enqueueConversation(content: string): Promise<EnqueueResponse> {
   })
 }
 
-// 显示提示
 function showToast(message: string) {
   const toast = document.createElement('div')
   toast.textContent = message
@@ -139,7 +164,6 @@ function showToast(message: string) {
   }, 3000)
 }
 
-// 添加动画样式
 const style = document.createElement('style')
 style.textContent = `
   @keyframes slideIn {
@@ -153,6 +177,6 @@ style.textContent = `
 `
 document.head.appendChild(style)
 
-export default function ClaudeContent() {
+export default function GeminiContent() {
   return null
 }

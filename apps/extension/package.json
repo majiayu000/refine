@@ -30,7 +30,8 @@
       "https://api.refine.so/*",
       "https://chat.openai.com/*",
       "https://chatgpt.com/*",
-      "https://claude.ai/*"
+      "https://claude.ai/*",
+      "https://gemini.google.com/*"
     ],
     "permissions": [
       "storage",

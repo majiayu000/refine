@@ -15,6 +15,7 @@ pub struct ClaudeClient {
     client: reqwest::Client,
     api_key: String,
     model: String,
+    base_url: String,
 }
 
 impl ClaudeClient {
@@ -22,12 +23,18 @@ impl ClaudeClient {
         Self {
             client: reqwest::Client::new(),
             api_key: api_key.to_string(),
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: "claude-opus-4-6".to_string(),
+            base_url: "https://api.anthropic.com".to_string(),
         }
     }
 
     pub fn with_model(mut self, model: &str) -> Self {
         self.model = model.to_string();
+        self
+    }
+
+    pub fn with_base_url(mut self, url: &str) -> Self {
+        self.base_url = url.trim_end_matches('/').to_string();
         self
     }
 }
@@ -46,7 +53,7 @@ impl LlmClient for ClaudeClient {
 
         let resp = self
             .client
-            .post("https://api.anthropic.com/v1/messages")
+            .post(format!("{}/v1/messages", self.base_url))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")

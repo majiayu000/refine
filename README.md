@@ -23,10 +23,12 @@ cargo build --workspace
 # 前端
 cd apps/desktop/ui && bun install
 cd apps/extension && bun install
-cd apps/server && bun install
 
 # 配置 LLM（提炼功能必需，二选一）
 export REFINE_ANTHROPIC_API_KEY=your_key
+export REFINE_ANTHROPIC_MODEL=claude-opus-4-6
+# Anthropic 兼容网关可选（例如 Yunyi）
+# export REFINE_ANTHROPIC_BASE_URL=https://yunyi.cfd/claude
 # 或
 export REFINE_OPENAI_API_KEY=your_key
 
@@ -47,7 +49,7 @@ cd apps/desktop/src-tauri && cargo tauri dev
 cd apps/extension && bun dev
 
 # 云端服务（扩展直连）
-cd apps/server && bun run dev
+cargo run --package refine-server
 ```
 
 ## 项目结构
@@ -67,7 +69,7 @@ refine/
 │   │   ├── src-tauri/    # Rust 后端
 │   │   └── ui/           # React 前端
 │   ├── extension/        # 浏览器插件 (Plasmo)
-│   └── server/           # 云端 API 服务 (Bun)
+│   └── server/           # 云端 API 服务 (Rust/Axum)
 └── docs/                 # 文档
 ```
 

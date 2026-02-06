@@ -69,7 +69,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ success: true, length: conversation.length })
     } else {
       showToast('未找到对话内容')
-      sendResponse({ success: false })
+      sendResponse({ success: false, message: '未找到对话内容' })
     }
   }
   return true

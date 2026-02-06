@@ -4,6 +4,7 @@ members = [
     "packages/core",
     "apps/cli",
     "apps/desktop/src-tauri",
+    "apps/server",
 ]
 
 [workspace.package]

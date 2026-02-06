@@ -129,7 +129,7 @@ GET /health
 ```json
 {
   "success": true,
-  "message": "Refine cloud API is running"
+  "message": "Refine cloud API (Rust) is running"
 }
 ```
 
@@ -158,7 +158,8 @@ Authorization: Bearer <token>  // 可选，服务端开启鉴权时需要
 {
   "success": true,
   "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "queued"
+  "status": "queued",
+  "job_id": "9cc2d6f9-b8c7-4ed2-a401-5b2d2ab6d4fc"
 }
 ```
 
@@ -214,7 +215,9 @@ GET /v1/search?q=rust&limit=20
 说明：
 - `idempotency_key` 用于去重，避免重复上传生成重复记录。
 - 生产环境建议启用 `Authorization: Bearer` 并绑定用户身份。
-- 当前 `apps/server` 是迁移联调用 MVP，实现为内存存储；生产需替换持久化存储与异步任务队列。
+- Claude 提炼可通过 `REFINE_ANTHROPIC_MODEL` 指定模型（默认 `claude-opus-4-6`），并通过 `REFINE_ANTHROPIC_BASE_URL` 对接 Anthropic 兼容网关。
+- 当前 `apps/server` 使用 Rust + Axum；`items` 已持久化到 SQLite，`conversations/extraction_jobs` 仍是内存状态。
+- 生产需将会话与任务状态持久化并接入异步任务队列。
 
 ---
 

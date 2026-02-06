@@ -1,0 +1,20 @@
+[package]
+name = "refine-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+refine-core.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+reqwest.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+
+axum = { version = "0.7", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors"] }
+dirs = "5"
+dotenvy = "0.15"
