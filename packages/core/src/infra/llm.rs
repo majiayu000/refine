@@ -1,6 +1,4 @@
-//! LLM 客户端
-//!
-//! 轻量级 LLM 调用封装，支持 Claude 和 OpenAI
+//! LLM 客户端，支持 Claude 和 OpenAI。
 
 use crate::error::{InfraError, InfraResult};
 use async_trait::async_trait;
@@ -12,7 +10,6 @@ pub trait LlmClient: Send + Sync {
     /// 发送补全请求
     async fn complete(&self, prompt: &str, system: Option<&str>) -> InfraResult<String>;
 }
-
 /// Claude 客户端
 pub struct ClaudeClient {
     client: reqwest::Client,
@@ -34,7 +31,6 @@ impl ClaudeClient {
         self
     }
 }
-
 #[async_trait]
 impl LlmClient for ClaudeClient {
     async fn complete(&self, prompt: &str, system: Option<&str>) -> InfraResult<String> {
@@ -75,7 +71,6 @@ impl LlmClient for ClaudeClient {
             .ok_or_else(|| InfraError::LlmParse("空响应".into()))
     }
 }
-
 #[derive(Deserialize)]
 struct ClaudeResponse {
     content: Vec<ClaudeContent>,
@@ -85,7 +80,6 @@ struct ClaudeResponse {
 struct ClaudeContent {
     text: Option<String>,
 }
-
 /// OpenAI 客户端
 pub struct OpenAIClient {
     client: reqwest::Client,
@@ -114,7 +108,6 @@ impl OpenAIClient {
         self
     }
 }
-
 #[async_trait]
 impl LlmClient for OpenAIClient {
     async fn complete(&self, prompt: &str, system: Option<&str>) -> InfraResult<String> {
@@ -157,7 +150,6 @@ impl LlmClient for OpenAIClient {
             .ok_or_else(|| InfraError::LlmParse("空响应".into()))
     }
 }
-
 #[derive(Deserialize)]
 struct OpenAIResponse {
     choices: Vec<OpenAIChoice>,
@@ -172,7 +164,6 @@ struct OpenAIChoice {
 struct OpenAIMessage {
     content: Option<String>,
 }
-
 /// Mock 客户端（测试用）
 #[cfg(test)]
 pub struct MockLlmClient {
@@ -187,7 +178,6 @@ impl MockLlmClient {
         }
     }
 }
-
 #[cfg(test)]
 #[async_trait]
 impl LlmClient for MockLlmClient {
@@ -195,7 +185,6 @@ impl LlmClient for MockLlmClient {
         Ok(self.response.clone())
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

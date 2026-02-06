@@ -8,7 +8,6 @@ pub(super) fn init_schema(conn: &Connection) -> InfraResult<()> {
     conn.execute_batch(include_str!("../schema.sql"))
         .map_err(|e| InfraError::Database(e.to_string()))
 }
-
 pub(super) fn find_by_id(conn: &Connection, id: &str) -> InfraResult<Option<Item>> {
     let mut stmt = conn
         .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at FROM items WHERE id = ?1")
@@ -18,7 +17,6 @@ pub(super) fn find_by_id(conn: &Connection, id: &str) -> InfraResult<Option<Item
         .optional()
         .map_err(|e| InfraError::Database(e.to_string()))
 }
-
 pub(super) fn find_all(conn: &Connection) -> InfraResult<Vec<Item>> {
     let mut stmt = conn
         .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at FROM items ORDER BY created_at DESC")
@@ -31,7 +29,6 @@ pub(super) fn find_all(conn: &Connection) -> InfraResult<Vec<Item>> {
     rows.map(|r| r.map_err(|e| InfraError::Database(e.to_string())))
         .collect()
 }
-
 pub(super) fn find_by_type(conn: &Connection, item_type: ItemType) -> InfraResult<Vec<Item>> {
     let mut stmt = conn
         .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at FROM items WHERE item_type = ?1 ORDER BY created_at DESC")
@@ -44,7 +41,6 @@ pub(super) fn find_by_type(conn: &Connection, item_type: ItemType) -> InfraResul
     rows.map(|r| r.map_err(|e| InfraError::Database(e.to_string())))
         .collect()
 }
-
 pub(super) fn find_recent(
     conn: &Connection,
     item_type: Option<ItemType>,
@@ -79,7 +75,6 @@ pub(super) fn find_recent(
         }
     }
 }
-
 pub(super) fn count_items(conn: &Connection, item_type: Option<ItemType>) -> InfraResult<usize> {
     let count: i64 = match item_type {
         Some(item_type) => conn
@@ -96,7 +91,6 @@ pub(super) fn count_items(conn: &Connection, item_type: Option<ItemType>) -> Inf
 
     Ok(count.max(0) as usize)
 }
-
 pub(super) fn find_by_tags(conn: &Connection, tags: &[String]) -> InfraResult<Vec<Item>> {
     let all_items = find_all(conn)?;
     if tags.is_empty() {
@@ -117,7 +111,6 @@ pub(super) fn find_by_tags(conn: &Connection, tags: &[String]) -> InfraResult<Ve
         })
         .collect())
 }
-
 pub(super) fn save(conn: &Connection, item: &Item) -> InfraResult<()> {
     let tags_json = serde_json::to_string(item.tags())
         .map_err(|e| InfraError::Serialization(e.to_string()))?;
@@ -145,14 +138,12 @@ pub(super) fn save(conn: &Connection, item: &Item) -> InfraResult<()> {
 
     Ok(())
 }
-
 pub(super) fn delete(conn: &Connection, id: &str) -> InfraResult<bool> {
     let rows = conn
         .execute("DELETE FROM items WHERE id = ?1", [id])
         .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(rows > 0)
 }
-
 pub(super) fn exists(conn: &Connection, id: &str) -> InfraResult<bool> {
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM items WHERE id = ?1", [id], |row| {
@@ -162,7 +153,6 @@ pub(super) fn exists(conn: &Connection, id: &str) -> InfraResult<bool> {
 
     Ok(count > 0)
 }
-
 pub(super) fn search_text(
     conn: &Connection,
     query: &str,
@@ -193,10 +183,8 @@ pub(super) fn search_text(
     rows.map(|r| r.map_err(|e| InfraError::Database(e.to_string())))
         .collect()
 }
-
 pub(super) fn count_text_hits(conn: &Connection, query: &str) -> InfraResult<usize> {
     let fts_query = to_fts_query(query);
-
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM items_fts WHERE items_fts MATCH ?1",
@@ -207,7 +195,6 @@ pub(super) fn count_text_hits(conn: &Connection, query: &str) -> InfraResult<usi
 
     Ok(count.max(0) as usize)
 }
-
 fn to_row_err(err: InfraError) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
 }
