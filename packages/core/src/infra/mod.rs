@@ -1,8 +1,8 @@
 //! 基础设施模块
 //!
-//! ## 文件结构（固定，禁止新增）
+//! ## 文件结构
 //!
-//! - `sqlite.rs` - SQLite 存储实现
+//! - `sqlite/` - SQLite 存储实现（worker + 查询）
 //! - `llm.rs` - LLM 客户端 (Claude, OpenAI)
 //! - `schema.sql` - 数据库 Schema
 
