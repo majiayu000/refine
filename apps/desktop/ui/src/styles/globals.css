@@ -1,39 +1,68 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  --brand-primary: #6366f1;
-  --brand-secondary: #818cf8;
+  --brand-primary: #14b8a6;
+  --brand-secondary: #0f766e;
+  --surface-base: #f8f4ea;
+  --surface-raised: #fffdf8;
+  --ink-primary: #0f172a;
+}
+
+html,
+body,
+#root {
+  height: 100%;
 }
 
 body {
-  font-family: 'Inter', system-ui, sans-serif;
+  margin: 0;
+  color: var(--ink-primary);
+  background:
+    radial-gradient(circle at 10% -10%, rgba(45, 212, 191, 0.24), transparent 34%),
+    radial-gradient(circle at 96% 4%, rgba(251, 146, 60, 0.17), transparent 28%),
+    linear-gradient(160deg, #fcfaf4 0%, #f8f1e6 48%, #f8f5ed 100%);
+  font-family: 'Space Grotesk', 'Avenir Next', 'PingFang SC', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* 滚动条样式 */
+.app-grain {
+  background-image: radial-gradient(rgba(15, 23, 42, 0.05) 0.7px, transparent 0.7px);
+  background-size: 3px 3px;
+}
+
+:focus-visible {
+  outline: 2px solid rgba(20, 184, 166, 0.52);
+  outline-offset: 2px;
+}
+
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: rgba(255, 255, 255, 0.35);
+  border-radius: 999px;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #4b5563;
-  border-radius: 4px;
+  background: rgba(120, 113, 108, 0.42);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #6b7280;
+  background: rgba(68, 64, 60, 0.55);
+  background-clip: content-box;
 }
 
-/* 选中文本样式 */
 ::selection {
-  background: var(--brand-primary);
-  color: white;
+  background: rgba(20, 184, 166, 0.26);
+  color: #042f2e;
 }

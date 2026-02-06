@@ -2,6 +2,7 @@ mod auth;
 mod extraction;
 mod handlers;
 mod models;
+mod persistence;
 mod state;
 
 use axum::http::{header, Method};
@@ -49,7 +50,10 @@ async fn main() {
         .route("/", get(handlers::dashboard_page))
         .route("/dashboard", get(handlers::dashboard_page))
         .route("/health", get(handlers::health))
-        .route("/v1/conversations", post(handlers::create_conversation))
+        .route(
+            "/v1/conversations",
+            get(handlers::list_conversations).post(handlers::create_conversation),
+        )
         .route("/v1/extraction-jobs", post(handlers::create_extraction_job))
         .route(
             "/v1/extraction-jobs/:job_id",

@@ -110,9 +110,11 @@ invoke('delete_item', {
 
 ---
 
-## 2. Cloud HTTP API
+## 2. Unified HTTP API
 
-浏览器扩展直接调用云端 API，不再依赖桌面端本地 HTTP 服务。
+浏览器扩展调用统一 `v1` HTTP 协议：
+- 桌面本地模式：`http://localhost:8787`（由 desktop 内置服务提供）
+- 独立服务模式：`http://localhost:8787` 或部署域名（由 `refine-server` 提供）
 
 **基础 URL（开发）**: `http://localhost:8787`  
 **基础 URL（生产）**: `https://api.refine.so`（示例）
@@ -200,6 +202,16 @@ GET /v1/extraction-jobs/:job_id
 
 ```http
 GET /v1/items?cursor=0&limit=20
+```
+
+**响应**：
+```json
+{
+  "success": true,
+  "items": [],
+  "total": 128,
+  "next_cursor": 20
+}
 ```
 
 ---

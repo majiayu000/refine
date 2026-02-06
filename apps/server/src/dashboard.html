@@ -1,0 +1,831 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Refine Dashboard</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap');
+
+    :root {
+      color-scheme: light;
+      --bg: #f7f3e8;
+      --text: #17202f;
+      --muted: #5b6471;
+      --primary: #0f766e;
+      --card: rgba(255, 255, 255, 0.86);
+      --card-strong: #fffef9;
+      --border: #dbd3be;
+      --danger: #dc2626;
+      --shadow: 0 26px 46px -34px rgba(26, 32, 44, 0.45);
+    }
+
+    * { box-sizing: border-box; }
+
+    html,
+    body {
+      height: 100%;
+    }
+
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 8% 4%, rgba(16, 185, 129, 0.20), transparent 28%),
+        radial-gradient(circle at 95% 3%, rgba(251, 146, 60, 0.18), transparent 26%),
+        linear-gradient(158deg, #fcfaf4 0%, #f8f2e6 54%, #f6f4eb 100%);
+      font: 500 14px/1.5 "Manrope", "Avenir Next", "PingFang SC", -apple-system, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image: radial-gradient(rgba(23, 32, 47, 0.07) 0.65px, transparent 0.65px);
+      background-size: 3px 3px;
+      opacity: 0.35;
+    }
+
+    .wrap {
+      position: relative;
+      z-index: 1;
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 22px 14px 34px;
+    }
+
+    .hero {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+
+    .eyebrow {
+      margin: 0;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      color: #0f766e;
+      font-weight: 800;
+    }
+
+    .title {
+      margin: 4px 0 0;
+      font-size: 34px;
+      line-height: 1;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+
+    .sub {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .hero-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .stats-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid #99f6e4;
+      background: linear-gradient(120deg, #f0fdfa, #ccfbf1);
+      color: #0f766e;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+    }
+
+    .controls {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+
+    .panel {
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: linear-gradient(170deg, rgba(255, 255, 255, 0.95), var(--card));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(8px);
+    }
+
+    .token {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      padding: 11px;
+    }
+
+    .tools {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 8px;
+      padding: 11px;
+    }
+
+    input {
+      width: 100%;
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 11px 12px;
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.96);
+      font-size: 13px;
+      font-weight: 600;
+      outline: none;
+      transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease;
+    }
+
+    input::placeholder {
+      color: #8c94a1;
+      font-weight: 500;
+    }
+
+    input:focus {
+      border-color: #14b8a6;
+      box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.18);
+      transform: translateY(-1px);
+    }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: 12px;
+      padding: 10px 14px;
+      cursor: pointer;
+      color: white;
+      background: linear-gradient(145deg, #14b8a6, #0f766e);
+      font: 700 13px/1 "Manrope", "Avenir Next", "PingFang SC", sans-serif;
+      letter-spacing: 0.01em;
+      transition: transform .16s ease, box-shadow .16s ease, opacity .16s ease;
+      box-shadow: 0 16px 30px -22px rgba(15, 118, 110, 0.92);
+      white-space: nowrap;
+    }
+
+    button.secondary {
+      color: #334155;
+      background: linear-gradient(145deg, #ffffff, #f3efe3);
+      border-color: #d8cfb9;
+      box-shadow: 0 14px 26px -24px rgba(30, 41, 59, 0.9);
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+    }
+
+    button:active {
+      transform: translateY(0);
+    }
+
+    button[disabled] {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .notice {
+      border: 1px solid #ccfbf1;
+      border-radius: 14px;
+      padding: 11px 12px;
+      margin-bottom: 12px;
+      background: linear-gradient(140deg, #f0fdfa, #ecfeff);
+      color: #0f766e;
+      font-weight: 700;
+    }
+
+    .notice.error {
+      border-color: #fecaca;
+      background: linear-gradient(145deg, #fff5f5, #fff0f0);
+      color: var(--danger);
+    }
+
+    .block {
+      margin-bottom: 18px;
+    }
+
+    .block-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 9px;
+    }
+
+    .block-head h2 {
+      margin: 0;
+      font-size: 15px;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      color: #475569;
+      font-weight: 800;
+    }
+
+    .list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .item {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 13px;
+      background: linear-gradient(165deg, rgba(255, 255, 255, 0.97), var(--card-strong));
+      box-shadow: 0 20px 34px -30px rgba(15, 23, 42, 0.72);
+      transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+    }
+
+    .item:hover {
+      transform: translateY(-2px);
+      border-color: #9ccdc3;
+      box-shadow: 0 24px 38px -30px rgba(15, 23, 42, 0.82);
+    }
+
+    .item-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .item h3 {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 800;
+      line-height: 1.25;
+      letter-spacing: -0.01em;
+      word-break: break-word;
+    }
+
+    .item-type {
+      flex-shrink: 0;
+      border: 1px solid;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .item-type.knowledge {
+      color: #0f766e;
+      border-color: #99f6e4;
+      background: #f0fdfa;
+    }
+
+    .item-type.skill {
+      color: #92400e;
+      border-color: #fcd34d;
+      background: #fffbeb;
+    }
+
+    .item-type.snippet {
+      color: #334155;
+      border-color: #cbd5e1;
+      background: #f8fafc;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid #cbd5e1;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 11px;
+      font-weight: 800;
+      color: #475569;
+      background: #f8fafc;
+    }
+
+    .chip.captured {
+      border-color: #fcd34d;
+      background: #fffbeb;
+      color: #92400e;
+    }
+
+    .meta {
+      color: #667085;
+      font-size: 12px;
+      font-family: "IBM Plex Mono", "JetBrains Mono", ui-monospace, monospace;
+      margin-bottom: 8px;
+      word-break: break-word;
+    }
+
+    .summary {
+      margin: 0 0 10px;
+      color: #334155;
+      line-height: 1.6;
+      word-break: break-word;
+    }
+
+    .content {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      border: 1px solid #d9e2ec;
+      border-radius: 12px;
+      background: linear-gradient(145deg, #f8fafc, #f1f5f9);
+      padding: 11px;
+      max-height: 230px;
+      overflow: auto;
+      color: #0f172a;
+      font: 500 12px/1.52 "IBM Plex Mono", "JetBrains Mono", ui-monospace, monospace;
+    }
+
+    .item-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+
+    .inline-action {
+      padding: 7px 10px;
+      border-radius: 10px;
+      font-size: 12px;
+      box-shadow: none;
+    }
+
+    .empty {
+      text-align: center;
+      border-style: dashed;
+      color: #4b5563;
+      background: rgba(255, 255, 255, 0.66);
+    }
+
+    .empty h3 {
+      margin-bottom: 8px;
+      font-size: 18px;
+    }
+
+    .empty p {
+      margin: 0;
+      color: #6b7280;
+    }
+
+    .skeleton {
+      position: relative;
+      overflow: hidden;
+      min-height: 128px;
+      border-style: solid;
+    }
+
+    .skeleton::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      transform: translateX(-100%);
+      background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.68) 50%, transparent 100%);
+      animation: shimmer 1.4s infinite;
+    }
+
+    @keyframes shimmer {
+      100% { transform: translateX(100%); }
+    }
+
+    .footer {
+      margin-top: 14px;
+      display: flex;
+      justify-content: center;
+      padding-bottom: 8px;
+    }
+
+    @media (min-width: 900px) {
+      .wrap {
+        padding: 30px 24px 44px;
+      }
+      .controls {
+        grid-template-columns: minmax(270px, 1fr) minmax(420px, 1.35fr);
+      }
+    }
+
+    @media (max-width: 760px) {
+      .title {
+        font-size: 29px;
+      }
+      .token {
+        grid-template-columns: 1fr;
+      }
+      .tools {
+        grid-template-columns: 1fr;
+      }
+      button {
+        width: 100%;
+      }
+      .hero-actions {
+        width: 100%;
+      }
+      .hero-actions button.secondary {
+        margin-left: auto;
+      }
+      .item-row .inline-action {
+        width: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Refine Cloud</p>
+        <h1 class="title">Dashboard</h1>
+        <div class="sub">先采集原始会话，再由你决定何时总结成知识。</div>
+      </div>
+      <div class="hero-actions">
+        <span id="statPill" class="stats-pill">加载中</span>
+        <button class="secondary" id="refreshBtn">刷新知识</button>
+      </div>
+    </header>
+
+    <section class="controls">
+      <section class="panel token">
+        <input id="tokenInput" type="password" placeholder="可选：REFINE_API_TOKEN（若服务端开启鉴权）" />
+        <button id="saveTokenBtn" class="secondary">保存 Token</button>
+      </section>
+
+      <section class="panel tools">
+        <input id="searchInput" type="text" placeholder="搜索知识标题/摘要/内容，例如 rust、提示词..." />
+        <button id="searchBtn">搜索</button>
+        <button id="clearBtn" class="secondary">清空</button>
+      </section>
+    </section>
+
+    <section id="notice" class="notice">正在加载...</section>
+
+    <section class="block">
+      <div class="block-head">
+        <h2>Raw Inbox（待总结）</h2>
+        <button class="secondary" id="refreshConvBtn">刷新会话</button>
+      </div>
+      <section id="convList" class="list"></section>
+      <div class="footer">
+        <button id="convMoreBtn" class="secondary" style="display:none;">加载更多会话</button>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="block-head">
+        <h2>Knowledge Items</h2>
+      </div>
+      <section id="list" class="list"></section>
+      <div class="footer">
+        <button id="moreBtn" class="secondary" style="display:none;">加载更多知识</button>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      cursor: 0,
+      nextCursor: null,
+      query: "",
+      loading: false,
+      items: [],
+      convCursor: 0,
+      convNextCursor: null,
+      convLoading: false,
+      conversations: [],
+      token: localStorage.getItem("refine_api_token") || ""
+    }
+
+    const typeLabelMap = {
+      knowledge: "知识",
+      skill: "技能",
+      snippet: "片段"
+    }
+
+    const noticeEl = document.getElementById("notice")
+    const listEl = document.getElementById("list")
+    const moreBtn = document.getElementById("moreBtn")
+    const convListEl = document.getElementById("convList")
+    const convMoreBtn = document.getElementById("convMoreBtn")
+    const searchInput = document.getElementById("searchInput")
+    const tokenInput = document.getElementById("tokenInput")
+    const statPill = document.getElementById("statPill")
+
+    tokenInput.value = state.token
+
+    function authHeaders() {
+      const headers = { "Content-Type": "application/json" }
+      if (state.token) headers["Authorization"] = `Bearer ${state.token}`
+      return headers
+    }
+
+    function esc(input) {
+      const div = document.createElement("div")
+      div.textContent = input ?? ""
+      return div.innerHTML
+    }
+
+    function typeLabel(itemType) {
+      return typeLabelMap[itemType] || itemType || "unknown"
+    }
+
+    function typeClass(itemType) {
+      if (itemType === "knowledge" || itemType === "skill" || itemType === "snippet") {
+        return itemType
+      }
+      return "snippet"
+    }
+
+    function formatTime(input) {
+      if (!input) return ""
+      const date = new Date(input)
+      if (Number.isNaN(date.getTime())) return input
+      return date.toLocaleString("zh-CN", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit"
+      })
+    }
+
+    function setNotice(text, isError = false) {
+      noticeEl.textContent = text
+      noticeEl.className = isError ? "notice error" : "notice"
+    }
+
+    function updateStatPill() {
+      if (state.loading || state.convLoading) {
+        statPill.textContent = "加载中"
+        return
+      }
+      statPill.textContent = `知识 ${state.items.length} · 待总结 ${state.conversations.length}`
+    }
+
+    function renderEmpty() {
+      listEl.innerHTML = `
+        <article class="item empty">
+          <h3>还没有知识条目</h3>
+          <p>会话总结完成后，这里会显示结构化知识。</p>
+        </article>
+      `
+    }
+
+    function renderLoading() {
+      listEl.innerHTML = `<article class="item skeleton" aria-hidden="true"></article>`
+      updateStatPill()
+      setNotice("正在加载知识数据，请稍候...")
+    }
+
+    function renderItems() {
+      if (state.loading && state.items.length === 0) {
+        renderLoading()
+      } else if (!state.items.length) {
+        renderEmpty()
+      } else {
+        setNotice(`已加载 ${state.items.length} 条知识`)
+        listEl.innerHTML = state.items.map(item => `
+          <article class="item">
+            <div class="item-head">
+              <h3>${esc(item.title || "(无标题)")}</h3>
+              <span class="item-type ${typeClass(item.item_type)}">${esc(typeLabel(item.item_type))}</span>
+            </div>
+            <div class="meta">${esc(formatTime(item.created_at || ""))}</div>
+            <p class="summary">${esc(item.summary || "暂无摘要")}</p>
+            <pre class="content">${esc(item.content || "")}</pre>
+          </article>
+        `).join("")
+      }
+
+      moreBtn.style.display = state.nextCursor == null || state.query ? "none" : "inline-block"
+      moreBtn.disabled = state.loading
+      updateStatPill()
+    }
+
+    function renderConversationEmpty() {
+      convListEl.innerHTML = `
+        <article class="item empty">
+          <h3>没有待总结会话</h3>
+          <p>当会话以 ingest_only 导入后，会在这里出现。</p>
+        </article>
+      `
+    }
+
+    function renderConversationLoading() {
+      convListEl.innerHTML = `<article class="item skeleton" aria-hidden="true"></article>`
+      updateStatPill()
+    }
+
+    function renderConversations() {
+      if (state.convLoading && state.conversations.length === 0) {
+        renderConversationLoading()
+      } else if (!state.conversations.length) {
+        renderConversationEmpty()
+      } else {
+        convListEl.innerHTML = state.conversations.map(conversation => `
+          <article class="item">
+            <div class="item-head">
+              <h3>${esc(conversation.title || "(无标题)")}</h3>
+              <span class="chip captured">${esc(conversation.status || "captured")}</span>
+            </div>
+            <div class="meta">${esc(conversation.source || "unknown")} · ${esc(formatTime(conversation.captured_at || conversation.created_at || ""))}</div>
+            <p class="summary">${esc(conversation.preview || "暂无预览")}</p>
+            <div class="item-row">
+              <span class="chip">${esc((conversation.id || "").slice(0, 8))}</span>
+              <button class="inline-action" data-action="summarize" data-conversation-id="${esc(conversation.id || "")}">总结入库</button>
+            </div>
+          </article>
+        `).join("")
+      }
+
+      convMoreBtn.style.display = state.convNextCursor == null ? "none" : "inline-block"
+      convMoreBtn.disabled = state.convLoading
+      updateStatPill()
+    }
+
+    async function requestJson(path) {
+      const res = await fetch(path, { headers: authHeaders() })
+      let data = {}
+      try {
+        data = await res.json()
+      } catch (_) {}
+      return { ok: res.ok, status: res.status, data }
+    }
+
+    async function postJson(path, body) {
+      const res = await fetch(path, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(body)
+      })
+
+      let data = {}
+      try {
+        data = await res.json()
+      } catch (_) {}
+      return { ok: res.ok, status: res.status, data }
+    }
+
+    async function loadItems(reset = true) {
+      if (state.loading) return
+      state.loading = true
+      renderItems()
+
+      if (reset) {
+        state.cursor = 0
+        state.nextCursor = null
+        state.items = []
+      }
+
+      try {
+        let resp
+        if (state.query) {
+          const q = encodeURIComponent(state.query)
+          resp = await requestJson(`/v1/search?q=${q}&limit=100`)
+          if (!resp.ok) throw resp
+          state.items = resp.data.items || []
+          state.nextCursor = null
+        } else {
+          const respPath = `/v1/items?cursor=${state.cursor}&limit=30`
+          resp = await requestJson(respPath)
+          if (!resp.ok) throw resp
+          const loaded = resp.data.items || []
+          state.items = reset ? loaded : state.items.concat(loaded)
+          state.nextCursor = resp.data.next_cursor ?? null
+        }
+      } catch (err) {
+        if (err && err.status === 401) {
+          setNotice("鉴权失败：请填写正确 Token 后重试。", true)
+        } else {
+          const msg = err?.data?.message || "加载知识失败，请检查服务是否在线。"
+          setNotice(msg, true)
+        }
+      } finally {
+        state.loading = false
+        renderItems()
+      }
+    }
+
+    async function loadConversations(reset = true) {
+      if (state.convLoading) return
+      state.convLoading = true
+      renderConversations()
+
+      if (reset) {
+        state.convCursor = 0
+        state.convNextCursor = null
+        state.conversations = []
+      }
+
+      try {
+        const respPath = `/v1/conversations?status=captured&cursor=${state.convCursor}&limit=20`
+        const resp = await requestJson(respPath)
+        if (!resp.ok) throw resp
+
+        const loaded = resp.data.conversations || []
+        state.conversations = reset ? loaded : state.conversations.concat(loaded)
+        state.convNextCursor = resp.data.next_cursor ?? null
+      } catch (err) {
+        if (err && err.status === 401) {
+          setNotice("鉴权失败：请填写正确 Token 后重试。", true)
+        } else {
+          const msg = err?.data?.message || "加载会话失败，请检查服务是否在线。"
+          setNotice(msg, true)
+        }
+      } finally {
+        state.convLoading = false
+        renderConversations()
+      }
+    }
+
+    async function summarizeConversation(conversationId) {
+      if (!conversationId) return
+
+      try {
+        const resp = await postJson("/v1/extraction-jobs", {
+          conversation_id: conversationId,
+          mode: "auto"
+        })
+
+        if (!resp.ok || !resp.data?.success) throw resp
+
+        setNotice("已加入总结队列，稍后会生成知识条目。")
+        await loadConversations(true)
+        await loadItems(true)
+      } catch (err) {
+        if (err && err.status === 401) {
+          setNotice("鉴权失败：请填写正确 Token 后重试。", true)
+        } else {
+          const msg = err?.data?.message || "提交总结任务失败。"
+          setNotice(msg, true)
+        }
+      }
+    }
+
+    document.getElementById("refreshBtn").addEventListener("click", () => {
+      state.query = searchInput.value.trim()
+      void loadItems(true)
+    })
+
+    document.getElementById("refreshConvBtn").addEventListener("click", () => {
+      void loadConversations(true)
+    })
+
+    document.getElementById("searchBtn").addEventListener("click", () => {
+      state.query = searchInput.value.trim()
+      void loadItems(true)
+    })
+
+    searchInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return
+      event.preventDefault()
+      state.query = searchInput.value.trim()
+      void loadItems(true)
+    })
+
+    document.getElementById("clearBtn").addEventListener("click", () => {
+      searchInput.value = ""
+      state.query = ""
+      void loadItems(true)
+    })
+
+    document.getElementById("saveTokenBtn").addEventListener("click", () => {
+      state.token = tokenInput.value.trim()
+      localStorage.setItem("refine_api_token", state.token)
+      setNotice("Token 已保存")
+    })
+
+    moreBtn.addEventListener("click", () => {
+      if (state.nextCursor == null) return
+      state.cursor = state.nextCursor
+      void loadItems(false)
+    })
+
+    convMoreBtn.addEventListener("click", () => {
+      if (state.convNextCursor == null) return
+      state.convCursor = state.convNextCursor
+      void loadConversations(false)
+    })
+
+    convListEl.addEventListener("click", (event) => {
+      const target = event.target
+      if (!(target instanceof HTMLElement)) return
+      if (target.dataset.action !== "summarize") return
+      const conversationId = target.dataset.conversationId
+      void summarizeConversation(conversationId)
+    })
+
+    void loadConversations(true)
+    void loadItems(true)
+  </script>
+</body>
+</html>

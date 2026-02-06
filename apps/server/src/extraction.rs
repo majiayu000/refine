@@ -1,5 +1,8 @@
+use refine_core::infra::LlmClient;
 use refine_core::knowledge::{Item, ItemRepository, Source};
-use refine_core::refinement::{Conversation, ExtractionPolicy, Extractor, PromptTemplate};
+use refine_core::refinement::{
+    Conversation, ExtractionPolicy, ExtractionResult, Extractor, PromptTemplate,
+};
 use std::sync::Arc;
 
 use crate::models::{now_iso, ConversationRecord, ConversationStatus, ExtractionMode, JobStatus};
@@ -7,6 +10,8 @@ use crate::state::AppState;
 
 const EXTRACTION_SYSTEM_PROMPT: &str =
     "你是 Refine 的知识提炼助手。严格按要求返回 JSON，不要输出额外说明文本。";
+const JSON_REPAIR_SYSTEM_PROMPT: &str =
+    "你是 JSON 修复器。只输出一个合法 JSON 对象，不要输出 markdown 或解释。";
 
 pub fn spawn_extraction(
     state: Arc<AppState>,
@@ -83,9 +88,16 @@ async fn build_items(
         .map_err(|e| e.to_string())?;
 
     let extractor = Extractor::new(policy);
-    let extraction = extractor
-        .parse_response(&llm_response, &parsed)
-        .map_err(|e| e.to_string())?;
+    let extraction =
+        match parse_extraction_with_repair(llm_client.clone(), &extractor, &parsed, &llm_response)
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!("提炼 JSON 解析失败，降级为 fallback item: {}", err);
+                return Ok(vec![fallback_item(conversation)]);
+            }
+        };
 
     if extraction.items.is_empty() {
         Ok(vec![fallback_item(conversation)])
@@ -106,6 +118,63 @@ fn mode_to_policy(mode: ExtractionMode) -> ExtractionPolicy {
             ..ExtractionPolicy::default()
         },
     }
+}
+
+async fn parse_extraction_with_repair(
+    llm_client: Arc<dyn LlmClient>,
+    extractor: &Extractor,
+    conversation: &Conversation,
+    raw_response: &str,
+) -> Result<ExtractionResult, String> {
+    match extractor.parse_response(raw_response, conversation) {
+        Ok(extraction) => Ok(extraction),
+        Err(first_err) => {
+            let first_message = first_err.to_string();
+            tracing::warn!("首次提炼解析失败，尝试 JSON 修复重试: {}", first_message);
+
+            let repair_prompt = build_json_repair_prompt(raw_response, &first_message);
+            let repaired_response = llm_client
+                .complete(&repair_prompt, Some(JSON_REPAIR_SYSTEM_PROMPT))
+                .await
+                .map_err(|e| format!("原始解析失败，且 JSON 修复请求失败: {}", e))?;
+
+            extractor
+                .parse_response(&repaired_response, conversation)
+                .map_err(|second_err| {
+                    format!(
+                        "原始解析失败: {}; JSON 修复后仍失败: {}",
+                        first_message, second_err
+                    )
+                })
+        }
+    }
+}
+
+fn build_json_repair_prompt(raw_response: &str, parse_error: &str) -> String {
+    format!(
+        r#"你会收到一段本应是 JSON 的文本，但它存在语法错误。
+请将它修复为合法 JSON，并严格满足以下要求：
+1) 只能输出一个 JSON 对象；
+2) 顶层字段必须是 "items"；
+3) "items" 必须是数组，数组元素结构为:
+   {{
+     "type": "knowledge|skill|snippet",
+     "title": "...",
+     "summary": "...",
+     "content": "...",
+     "tags": ["..."]
+   }}
+4) 若无法可靠修复，请返回 {{"items":[]}}；
+5) 不要输出 markdown 代码块，不要输出任何解释文字。
+
+原始解析错误:
+{}
+
+待修复文本:
+{}
+"#,
+        parse_error, raw_response
+    )
 }
 
 fn fallback_item(conversation: &ConversationRecord) -> Item {
@@ -146,29 +215,59 @@ fn trim_to(input: &str, max_chars: usize) -> String {
 }
 
 async fn set_job_running(state: &Arc<AppState>, job_id: &str) {
-    let mut jobs = state.jobs.write().await;
-    if let Some(job) = jobs.get_mut(job_id) {
-        job.status = JobStatus::Running;
-        job.updated_at = now_iso();
-        job.error = None;
+    let job_snapshot = {
+        let mut jobs = state.jobs.write().await;
+        if let Some(job) = jobs.get_mut(job_id) {
+            job.status = JobStatus::Running;
+            job.updated_at = now_iso();
+            job.error = None;
+            Some(job.clone())
+        } else {
+            None
+        }
+    };
+    if let Some(job) = job_snapshot {
+        if let Err(err) = state.persistence.upsert_job(&job) {
+            tracing::warn!("persist running job failed: {}", err);
+        }
     }
 }
 
 async fn set_job_succeeded(state: &Arc<AppState>, job_id: &str) {
-    let mut jobs = state.jobs.write().await;
-    if let Some(job) = jobs.get_mut(job_id) {
-        job.status = JobStatus::Succeeded;
-        job.updated_at = now_iso();
-        job.error = None;
+    let job_snapshot = {
+        let mut jobs = state.jobs.write().await;
+        if let Some(job) = jobs.get_mut(job_id) {
+            job.status = JobStatus::Succeeded;
+            job.updated_at = now_iso();
+            job.error = None;
+            Some(job.clone())
+        } else {
+            None
+        }
+    };
+    if let Some(job) = job_snapshot {
+        if let Err(err) = state.persistence.upsert_job(&job) {
+            tracing::warn!("persist succeeded job failed: {}", err);
+        }
     }
 }
 
 async fn set_job_failed(state: &Arc<AppState>, job_id: &str, error: &str) {
-    let mut jobs = state.jobs.write().await;
-    if let Some(job) = jobs.get_mut(job_id) {
-        job.status = JobStatus::Failed;
-        job.updated_at = now_iso();
-        job.error = Some(error.to_string());
+    let job_snapshot = {
+        let mut jobs = state.jobs.write().await;
+        if let Some(job) = jobs.get_mut(job_id) {
+            job.status = JobStatus::Failed;
+            job.updated_at = now_iso();
+            job.error = Some(error.to_string());
+            Some(job.clone())
+        } else {
+            None
+        }
+    };
+    if let Some(job) = job_snapshot {
+        if let Err(err) = state.persistence.upsert_job(&job) {
+            tracing::warn!("persist failed job failed: {}", err);
+        }
     }
 }
 
@@ -177,9 +276,19 @@ async fn set_conversation_status(
     conversation_id: &str,
     status: ConversationStatus,
 ) {
-    let mut conversations = state.conversations.write().await;
-    if let Some(conversation) = conversations.get_mut(conversation_id) {
-        conversation.status = status;
+    let conversation_snapshot = {
+        let mut conversations = state.conversations.write().await;
+        if let Some(conversation) = conversations.get_mut(conversation_id) {
+            conversation.status = status;
+            Some(conversation.clone())
+        } else {
+            None
+        }
+    };
+    if let Some(conversation) = conversation_snapshot {
+        if let Err(err) = state.persistence.upsert_conversation(&conversation) {
+            tracing::warn!("persist conversation status failed: {}", err);
+        }
     }
 }
 
@@ -188,18 +297,38 @@ async fn set_conversation_processed(
     conversation_id: &str,
     item_ids: Vec<String>,
 ) {
-    let mut conversations = state.conversations.write().await;
-    if let Some(conversation) = conversations.get_mut(conversation_id) {
-        conversation.status = ConversationStatus::Processed;
-        conversation.item_ids = item_ids;
-        conversation.last_error = None;
+    let conversation_snapshot = {
+        let mut conversations = state.conversations.write().await;
+        if let Some(conversation) = conversations.get_mut(conversation_id) {
+            conversation.status = ConversationStatus::Processed;
+            conversation.item_ids = item_ids;
+            conversation.last_error = None;
+            Some(conversation.clone())
+        } else {
+            None
+        }
+    };
+    if let Some(conversation) = conversation_snapshot {
+        if let Err(err) = state.persistence.upsert_conversation(&conversation) {
+            tracing::warn!("persist processed conversation failed: {}", err);
+        }
     }
 }
 
 async fn set_conversation_failed(state: &Arc<AppState>, conversation_id: &str, error: &str) {
-    let mut conversations = state.conversations.write().await;
-    if let Some(conversation) = conversations.get_mut(conversation_id) {
-        conversation.status = ConversationStatus::Failed;
-        conversation.last_error = Some(error.to_string());
+    let conversation_snapshot = {
+        let mut conversations = state.conversations.write().await;
+        if let Some(conversation) = conversations.get_mut(conversation_id) {
+            conversation.status = ConversationStatus::Failed;
+            conversation.last_error = Some(error.to_string());
+            Some(conversation.clone())
+        } else {
+            None
+        }
+    };
+    if let Some(conversation) = conversation_snapshot {
+        if let Err(err) = state.persistence.upsert_conversation(&conversation) {
+            tracing::warn!("persist failed conversation failed: {}", err);
+        }
     }
 }

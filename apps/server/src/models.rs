@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationStatus {
+    Captured,
     Queued,
     Processing,
     Processed,
@@ -43,6 +44,7 @@ pub struct ConversationRecord {
     pub url: String,
     pub title: Option<String>,
     pub raw_content: String,
+    pub metadata: serde_json::Value,
     pub captured_at: String,
     pub created_at: String,
     pub status: ConversationStatus,
@@ -70,6 +72,8 @@ pub struct CreateConversationRequest {
     pub title: Option<String>,
     pub captured_at: Option<String>,
     pub idempotency_key: Option<String>,
+    pub ingest_only: Option<bool>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +84,13 @@ pub struct CreateExtractionJobRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct ListItemsQuery {
+    pub cursor: Option<usize>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListConversationsQuery {
+    pub status: Option<String>,
     pub cursor: Option<usize>,
     pub limit: Option<usize>,
 }
@@ -115,6 +126,46 @@ impl From<&Item> for ItemDto {
                 .map(|tag| tag.as_str().to_string())
                 .collect(),
             created_at: item.created_at().to_rfc3339(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConversationDto {
+    pub id: String,
+    pub source: String,
+    pub url: String,
+    pub title: String,
+    pub status: ConversationStatus,
+    pub captured_at: String,
+    pub created_at: String,
+    pub preview: String,
+}
+
+impl From<&ConversationRecord> for ConversationDto {
+    fn from(record: &ConversationRecord) -> Self {
+        let title = record
+            .title
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("(无标题)")
+            .to_string();
+        let mut preview = record.raw_content.trim().replace('\n', " ");
+        if preview.chars().count() > 140 {
+            preview = preview.chars().take(140).collect::<String>();
+            preview.push_str("...");
+        }
+
+        Self {
+            id: record.id.clone(),
+            source: record.source.clone(),
+            url: record.url.clone(),
+            title,
+            status: record.status.clone(),
+            captured_at: record.captured_at.clone(),
+            created_at: record.created_at.clone(),
+            preview,
         }
     }
 }

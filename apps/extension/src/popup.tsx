@@ -6,6 +6,35 @@ import { useState, useEffect } from 'react'
 import './style.css'
 import type { SyncStatus } from './lib/types'
 
+const POPUP_WIDTH_PX = 360
+
+function enforcePopupViewportWidth(): void {
+  if (typeof document === 'undefined') return
+
+  const width = `${POPUP_WIDTH_PX}px`
+  const root = document.documentElement
+  root.style.setProperty('width', width, 'important')
+  root.style.setProperty('min-width', width, 'important')
+  root.style.setProperty('max-width', width, 'important')
+
+  if (document.body) {
+    document.body.style.setProperty('width', width, 'important')
+    document.body.style.setProperty('min-width', width, 'important')
+    document.body.style.setProperty('max-width', width, 'important')
+    document.body.style.setProperty('margin', '0', 'important')
+    document.body.style.setProperty('overflow-x', 'hidden', 'important')
+  }
+
+  const plasmoRoot = document.getElementById('__plasmo')
+  if (plasmoRoot) {
+    plasmoRoot.style.setProperty('width', width, 'important')
+    plasmoRoot.style.setProperty('min-width', width, 'important')
+    plasmoRoot.style.setProperty('max-width', width, 'important')
+  }
+}
+
+enforcePopupViewportWidth()
+
 interface Stats {
   totalItems: number
   todayExtracted: number
@@ -14,12 +43,27 @@ interface Stats {
 interface SyncStatusResponse {
   cloudHealthy: boolean
   status: SyncStatus
+  remoteTotalItems?: number
 }
 
 interface ExtractResponse {
   success?: boolean
   length?: number
   message?: string
+}
+
+type MessageLevel = 'ok' | 'error' | ''
+
+type IconProps = {
+  className?: string
+}
+
+const DEFAULT_SYNC_STATUS: SyncStatus = {
+  pending: 0,
+  syncing: 0,
+  failed: 0,
+  sent: 0,
+  apiBase: '',
 }
 
 async function safeRuntimeMessage<T>(message: unknown): Promise<T | null> {
@@ -30,40 +74,180 @@ async function safeRuntimeMessage<T>(message: unknown): Promise<T | null> {
   }
 }
 
+async function readStoredStats(): Promise<Stats> {
+  const storage = await chrome.storage.local.get(['stats'])
+  const stats = storage.stats as Partial<Stats> | undefined
+  return {
+    totalItems: typeof stats?.totalItems === 'number' ? stats.totalItems : 0,
+    todayExtracted: typeof stats?.todayExtracted === 'number' ? stats.todayExtracted : 0,
+  }
+}
+
+function LogoIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M12 3l1.9 4.1L18 9l-4.1 1.9L12 15l-1.9-4.1L6 9l4.1-1.9L12 3z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M6 15.8l1 2.1L9 19l-2 1-1 2.1-1-2.1-2-1 2-1.1 1-2.1z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function StackIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M12 4l7 4-7 4-7-4 7-4z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M5 12l7 4 7-4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M5 16l7 4 7-4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function SparkIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M12 3l1.7 4 4 1.7-4 1.7-1.7 4-1.7-4-4-1.7 4-1.7L12 3z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M18.5 13.5l.9 1.8 1.8.9-1.8.9-.9 1.8-.9-1.8-1.8-.9 1.8-.9.9-1.8z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function CloudIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M7 18a4 4 0 0 1 0-8 5 5 0 0 1 9.8-1.5A3.5 3.5 0 1 1 18 18H7z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function BoltIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M13 2L5 13h6l-1 9 8-11h-6l1-9z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function RotateIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M20 11a8 8 0 1 0 2 5.2"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M20 4v7h-7"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function LinkIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M10 14l4-4"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M7 17a3 3 0 0 1 0-4.2l2.1-2.1a3 3 0 1 1 4.2 4.2L11 17"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M17 7a3 3 0 0 1 0 4.2l-2.1 2.1a3 3 0 1 1-4.2-4.2L13 7"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
 export default function Popup() {
   const [stats, setStats] = useState<Stats>({ totalItems: 0, todayExtracted: 0 })
+  const [remoteTotalItems, setRemoteTotalItems] = useState<number | null>(null)
   const [cloudHealthy, setCloudHealthy] = useState(false)
   const [extractMessage, setExtractMessage] = useState('')
-  const [extractMessageLevel, setExtractMessageLevel] = useState<'ok' | 'error' | ''>('')
-  const [syncStatus, setSyncStatus] = useState<SyncStatus>({
-    pending: 0,
-    syncing: 0,
-    failed: 0,
-    sent: 0,
-    apiBase: '',
-  })
+  const [extractMessageLevel, setExtractMessageLevel] = useState<MessageLevel>('')
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>(DEFAULT_SYNC_STATUS)
+
+  const queueSize = syncStatus.pending + syncStatus.syncing
+  const displayedTotalItems = remoteTotalItems ?? stats.totalItems
+  const totalSourceText = remoteTotalItems == null ? '本地缓存' : '云端实时'
 
   const syncStateText = (() => {
     if (syncStatus.failed > 0) return `同步失败 ${syncStatus.failed} 条`
-    if (syncStatus.pending + syncStatus.syncing > 0) {
-      return `待同步 ${syncStatus.pending + syncStatus.syncing} 条`
+    if (queueSize > 0) {
+      return `待同步 ${queueSize} 条`
     }
     return cloudHealthy ? '云端同步正常' : '云端不可达'
   })()
 
-  const syncStateDotClass = (() => {
-    if (syncStatus.failed > 0) return 'bg-red-500'
-    if (syncStatus.pending + syncStatus.syncing > 0) return 'bg-yellow-500'
-    return cloudHealthy ? 'bg-green-500' : 'bg-gray-500'
+  const syncStateToneClass = (() => {
+    if (syncStatus.failed > 0) return 'tone-error'
+    if (queueSize > 0) return 'tone-warn'
+    return cloudHealthy ? 'tone-ok' : 'tone-off'
   })()
 
-  useEffect(() => {
-    // 从 storage 加载统计
-    chrome.storage.local.get(['stats'], (result) => {
-      if (result.stats) setStats(result.stats)
-    })
+  const syncCardToneClass = syncStatus.failed > 0 ? 'status-card-error' : cloudHealthy ? 'status-card-ok' : ''
 
-    const syncCloudStatus = async () => {
+  const syncCloudStatus = async () => {
+    try {
       const result = await safeRuntimeMessage<SyncStatusResponse>({
         action: 'getSyncStatus',
       })
@@ -71,17 +255,27 @@ export default function Popup() {
       if (result?.status) {
         setCloudHealthy(result.cloudHealthy)
         setSyncStatus(result.status)
+        setRemoteTotalItems(typeof result.remoteTotalItems === 'number' ? result.remoteTotalItems : null)
       } else {
         setCloudHealthy(false)
-        setExtractMessage('扩展后台未就绪，请在扩展页点击“重新加载”')
-        setExtractMessageLevel('error')
+        setSyncStatus(DEFAULT_SYNC_STATUS)
+        setRemoteTotalItems(null)
       }
-
-      const storage = await chrome.storage.local.get(['stats'])
-      if (storage.stats) {
-        setStats(storage.stats as Stats)
-      }
+    } catch {
+      setCloudHealthy(false)
+      setSyncStatus(DEFAULT_SYNC_STATUS)
+      setRemoteTotalItems(null)
     }
+
+    try {
+      setStats(await readStoredStats())
+    } catch {
+      setStats({ totalItems: 0, todayExtracted: 0 })
+    }
+  }
+
+  useEffect(() => {
+    enforcePopupViewportWidth()
 
     void syncCloudStatus()
     const timer = setInterval(() => {
@@ -122,6 +316,7 @@ export default function Popup() {
     if (result.success) {
       setExtractMessage(`提取成功，已加入同步队列（${result.length ?? 0} 字符）`)
       setExtractMessageLevel('ok')
+      await syncCloudStatus()
       return
     }
 
@@ -130,84 +325,90 @@ export default function Popup() {
   }
 
   const handleForceSync = async () => {
-    await safeRuntimeMessage({ action: 'forceSync' })
-    const result = await safeRuntimeMessage<SyncStatusResponse>({
-      action: 'getSyncStatus',
-    })
-    if (result?.status) {
-      setCloudHealthy(result.cloudHealthy)
-      setSyncStatus(result.status)
-    } else {
+    try {
+      await safeRuntimeMessage({ action: 'forceSync' })
+      await syncCloudStatus()
+    } catch {
       setCloudHealthy(false)
+      setRemoteTotalItems(null)
       setExtractMessage('扩展后台未就绪，请在扩展页点击“重新加载”')
       setExtractMessageLevel('error')
     }
   }
 
   return (
-    <div className="w-80 bg-gray-950 text-gray-100 p-4">
-      {/* Header */}
-      <div className="flex items-center gap-2 mb-4">
-        <div className="w-8 h-8 bg-brand-500 rounded-lg flex items-center justify-center">
-          <span className="text-white font-bold">R</span>
+    <div className="popup-shell">
+      <header className="popup-header">
+        <div className="brand-wrap">
+          <div className="brand-icon-wrap">
+            <LogoIcon className="brand-icon" />
+          </div>
+          <div>
+            <h1 className="brand-title">Refine</h1>
+            <p className="brand-subtitle">智能知识复用引擎</p>
+          </div>
         </div>
-        <div>
-          <h1 className="text-lg font-semibold">Refine</h1>
-          <p className="text-xs text-gray-500">智能知识复用引擎</p>
-        </div>
-      </div>
+        <span className="brand-badge">EXT</span>
+      </header>
 
-      {/* Stats */}
-      <div className="grid grid-cols-2 gap-3 mb-4">
-        <div className="bg-gray-900 rounded-lg p-3">
-          <div className="text-2xl font-bold text-brand-500">{stats.totalItems}</div>
-          <div className="text-xs text-gray-500">知识总数</div>
-        </div>
-        <div className="bg-gray-900 rounded-lg p-3">
-          <div className="text-2xl font-bold text-green-500">{stats.todayExtracted}</div>
-          <div className="text-xs text-gray-500">今日提炼</div>
-        </div>
-      </div>
+      <section className="stats-grid">
+        <article className="stats-card stats-card-brand">
+          <div className="stats-card-top">
+            <span className="stats-icon-box">
+              <StackIcon className="stats-icon" />
+            </span>
+            <span className="stats-meta">{totalSourceText}</span>
+          </div>
+          <p className="stats-value">{displayedTotalItems}</p>
+          <p className="stats-label">知识总数</p>
+        </article>
 
-      {/* Connection Status */}
-      <div className="flex items-center gap-2 mb-4 px-3 py-2 bg-gray-900 rounded-lg">
-        <div className={`w-2 h-2 rounded-full ${syncStateDotClass}`} />
-        <span className="text-sm text-gray-400">
-          {syncStateText}
-        </span>
-      </div>
+        <article className="stats-card stats-card-green">
+          <div className="stats-card-top">
+            <span className="stats-icon-box stats-icon-box-green">
+              <SparkIcon className="stats-icon" />
+            </span>
+            <span className="stats-meta">今日更新</span>
+          </div>
+          <p className="stats-value stats-value-green">{stats.todayExtracted}</p>
+          <p className="stats-label">今日提炼</p>
+        </article>
+      </section>
 
-      {/* Actions */}
-      <button
-        onClick={handleExtract}
-        className="w-full py-2.5 bg-brand-500 hover:bg-brand-600 text-white font-medium rounded-lg transition-colors"
-      >
-        提取当前对话
-      </button>
-      <button
-        onClick={handleForceSync}
-        className="w-full mt-2 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 text-sm rounded-lg transition-colors"
-      >
-        立即同步队列
-      </button>
+      <section className={`status-card ${syncCardToneClass}`}>
+        <div className={`status-dot ${syncStateToneClass}`} />
+        <div className="status-content">
+          <p className="status-title">
+            <CloudIcon className="status-icon" />
+            {syncStateText}
+          </p>
+          <p className="status-detail">已发送 {syncStatus.sent} 条，队列 {queueSize} 条</p>
+          {syncStatus.lastError ? <p className="status-error">{syncStatus.lastError}</p> : null}
+        </div>
+      </section>
+
+      <section className="actions">
+        <button onClick={handleExtract} className="action-btn action-btn-primary">
+          <BoltIcon className="action-icon" />
+          提取当前对话
+        </button>
+        <button onClick={handleForceSync} className="action-btn action-btn-secondary">
+          <RotateIcon className="action-icon" />
+          立即同步队列
+        </button>
+      </section>
+
       {extractMessage && (
-        <div
-          className={`mt-2 px-3 py-2 rounded-lg text-xs ${
-            extractMessageLevel === 'ok'
-              ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-              : 'bg-red-950 text-red-300 border border-red-800'
-          }`}
-        >
+        <div className={`message-box ${extractMessageLevel === 'ok' ? 'message-success' : 'message-error'}`}>
           {extractMessage}
         </div>
       )}
 
-      {/* Footer */}
-      <div className="mt-4 pt-3 border-t border-gray-800 text-center">
-        <p className="text-xs text-gray-600">
-          Cloud API: {syncStatus.apiBase || '(未配置)'}
-        </p>
-      </div>
+      <footer className="popup-footer">
+        <LinkIcon className="footer-icon" />
+        <span>Cloud API:</span>
+        <code className="footer-api">{syncStatus.apiBase || '(未配置)'}</code>
+      </footer>
     </div>
   )
 }

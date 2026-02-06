@@ -18,3 +18,4 @@ axum = { version = "0.7", features = ["macros"] }
 tower-http = { version = "0.6", features = ["cors"] }
 dirs = "5"
 dotenvy = "0.15"
+rusqlite.workspace = true

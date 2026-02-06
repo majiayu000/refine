@@ -4,7 +4,19 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import {
+  ArrowDown,
+  ArrowUp,
+  BookOpenText,
+  Code2,
+  CornerDownLeft,
+  LoaderCircle,
+  Search,
+  Wrench,
+  type LucideIcon,
+} from 'lucide-react'
 import { useStore } from '../lib/store'
+import { cn } from '../lib/utils'
 import { searchItems } from '../lib/tauri'
 import type { Item } from '../lib/tauri'
 
@@ -13,16 +25,22 @@ interface SpotlightProps {
   onClose: () => void
 }
 
-const typeColors = {
-  knowledge: 'text-blue-400 bg-blue-500/10',
-  skill: 'text-violet-400 bg-violet-500/10',
-  snippet: 'text-emerald-400 bg-emerald-500/10',
-}
-
-const typeLabels = {
-  knowledge: '知识',
-  skill: '技能',
-  snippet: '代码',
+const typeMeta: Record<Item['item_type'], { label: string; icon: LucideIcon; chipClass: string }> = {
+  knowledge: {
+    label: '知识',
+    icon: BookOpenText,
+    chipClass: 'border-brand-200 bg-brand-100 text-brand-800',
+  },
+  skill: {
+    label: '技能',
+    icon: Wrench,
+    chipClass: 'border-amber-200 bg-amber-100 text-amber-800',
+  },
+  snippet: {
+    label: '片段',
+    icon: Code2,
+    chipClass: 'border-slate-200 bg-slate-100 text-slate-700',
+  },
 }
 
 export function Spotlight({ isOpen, onClose }: SpotlightProps) {
@@ -33,10 +51,9 @@ export function Spotlight({ isOpen, onClose }: SpotlightProps) {
   const inputRef = useRef<HTMLInputElement>(null)
   const { selectItem, items } = useStore()
 
-  // 搜索
   useEffect(() => {
     if (!query.trim()) {
-      setResults(items.slice(0, 5))
+      setResults(items.slice(0, 6))
       return
     }
 
@@ -47,14 +64,14 @@ export function Spotlight({ isOpen, onClose }: SpotlightProps) {
         setResults(result.items)
       } catch {
         setResults([])
+      } finally {
+        setIsSearching(false)
       }
-      setIsSearching(false)
-    }, 150)
+    }, 140)
 
     return () => clearTimeout(timer)
   }, [query, items])
 
-  // 重置状态
   useEffect(() => {
     if (isOpen) {
       setQuery('')
@@ -63,17 +80,25 @@ export function Spotlight({ isOpen, onClose }: SpotlightProps) {
     }
   }, [isOpen])
 
-  // 键盘导航
+  useEffect(() => {
+    setSelectedIndex((index) => {
+      if (results.length === 0) {
+        return 0
+      }
+      return Math.min(index, results.length - 1)
+    })
+  }, [results.length])
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       switch (e.key) {
         case 'ArrowDown':
           e.preventDefault()
-          setSelectedIndex((i) => Math.min(i + 1, results.length - 1))
+          setSelectedIndex((index) => Math.min(index + 1, results.length - 1))
           break
         case 'ArrowUp':
           e.preventDefault()
-          setSelectedIndex((i) => Math.max(i - 1, 0))
+          setSelectedIndex((index) => Math.max(index - 1, 0))
           break
         case 'Enter':
           e.preventDefault()
@@ -88,46 +113,34 @@ export function Spotlight({ isOpen, onClose }: SpotlightProps) {
           break
       }
     },
-    [results, selectedIndex, selectItem, onClose]
+    [onClose, results, selectItem, selectedIndex]
   )
 
   return (
     <AnimatePresence>
       {isOpen && (
         <>
-          {/* 背景遮罩 */}
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={onClose}
-            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50"
+            className="fixed inset-0 z-50 bg-slate-900/48 backdrop-blur-sm"
           />
 
-          {/* 搜索面板 */}
           <motion.div
-            initial={{ opacity: 0, scale: 0.96, y: -10 }}
+            initial={{ opacity: 0, scale: 0.97, y: -12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.96, y: -10 }}
+            exit={{ opacity: 0, scale: 0.97, y: -12 }}
             transition={{ duration: 0.2 }}
-            className="fixed top-[15%] left-1/2 -translate-x-1/2 w-full max-w-xl z-50 px-4"
+            className="fixed left-1/2 top-[12%] z-50 w-full max-w-2xl -translate-x-1/2 px-4"
           >
-            <div className="bg-gray-900/95 backdrop-blur-xl rounded-xl border border-gray-700/50 shadow-2xl overflow-hidden">
-              {/* 搜索框 */}
-              <div className="flex items-center px-4 py-3 border-b border-gray-800">
-                <svg
-                  className="w-5 h-5 text-gray-500 mr-3"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-                  />
-                </svg>
+            <div className="overflow-hidden rounded-3xl border border-sand-200/85 bg-white/95 shadow-2xl">
+              <div className="flex items-center gap-3 border-b border-sand-200/80 px-4 py-3.5 md:px-5">
+                <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-brand-200 bg-brand-50 text-brand-700">
+                  <Search className="h-4.5 w-4.5" />
+                </span>
+
                 <input
                   ref={inputRef}
                   type="text"
@@ -135,71 +148,79 @@ export function Spotlight({ isOpen, onClose }: SpotlightProps) {
                   onChange={(e) => setQuery(e.target.value)}
                   onKeyDown={handleKeyDown}
                   placeholder="搜索知识、技能、代码片段..."
-                  className="flex-1 bg-transparent text-white text-sm placeholder:text-gray-500 focus:outline-none"
+                  className="flex-1 bg-transparent text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none"
                 />
-                {isSearching && (
-                  <div className="w-4 h-4 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+
+                {isSearching ? (
+                  <LoaderCircle className="h-4.5 w-4.5 animate-spin text-brand-700" />
+                ) : (
+                  <kbd className="rounded-md bg-sand-100 px-2 py-1 text-[11px] font-semibold text-sand-700">
+                    ESC
+                  </kbd>
                 )}
               </div>
 
-              {/* 结果列表 */}
               <div className="max-h-80 overflow-y-auto py-2">
                 {results.length > 0 ? (
                   <>
-                    <div className="px-4 py-1 text-xs font-medium text-gray-500 uppercase">
-                      {query ? '搜索结果' : '最近使用'}
+                    <div className="px-4 py-1 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500 md:px-5">
+                      {query ? '搜索结果' : '最近条目'}
                     </div>
-                    {results.map((item, index) => (
-                      <button
-                        key={item.id}
-                        onClick={() => {
-                          selectItem(item)
-                          onClose()
-                        }}
-                        onMouseEnter={() => setSelectedIndex(index)}
-                        className={`w-full text-left px-4 py-2.5 flex items-start gap-3 transition-colors ${
-                          index === selectedIndex
-                            ? 'bg-brand-500/10'
-                            : 'hover:bg-gray-800/50'
-                        }`}
-                      >
-                        <span
-                          className={`mt-0.5 text-xs px-1.5 py-0.5 rounded ${typeColors[item.item_type]}`}
+
+                    {results.map((item, index) => {
+                      const meta = typeMeta[item.item_type]
+                      const Icon = meta.icon
+
+                      return (
+                        <button
+                          key={item.id}
+                          onClick={() => {
+                            selectItem(item)
+                            onClose()
+                          }}
+                          onMouseEnter={() => setSelectedIndex(index)}
+                          className={cn(
+                            'flex w-full items-start gap-3 px-4 py-2.5 text-left transition-colors md:px-5',
+                            index === selectedIndex ? 'bg-brand-100/70' : 'hover:bg-slate-100/70'
+                          )}
                         >
-                          {typeLabels[item.item_type]}
-                        </span>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm font-medium text-gray-200 truncate">
-                            {item.title}
+                          <span
+                            className={cn(
+                              'mt-0.5 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold',
+                              meta.chipClass
+                            )}
+                          >
+                            <Icon className="h-3.5 w-3.5" />
+                            {meta.label}
+                          </span>
+
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-sm font-semibold text-slate-800">{item.title}</div>
+                            <div className="mt-0.5 truncate text-xs text-slate-500">
+                              {item.summary || '暂无摘要描述'}
+                            </div>
                           </div>
-                          <div className="text-xs text-gray-500 truncate mt-0.5">
-                            {item.summary}
-                          </div>
-                        </div>
-                      </button>
-                    ))}
+                        </button>
+                      )
+                    })}
                   </>
                 ) : (
-                  <div className="py-12 text-center text-gray-500">
-                    <p className="text-sm">没有找到匹配的结果</p>
-                    <p className="text-xs text-gray-600 mt-1">尝试其他关键词</p>
+                  <div className="py-12 text-center text-slate-500">
+                    <p className="text-sm font-medium text-slate-700">没有找到匹配结果</p>
+                    <p className="mt-1 text-xs text-slate-500">换个关键词再试试</p>
                   </div>
                 )}
               </div>
 
-              {/* 底部提示 */}
-              <div className="flex items-center gap-4 px-4 py-2 border-t border-gray-800 text-xs text-gray-600">
-                <span className="flex items-center gap-1">
-                  <kbd className="px-1 bg-gray-800 rounded">↑↓</kbd>
-                  <span>导航</span>
+              <div className="flex items-center gap-4 border-t border-sand-200/80 px-4 py-2.5 text-xs text-slate-500 md:px-5">
+                <span className="inline-flex items-center gap-1">
+                  <ArrowUp className="h-3.5 w-3.5" />
+                  <ArrowDown className="h-3.5 w-3.5" />
+                  导航
                 </span>
-                <span className="flex items-center gap-1">
-                  <kbd className="px-1 bg-gray-800 rounded">↵</kbd>
-                  <span>选择</span>
-                </span>
-                <span className="flex items-center gap-1">
-                  <kbd className="px-1 bg-gray-800 rounded">esc</kbd>
-                  <span>关闭</span>
+                <span className="inline-flex items-center gap-1">
+                  <CornerDownLeft className="h-3.5 w-3.5" />
+                  选择
                 </span>
               </div>
             </div>

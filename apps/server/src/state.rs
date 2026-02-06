@@ -7,12 +7,14 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::models::{ConversationRecord, ExtractionJobRecord};
+use crate::persistence::ServerPersistence;
 
 pub struct AppState {
     pub store: Arc<SqliteStore>,
     pub engine: Arc<SearchEngine>,
     pub llm_client: Option<Arc<dyn LlmClient>>,
     pub api_token: Option<String>,
+    pub persistence: Arc<ServerPersistence>,
     pub conversations: Arc<RwLock<HashMap<String, ConversationRecord>>>,
     pub idempotency: Arc<RwLock<HashMap<String, String>>>,
     pub jobs: Arc<RwLock<HashMap<String, ExtractionJobRecord>>>,
@@ -22,19 +24,39 @@ impl AppState {
     pub fn build() -> Result<Self, String> {
         let db_path = get_db_path();
         ensure_db_dir(&db_path)?;
+        let persistence = Arc::new(ServerPersistence::new(db_path.clone())?);
 
         let store = Arc::new(SqliteStore::open(&db_path).map_err(|e| e.to_string())?);
         let repo: Arc<dyn ItemRepository> = store.clone();
         let engine = Arc::new(SearchEngine::new(repo));
+
+        let conversation_vec = persistence.load_conversations()?;
+        let job_vec = persistence.load_jobs()?;
+
+        let mut conversations = HashMap::new();
+        let mut idempotency = HashMap::new();
+        for conversation in conversation_vec {
+            idempotency.insert(
+                conversation.idempotency_key.clone(),
+                conversation.id.clone(),
+            );
+            conversations.insert(conversation.id.clone(), conversation);
+        }
+
+        let mut jobs = HashMap::new();
+        for job in job_vec {
+            jobs.insert(job.id.clone(), job);
+        }
 
         Ok(Self {
             store,
             engine,
             llm_client: build_llm_client_from_env(),
             api_token: env_var(&["REFINE_API_TOKEN"]),
-            conversations: Arc::new(RwLock::new(HashMap::new())),
-            idempotency: Arc::new(RwLock::new(HashMap::new())),
-            jobs: Arc::new(RwLock::new(HashMap::new())),
+            persistence,
+            conversations: Arc::new(RwLock::new(conversations)),
+            idempotency: Arc::new(RwLock::new(idempotency)),
+            jobs: Arc::new(RwLock::new(jobs)),
         })
     }
 }
