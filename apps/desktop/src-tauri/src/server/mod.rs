@@ -11,13 +11,14 @@ use std::sync::Arc;
 use tiny_http::Server;
 use tokio::runtime::Builder as RuntimeBuilder;
 
-const SERVER_PORT: u16 = 19527;
+const DEFAULT_SERVER_PORT: u16 = 8787;
 const MAX_SERVER_WORKERS: usize = 8;
 
 /// 启动 HTTP 服务器
 pub fn start_server(store: Arc<SqliteStore>) {
     std::thread::spawn(move || {
-        let server = match Server::http(format!("127.0.0.1:{}", SERVER_PORT)) {
+        let port = resolve_server_port();
+        let server = match Server::http(format!("127.0.0.1:{}", port)) {
             Ok(server) => Arc::new(server),
             Err(err) => {
                 eprintln!("Failed to start HTTP server: {}", err);
@@ -28,7 +29,10 @@ pub fn start_server(store: Arc<SqliteStore>) {
         let llm_client = match build_llm_client_from_env() {
             Ok(client) => Some(client),
             Err(err) => {
-                eprintln!("LLM is not configured, /extract will return errors: {}", err);
+                eprintln!(
+                    "LLM is not configured, /extract will return errors: {}",
+                    err
+                );
                 None
             }
         };
@@ -39,7 +43,7 @@ pub fn start_server(store: Arc<SqliteStore>) {
 
         println!(
             "Refine API: http://localhost:{} (workers: {})",
-            SERVER_PORT, worker_count
+            port, worker_count
         );
 
         let mut handles = Vec::with_capacity(worker_count);
@@ -58,7 +62,18 @@ pub fn start_server(store: Arc<SqliteStore>) {
     });
 }
 
-fn run_worker(server: Arc<Server>, store: Arc<SqliteStore>, llm_client: Option<Arc<dyn LlmClient>>) {
+fn resolve_server_port() -> u16 {
+    std::env::var("REFINE_DESKTOP_API_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(DEFAULT_SERVER_PORT)
+}
+
+fn run_worker(
+    server: Arc<Server>,
+    store: Arc<SqliteStore>,
+    llm_client: Option<Arc<dyn LlmClient>>,
+) {
     let runtime = match RuntimeBuilder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(err) => {

@@ -4,7 +4,7 @@
  * 处理后台任务与云端同步（不依赖本地桌面端服务）
  */
 
-import { checkCloudHealth, uploadConversation } from '../lib/api'
+import { checkCloudHealth, fetchCloudTotalItems, uploadConversation } from '../lib/api'
 import {
   getCloudApiBase,
   OUTBOX_FLUSH_ALARM,
@@ -147,14 +147,22 @@ async function enqueueConversation(payload: ConversationPayload): Promise<{ queu
 }
 
 async function flushOutboxNow(): Promise<void> {
+  await flushOutboxWithOptions({ forceRetry: false })
+}
+
+async function flushOutboxWithOptions(options: { forceRetry: boolean }): Promise<void> {
   const snapshot = await loadSnapshot()
   const now = Date.now()
+  const forceRetry = options.forceRetry
   let changed = false
 
   for (const item of snapshot.outbox) {
     if (item.status === 'sent') continue
     if (item.status !== 'pending' && item.status !== 'failed') continue
-    if (item.nextAttemptAt > now) continue
+    if (!forceRetry && item.nextAttemptAt > now) continue
+    if (forceRetry && item.status === 'failed') {
+      item.nextAttemptAt = now
+    }
 
     item.status = 'syncing'
     item.updatedAt = Date.now()
@@ -191,11 +199,16 @@ async function flushOutboxNow(): Promise<void> {
 }
 
 async function flushOutbox(): Promise<void> {
+  return flushOutboxWith({ forceRetry: false })
+}
+
+async function flushOutboxWith(options: { forceRetry: boolean }): Promise<void> {
   if (flushPromise) {
-    return flushPromise
+    await flushPromise
+    if (!options.forceRetry) return
   }
 
-  flushPromise = flushOutboxNow().finally(() => {
+  flushPromise = flushOutboxWithOptions(options).finally(() => {
     flushPromise = null
   })
 
@@ -247,9 +260,11 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage, _sender, sendR
     loadSnapshot()
       .then(async (snapshot) => {
         const cloudHealthy = await checkCloudHealth()
+        const remoteTotalItems = cloudHealthy ? await fetchCloudTotalItems() : null
         sendResponse({
           cloudHealthy,
           status: buildSyncStatus(snapshot),
+          remoteTotalItems: remoteTotalItems ?? undefined,
         })
       })
       .catch((error: unknown) => {
@@ -269,7 +284,7 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage, _sender, sendR
   }
 
   if (message.action === 'forceSync') {
-    flushOutbox()
+    flushOutboxWith({ forceRetry: true })
       .then(async () => {
         const snapshot = await loadSnapshot()
         sendResponse({

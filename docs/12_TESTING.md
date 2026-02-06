@@ -350,7 +350,7 @@ import { rest } from 'msw'
 import { setupServer } from 'msw/node'
 
 const server = setupServer(
-  rest.get('http://localhost:19527/health', (req, res, ctx) => {
+  rest.get('http://localhost:8787/health', (req, res, ctx) => {
     return res(ctx.json({ success: true }))
   })
 )

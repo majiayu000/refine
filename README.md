@@ -32,7 +32,8 @@ export REFINE_ANTHROPIC_MODEL=claude-opus-4-6
 # 或
 export REFINE_OPENAI_API_KEY=your_key
 
-# 配置浏览器扩展云端 API（可选，默认 http://localhost:8787）
+# 配置浏览器扩展 API（可选，默认 http://localhost:8787）
+# 默认会连接本机 8787（可由桌面端本地 API 或 refine-server 提供）
 export PLASMO_PUBLIC_REFINE_API_BASE=http://localhost:8787
 ```
 
@@ -44,11 +45,13 @@ cargo run --package refine-cli -- --help
 
 # 桌面应用
 cd apps/desktop/src-tauri && cargo tauri dev
+# 启动后会暴露本地 API: http://localhost:8787
+# (可用 REFINE_DESKTOP_API_PORT 覆盖端口)
 
 # 浏览器扩展
 cd apps/extension && bun dev
 
-# 云端服务（扩展直连）
+# 云端服务（独立部署或不使用桌面端时）
 cargo run --package refine-server
 ```
 
