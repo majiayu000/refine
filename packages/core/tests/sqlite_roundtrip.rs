@@ -1,6 +1,7 @@
 use chrono::{Duration, TimeZone, Utc};
 use refine_core::infra::SqliteStore;
 use refine_core::knowledge::{Item, ItemId, ItemRepository, ItemType, Source, Tag};
+use std::collections::HashSet;
 
 #[tokio::test]
 async fn roundtrip_preserves_timestamps_and_content() {
@@ -54,4 +55,37 @@ async fn roundtrip_preserves_timestamps_and_content() {
 
     assert_eq!(loaded_again.created_at(), created_at);
     assert_eq!(loaded_again.updated_at(), updated_at);
+}
+
+#[tokio::test]
+async fn search_text_supports_offset_and_total_count() {
+    let store = SqliteStore::in_memory().expect("failed to create sqlite store");
+
+    for title in ["Rust A", "Rust B", "Rust C"] {
+        let mut item = Item::new_knowledge(title, "summary");
+        item.set_content("rust ownership and memory");
+        store.save(&item).await.expect("save failed");
+    }
+
+    let total = store
+        .count_text_hits("rust")
+        .await
+        .expect("count_text_hits failed");
+    assert_eq!(total, 3);
+
+    let first_page = store
+        .search_text("rust", 0, 2)
+        .await
+        .expect("search_text first page failed");
+    let second_page = store
+        .search_text("rust", 2, 2)
+        .await
+        .expect("search_text second page failed");
+
+    assert_eq!(first_page.len(), 2);
+    assert_eq!(second_page.len(), 1);
+
+    let first_ids: HashSet<String> = first_page.iter().map(|item| item.id().to_string()).collect();
+    let second_id = second_page[0].id().to_string();
+    assert!(!first_ids.contains(&second_id));
 }

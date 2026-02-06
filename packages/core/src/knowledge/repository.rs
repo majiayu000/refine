@@ -30,6 +30,9 @@ pub trait ItemRepository: Send + Sync {
     /// 是否存在
     async fn exists(&self, id: &ItemId) -> InfraResult<bool>;
 
-    /// 全文搜索
-    async fn search_text(&self, query: &str, limit: usize) -> InfraResult<Vec<Item>>;
+    /// 全文搜索（分页）
+    async fn search_text(&self, query: &str, offset: usize, limit: usize) -> InfraResult<Vec<Item>>;
+
+    /// 全文搜索命中总数
+    async fn count_text_hits(&self, query: &str) -> InfraResult<usize>;
 }

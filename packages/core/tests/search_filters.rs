@@ -101,3 +101,79 @@ async fn search_engine_applies_offset_and_limit_for_recent_results() {
     assert_eq!(result.total, 3);
     assert_eq!(result.items.len(), 1);
 }
+
+#[tokio::test]
+async fn search_engine_applies_offset_and_limit_for_keyword_results() {
+    let store = Arc::new(SqliteStore::in_memory().expect("failed to create sqlite store"));
+    let engine = SearchEngine::new(store.clone());
+
+    for title in ["Rust One", "Rust Two", "Rust Three"] {
+        let mut item = Item::new_knowledge(title, "summary");
+        item.set_content("rust memory model");
+        store.save(&item).await.expect("save failed");
+    }
+
+    let result = engine
+        .search(SearchQuery::new("rust").with_offset(1).with_limit(1))
+        .await
+        .expect("search failed");
+
+    assert_eq!(result.total, 3);
+    assert_eq!(result.items.len(), 1);
+}
+
+#[tokio::test]
+async fn search_engine_paginates_filtered_keyword_results_without_loading_all() {
+    let store = Arc::new(SqliteStore::in_memory().expect("failed to create sqlite store"));
+    let engine = SearchEngine::new(store.clone());
+
+    for title in ["A", "B", "C"] {
+        let mut item = Item::new_knowledge(title, "knowledge");
+        item.set_content("rust async backend");
+        item.set_tags(vec![
+            Tag::new("rust").expect("invalid tag"),
+            Tag::new("backend").expect("invalid tag"),
+        ])
+        .expect("set tags failed");
+        store.save(&item).await.expect("save failed");
+    }
+
+    let mut filtered_out_type = Item::new_skill("D", "skill");
+    filtered_out_type.set_content("rust async backend");
+    filtered_out_type
+        .set_tags(vec![Tag::new("backend").expect("invalid tag")])
+        .expect("set tags failed");
+    store.save(&filtered_out_type).await.expect("save failed");
+
+    let mut filtered_out_tag = Item::new_knowledge("E", "knowledge");
+    filtered_out_tag.set_content("rust async backend");
+    filtered_out_tag
+        .set_tags(vec![Tag::new("frontend").expect("invalid tag")])
+        .expect("set tags failed");
+    store.save(&filtered_out_tag).await.expect("save failed");
+
+    let result = engine
+        .search(
+            SearchQuery::new("rust")
+                .with_type(ItemType::Knowledge)
+                .with_tags(vec!["backend".to_string()])
+                .with_offset(1)
+                .with_limit(1),
+        )
+        .await
+        .expect("search failed");
+
+    assert_eq!(result.total, 3);
+    assert_eq!(result.items.len(), 1);
+    assert!(matches!(
+        result.items[0].item.item_type(),
+        ItemType::Knowledge
+    ));
+    assert!(
+        result.items[0]
+            .item
+            .tags()
+            .iter()
+            .any(|tag| tag.as_str() == "backend")
+    );
+}

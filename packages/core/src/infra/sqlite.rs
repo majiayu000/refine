@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
 
 /// SQLite 存储
 pub struct SqliteStore {
@@ -19,6 +20,7 @@ impl SqliteStore {
     /// 打开或创建数据库
     pub fn open(path: impl AsRef<Path>) -> InfraResult<Self> {
         let conn = Connection::open(path).map_err(|e| InfraError::Database(e.to_string()))?;
+        Self::configure_connection(&conn, false)?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -29,6 +31,7 @@ impl SqliteStore {
     /// 内存数据库（测试用）
     pub fn in_memory() -> InfraResult<Self> {
         let conn = Connection::open_in_memory().map_err(|e| InfraError::Database(e.to_string()))?;
+        Self::configure_connection(&conn, true)?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -41,6 +44,38 @@ impl SqliteStore {
         conn.execute_batch(include_str!("schema.sql"))
             .map_err(|e| InfraError::Database(e.to_string()))?;
         Ok(())
+    }
+
+    fn configure_connection(conn: &Connection, in_memory: bool) -> InfraResult<()> {
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+
+        let pragma_sql = if in_memory {
+            "PRAGMA foreign_keys = ON;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA synchronous = NORMAL;"
+        } else {
+            "PRAGMA foreign_keys = ON;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;"
+        };
+
+        conn.execute_batch(pragma_sql)
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    fn to_fts_query(query: &str) -> String {
+        if query.contains('*') || query.contains('"') {
+            return query.to_string();
+        }
+
+        query
+            .split_whitespace()
+            .map(|w| format!("{}*", w))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     fn row_to_item(&self, row: &rusqlite::Row) -> InfraResult<Item> {
@@ -232,21 +267,11 @@ impl ItemRepository for SqliteStore {
         Ok(count > 0)
     }
 
-    async fn search_text(&self, query: &str, limit: usize) -> InfraResult<Vec<Item>> {
+    async fn search_text(&self, query: &str, offset: usize, limit: usize) -> InfraResult<Vec<Item>> {
         let conn = self.conn.lock().unwrap();
         let limit = std::cmp::min(limit, i64::MAX as usize) as i64;
-
-        // 为 FTS5 添加通配符支持前缀匹配
-        let fts_query = if query.contains('*') || query.contains('"') {
-            query.to_string()
-        } else {
-            // 对每个词添加 * 后缀实现前缀匹配
-            query
-                .split_whitespace()
-                .map(|w| format!("{}*", w))
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
+        let offset = std::cmp::min(offset, i64::MAX as usize) as i64;
+        let fts_query = Self::to_fts_query(query);
 
         let mut stmt = conn
             .prepare(
@@ -256,15 +281,30 @@ impl ItemRepository for SqliteStore {
                  JOIN items_fts fts ON i.rowid = fts.rowid
                  WHERE items_fts MATCH ?1
                  ORDER BY fts.rank
-                 LIMIT ?2",
+                 LIMIT ?2 OFFSET ?3",
             )
             .map_err(|e| InfraError::Database(e.to_string()))?;
 
         let rows = stmt
-            .query_map(params![fts_query, limit], |row| Ok(self.row_to_item(row)))
+            .query_map(params![fts_query, limit, offset], |row| Ok(self.row_to_item(row)))
             .map_err(|e| InfraError::Database(e.to_string()))?;
 
         rows.map(|r| r.map_err(|e| InfraError::Database(e.to_string()))?)
             .collect()
+    }
+
+    async fn count_text_hits(&self, query: &str) -> InfraResult<usize> {
+        let conn = self.conn.lock().unwrap();
+        let fts_query = Self::to_fts_query(query);
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM items_fts WHERE items_fts MATCH ?1",
+                [fts_query],
+                |row| row.get(0),
+            )
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+
+        Ok(count.max(0) as usize)
     }
 }

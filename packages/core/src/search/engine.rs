@@ -8,6 +8,8 @@ use crate::search::query::{SearchFilter, SearchHit, SearchQuery, SearchResult};
 use async_trait::async_trait;
 use std::sync::Arc;
 
+const KEYWORD_SCAN_BATCH: usize = 128;
+
 /// 向量搜索接口
 #[async_trait]
 pub trait VectorSearch: Send + Sync {
@@ -58,20 +60,64 @@ impl SearchEngine {
 
     /// 关键词搜索
     async fn keyword_search(&self, query: &SearchQuery) -> InfraResult<SearchResult<Item>> {
-        let all_items = self.item_repo.search_text(&query.text, usize::MAX).await?;
+        let has_filter = query.filter.item_type.is_some() || !query.filter.tags.is_empty();
 
-        let filtered_items: Vec<Item> = all_items
-            .into_iter()
-            .filter(|item| Self::matches_filter(item, &query.filter))
-            .collect();
+        if !has_filter {
+            let total = self.item_repo.count_text_hits(&query.text).await?;
+            let items = self
+                .item_repo
+                .search_text(&query.text, query.pagination.offset, query.pagination.limit)
+                .await?;
+            let hits: Vec<SearchHit<Item>> = items
+                .into_iter()
+                .map(|item| SearchHit::new(item, 1.0))
+                .collect();
 
-        let total = filtered_items.len();
-        let paginated_items = Self::paginate(
-            filtered_items,
-            query.pagination.offset,
-            query.pagination.limit,
-        );
-        let hits: Vec<SearchHit<Item>> = paginated_items
+            return Ok(SearchResult {
+                items: hits,
+                total,
+                query: query.clone(),
+            });
+        }
+
+        let mut total = 0usize;
+        let mut raw_offset = 0usize;
+        let mut page_items = Vec::new();
+        let page_end = query
+            .pagination
+            .offset
+            .saturating_add(query.pagination.limit);
+
+        loop {
+            let batch = self
+                .item_repo
+                .search_text(&query.text, raw_offset, KEYWORD_SCAN_BATCH)
+                .await?;
+
+            if batch.is_empty() {
+                break;
+            }
+
+            let batch_len = batch.len();
+            raw_offset = raw_offset.saturating_add(batch_len);
+
+            for item in batch {
+                if !Self::matches_filter(&item, &query.filter) {
+                    continue;
+                }
+
+                if total >= query.pagination.offset && total < page_end {
+                    page_items.push(item);
+                }
+                total = total.saturating_add(1);
+            }
+
+            if batch_len < KEYWORD_SCAN_BATCH {
+                break;
+            }
+        }
+
+        let hits: Vec<SearchHit<Item>> = page_items
             .into_iter()
             .map(|item| SearchHit::new(item, 1.0))
             .collect();
