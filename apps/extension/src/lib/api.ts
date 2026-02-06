@@ -7,7 +7,7 @@ const API_BASE = 'http://localhost:19527'
 interface ApiResponse {
   success: boolean
   message?: string
-  id?: string
+  ids?: string[]
 }
 
 /**
@@ -18,6 +18,9 @@ export async function checkHealth(): Promise<boolean> {
     const res = await fetch(`${API_BASE}/health`, {
       method: 'GET',
       mode: 'cors',
+      headers: {
+        'X-Refine-Client': 'extension',
+      },
     })
     const data: ApiResponse = await res.json()
     return data.success
@@ -40,6 +43,7 @@ export async function sendToDesktop(
       mode: 'cors',
       headers: {
         'Content-Type': 'application/json',
+        'X-Refine-Client': 'extension',
       },
       body: JSON.stringify({ content, url, source }),
     })

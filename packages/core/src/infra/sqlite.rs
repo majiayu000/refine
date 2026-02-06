@@ -5,6 +5,7 @@
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{Item, ItemId, ItemRepository, ItemType, Source, Tag};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::Mutex;
@@ -27,8 +28,7 @@ impl SqliteStore {
 
     /// 内存数据库（测试用）
     pub fn in_memory() -> InfraResult<Self> {
-        let conn =
-            Connection::open_in_memory().map_err(|e| InfraError::Database(e.to_string()))?;
+        let conn = Connection::open_in_memory().map_err(|e| InfraError::Database(e.to_string()))?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -44,14 +44,33 @@ impl SqliteStore {
     }
 
     fn row_to_item(&self, row: &rusqlite::Row) -> InfraResult<Item> {
-        let id: String = row.get(0).map_err(|e| InfraError::Database(e.to_string()))?;
-        let type_str: String = row.get(1).map_err(|e| InfraError::Database(e.to_string()))?;
-        let title: String = row.get(2).map_err(|e| InfraError::Database(e.to_string()))?;
-        let summary: String = row.get(3).map_err(|e| InfraError::Database(e.to_string()))?;
-        let content: String = row.get(4).map_err(|e| InfraError::Database(e.to_string()))?;
-        let tags_json: String = row.get(5).map_err(|e| InfraError::Database(e.to_string()))?;
-        let source_json: Option<String> =
-            row.get(6).map_err(|e| InfraError::Database(e.to_string()))?;
+        let id: String = row
+            .get(0)
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        let type_str: String = row
+            .get(1)
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        let title: String = row
+            .get(2)
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        let summary: String = row
+            .get(3)
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        let content: String = row
+            .get(4)
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        let tags_json: String = row
+            .get(5)
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        let source_json: Option<String> = row
+            .get(6)
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        let created_at_raw: String = row
+            .get(7)
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        let updated_at_raw: String = row
+            .get(8)
+            .map_err(|e| InfraError::Database(e.to_string()))?;
 
         let item_type = match type_str.as_str() {
             "skill" => ItemType::Skill,
@@ -68,21 +87,25 @@ impl SqliteStore {
             .transpose()
             .map_err(|e| InfraError::Serialization(e.to_string()))?;
 
-        let mut item = match item_type {
-            ItemType::Knowledge => Item::new_knowledge(&title, &summary),
-            ItemType::Skill => Item::new_skill(&title, &summary),
-            ItemType::Snippet => Item::new_snippet(&title, &summary),
-        };
+        let created_at = DateTime::parse_from_rfc3339(&created_at_raw)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| InfraError::Serialization(format!("created_at 解析失败: {}", e)))?;
+        let updated_at = DateTime::parse_from_rfc3339(&updated_at_raw)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| InfraError::Serialization(format!("updated_at 解析失败: {}", e)))?;
 
-        item = item.with_id(ItemId::from_str(&id)).with_tags(tags);
-
-        if let Some(src) = source {
-            item = item.with_source(src);
-        }
-
-        item.set_content(&content);
-
-        Ok(item)
+        Item::restore(
+            ItemId::from_str(&id),
+            item_type,
+            title,
+            summary,
+            content,
+            tags,
+            source,
+            created_at,
+            updated_at,
+        )
+        .map_err(|e| InfraError::Serialization(e.to_string()))
     }
 }
 
@@ -92,14 +115,19 @@ impl ItemRepository for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT id, item_type, title, summary, content, tags, source FROM items WHERE id = ?1",
+                "SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at FROM items WHERE id = ?1",
             )
             .map_err(|e| InfraError::Database(e.to_string()))?;
 
         let result = stmt
             .query_row([id.as_str()], |row| {
-                self.row_to_item(row)
-                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+                self.row_to_item(row).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })
             })
             .optional()
             .map_err(|e| InfraError::Database(e.to_string()))?;
@@ -110,7 +138,7 @@ impl ItemRepository for SqliteStore {
     async fn find_all(&self) -> InfraResult<Vec<Item>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare("SELECT id, item_type, title, summary, content, tags, source FROM items ORDER BY created_at DESC")
+            .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at FROM items ORDER BY created_at DESC")
             .map_err(|e| InfraError::Database(e.to_string()))?;
 
         let rows = stmt
@@ -124,7 +152,7 @@ impl ItemRepository for SqliteStore {
     async fn find_by_type(&self, item_type: ItemType) -> InfraResult<Vec<Item>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare("SELECT id, item_type, title, summary, content, tags, source FROM items WHERE item_type = ?1 ORDER BY created_at DESC")
+            .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at FROM items WHERE item_type = ?1 ORDER BY created_at DESC")
             .map_err(|e| InfraError::Database(e.to_string()))?;
 
         let rows = stmt
@@ -136,14 +164,30 @@ impl ItemRepository for SqliteStore {
     }
 
     async fn find_by_tags(&self, _tags: &[Tag]) -> InfraResult<Vec<Item>> {
-        // TODO: 实现标签过滤
-        self.find_all().await
+        let all_items = self.find_all().await?;
+        if _tags.is_empty() {
+            return Ok(all_items);
+        }
+
+        let required: Vec<String> = _tags.iter().map(|t| t.as_str().to_lowercase()).collect();
+
+        Ok(all_items
+            .into_iter()
+            .filter(|item| {
+                let item_tags: std::collections::HashSet<String> = item
+                    .tags()
+                    .iter()
+                    .map(|t| t.as_str().to_lowercase())
+                    .collect();
+                required.iter().all(|tag| item_tags.contains(tag))
+            })
+            .collect())
     }
 
     async fn save(&self, item: &Item) -> InfraResult<()> {
         let conn = self.conn.lock().unwrap();
-        let tags_json =
-            serde_json::to_string(item.tags()).map_err(|e| InfraError::Serialization(e.to_string()))?;
+        let tags_json = serde_json::to_string(item.tags())
+            .map_err(|e| InfraError::Serialization(e.to_string()))?;
         let source_json = item
             .source()
             .map(|s| serde_json::to_string(s))
@@ -179,15 +223,18 @@ impl ItemRepository for SqliteStore {
     async fn exists(&self, id: &ItemId) -> InfraResult<bool> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM items WHERE id = ?1", [id.as_str()], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM items WHERE id = ?1",
+                [id.as_str()],
+                |row| row.get(0),
+            )
             .map_err(|e| InfraError::Database(e.to_string()))?;
         Ok(count > 0)
     }
 
     async fn search_text(&self, query: &str, limit: usize) -> InfraResult<Vec<Item>> {
         let conn = self.conn.lock().unwrap();
+        let limit = std::cmp::min(limit, i64::MAX as usize) as i64;
 
         // 为 FTS5 添加通配符支持前缀匹配
         let fts_query = if query.contains('*') || query.contains('"') {
@@ -204,6 +251,7 @@ impl ItemRepository for SqliteStore {
         let mut stmt = conn
             .prepare(
                 "SELECT i.id, i.item_type, i.title, i.summary, i.content, i.tags, i.source
+                 ,i.created_at, i.updated_at
                  FROM items i
                  JOIN items_fts fts ON i.rowid = fts.rowid
                  WHERE items_fts MATCH ?1
@@ -213,9 +261,7 @@ impl ItemRepository for SqliteStore {
             .map_err(|e| InfraError::Database(e.to_string()))?;
 
         let rows = stmt
-            .query_map(params![fts_query, limit as i64], |row| {
-                Ok(self.row_to_item(row))
-            })
+            .query_map(params![fts_query, limit], |row| Ok(self.row_to_item(row)))
             .map_err(|e| InfraError::Database(e.to_string()))?;
 
         rows.map(|r| r.map_err(|e| InfraError::Database(e.to_string()))?)

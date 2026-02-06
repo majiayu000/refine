@@ -53,6 +53,35 @@ impl Item {
         }
     }
 
+    /// 从持久化存储还原实体（不触发业务时间更新）
+    pub fn restore(
+        id: ItemId,
+        item_type: ItemType,
+        title: String,
+        summary: String,
+        content: String,
+        tags: Vec<Tag>,
+        source: Option<Source>,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+    ) -> Result<Self, DomainError> {
+        if tags.len() > 20 {
+            return Err(DomainError::TooManyTags);
+        }
+
+        Ok(Self {
+            id,
+            item_type,
+            title,
+            summary,
+            content,
+            tags,
+            source,
+            created_at,
+            updated_at,
+        })
+    }
+
     // ────────────────────────────────────────────────────────
     // 查询方法
     // ────────────────────────────────────────────────────────

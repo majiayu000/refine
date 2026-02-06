@@ -4,6 +4,7 @@
 
 import { useState, useEffect } from 'react'
 import './style.css'
+import { checkHealth } from './lib/api'
 
 interface Stats {
   totalItems: number
@@ -18,8 +19,21 @@ export default function Popup() {
     // 从 storage 加载统计
     chrome.storage.local.get(['stats', 'connected'], (result) => {
       if (result.stats) setStats(result.stats)
-      if (result.connected) setIsConnected(result.connected)
+      if (typeof result.connected === 'boolean') setIsConnected(result.connected)
     })
+
+    const syncConnection = async () => {
+      const connected = await checkHealth()
+      setIsConnected(connected)
+      chrome.storage.local.set({ connected })
+    }
+
+    void syncConnection()
+    const timer = setInterval(() => {
+      void syncConnection()
+    }, 15000)
+
+    return () => clearInterval(timer)
   }, [])
 
   const handleExtract = async () => {

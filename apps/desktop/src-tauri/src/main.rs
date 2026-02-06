@@ -13,12 +13,11 @@ use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State;
-use tokio::sync::Mutex;
 
 /// 应用状态
 struct AppState {
     store: Arc<SqliteStore>,
-    engine: SearchEngine,
+    engine: Arc<SearchEngine>,
 }
 
 /// 前端使用的 Item DTO
@@ -71,11 +70,10 @@ fn ensure_db_dir(path: &PathBuf) {
 
 #[tauri::command]
 async fn get_items(
-    state: State<'_, Mutex<AppState>>,
+    state: State<'_, AppState>,
     item_type: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<ItemDto>, String> {
-    let state = state.lock().await;
     let limit = limit.unwrap_or(50);
 
     let items = if let Some(type_str) = item_type {
@@ -96,8 +94,7 @@ async fn get_items(
 }
 
 #[tauri::command]
-async fn get_item(state: State<'_, Mutex<AppState>>, id: String) -> Result<Option<ItemDto>, String> {
-    let state = state.lock().await;
+async fn get_item(state: State<'_, AppState>, id: String) -> Result<Option<ItemDto>, String> {
     let item_id = ItemId::from_str(&id);
 
     state
@@ -110,11 +107,10 @@ async fn get_item(state: State<'_, Mutex<AppState>>, id: String) -> Result<Optio
 
 #[tauri::command]
 async fn search_items(
-    state: State<'_, Mutex<AppState>>,
+    state: State<'_, AppState>,
     query: String,
     limit: Option<usize>,
 ) -> Result<SearchResultDto, String> {
-    let state = state.lock().await;
     let limit = limit.unwrap_or(20);
 
     let results = state
@@ -124,22 +120,24 @@ async fn search_items(
         .map_err(|e| e.to_string())?;
 
     Ok(SearchResultDto {
-        items: results.items.iter().map(|h| ItemDto::from(&h.item)).collect(),
+        items: results
+            .items
+            .iter()
+            .map(|h| ItemDto::from(&h.item))
+            .collect(),
         total: results.total,
     })
 }
 
 #[tauri::command]
 async fn create_item(
-    state: State<'_, Mutex<AppState>>,
+    state: State<'_, AppState>,
     title: String,
     summary: String,
     content: String,
     item_type: Option<String>,
     tags: Option<Vec<String>>,
 ) -> Result<ItemDto, String> {
-    let state = state.lock().await;
-
     let item_type = item_type
         .map(|t| match t.as_str() {
             "skill" => ItemType::Skill,
@@ -171,13 +169,12 @@ async fn create_item(
 
 #[tauri::command]
 async fn update_item(
-    state: State<'_, Mutex<AppState>>,
+    state: State<'_, AppState>,
     id: String,
     title: Option<String>,
     summary: Option<String>,
     content: Option<String>,
 ) -> Result<ItemDto, String> {
-    let state = state.lock().await;
     let item_id = ItemId::from_str(&id);
 
     let mut item = state
@@ -203,8 +200,7 @@ async fn update_item(
 }
 
 #[tauri::command]
-async fn delete_item(state: State<'_, Mutex<AppState>>, id: String) -> Result<bool, String> {
-    let state = state.lock().await;
+async fn delete_item(state: State<'_, AppState>, id: String) -> Result<bool, String> {
     let item_id = ItemId::from_str(&id);
 
     state
@@ -226,12 +222,12 @@ fn main() {
 
     let store = SqliteStore::open(&db_path).expect("打开数据库失败");
     let store = Arc::new(store);
-    let engine = SearchEngine::new(store.clone());
+    let engine = Arc::new(SearchEngine::new(store.clone()));
 
     // 启动 HTTP API 服务器（供浏览器扩展调用）
     server::start_server(store.clone());
 
-    let state = Mutex::new(AppState { store, engine });
+    let state = AppState { store, engine };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())

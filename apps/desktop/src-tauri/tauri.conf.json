@@ -4,9 +4,9 @@
   "identifier": "com.refine.app",
   "version": "0.1.0",
   "build": {
-    "beforeDevCommand": "cd ../ui && pnpm dev",
+    "beforeDevCommand": "cd ../ui && bun run dev",
     "devUrl": "http://localhost:7788",
-    "beforeBuildCommand": "cd ../ui && pnpm build",
+    "beforeBuildCommand": "cd ../ui && bun run build",
     "frontendDist": "../ui/dist"
   },
   "app": {

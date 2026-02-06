@@ -23,6 +23,11 @@ cargo build --workspace
 # 前端
 cd apps/desktop/ui && bun install
 cd apps/extension && bun install
+
+# 配置 LLM（提炼功能必需，二选一）
+export REFINE_ANTHROPIC_API_KEY=your_key
+# 或
+export REFINE_OPENAI_API_KEY=your_key
 ```
 
 ### 运行

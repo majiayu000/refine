@@ -14,7 +14,7 @@
 
 ```typescript
 invoke('get_items', {
-  itemType?: 'knowledge' | 'skill' | 'snippet',
+  item_type?: 'knowledge' | 'skill' | 'snippet',
   limit?: number  // 默认 50
 }): Promise<ItemDto[]>
 ```
@@ -76,7 +76,7 @@ invoke('create_item', {
   title: string,
   summary: string,
   content: string,
-  itemType?: 'knowledge' | 'skill' | 'snippet',
+  item_type?: 'knowledge' | 'skill' | 'snippet',
   tags?: string[]
 }): Promise<ItemDto>
 ```
@@ -137,6 +137,7 @@ GET /health
 ```http
 POST /extract
 Content-Type: application/json
+X-Refine-Client: extension
 
 {
   "content": "对话内容文本",
@@ -149,7 +150,9 @@ Content-Type: application/json
 ```json
 {
   "success": true,
-  "id": "550e8400-e29b-41d4-a716-446655440000"
+  "ids": [
+    "550e8400-e29b-41d4-a716-446655440000"
+  ]
 }
 ```
 
@@ -160,6 +163,11 @@ Content-Type: application/json
   "message": "错误描述"
 }
 ```
+
+说明：
+- `/extract` 仅接受浏览器扩展来源请求（`chrome-extension://` / `moz-extension://`）
+- 请求头必须包含 `X-Refine-Client: extension`
+- 桌面端需配置 LLM Key（`REFINE_ANTHROPIC_API_KEY` 或 `REFINE_OPENAI_API_KEY`）
 
 ---
 
@@ -276,10 +284,10 @@ export interface SearchResult {
 }
 
 export async function getItems(
-  itemType?: string,
+  item_type?: string,
   limit?: number
 ): Promise<Item[]> {
-  return invoke('get_items', { itemType, limit })
+  return invoke('get_items', { item_type, limit })
 }
 
 export async function getItem(id: string): Promise<Item | null> {
@@ -297,10 +305,10 @@ export async function createItem(
   title: string,
   summary: string,
   content: string,
-  itemType?: string,
+  item_type?: string,
   tags?: string[]
 ): Promise<Item> {
-  return invoke('create_item', { title, summary, content, itemType, tags })
+  return invoke('create_item', { title, summary, content, item_type, tags })
 }
 
 export async function deleteItem(id: string): Promise<boolean> {
@@ -347,7 +355,7 @@ export async function sendToDesktop(
 HTTP API 支持跨域请求：
 
 ```
-Access-Control-Allow-Origin: *
+Access-Control-Allow-Origin: chrome-extension://<extension-id> 或 moz-extension://<extension-id>
 Access-Control-Allow-Methods: GET, POST, OPTIONS
-Access-Control-Allow-Headers: Content-Type
+Access-Control-Allow-Headers: Content-Type, X-Refine-Client
 ```

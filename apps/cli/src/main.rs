@@ -4,9 +4,9 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use refine_core::infra::SqliteStore;
-use refine_core::knowledge::{Item, ItemId, ItemRepository, ItemType};
-use refine_core::refinement::{Conversation, Extractor};
+use refine_core::infra::{ClaudeClient, LlmClient, OpenAIClient, SqliteStore};
+use refine_core::knowledge::{Item, ItemId, ItemRepository, ItemType, Source};
+use refine_core::refinement::{Conversation, ExtractionPolicy, Extractor, PromptTemplate};
 use refine_core::search::{SearchEngine, SearchQuery};
 use std::io::{self, Read};
 use std::path::PathBuf;
@@ -100,6 +100,37 @@ fn parse_item_type(s: &str) -> Option<ItemType> {
     }
 }
 
+fn env_var(keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| std::env::var(key).ok())
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn build_llm_client_from_env() -> Result<Box<dyn LlmClient>> {
+    if let Some(api_key) = env_var(&["REFINE_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]) {
+        let mut client = ClaudeClient::new(&api_key);
+        if let Some(model) = env_var(&["REFINE_ANTHROPIC_MODEL"]) {
+            client = client.with_model(&model);
+        }
+        return Ok(Box::new(client));
+    }
+
+    if let Some(api_key) = env_var(&["REFINE_OPENAI_API_KEY", "OPENAI_API_KEY"]) {
+        let mut client = OpenAIClient::new(&api_key);
+        if let Some(model) = env_var(&["REFINE_OPENAI_MODEL"]) {
+            client = client.with_model(&model);
+        }
+        if let Some(base_url) = env_var(&["REFINE_OPENAI_BASE_URL"]) {
+            client = client.with_base_url(&base_url);
+        }
+        return Ok(Box::new(client));
+    }
+
+    Err(anyhow::anyhow!(
+        "未配置 LLM API Key，请设置 REFINE_ANTHROPIC_API_KEY 或 REFINE_OPENAI_API_KEY"
+    ))
+}
+
 fn format_item(item: &Item, verbose: bool) -> String {
     if verbose {
         format!(
@@ -108,7 +139,11 @@ fn format_item(item: &Item, verbose: bool) -> String {
             item.item_type(),
             item.title(),
             item.summary(),
-            item.tags().iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", "),
+            item.tags()
+                .iter()
+                .map(|t| t.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
             item.created_at().format("%Y-%m-%d %H:%M"),
             item.content()
         )
@@ -143,14 +178,40 @@ async fn main() -> Result<()> {
                 io::stdin().read_to_string(&mut content)?;
 
                 let conv = Conversation::parse(&content).context("解析对话失败")?;
-                println!("解析到 {} 条消息", conv.messages.len());
+                let llm_client = build_llm_client_from_env()?;
+                let policy = ExtractionPolicy::default();
+                let prompt = PromptTemplate::extraction_prompt(&conv.raw, &policy);
+                let llm_response = llm_client
+                    .complete(
+                        &prompt,
+                        Some("你是 Refine 的知识提炼助手。严格按要求返回 JSON。"),
+                    )
+                    .await
+                    .context("LLM 调用失败")?;
 
-                let _extractor = Extractor::with_default_policy();
-                // 注意：实际提炼需要 LLM，这里只是解析
-                println!("对话解析成功，请配置 LLM API 进行提炼");
-                println!("\n预览:");
-                for (i, msg) in conv.messages.iter().take(3).enumerate() {
-                    println!("  [{}] {:?}: {}...", i + 1, msg.role, &msg.content.chars().take(50).collect::<String>());
+                let extractor = Extractor::new(policy);
+                let extraction = extractor
+                    .parse_response(&llm_response, &conv)
+                    .context("解析提炼结果失败")?;
+
+                if extraction.items.is_empty() {
+                    println!("未提炼出可保存的知识项");
+                    return Ok(());
+                }
+
+                println!("提炼完成：{} 条", extraction.items.len());
+                for mut item in extraction.items {
+                    item.set_source(Source::new("cli"));
+                    if item.content().trim().is_empty() {
+                        item.set_content(&content);
+                    }
+                    store.save(&item).await?;
+                    println!(
+                        "  + [{}] {} ({})",
+                        format!("{:?}", item.item_type()).to_lowercase(),
+                        item.title(),
+                        item.id()
+                    );
                 }
             } else {
                 println!("用法: cat conversation.txt | refine extract --stdin");
@@ -207,7 +268,11 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Add { title, summary, r#type } => {
+        Commands::Add {
+            title,
+            summary,
+            r#type,
+        } => {
             let item_type = parse_item_type(&r#type).unwrap_or(ItemType::Knowledge);
             let item = match item_type {
                 ItemType::Knowledge => Item::new_knowledge(&title, &summary),
