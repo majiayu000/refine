@@ -18,6 +18,17 @@ pub trait ItemRepository: Send + Sync {
     /// 按类型查找
     async fn find_by_type(&self, item_type: ItemType) -> InfraResult<Vec<Item>>;
 
+    /// 按类型查找最近数据（分页）
+    async fn find_recent(
+        &self,
+        item_type: Option<ItemType>,
+        offset: usize,
+        limit: usize,
+    ) -> InfraResult<Vec<Item>>;
+
+    /// 按类型统计总数
+    async fn count_items(&self, item_type: Option<ItemType>) -> InfraResult<usize>;
+
     /// 按标签查找
     async fn find_by_tags(&self, tags: &[Tag]) -> InfraResult<Vec<Item>>;
 

@@ -170,6 +170,29 @@ impl SearchEngine {
 
     /// 获取最近的 Item
     async fn get_recent(&self, query: &SearchQuery) -> InfraResult<SearchResult<Item>> {
+        if query.filter.tags.is_empty() {
+            let total = self.item_repo.count_items(query.filter.item_type).await?;
+            let items = self
+                .item_repo
+                .find_recent(
+                    query.filter.item_type,
+                    query.pagination.offset,
+                    query.pagination.limit,
+                )
+                .await?;
+
+            let hits: Vec<SearchHit<Item>> = items
+                .into_iter()
+                .map(|item| SearchHit::new(item, 1.0))
+                .collect();
+
+            return Ok(SearchResult {
+                items: hits,
+                total,
+                query: query.clone(),
+            });
+        }
+
         let all_items = if let Some(t) = &query.filter.item_type {
             self.item_repo.find_by_type(*t).await?
         } else {

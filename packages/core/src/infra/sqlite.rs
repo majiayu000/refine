@@ -198,6 +198,62 @@ impl ItemRepository for SqliteStore {
             .collect()
     }
 
+    async fn find_recent(
+        &self,
+        item_type: Option<ItemType>,
+        offset: usize,
+        limit: usize,
+    ) -> InfraResult<Vec<Item>> {
+        let conn = self.conn.lock().unwrap();
+        let limit = std::cmp::min(limit, i64::MAX as usize) as i64;
+        let offset = std::cmp::min(offset, i64::MAX as usize) as i64;
+
+        if let Some(item_type) = item_type {
+            let mut stmt = conn
+                .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at FROM items WHERE item_type = ?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3")
+                .map_err(|e| InfraError::Database(e.to_string()))?;
+
+            let rows = stmt
+                .query_map(params![item_type.as_str(), limit, offset], |row| {
+                    Ok(self.row_to_item(row))
+                })
+                .map_err(|e| InfraError::Database(e.to_string()))?;
+
+            return rows
+                .map(|r| r.map_err(|e| InfraError::Database(e.to_string()))?)
+                .collect();
+        }
+
+        let mut stmt = conn
+            .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at FROM items ORDER BY created_at DESC LIMIT ?1 OFFSET ?2")
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![limit, offset], |row| Ok(self.row_to_item(row)))
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+
+        rows.map(|r| r.map_err(|e| InfraError::Database(e.to_string()))?)
+            .collect()
+    }
+
+    async fn count_items(&self, item_type: Option<ItemType>) -> InfraResult<usize> {
+        let conn = self.conn.lock().unwrap();
+
+        let count: i64 = if let Some(item_type) = item_type {
+            conn.query_row(
+                "SELECT COUNT(*) FROM items WHERE item_type = ?1",
+                [item_type.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(|e| InfraError::Database(e.to_string()))?
+        } else {
+            conn.query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))
+                .map_err(|e| InfraError::Database(e.to_string()))?
+        };
+
+        Ok(count.max(0) as usize)
+    }
+
     async fn find_by_tags(&self, _tags: &[Tag]) -> InfraResult<Vec<Item>> {
         let all_items = self.find_all().await?;
         if _tags.is_empty() {

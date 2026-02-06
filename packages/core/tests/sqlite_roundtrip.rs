@@ -89,3 +89,45 @@ async fn search_text_supports_offset_and_total_count() {
     let second_id = second_page[0].id().to_string();
     assert!(!first_ids.contains(&second_id));
 }
+
+#[tokio::test]
+async fn find_recent_and_count_items_respect_type_and_pagination() {
+    let store = SqliteStore::in_memory().expect("failed to create sqlite store");
+
+    store
+        .save(&Item::new_knowledge("K1", "knowledge one"))
+        .await
+        .expect("save failed");
+    store
+        .save(&Item::new_skill("S1", "skill one"))
+        .await
+        .expect("save failed");
+    store
+        .save(&Item::new_knowledge("K2", "knowledge two"))
+        .await
+        .expect("save failed");
+
+    let total_all = store.count_items(None).await.expect("count all failed");
+    let total_knowledge = store
+        .count_items(Some(ItemType::Knowledge))
+        .await
+        .expect("count knowledge failed");
+    assert_eq!(total_all, 3);
+    assert_eq!(total_knowledge, 2);
+
+    let recent_knowledge = store
+        .find_recent(Some(ItemType::Knowledge), 0, 1)
+        .await
+        .expect("find_recent knowledge failed");
+    assert_eq!(recent_knowledge.len(), 1);
+    assert!(matches!(
+        recent_knowledge[0].item_type(),
+        ItemType::Knowledge
+    ));
+
+    let paged_all = store
+        .find_recent(None, 1, 10)
+        .await
+        .expect("find_recent all failed");
+    assert_eq!(paged_all.len(), 2);
+}
