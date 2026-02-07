@@ -161,7 +161,9 @@ pub(super) fn search_text(
 ) -> InfraResult<Vec<Item>> {
     let limit = std::cmp::min(limit, i64::MAX as usize) as i64;
     let offset = std::cmp::min(offset, i64::MAX as usize) as i64;
-    let fts_query = to_fts_query(query);
+    let Some(fts_query) = to_fts_query(query) else {
+        return Ok(Vec::new());
+    };
 
     let mut stmt = conn
         .prepare(
@@ -184,7 +186,9 @@ pub(super) fn search_text(
         .collect()
 }
 pub(super) fn count_text_hits(conn: &Connection, query: &str) -> InfraResult<usize> {
-    let fts_query = to_fts_query(query);
+    let Some(fts_query) = to_fts_query(query) else {
+        return Ok(0);
+    };
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM items_fts WHERE items_fts MATCH ?1",

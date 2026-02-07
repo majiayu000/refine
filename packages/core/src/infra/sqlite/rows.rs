@@ -25,16 +25,31 @@ pub(super) fn configure_connection(conn: &Connection, in_memory: bool) -> InfraR
     Ok(())
 }
 
-pub(super) fn to_fts_query(query: &str) -> String {
-    if query.contains('*') || query.contains('"') {
-        return query.to_string();
+pub(super) fn to_fts_query(query: &str) -> Option<String> {
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .filter_map(sanitize_fts_term)
+        .collect();
+
+    if terms.is_empty() {
+        return None;
     }
 
-    query
-        .split_whitespace()
-        .map(|word| format!("{}*", word))
-        .collect::<Vec<_>>()
-        .join(" ")
+    Some(
+        terms
+            .into_iter()
+            .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn sanitize_fts_term(raw: &str) -> Option<String> {
+    let term: String = raw
+        .chars()
+        .filter(|ch| ch.is_alphanumeric() || *ch == '_')
+        .collect();
+    (!term.is_empty()).then_some(term)
 }
 
 pub(super) fn row_to_item(row: &rusqlite::Row) -> InfraResult<Item> {
@@ -82,4 +97,26 @@ pub(super) fn row_to_item(row: &rusqlite::Row) -> InfraResult<Item> {
         updated_at,
     )
     .map_err(|e| InfraError::Serialization(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_fts_query;
+
+    #[test]
+    fn to_fts_query_builds_safe_prefix_terms() {
+        let query = to_fts_query("rust async").expect("expected valid fts query");
+        assert_eq!(query, "\"rust\"* \"async\"*");
+    }
+
+    #[test]
+    fn to_fts_query_strips_unsafe_syntax_chars() {
+        let query = to_fts_query("c++ \"unterminated").expect("expected valid fts query");
+        assert_eq!(query, "\"c\"* \"unterminated\"*");
+    }
+
+    #[test]
+    fn to_fts_query_returns_none_for_symbol_only_input() {
+        assert!(to_fts_query("+++ --- !!!").is_none());
+    }
 }
