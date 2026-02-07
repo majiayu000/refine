@@ -132,7 +132,7 @@ async fn handle_delete(id: &str, store: Arc<SqliteStore>) -> Result<()> {
 }
 
 async fn handle_add(title: &str, summary: &str, raw_type: &str, store: Arc<SqliteStore>) -> Result<()> {
-    let item_type = parse_item_type(raw_type).unwrap_or(ItemType::Knowledge);
+    let item_type = parse_add_item_type(raw_type)?;
     let item = match item_type {
         ItemType::Knowledge => Item::new_knowledge(title, summary),
         ItemType::Skill => Item::new_skill(title, summary),
@@ -143,4 +143,39 @@ async fn handle_add(title: &str, summary: &str, raw_type: &str, store: Arc<Sqlit
     println!("已添加: {} ({})", item.id().as_str(), item.title());
 
     Ok(())
+}
+
+fn parse_add_item_type(raw_type: &str) -> Result<ItemType> {
+    parse_item_type(raw_type).with_context(|| {
+        format!(
+            "无效的类型: {} (支持: knowledge, skill, snippet)",
+            raw_type
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_add_item_type;
+    use refine_core::knowledge::ItemType;
+
+    #[test]
+    fn parse_add_item_type_accepts_supported_values() {
+        let cases = [
+            ("knowledge", ItemType::Knowledge),
+            ("skill", ItemType::Skill),
+            ("snippet", ItemType::Snippet),
+        ];
+
+        for (raw, expected) in cases {
+            let parsed = parse_add_item_type(raw).expect("expected supported type");
+            assert_eq!(parsed, expected);
+        }
+    }
+
+    #[test]
+    fn parse_add_item_type_rejects_unknown_value() {
+        let err = parse_add_item_type("invalid").expect_err("expected invalid type error");
+        assert!(err.to_string().contains("无效的类型"));
+    }
 }
