@@ -1,6 +1,11 @@
-use refine_core::infra::{build_llm_client_from_env as build_core_llm_client_from_env, LlmClient, SqliteStore};
+use refine_core::infra::{
+    build_llm_client_from_env as build_core_llm_client_from_env, LlmClient, SqliteStore,
+};
 use refine_core::knowledge::{Item, ItemRepository, Source};
-use refine_core::refinement::{build_fallback_item, extract_items_with_llm, ExtractionPolicy};
+use refine_core::refinement::{
+    apply_source_and_content_defaults, extract_items_or_fallback, ExtractionPolicy,
+    ItemExtractionInput,
+};
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
@@ -69,15 +74,13 @@ async fn extract_and_store(
     llm_client: Option<Arc<dyn LlmClient>>,
     req: IngestRequest,
 ) -> Result<Vec<String>, String> {
-    let items = build_items(llm_client, &req).await;
+    let mut items = build_items(llm_client, &req).await;
+    let source = Source::new(&req.source).with_url(&req.url);
+    apply_source_and_content_defaults(&mut items, &source, &req.content);
 
     let mut ids = Vec::with_capacity(items.len());
-    for mut item in items {
-        item.set_source(Source::new(&req.source).with_url(&req.url));
-        if item.content().trim().is_empty() {
-            item.set_content(&req.content);
-        }
-        store.save(&item).await.map_err(|e| e.to_string())?;
+    for item in &items {
+        store.save(item).await.map_err(|e| e.to_string())?;
         ids.push(item.id().to_string());
     }
 
@@ -85,17 +88,12 @@ async fn extract_and_store(
 }
 
 async fn build_items(llm_client: Option<Arc<dyn LlmClient>>, req: &IngestRequest) -> Vec<Item> {
-    let fallback = || build_fallback_item(&req.source, req.title.as_deref(), &req.content, None);
-
-    let Some(client) = llm_client else {
-        return vec![fallback()];
+    let input = ItemExtractionInput {
+        source: &req.source,
+        title: req.title.as_deref(),
+        raw_content: &req.content,
+        captured_at: None,
+        policy: ExtractionPolicy::default(),
     };
-
-    match extract_items_with_llm(client.as_ref(), &req.content, ExtractionPolicy::default()).await {
-        Ok(items) => items,
-        Err(err) => {
-            tracing::warn!("提炼失败，降级为 fallback item: {}", err);
-            vec![fallback()]
-        }
-    }
+    extract_items_or_fallback(llm_client.as_deref(), &input).await
 }

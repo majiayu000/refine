@@ -3,7 +3,9 @@ use crate::support::{build_llm_client_from_env, format_item, parse_item_type};
 use anyhow::{Context, Result};
 use refine_core::infra::SqliteStore;
 use refine_core::knowledge::{Item, ItemId, ItemRepository, ItemType, Source};
-use refine_core::refinement::{extract_items_with_llm, ExtractionPolicy};
+use refine_core::refinement::{
+    apply_source_and_content_defaults, extract_items_with_llm, ExtractionPolicy,
+};
 use refine_core::search::{SearchEngine, SearchQuery};
 use std::io::{self, Read};
 use std::sync::Arc;
@@ -37,17 +39,16 @@ async fn handle_extract(stdin: bool, store: Arc<SqliteStore>) -> Result<()> {
     io::stdin().read_to_string(&mut content)?;
 
     let llm_client = build_llm_client_from_env()?;
-    let items = extract_items_with_llm(llm_client.as_ref(), &content, ExtractionPolicy::default())
+    let mut items =
+        extract_items_with_llm(llm_client.as_ref(), &content, ExtractionPolicy::default())
         .await
         .context("提炼失败")?;
+    let source = Source::new("cli");
+    apply_source_and_content_defaults(&mut items, &source, &content);
 
     println!("提炼完成：{} 条", items.len());
-    for mut item in items {
-        item.set_source(Source::new("cli"));
-        if item.content().trim().is_empty() {
-            item.set_content(&content);
-        }
-        store.save(&item).await?;
+    for item in &items {
+        store.save(item).await?;
         println!(
             "  + [{}] {} ({})",
             format!("{:?}", item.item_type()).to_lowercase(),

@@ -1,5 +1,8 @@
 use refine_core::knowledge::{Item, ItemRepository, Source};
-use refine_core::refinement::{build_fallback_item, extract_items_with_llm, ExtractionPolicy};
+use refine_core::refinement::{
+    apply_source_and_content_defaults, extract_items_or_fallback, ExtractionPolicy,
+    ItemExtractionInput,
+};
 use std::sync::Arc;
 
 use crate::models::{now_iso, ConversationRecord, ConversationStatus, ExtractionMode, JobStatus};
@@ -36,18 +39,14 @@ async fn run_extraction(
             .ok_or_else(|| "Conversation not found".to_string())?
     };
 
-    let mut items = build_items(&state, &conversation, mode).await?;
+    let mut items = build_items(&state, &conversation, mode).await;
+    let source = Source::new(&conversation.source)
+        .with_conversation_id(&conversation.id)
+        .with_url(&conversation.url);
+    apply_source_and_content_defaults(&mut items, &source, &conversation.raw_content);
 
     let mut item_ids = Vec::with_capacity(items.len());
-    for item in &mut items {
-        item.set_source(
-            Source::new(&conversation.source)
-                .with_conversation_id(&conversation.id)
-                .with_url(&conversation.url),
-        );
-        if item.content().trim().is_empty() {
-            item.set_content(&conversation.raw_content);
-        }
+    for item in &items {
         state.store.save(item).await.map_err(|e| e.to_string())?;
         item_ids.push(item.id().to_string());
     }
@@ -62,29 +61,15 @@ async fn build_items(
     state: &Arc<AppState>,
     conversation: &ConversationRecord,
     mode: ExtractionMode,
-) -> Result<Vec<Item>, String> {
-    let fallback = || {
-        build_fallback_item(
-            &conversation.source,
-            conversation.title.as_deref(),
-            &conversation.raw_content,
-            Some(&conversation.captured_at),
-        )
+) -> Vec<Item> {
+    let input = ItemExtractionInput {
+        source: &conversation.source,
+        title: conversation.title.as_deref(),
+        raw_content: &conversation.raw_content,
+        captured_at: Some(&conversation.captured_at),
+        policy: mode_to_policy(mode),
     };
-
-    let llm_client = match &state.llm_client {
-        Some(client) => client.clone(),
-        None => return Ok(vec![fallback()]),
-    };
-
-    let policy = mode_to_policy(mode);
-    match extract_items_with_llm(llm_client.as_ref(), &conversation.raw_content, policy).await {
-        Ok(items) => Ok(items),
-        Err(err) => {
-            tracing::warn!("提炼失败，降级为 fallback item: {}", err);
-            Ok(vec![fallback()])
-        }
-    }
+    extract_items_or_fallback(state.llm_client.as_deref(), &input).await
 }
 
 fn mode_to_policy(mode: ExtractionMode) -> ExtractionPolicy {

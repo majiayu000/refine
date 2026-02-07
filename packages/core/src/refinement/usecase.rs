@@ -5,7 +5,7 @@
 
 use crate::error::{DomainError, DomainResult};
 use crate::infra::LlmClient;
-use crate::knowledge::Item;
+use crate::knowledge::{Item, Source};
 use crate::refinement::{
     Conversation, ExtractionPolicy, ExtractionResult, Extractor, PromptTemplate,
 };
@@ -14,6 +14,56 @@ pub const EXTRACTION_SYSTEM_PROMPT: &str =
     "你是 Refine 的知识提炼助手。严格按要求返回 JSON，不要输出额外说明文本。";
 pub const JSON_REPAIR_SYSTEM_PROMPT: &str =
     "你是 JSON 修复器。只输出一个合法 JSON 对象，不要输出 markdown 或解释。";
+
+/// 提炼输入参数（供多端复用）
+pub struct ItemExtractionInput<'a> {
+    pub source: &'a str,
+    pub title: Option<&'a str>,
+    pub raw_content: &'a str,
+    pub captured_at: Option<&'a str>,
+    pub policy: ExtractionPolicy,
+}
+
+/// 执行提炼；若 LLM 缺失或提炼失败，则自动降级为 fallback item。
+pub async fn extract_items_or_fallback(
+    llm_client: Option<&dyn LlmClient>,
+    input: &ItemExtractionInput<'_>,
+) -> Vec<Item> {
+    let fallback = || {
+        vec![build_fallback_item(
+            input.source,
+            input.title,
+            input.raw_content,
+            input.captured_at,
+        )]
+    };
+
+    let Some(client) = llm_client else {
+        return fallback();
+    };
+
+    match extract_items_with_llm(client, input.raw_content, input.policy.clone()).await {
+        Ok(items) => items,
+        Err(err) => {
+            tracing::warn!("提炼失败，降级为 fallback item: {}", err);
+            fallback()
+        }
+    }
+}
+
+/// 为提炼结果补齐统一来源与兜底 content。
+pub fn apply_source_and_content_defaults(
+    items: &mut [Item],
+    source: &Source,
+    raw_content: &str,
+) {
+    for item in items {
+        item.set_source(source.clone());
+        if item.content().trim().is_empty() {
+            item.set_content(raw_content);
+        }
+    }
+}
 
 /// 使用 LLM 提炼 Item 列表。
 ///
@@ -160,6 +210,8 @@ mod tests {
         responses: Arc<Mutex<Vec<String>>>,
     }
 
+    struct AlwaysFailLlmClient;
+
     impl SequenceLlmClient {
         fn new(responses: Vec<&str>) -> Self {
             Self {
@@ -183,6 +235,13 @@ mod tests {
                 ));
             }
             Ok(guard.remove(0))
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for AlwaysFailLlmClient {
+        async fn complete(&self, _prompt: &str, _system: Option<&str>) -> InfraResult<String> {
+            Err(crate::error::InfraError::LlmRequest("mock failure".to_string()))
         }
     }
 
@@ -230,5 +289,44 @@ mod tests {
     fn fallback_item_uses_default_title_without_timestamp() {
         let item = build_fallback_item("claude", None, "hello world", None);
         assert_eq!(item.title(), "[claude] 对话提炼");
+    }
+
+    #[tokio::test]
+    async fn extract_items_or_fallback_returns_fallback_without_client() {
+        let input = ItemExtractionInput {
+            source: "chatgpt",
+            title: None,
+            raw_content: "Human: h\nAssistant: a",
+            captured_at: Some("2026-02-07T00:00:00Z"),
+            policy: ExtractionPolicy::default(),
+        };
+        let items = extract_items_or_fallback(None, &input).await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title(), "[chatgpt] 2026-02-07T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn extract_items_or_fallback_returns_fallback_on_error() {
+        let client = AlwaysFailLlmClient;
+        let input = ItemExtractionInput {
+            source: "claude",
+            title: Some("my title"),
+            raw_content: "Human: h\nAssistant: a",
+            captured_at: None,
+            policy: ExtractionPolicy::default(),
+        };
+        let items = extract_items_or_fallback(Some(&client), &input).await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title(), "my title");
+    }
+
+    #[test]
+    fn apply_source_and_content_defaults_fills_missing_fields() {
+        let mut items = vec![Item::new_knowledge("t", "s")];
+        let source = Source::new("chatgpt").with_url("https://example.com");
+        apply_source_and_content_defaults(&mut items, &source, "raw text");
+
+        assert_eq!(items[0].source().map(|s| s.platform.as_str()), Some("chatgpt"));
+        assert_eq!(items[0].content(), "raw text");
     }
 }
