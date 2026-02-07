@@ -1,4 +1,4 @@
-use refine_core::knowledge::{Item, ItemRepository, Source};
+use refine_core::knowledge::{Item, Source};
 use refine_core::refinement::{
     apply_source_and_content_defaults, extract_items_or_fallback, ExtractionPolicy,
     ItemExtractionInput,

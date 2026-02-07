@@ -14,9 +14,9 @@ pub fn build_state() -> AppState {
     let db_path = get_db_path();
     ensure_db_dir(&db_path);
 
-    let store = Arc::new(SqliteStore::open(&db_path).expect("打开数据库失败"));
-    let repo: Arc<dyn ItemRepository> = store.clone();
-    let engine = Arc::new(SearchEngine::new(repo));
+    let sqlite_store = Arc::new(SqliteStore::open(&db_path).expect("打开数据库失败"));
+    let store: Arc<dyn ItemRepository> = sqlite_store;
+    let engine = Arc::new(SearchEngine::new(store.clone()));
 
     AppState { store, engine }
 }

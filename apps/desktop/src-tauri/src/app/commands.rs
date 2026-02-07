@@ -1,6 +1,6 @@
 use super::dto::{ItemDto, SearchResultDto};
 use super::state::AppState;
-use refine_core::knowledge::{Item, ItemId, ItemRepository, ItemType, Tag};
+use refine_core::knowledge::{Item, ItemId, ItemType, Tag};
 use refine_core::search::SearchQuery;
 use tauri::State;
 

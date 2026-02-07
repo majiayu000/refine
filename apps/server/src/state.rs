@@ -10,7 +10,7 @@ use crate::models::{ConversationRecord, ExtractionJobRecord};
 use crate::persistence::ServerPersistence;
 
 pub struct AppState {
-    pub store: Arc<SqliteStore>,
+    pub store: Arc<dyn ItemRepository>,
     pub engine: Arc<SearchEngine>,
     pub llm_client: Option<Arc<dyn LlmClient>>,
     pub api_token: Option<String>,
@@ -26,9 +26,9 @@ impl AppState {
         ensure_db_dir(&db_path)?;
         let persistence = Arc::new(ServerPersistence::new(db_path.clone())?);
 
-        let store = Arc::new(SqliteStore::open(&db_path).map_err(|e| e.to_string())?);
-        let repo: Arc<dyn ItemRepository> = store.clone();
-        let engine = Arc::new(SearchEngine::new(repo));
+        let sqlite_store = Arc::new(SqliteStore::open(&db_path).map_err(|e| e.to_string())?);
+        let store: Arc<dyn ItemRepository> = sqlite_store;
+        let engine = Arc::new(SearchEngine::new(store.clone()));
 
         let conversation_vec = persistence.load_conversations()?;
         let job_vec = persistence.load_jobs()?;

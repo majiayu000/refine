@@ -1,5 +1,5 @@
 use refine_core::infra::{
-    build_llm_client_from_env as build_core_llm_client_from_env, LlmClient, SqliteStore,
+    build_llm_client_from_env as build_core_llm_client_from_env, LlmClient,
 };
 use refine_core::knowledge::{Item, ItemRepository, Source};
 use refine_core::refinement::{
@@ -28,7 +28,7 @@ struct ExtractRequest {
 
 pub(super) fn handle_extract(
     request: &mut tiny_http::Request,
-    store: &Arc<SqliteStore>,
+    store: &Arc<dyn ItemRepository>,
     runtime: &Runtime,
     llm_client: Option<&Arc<dyn LlmClient>>,
 ) -> Result<Vec<String>, String> {
@@ -47,7 +47,7 @@ pub(super) fn handle_extract(
 }
 
 pub(super) fn ingest_conversation(
-    store: &Arc<SqliteStore>,
+    store: &Arc<dyn ItemRepository>,
     runtime: &Runtime,
     llm_client: Option<&Arc<dyn LlmClient>>,
     req: IngestRequest,
@@ -70,7 +70,7 @@ fn parse_request_body(request: &mut tiny_http::Request) -> Result<ExtractRequest
 }
 
 async fn extract_and_store(
-    store: &Arc<SqliteStore>,
+    store: &Arc<dyn ItemRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
     req: IngestRequest,
 ) -> Result<Vec<String>, String> {

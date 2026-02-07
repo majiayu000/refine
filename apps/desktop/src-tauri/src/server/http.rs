@@ -1,5 +1,5 @@
 use super::extract::{self, IngestRequest};
-use refine_core::infra::{LlmClient, SqliteStore};
+use refine_core::infra::LlmClient;
 use refine_core::knowledge::{Item, ItemRepository};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -53,7 +53,7 @@ impl From<&Item> for ItemDto {
 
 pub(super) fn handle_request(
     request: &mut tiny_http::Request,
-    store: &Arc<SqliteStore>,
+    store: &Arc<dyn ItemRepository>,
     runtime: &Runtime,
     llm_client: Option<&Arc<dyn LlmClient>>,
 ) -> Response<Cursor<Vec<u8>>> {
@@ -130,7 +130,7 @@ pub(super) fn handle_request(
 
 fn handle_create_conversation(
     request: &mut tiny_http::Request,
-    store: &Arc<SqliteStore>,
+    store: &Arc<dyn ItemRepository>,
     runtime: &Runtime,
     llm_client: Option<&Arc<dyn LlmClient>>,
     allowed_origin: Option<&str>,
@@ -242,7 +242,7 @@ fn handle_create_conversation(
 }
 
 fn handle_list_items(
-    store: &Arc<SqliteStore>,
+    store: &Arc<dyn ItemRepository>,
     runtime: &Runtime,
     query: Option<&str>,
     allowed_origin: Option<&str>,

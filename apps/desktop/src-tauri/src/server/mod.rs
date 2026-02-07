@@ -6,7 +6,8 @@ mod extract;
 mod http;
 
 use extract::build_llm_client_from_env;
-use refine_core::infra::{LlmClient, SqliteStore};
+use refine_core::infra::LlmClient;
+use refine_core::knowledge::ItemRepository;
 use std::sync::Arc;
 use tiny_http::Server;
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -15,7 +16,7 @@ const DEFAULT_SERVER_PORT: u16 = 8787;
 const MAX_SERVER_WORKERS: usize = 8;
 
 /// 启动 HTTP 服务器
-pub fn start_server(store: Arc<SqliteStore>) {
+pub fn start_server(store: Arc<dyn ItemRepository>) {
     std::thread::spawn(move || {
         let port = resolve_server_port();
         let server = match Server::http(format!("127.0.0.1:{}", port)) {
@@ -71,7 +72,7 @@ fn resolve_server_port() -> u16 {
 
 fn run_worker(
     server: Arc<Server>,
-    store: Arc<SqliteStore>,
+    store: Arc<dyn ItemRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) {
     let runtime = match RuntimeBuilder::new_current_thread().enable_all().build() {
