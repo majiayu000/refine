@@ -1,5 +1,5 @@
 use super::{SearchEngine, VectorSearch};
-use crate::error::InfraResult;
+use crate::error::{RepoResult, RepositoryError};
 use crate::knowledge::Item;
 use crate::search::query::{SearchHit, SearchQuery, SearchResult};
 use std::sync::Arc;
@@ -9,14 +9,17 @@ impl SearchEngine {
         &self,
         vs: &Arc<dyn VectorSearch>,
         query: &SearchQuery,
-    ) -> InfraResult<SearchResult<Item>> {
+    ) -> RepoResult<SearchResult<Item>> {
         let request_limit = query
             .pagination
             .offset
             .saturating_add(query.pagination.limit)
             .saturating_add(100);
 
-        let similar = vs.search(&query.text, request_limit).await?;
+        let similar = vs
+            .search(&query.text, request_limit)
+            .await
+            .map_err(RepositoryError::from)?;
 
         let mut hits = Vec::new();
         for (id, score) in similar {

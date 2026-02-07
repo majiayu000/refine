@@ -3,6 +3,7 @@
 //! ItemRepository 的 SQLite 实现（worker 线程模型）
 
 use crate::error::{InfraError, InfraResult};
+use crate::error::RepoResult;
 use crate::knowledge::{Item, ItemId, ItemRepository, ItemType, Tag};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
@@ -48,19 +49,21 @@ impl SqliteStore {
 
 #[async_trait]
 impl ItemRepository for SqliteStore {
-    async fn find_by_id(&self, id: &ItemId) -> InfraResult<Option<Item>> {
+    async fn find_by_id(&self, id: &ItemId) -> RepoResult<Option<Item>> {
         let id = id.as_str().to_string();
         self.request(|resp| SqliteCommand::FindById { id, resp })
             .await
+            .map_err(Into::into)
     }
 
-    async fn find_all(&self) -> InfraResult<Vec<Item>> {
-        self.request(SqliteCommand::FindAll).await
+    async fn find_all(&self) -> RepoResult<Vec<Item>> {
+        self.request(SqliteCommand::FindAll).await.map_err(Into::into)
     }
 
-    async fn find_by_type(&self, item_type: ItemType) -> InfraResult<Vec<Item>> {
+    async fn find_by_type(&self, item_type: ItemType) -> RepoResult<Vec<Item>> {
         self.request(|resp| SqliteCommand::FindByType { item_type, resp })
             .await
+            .map_err(Into::into)
     }
 
     async fn find_recent(
@@ -68,7 +71,7 @@ impl ItemRepository for SqliteStore {
         item_type: Option<ItemType>,
         offset: usize,
         limit: usize,
-    ) -> InfraResult<Vec<Item>> {
+    ) -> RepoResult<Vec<Item>> {
         self.request(|resp| SqliteCommand::FindRecent {
             item_type,
             offset,
@@ -76,35 +79,41 @@ impl ItemRepository for SqliteStore {
             resp,
         })
         .await
+        .map_err(Into::into)
     }
 
-    async fn count_items(&self, item_type: Option<ItemType>) -> InfraResult<usize> {
+    async fn count_items(&self, item_type: Option<ItemType>) -> RepoResult<usize> {
         self.request(|resp| SqliteCommand::CountItems { item_type, resp })
             .await
+            .map_err(Into::into)
     }
 
-    async fn find_by_tags(&self, tags: &[Tag]) -> InfraResult<Vec<Item>> {
+    async fn find_by_tags(&self, tags: &[Tag]) -> RepoResult<Vec<Item>> {
         let tags = tags.iter().map(|tag| tag.as_str().to_string()).collect();
         self.request(|resp| SqliteCommand::FindByTags { tags, resp })
             .await
+            .map_err(Into::into)
     }
 
-    async fn save(&self, item: &Item) -> InfraResult<()> {
+    async fn save(&self, item: &Item) -> RepoResult<()> {
         let item = item.clone();
         self.request(|resp| SqliteCommand::Save { item, resp })
             .await
+            .map_err(Into::into)
     }
 
-    async fn delete(&self, id: &ItemId) -> InfraResult<bool> {
+    async fn delete(&self, id: &ItemId) -> RepoResult<bool> {
         let id = id.as_str().to_string();
         self.request(|resp| SqliteCommand::Delete { id, resp })
             .await
+            .map_err(Into::into)
     }
 
-    async fn exists(&self, id: &ItemId) -> InfraResult<bool> {
+    async fn exists(&self, id: &ItemId) -> RepoResult<bool> {
         let id = id.as_str().to_string();
         self.request(|resp| SqliteCommand::Exists { id, resp })
             .await
+            .map_err(Into::into)
     }
 
     async fn search_text(
@@ -112,7 +121,7 @@ impl ItemRepository for SqliteStore {
         query: &str,
         offset: usize,
         limit: usize,
-    ) -> InfraResult<Vec<Item>> {
+    ) -> RepoResult<Vec<Item>> {
         let query = query.to_string();
         self.request(|resp| SqliteCommand::SearchText {
             query,
@@ -121,11 +130,13 @@ impl ItemRepository for SqliteStore {
             resp,
         })
         .await
+        .map_err(Into::into)
     }
 
-    async fn count_text_hits(&self, query: &str) -> InfraResult<usize> {
+    async fn count_text_hits(&self, query: &str) -> RepoResult<usize> {
         let query = query.to_string();
         self.request(|resp| SqliteCommand::CountTextHits { query, resp })
             .await
+            .map_err(Into::into)
     }
 }

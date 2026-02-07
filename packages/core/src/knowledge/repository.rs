@@ -2,7 +2,7 @@
 //!
 //! 定义在领域层，实现在 infra 层
 
-use crate::error::InfraResult;
+use crate::error::RepoResult;
 use crate::knowledge::{Item, ItemId, ItemType, Tag};
 use async_trait::async_trait;
 
@@ -10,13 +10,13 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait ItemRepository: Send + Sync {
     /// 根据 ID 查找
-    async fn find_by_id(&self, id: &ItemId) -> InfraResult<Option<Item>>;
+    async fn find_by_id(&self, id: &ItemId) -> RepoResult<Option<Item>>;
 
     /// 查找所有
-    async fn find_all(&self) -> InfraResult<Vec<Item>>;
+    async fn find_all(&self) -> RepoResult<Vec<Item>>;
 
     /// 按类型查找
-    async fn find_by_type(&self, item_type: ItemType) -> InfraResult<Vec<Item>>;
+    async fn find_by_type(&self, item_type: ItemType) -> RepoResult<Vec<Item>>;
 
     /// 按类型查找最近数据（分页）
     async fn find_recent(
@@ -24,27 +24,26 @@ pub trait ItemRepository: Send + Sync {
         item_type: Option<ItemType>,
         offset: usize,
         limit: usize,
-    ) -> InfraResult<Vec<Item>>;
+    ) -> RepoResult<Vec<Item>>;
 
     /// 按类型统计总数
-    async fn count_items(&self, item_type: Option<ItemType>) -> InfraResult<usize>;
+    async fn count_items(&self, item_type: Option<ItemType>) -> RepoResult<usize>;
 
     /// 按标签查找
-    async fn find_by_tags(&self, tags: &[Tag]) -> InfraResult<Vec<Item>>;
+    async fn find_by_tags(&self, tags: &[Tag]) -> RepoResult<Vec<Item>>;
 
     /// 保存（创建或更新）
-    async fn save(&self, item: &Item) -> InfraResult<()>;
+    async fn save(&self, item: &Item) -> RepoResult<()>;
 
     /// 删除
-    async fn delete(&self, id: &ItemId) -> InfraResult<bool>;
+    async fn delete(&self, id: &ItemId) -> RepoResult<bool>;
 
     /// 是否存在
-    async fn exists(&self, id: &ItemId) -> InfraResult<bool>;
+    async fn exists(&self, id: &ItemId) -> RepoResult<bool>;
 
     /// 全文搜索（分页）
-    async fn search_text(&self, query: &str, offset: usize, limit: usize)
-        -> InfraResult<Vec<Item>>;
+    async fn search_text(&self, query: &str, offset: usize, limit: usize) -> RepoResult<Vec<Item>>;
 
     /// 全文搜索命中总数
-    async fn count_text_hits(&self, query: &str) -> InfraResult<usize>;
+    async fn count_text_hits(&self, query: &str) -> RepoResult<usize>;
 }

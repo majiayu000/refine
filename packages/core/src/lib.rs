@@ -48,4 +48,4 @@ pub mod refinement;
 pub mod search;
 
 // 常用类型重导出
-pub use error::{AppError, DomainError, InfraError, Result};
+pub use error::{AppError, DomainError, InfraError, RepositoryError, Result};
