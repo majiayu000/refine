@@ -56,7 +56,11 @@ pub async fn search_items(
         .map_err(|e| e.to_string())?;
 
     Ok(SearchResultDto {
-        items: results.items.iter().map(|hit| ItemDto::from(&hit.item)).collect(),
+        items: results
+            .items
+            .iter()
+            .map(|hit| ItemDto::from(&hit.item))
+            .collect(),
         total: results.total,
     })
 }

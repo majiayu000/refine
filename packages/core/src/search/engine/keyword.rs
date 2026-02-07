@@ -6,7 +6,10 @@ use crate::search::query::{SearchFilter, SearchQuery, SearchResult};
 const KEYWORD_SCAN_BATCH: usize = 128;
 
 impl SearchEngine {
-    pub(super) async fn keyword_search(&self, query: &SearchQuery) -> InfraResult<SearchResult<Item>> {
+    pub(super) async fn keyword_search(
+        &self,
+        query: &SearchQuery,
+    ) -> InfraResult<SearchResult<Item>> {
         let has_filter = query.filter.item_type.is_some() || !query.filter.tags.is_empty();
 
         if !has_filter {

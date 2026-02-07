@@ -3,12 +3,16 @@ use crate::support::{build_llm_client_from_env, format_item, parse_item_type};
 use anyhow::{Context, Result};
 use refine_core::infra::SqliteStore;
 use refine_core::knowledge::{Item, ItemId, ItemRepository, ItemType, Source};
-use refine_core::refinement::{Conversation, ExtractionPolicy, Extractor, PromptTemplate};
+use refine_core::refinement::{extract_items_with_llm, ExtractionPolicy};
 use refine_core::search::{SearchEngine, SearchQuery};
 use std::io::{self, Read};
 use std::sync::Arc;
 
-pub async fn run(command: Commands, store: Arc<SqliteStore>, engine: Arc<SearchEngine>) -> Result<()> {
+pub async fn run(
+    command: Commands,
+    store: Arc<SqliteStore>,
+    engine: Arc<SearchEngine>,
+) -> Result<()> {
     match command {
         Commands::Extract { stdin } => handle_extract(stdin, store).await,
         Commands::Search { query, limit } => handle_search(&query, limit, engine).await,
@@ -32,31 +36,13 @@ async fn handle_extract(stdin: bool, store: Arc<SqliteStore>) -> Result<()> {
     let mut content = String::new();
     io::stdin().read_to_string(&mut content)?;
 
-    let conv = Conversation::parse(&content).context("解析对话失败")?;
     let llm_client = build_llm_client_from_env()?;
-    let policy = ExtractionPolicy::default();
-    let prompt = PromptTemplate::extraction_prompt(&conv.raw, &policy);
-
-    let llm_response = llm_client
-        .complete(
-            &prompt,
-            Some("你是 Refine 的知识提炼助手。严格按要求返回 JSON。"),
-        )
+    let items = extract_items_with_llm(llm_client.as_ref(), &content, ExtractionPolicy::default())
         .await
-        .context("LLM 调用失败")?;
+        .context("提炼失败")?;
 
-    let extractor = Extractor::new(policy);
-    let extraction = extractor
-        .parse_response(&llm_response, &conv)
-        .context("解析提炼结果失败")?;
-
-    if extraction.items.is_empty() {
-        println!("未提炼出可保存的知识项");
-        return Ok(());
-    }
-
-    println!("提炼完成：{} 条", extraction.items.len());
-    for mut item in extraction.items {
+    println!("提炼完成：{} 条", items.len());
+    for mut item in items {
         item.set_source(Source::new("cli"));
         if item.content().trim().is_empty() {
             item.set_content(&content);

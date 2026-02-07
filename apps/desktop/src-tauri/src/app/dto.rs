@@ -21,7 +21,11 @@ impl From<&Item> for ItemDto {
             title: item.title().to_string(),
             summary: item.summary().to_string(),
             content: item.content().to_string(),
-            tags: item.tags().iter().map(|tag| tag.as_str().to_string()).collect(),
+            tags: item
+                .tags()
+                .iter()
+                .map(|tag| tag.as_str().to_string())
+                .collect(),
             created_at: item.created_at().to_rfc3339(),
         }
     }

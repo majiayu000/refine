@@ -91,20 +91,28 @@ impl ItemRepository for SqliteStore {
 
     async fn save(&self, item: &Item) -> InfraResult<()> {
         let item = item.clone();
-        self.request(|resp| SqliteCommand::Save { item, resp }).await
+        self.request(|resp| SqliteCommand::Save { item, resp })
+            .await
     }
 
     async fn delete(&self, id: &ItemId) -> InfraResult<bool> {
         let id = id.as_str().to_string();
-        self.request(|resp| SqliteCommand::Delete { id, resp }).await
+        self.request(|resp| SqliteCommand::Delete { id, resp })
+            .await
     }
 
     async fn exists(&self, id: &ItemId) -> InfraResult<bool> {
         let id = id.as_str().to_string();
-        self.request(|resp| SqliteCommand::Exists { id, resp }).await
+        self.request(|resp| SqliteCommand::Exists { id, resp })
+            .await
     }
 
-    async fn search_text(&self, query: &str, offset: usize, limit: usize) -> InfraResult<Vec<Item>> {
+    async fn search_text(
+        &self,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> InfraResult<Vec<Item>> {
         let query = query.to_string();
         self.request(|resp| SqliteCommand::SearchText {
             query,

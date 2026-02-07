@@ -35,6 +35,7 @@
 | [07_RUST_GUIDELINES.md](./07_RUST_GUIDELINES.md) | Rust 核心库编码规范 | ✅ |
 | [08_REACT_GUIDELINES.md](./08_REACT_GUIDELINES.md) | React/Tauri 前端规范 | ✅ |
 | [09_ARCHITECTURE.md](./09_ARCHITECTURE.md) | 模块化架构设计 | ✅ |
+| [09_ARCHITECTURE_V2.md](./09_ARCHITECTURE_V2.md) | 模块化单体 + Hexagonal 升级方案 | ✅ |
 | [10_DATA_MODEL.md](./10_DATA_MODEL.md) | 数据模型规格 | ✅ |
 | [11_API_SPEC.md](./11_API_SPEC.md) | Tauri/HTTP API 规格 | ✅ |
 | [12_TESTING.md](./12_TESTING.md) | 测试策略 | ✅ |

@@ -40,7 +40,9 @@ pub(super) fn find_by_type(conn: &Connection, item_type: ItemType) -> InfraResul
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     let rows = stmt
-        .query_map([item_type.as_str()], |row| row_to_item(row).map_err(to_row_err))
+        .query_map([item_type.as_str()], |row| {
+            row_to_item(row).map_err(to_row_err)
+        })
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     rows.map(|r| r.map_err(|e| InfraError::Database(e.to_string())))
@@ -73,7 +75,9 @@ pub(super) fn find_recent(
                 .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at FROM items ORDER BY created_at DESC LIMIT ?1 OFFSET ?2")
                 .map_err(|e| InfraError::Database(e.to_string()))?;
             let rows = stmt
-                .query_map(params![limit, offset], |row| row_to_item(row).map_err(to_row_err))
+                .query_map(params![limit, offset], |row| {
+                    row_to_item(row).map_err(to_row_err)
+                })
                 .map_err(|e| InfraError::Database(e.to_string()))?;
             rows.map(|r| r.map_err(|e| InfraError::Database(e.to_string())))
                 .collect()
@@ -117,8 +121,8 @@ pub(super) fn find_by_tags(conn: &Connection, tags: &[String]) -> InfraResult<Ve
         .collect())
 }
 pub(super) fn save(conn: &Connection, item: &Item) -> InfraResult<()> {
-    let tags_json = serde_json::to_string(item.tags())
-        .map_err(|e| InfraError::Serialization(e.to_string()))?;
+    let tags_json =
+        serde_json::to_string(item.tags()).map_err(|e| InfraError::Serialization(e.to_string()))?;
     let source_json = item
         .source()
         .map(serde_json::to_string)

@@ -140,6 +140,7 @@ refine add --title "..." --summary "..."  # 添加知识
 | [Rust 规范](./docs/07_RUST_GUIDELINES.md) | Rust 编码规范 |
 | [React 规范](./docs/08_REACT_GUIDELINES.md) | React 最佳实践 |
 | [架构设计](./docs/09_ARCHITECTURE.md) | 模块化架构 |
+| [架构升级 V2](./docs/09_ARCHITECTURE_V2.md) | Modular Monolith + Hexagonal 迁移方案 |
 | [数据模型](./docs/10_DATA_MODEL.md) | 数据类型定义 |
 | [API 规格](./docs/11_API_SPEC.md) | Tauri/HTTP API |
 | [测试策略](./docs/12_TESTING.md) | 测试规范 |

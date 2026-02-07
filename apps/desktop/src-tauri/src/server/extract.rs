@@ -1,12 +1,9 @@
 use refine_core::infra::{ClaudeClient, LlmClient, OpenAIClient, SqliteStore};
 use refine_core::knowledge::{Item, ItemRepository, Source};
-use refine_core::refinement::{Conversation, ExtractionPolicy, Extractor, PromptTemplate};
+use refine_core::refinement::{build_fallback_item, extract_items_with_llm, ExtractionPolicy};
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
-
-const EXTRACTION_SYSTEM_PROMPT: &str =
-    "你是 Refine 的知识提炼助手。严格按要求返回 JSON，不要输出额外说明文本。";
 
 #[derive(Debug, Clone)]
 pub(super) struct IngestRequest {
@@ -94,10 +91,7 @@ async fn extract_and_store(
     llm_client: Option<Arc<dyn LlmClient>>,
     req: IngestRequest,
 ) -> Result<Vec<String>, String> {
-    let mut items = build_items(llm_client, &req).await;
-    if items.is_empty() {
-        items.push(fallback_item(&req));
-    }
+    let items = build_items(llm_client, &req).await;
 
     let mut ids = Vec::with_capacity(items.len());
     for mut item in items {
@@ -113,81 +107,18 @@ async fn extract_and_store(
 }
 
 async fn build_items(llm_client: Option<Arc<dyn LlmClient>>, req: &IngestRequest) -> Vec<Item> {
+    let fallback = || build_fallback_item(&req.source, req.title.as_deref(), &req.content, None);
+
     let Some(client) = llm_client else {
-        return vec![fallback_item(req)];
+        return vec![fallback()];
     };
 
-    let conversation = match Conversation::parse(&req.content) {
-        Ok(conversation) => conversation,
+    match extract_items_with_llm(client.as_ref(), &req.content, ExtractionPolicy::default()).await {
+        Ok(items) => items,
         Err(err) => {
-            tracing::warn!("conversation parse failed, fallback extraction: {}", err);
-            return vec![fallback_item(req)];
+            tracing::warn!("提炼失败，降级为 fallback item: {}", err);
+            vec![fallback()]
         }
-    };
-
-    let policy = ExtractionPolicy::default();
-    let prompt = PromptTemplate::extraction_prompt(&conversation.raw, &policy);
-    let llm_response = match client
-        .complete(&prompt, Some(EXTRACTION_SYSTEM_PROMPT))
-        .await
-    {
-        Ok(response) => response,
-        Err(err) => {
-            tracing::warn!("llm extraction failed, fallback extraction: {}", err);
-            return vec![fallback_item(req)];
-        }
-    };
-
-    let extractor = Extractor::new(policy);
-    let extraction = match extractor.parse_response(&llm_response, &conversation) {
-        Ok(extraction) => extraction,
-        Err(err) => {
-            tracing::warn!("extraction parse failed, fallback extraction: {}", err);
-            return vec![fallback_item(req)];
-        }
-    };
-
-    if extraction.items.is_empty() {
-        return vec![fallback_item(req)];
-    }
-
-    extraction.items
-}
-
-fn fallback_item(req: &IngestRequest) -> Item {
-    let default_title = format!("[{}] 对话提炼", req.source);
-    let title = req
-        .title
-        .as_ref()
-        .map(|value| trim_to(value, 120))
-        .unwrap_or_else(|| trim_to(&default_title, 120));
-
-    let summary = build_summary(&req.content, 200);
-    let mut item = Item::new_knowledge(&title, &summary);
-    item.set_content(&req.content);
-    item
-}
-
-fn build_summary(text: &str, max_chars: usize) -> String {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() {
-        return "No content".to_string();
-    }
-    trim_to(&normalized, max_chars)
-}
-
-fn trim_to(input: &str, max_chars: usize) -> String {
-    let mut output = String::new();
-    for (idx, ch) in input.chars().enumerate() {
-        if idx >= max_chars {
-            break;
-        }
-        output.push(ch);
-    }
-    if output.len() < input.len() {
-        format!("{}...", output.trim_end())
-    } else {
-        output
     }
 }
 

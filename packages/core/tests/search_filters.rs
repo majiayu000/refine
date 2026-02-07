@@ -169,11 +169,9 @@ async fn search_engine_paginates_filtered_keyword_results_without_loading_all() 
         result.items[0].item.item_type(),
         ItemType::Knowledge
     ));
-    assert!(
-        result.items[0]
-            .item
-            .tags()
-            .iter()
-            .any(|tag| tag.as_str() == "backend")
-    );
+    assert!(result.items[0]
+        .item
+        .tags()
+        .iter()
+        .any(|tag| tag.as_str() == "backend"));
 }

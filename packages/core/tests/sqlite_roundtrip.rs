@@ -85,7 +85,10 @@ async fn search_text_supports_offset_and_total_count() {
     assert_eq!(first_page.len(), 2);
     assert_eq!(second_page.len(), 1);
 
-    let first_ids: HashSet<String> = first_page.iter().map(|item| item.id().to_string()).collect();
+    let first_ids: HashSet<String> = first_page
+        .iter()
+        .map(|item| item.id().to_string())
+        .collect();
     let second_id = second_page[0].id().to_string();
     assert!(!first_ids.contains(&second_id));
 }

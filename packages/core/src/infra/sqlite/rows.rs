@@ -53,15 +53,33 @@ fn sanitize_fts_term(raw: &str) -> Option<String> {
 }
 
 pub(super) fn row_to_item(row: &rusqlite::Row) -> InfraResult<Item> {
-    let id: String = row.get(0).map_err(|e| InfraError::Database(e.to_string()))?;
-    let type_str: String = row.get(1).map_err(|e| InfraError::Database(e.to_string()))?;
-    let title: String = row.get(2).map_err(|e| InfraError::Database(e.to_string()))?;
-    let summary: String = row.get(3).map_err(|e| InfraError::Database(e.to_string()))?;
-    let content: String = row.get(4).map_err(|e| InfraError::Database(e.to_string()))?;
-    let tags_json: String = row.get(5).map_err(|e| InfraError::Database(e.to_string()))?;
-    let source_json: Option<String> = row.get(6).map_err(|e| InfraError::Database(e.to_string()))?;
-    let created_at_raw: String = row.get(7).map_err(|e| InfraError::Database(e.to_string()))?;
-    let updated_at_raw: String = row.get(8).map_err(|e| InfraError::Database(e.to_string()))?;
+    let id: String = row
+        .get(0)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let type_str: String = row
+        .get(1)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let title: String = row
+        .get(2)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let summary: String = row
+        .get(3)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let content: String = row
+        .get(4)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let tags_json: String = row
+        .get(5)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let source_json: Option<String> = row
+        .get(6)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let created_at_raw: String = row
+        .get(7)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let updated_at_raw: String = row
+        .get(8)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
 
     let item_type = match type_str.as_str() {
         "skill" => ItemType::Skill,

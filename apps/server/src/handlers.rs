@@ -11,10 +11,9 @@ use uuid::Uuid;
 use crate::auth::authorize_user;
 use crate::extraction::spawn_extraction;
 use crate::models::{
-    normalize_timestamp, now_iso, ConversationRecord, ConversationStatus,
+    normalize_timestamp, now_iso, ConversationDto, ConversationRecord, ConversationStatus,
     CreateConversationRequest, CreateExtractionJobRequest, ExtractionJobRecord, ExtractionMode,
     ItemDto, JobStatus, ListConversationsQuery, ListItemsQuery, SearchQuery,
-    ConversationDto,
 };
 use crate::state::AppState;
 

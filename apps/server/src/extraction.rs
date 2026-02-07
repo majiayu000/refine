@@ -1,17 +1,9 @@
-use refine_core::infra::LlmClient;
 use refine_core::knowledge::{Item, ItemRepository, Source};
-use refine_core::refinement::{
-    Conversation, ExtractionPolicy, ExtractionResult, Extractor, PromptTemplate,
-};
+use refine_core::refinement::{build_fallback_item, extract_items_with_llm, ExtractionPolicy};
 use std::sync::Arc;
 
 use crate::models::{now_iso, ConversationRecord, ConversationStatus, ExtractionMode, JobStatus};
 use crate::state::AppState;
-
-const EXTRACTION_SYSTEM_PROMPT: &str =
-    "你是 Refine 的知识提炼助手。严格按要求返回 JSON，不要输出额外说明文本。";
-const JSON_REPAIR_SYSTEM_PROMPT: &str =
-    "你是 JSON 修复器。只输出一个合法 JSON 对象，不要输出 markdown 或解释。";
 
 pub fn spawn_extraction(
     state: Arc<AppState>,
@@ -45,9 +37,6 @@ async fn run_extraction(
     };
 
     let mut items = build_items(&state, &conversation, mode).await?;
-    if items.is_empty() {
-        items.push(fallback_item(&conversation));
-    }
 
     let mut item_ids = Vec::with_capacity(items.len());
     for item in &mut items {
@@ -74,35 +63,27 @@ async fn build_items(
     conversation: &ConversationRecord,
     mode: ExtractionMode,
 ) -> Result<Vec<Item>, String> {
-    let llm_client = match &state.llm_client {
-        Some(client) => client.clone(),
-        None => return Ok(vec![fallback_item(conversation)]),
+    let fallback = || {
+        build_fallback_item(
+            &conversation.source,
+            conversation.title.as_deref(),
+            &conversation.raw_content,
+            Some(&conversation.captured_at),
+        )
     };
 
-    let parsed = Conversation::parse(&conversation.raw_content).map_err(|e| e.to_string())?;
+    let llm_client = match &state.llm_client {
+        Some(client) => client.clone(),
+        None => return Ok(vec![fallback()]),
+    };
+
     let policy = mode_to_policy(mode);
-    let prompt = PromptTemplate::extraction_prompt(&parsed.raw, &policy);
-    let llm_response = llm_client
-        .complete(&prompt, Some(EXTRACTION_SYSTEM_PROMPT))
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let extractor = Extractor::new(policy);
-    let extraction =
-        match parse_extraction_with_repair(llm_client.clone(), &extractor, &parsed, &llm_response)
-            .await
-        {
-            Ok(value) => value,
-            Err(err) => {
-                tracing::warn!("提炼 JSON 解析失败，降级为 fallback item: {}", err);
-                return Ok(vec![fallback_item(conversation)]);
-            }
-        };
-
-    if extraction.items.is_empty() {
-        Ok(vec![fallback_item(conversation)])
-    } else {
-        Ok(extraction.items)
+    match extract_items_with_llm(llm_client.as_ref(), &conversation.raw_content, policy).await {
+        Ok(items) => Ok(items),
+        Err(err) => {
+            tracing::warn!("提炼失败，降级为 fallback item: {}", err);
+            Ok(vec![fallback()])
+        }
     }
 }
 
@@ -117,100 +98,6 @@ fn mode_to_policy(mode: ExtractionMode) -> ExtractionPolicy {
             extract_snippets: false,
             ..ExtractionPolicy::default()
         },
-    }
-}
-
-async fn parse_extraction_with_repair(
-    llm_client: Arc<dyn LlmClient>,
-    extractor: &Extractor,
-    conversation: &Conversation,
-    raw_response: &str,
-) -> Result<ExtractionResult, String> {
-    match extractor.parse_response(raw_response, conversation) {
-        Ok(extraction) => Ok(extraction),
-        Err(first_err) => {
-            let first_message = first_err.to_string();
-            tracing::warn!("首次提炼解析失败，尝试 JSON 修复重试: {}", first_message);
-
-            let repair_prompt = build_json_repair_prompt(raw_response, &first_message);
-            let repaired_response = llm_client
-                .complete(&repair_prompt, Some(JSON_REPAIR_SYSTEM_PROMPT))
-                .await
-                .map_err(|e| format!("原始解析失败，且 JSON 修复请求失败: {}", e))?;
-
-            extractor
-                .parse_response(&repaired_response, conversation)
-                .map_err(|second_err| {
-                    format!(
-                        "原始解析失败: {}; JSON 修复后仍失败: {}",
-                        first_message, second_err
-                    )
-                })
-        }
-    }
-}
-
-fn build_json_repair_prompt(raw_response: &str, parse_error: &str) -> String {
-    format!(
-        r#"你会收到一段本应是 JSON 的文本，但它存在语法错误。
-请将它修复为合法 JSON，并严格满足以下要求：
-1) 只能输出一个 JSON 对象；
-2) 顶层字段必须是 "items"；
-3) "items" 必须是数组，数组元素结构为:
-   {{
-     "type": "knowledge|skill|snippet",
-     "title": "...",
-     "summary": "...",
-     "content": "...",
-     "tags": ["..."]
-   }}
-4) 若无法可靠修复，请返回 {{"items":[]}}；
-5) 不要输出 markdown 代码块，不要输出任何解释文字。
-
-原始解析错误:
-{}
-
-待修复文本:
-{}
-"#,
-        parse_error, raw_response
-    )
-}
-
-fn fallback_item(conversation: &ConversationRecord) -> Item {
-    let default_title = format!("[{}] {}", conversation.source, conversation.captured_at);
-    let title = conversation
-        .title
-        .as_ref()
-        .map(|v| trim_to(v, 120))
-        .unwrap_or_else(|| trim_to(&default_title, 120));
-
-    let summary = build_summary(&conversation.raw_content, 200);
-    let mut item = Item::new_knowledge(&title, &summary);
-    item.set_content(&conversation.raw_content);
-    item
-}
-
-fn build_summary(text: &str, max_chars: usize) -> String {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() {
-        return "No content".to_string();
-    }
-    trim_to(&normalized, max_chars)
-}
-
-fn trim_to(input: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    for (i, ch) in input.chars().enumerate() {
-        if i >= max_chars {
-            break;
-        }
-        out.push(ch);
-    }
-    if out.len() < input.len() {
-        format!("{}...", out.trim_end())
-    } else {
-        out
     }
 }
 
