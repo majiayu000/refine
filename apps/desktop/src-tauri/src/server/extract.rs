@@ -1,4 +1,4 @@
-use refine_core::infra::{ClaudeClient, LlmClient, OpenAIClient, SqliteStore};
+use refine_core::infra::{build_llm_client_from_env as build_core_llm_client_from_env, LlmClient, SqliteStore};
 use refine_core::knowledge::{Item, ItemRepository, Source};
 use refine_core::refinement::{build_fallback_item, extract_items_with_llm, ExtractionPolicy};
 use serde::Deserialize;
@@ -51,29 +51,7 @@ pub(super) fn ingest_conversation(
 }
 
 pub(super) fn build_llm_client_from_env() -> Result<Arc<dyn LlmClient>, String> {
-    if let Some(api_key) = env_var(&["REFINE_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]) {
-        let mut client = ClaudeClient::new(&api_key);
-        if let Some(model) = env_var(&["REFINE_ANTHROPIC_MODEL"]) {
-            client = client.with_model(&model);
-        }
-        if let Some(base_url) = env_var(&["REFINE_ANTHROPIC_BASE_URL"]) {
-            client = client.with_base_url(&base_url);
-        }
-        return Ok(Arc::new(client));
-    }
-
-    if let Some(api_key) = env_var(&["REFINE_OPENAI_API_KEY", "OPENAI_API_KEY"]) {
-        let mut client = OpenAIClient::new(&api_key);
-        if let Some(model) = env_var(&["REFINE_OPENAI_MODEL"]) {
-            client = client.with_model(&model);
-        }
-        if let Some(base_url) = env_var(&["REFINE_OPENAI_BASE_URL"]) {
-            client = client.with_base_url(&base_url);
-        }
-        return Ok(Arc::new(client));
-    }
-
-    Err("missing API key".to_string())
+    build_core_llm_client_from_env().ok_or_else(|| "missing API key".to_string())
 }
 
 fn parse_request_body(request: &mut tiny_http::Request) -> Result<ExtractRequest, String> {
@@ -120,10 +98,4 @@ async fn build_items(llm_client: Option<Arc<dyn LlmClient>>, req: &IngestRequest
             vec![fallback()]
         }
     }
-}
-
-fn env_var(keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| std::env::var(key).ok())
-        .filter(|value| !value.trim().is_empty())
 }

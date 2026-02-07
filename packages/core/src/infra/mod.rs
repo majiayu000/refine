@@ -10,5 +10,5 @@ mod llm;
 mod sqlite;
 
 // 公共 API
-pub use llm::{ClaudeClient, LlmClient, OpenAIClient};
+pub use llm::{build_llm_client_from_env, ClaudeClient, LlmClient, OpenAIClient};
 pub use sqlite::SqliteStore;
