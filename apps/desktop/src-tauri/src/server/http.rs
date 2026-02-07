@@ -196,7 +196,7 @@ fn handle_create_conversation(
             json!({
                 "success": true,
                 "conversation_id": conversation_id,
-                "status": "processed",
+                "status": "queued",
                 "deduplicated": true
             }),
             allowed_origin,
@@ -216,7 +216,7 @@ fn handle_create_conversation(
     );
 
     match extract_result {
-        Ok(item_ids) => {
+        Ok(_) => {
             let conversation_id = generate_conversation_id();
             remember_idempotency(idempotency_key, conversation_id.clone());
             json_response(
@@ -224,8 +224,7 @@ fn handle_create_conversation(
                 json!({
                     "success": true,
                     "conversation_id": conversation_id,
-                    "status": "processed",
-                    "item_ids": item_ids
+                    "status": "queued"
                 }),
                 allowed_origin,
             )
