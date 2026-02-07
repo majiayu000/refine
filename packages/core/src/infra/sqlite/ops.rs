@@ -6,7 +6,12 @@ use std::collections::HashSet;
 
 pub(super) fn init_schema(conn: &Connection) -> InfraResult<()> {
     conn.execute_batch(include_str!("../schema.sql"))
-        .map_err(|e| InfraError::Database(e.to_string()))
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+
+    conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')", [])
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+
+    Ok(())
 }
 pub(super) fn find_by_id(conn: &Connection, id: &str) -> InfraResult<Option<Item>> {
     let mut stmt = conn
