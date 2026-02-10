@@ -143,7 +143,7 @@ GET /health
 POST /v1/conversations
 Content-Type: application/json
 X-Refine-Client: extension
-Authorization: Bearer <token>  // 可选，服务端开启鉴权时需要
+Authorization: Bearer <token>  // 生产环境（REFINE_ENV=production）必填
 
 {
   "content": "对话内容文本",
@@ -325,9 +325,23 @@ GET /v1/recommendations?q=如何做 Rust 鉴权中间件&limit=5
 
 ---
 
+### 2.11 未授权响应（统一）
+
+当请求缺少或使用了错误的 `Authorization: Bearer <token>` 时，接口统一返回：
+
+```json
+{
+  "success": false,
+  "message": "Unauthorized: provide Authorization: Bearer <token> and ensure REFINE_API_TOKEN matches."
+}
+```
+
+---
+
 说明：
 - `idempotency_key` 用于去重，避免重复上传生成重复记录。
-- 生产环境建议启用 `Authorization: Bearer` 并绑定用户身份。
+- 当 `REFINE_ENV=production` 时，服务启动会强制要求配置 `REFINE_API_TOKEN`。
+- 生产环境请求需携带 `Authorization: Bearer <token>`。
 - Claude 提炼可通过 `REFINE_ANTHROPIC_MODEL` 指定模型（默认 `claude-opus-4-6`），并通过 `REFINE_ANTHROPIC_BASE_URL` 对接 Anthropic 兼容网关。
 - 可通过 `REFINE_ENABLE_SEMANTIC_SEARCH=true` 开启语义向量检索。
 - 当前 `apps/server` 使用 Rust + Axum；`items`、`conversations`、`extraction_jobs`、`events` 已持久化到 SQLite。

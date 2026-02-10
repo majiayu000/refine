@@ -19,11 +19,18 @@ REFINE_ANTHROPIC_BASE_URL=https://yunyi.cfd/claude
 REFINE_ANTHROPIC_MODEL=claude-opus-4-6
 ```
 
-## 可选环境变量
+生产环境建议直接使用 `apps/server/.env.production.example` 作为模板，默认启用鉴权：
+
+```bash
+cp apps/server/.env.production.example .env
+```
+
+## 环境变量
 
 - `HOST`：监听地址（默认 `0.0.0.0`）
 - `PORT`：服务端口（默认 `8787`）
-- `REFINE_API_TOKEN`：设置后要求 `Authorization: Bearer <token>`
+- `REFINE_ENV`：运行环境（`production` 时强制要求 `REFINE_API_TOKEN`）
+- `REFINE_API_TOKEN`：鉴权令牌；设置后要求 `Authorization: Bearer <token>`
 - `REFINE_SERVER_DB_PATH`：SQLite 路径（默认 `$XDG_DATA_HOME/refine/server.db`）
 - `REFINE_ANTHROPIC_API_KEY` / `REFINE_OPENAI_API_KEY`：启用 LLM 提炼（未配置时使用 fallback 提炼）
 - `REFINE_ANTHROPIC_MODEL`：Anthropic 模型名（默认 `claude-opus-4-6`）
@@ -37,6 +44,11 @@ export REFINE_ANTHROPIC_API_KEY=your_key
 export REFINE_ANTHROPIC_BASE_URL=https://yunyi.cfd/claude
 export REFINE_ANTHROPIC_MODEL=claude-opus-4-6
 ```
+
+## 安全基线
+
+- 当 `REFINE_ENV=production` 且未配置 `REFINE_API_TOKEN` 时，服务启动会直接失败。
+- 未授权请求统一返回 `401`，并提示使用 `Authorization: Bearer <token>`。
 
 ## API
 

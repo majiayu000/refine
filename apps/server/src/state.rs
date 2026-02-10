@@ -30,6 +30,13 @@ impl AppState {
 
         let sqlite_store = Arc::new(SqliteStore::open(&db_path).map_err(|e| e.to_string())?);
         let store: Arc<dyn ItemRepository> = sqlite_store;
+        let api_token = env_var(&["REFINE_API_TOKEN"]);
+        if is_production_env() && api_token.is_none() {
+            return Err(
+                "REFINE_API_TOKEN is required when REFINE_ENV is set to production".to_string(),
+            );
+        }
+
         let semantic_search_enabled = env_flag(&["REFINE_ENABLE_SEMANTIC_SEARCH"]);
         let mut engine_builder = SearchEngine::new(store.clone());
         if semantic_search_enabled {
@@ -81,7 +88,7 @@ impl AppState {
             engine,
             semantic_search_enabled,
             llm_client: build_llm_client_from_env(),
-            api_token: env_var(&["REFINE_API_TOKEN"]),
+            api_token,
             persistence,
             conversations: Arc::new(RwLock::new(conversations)),
             idempotency: Arc::new(RwLock::new(idempotency)),
@@ -121,5 +128,16 @@ fn env_flag(keys: &[&str]) -> bool {
     matches!(
         raw.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on" | "enabled"
+    )
+}
+
+fn is_production_env() -> bool {
+    let Some(raw) = env_var(&["REFINE_ENV", "APP_ENV"]) else {
+        return false;
+    };
+
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "prod" | "production"
     )
 }
