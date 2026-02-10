@@ -248,6 +248,7 @@ export default function Popup() {
   const displayedTotalItems = remoteTotalItems ?? stats.totalItems
   const totalSourceText = remoteTotalItems == null ? '本地缓存' : '云端实时'
   const onboardingDoneCount = [onboarding.extracted, onboarding.searched, onboarding.reused].filter(Boolean).length
+  const onboardingProgressPercent = Math.round((onboardingDoneCount / 3) * 100)
 
   const syncStateText = (() => {
     if (syncStatus.failed > 0) return `同步失败 ${syncStatus.failed} 条`
@@ -307,6 +308,45 @@ export default function Popup() {
     }, 15000)
 
     return () => clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    const onStorageChanged: Parameters<typeof chrome.storage.onChanged.addListener>[0] = (
+      changes,
+      areaName
+    ) => {
+      if (areaName !== 'local') return
+
+      if (changes.stats) {
+        void readStoredStats()
+          .then((next) => setStats(next))
+          .catch(() => setStats({ totalItems: 0, todayExtracted: 0 }))
+      }
+
+      if (changes.onboardingTasks) {
+        void readOnboardingTaskState()
+          .then((next) => setOnboarding(next))
+          .catch(() => setOnboarding(DEFAULT_ONBOARDING_STATE))
+      }
+    }
+
+    chrome.storage.onChanged.addListener(onStorageChanged)
+    return () => {
+      chrome.storage.onChanged.removeListener(onStorageChanged)
+    }
+  }, [])
+
+  useEffect(() => {
+    const onVisibilityChanged = () => {
+      if (document.visibilityState === 'visible') {
+        void syncCloudStatus()
+      }
+    }
+
+    document.addEventListener('visibilitychange', onVisibilityChanged)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChanged)
+    }
   }, [])
 
   const handleExtract = async () => {
@@ -424,6 +464,12 @@ export default function Popup() {
         <div className="onboarding-head">
           <p className="onboarding-title">首日任务流</p>
           <span className="onboarding-progress">{onboardingDoneCount}/3</span>
+        </div>
+        <div className="onboarding-progress-track" aria-hidden="true">
+          <div
+            className="onboarding-progress-fill"
+            style={{ width: `${onboardingProgressPercent}%` }}
+          />
         </div>
         <p className={`onboarding-item ${onboarding.extracted ? 'is-done' : ''}`}>1. 提取 1 条对话</p>
         <p className={`onboarding-item ${onboarding.searched ? 'is-done' : ''}`}>2. 搜索/触发推荐 1 次</p>
