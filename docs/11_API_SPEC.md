@@ -224,12 +224,55 @@ GET /v1/search?q=rust&limit=20
 
 ---
 
+### 2.7 上报事件
+
+```http
+POST /v1/events
+Content-Type: application/json
+X-Refine-Client: extension
+
+{
+  "event_name": "conversation_extracted",
+  "source": "chatgpt",
+  "properties": {
+    "content_length": 1024
+  },
+  "occurred_at": "2026-02-10T12:00:00.000Z"
+}
+```
+
+---
+
+### 2.8 查询漏斗汇总
+
+```http
+GET /v1/events/summary?days=7
+```
+
+**响应**：
+```json
+{
+  "success": true,
+  "days": 7,
+  "since": "2026-02-03T10:00:00Z",
+  "counts": {
+    "conversation_extracted": 120,
+    "conversation_synced": 118,
+    "recommendation_exposed": 0,
+    "recommendation_clicked": 0,
+    "knowledge_reused": 0
+  }
+}
+```
+
+---
+
 说明：
 - `idempotency_key` 用于去重，避免重复上传生成重复记录。
 - 生产环境建议启用 `Authorization: Bearer` 并绑定用户身份。
 - Claude 提炼可通过 `REFINE_ANTHROPIC_MODEL` 指定模型（默认 `claude-opus-4-6`），并通过 `REFINE_ANTHROPIC_BASE_URL` 对接 Anthropic 兼容网关。
-- 当前 `apps/server` 使用 Rust + Axum；`items` 已持久化到 SQLite，`conversations/extraction_jobs` 仍是内存状态。
-- 生产需将会话与任务状态持久化并接入异步任务队列。
+- 当前 `apps/server` 使用 Rust + Axum；`items`、`conversations`、`extraction_jobs`、`events` 已持久化到 SQLite。
+- 生产建议接入更细粒度鉴权（用户级身份）与独立异步任务队列。
 
 ---
 

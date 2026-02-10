@@ -54,6 +54,8 @@ async fn main() {
             "/v1/conversations",
             get(handlers::list_conversations).post(handlers::create_conversation),
         )
+        .route("/v1/events", post(handlers::create_event))
+        .route("/v1/events/summary", get(handlers::get_event_summary))
         .route("/v1/extraction-jobs", post(handlers::create_extraction_job))
         .route(
             "/v1/extraction-jobs/:job_id",

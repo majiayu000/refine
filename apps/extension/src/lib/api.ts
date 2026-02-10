@@ -19,6 +19,13 @@ interface CloudItemsResponse {
   next_cursor?: number | null
 }
 
+interface TrackEventRequest {
+  event_name: string
+  source?: string
+  properties?: Record<string, unknown>
+  occurred_at?: string
+}
+
 function toRequestBody(item: OutboxItem): CloudUploadRequest {
   return {
     content: item.payload.content,
@@ -134,5 +141,26 @@ export async function fetchCloudTotalItemsWithOptions(options?: {
     return legacyCount
   } catch {
     return null
+  }
+}
+
+export async function trackEvent(payload: TrackEventRequest): Promise<boolean> {
+  const apiBase = getCloudApiBase()
+
+  try {
+    const res = await fetch(`${apiBase}/v1/events`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Refine-Client': 'extension',
+      },
+      body: JSON.stringify(payload),
+    })
+
+    if (!res.ok) return false
+    const data = (await res.json()) as { success?: boolean }
+    return data.success === true
+  } catch {
+    return false
   }
 }

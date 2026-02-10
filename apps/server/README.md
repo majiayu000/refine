@@ -41,6 +41,8 @@ export REFINE_ANTHROPIC_MODEL=claude-opus-4-6
 
 - `GET /health`
 - `POST /v1/conversations`
+- `POST /v1/events`
+- `GET /v1/events/summary?days=7`
 - `POST /v1/extraction-jobs`
 - `GET /v1/extraction-jobs/:id`
 - `GET /v1/items?cursor=0&limit=20`

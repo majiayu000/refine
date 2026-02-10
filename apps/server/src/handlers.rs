@@ -2,6 +2,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::Json;
+use chrono::{Duration, Utc};
 use refine_core::search::SearchQuery as CoreSearchQuery;
 use serde_json::json;
 use std::sync::Arc;
@@ -11,10 +12,19 @@ use crate::auth::authorize_user;
 use crate::extraction::spawn_extraction;
 use crate::models::{
     normalize_timestamp, now_iso, ConversationDto, ConversationRecord, ConversationStatus,
-    CreateConversationRequest, CreateExtractionJobRequest, ExtractionJobRecord, ExtractionMode,
-    ItemDto, JobStatus, ListConversationsQuery, ListItemsQuery, SearchQuery,
+    CreateConversationRequest, CreateEventRequest, CreateExtractionJobRequest, EventRecord,
+    EventSummaryQuery, ExtractionJobRecord, ExtractionMode, ItemDto, JobStatus,
+    ListConversationsQuery, ListItemsQuery, SearchQuery,
 };
 use crate::state::AppState;
+
+const FUNNEL_EVENTS: [&str; 5] = [
+    "conversation_extracted",
+    "conversation_synced",
+    "recommendation_exposed",
+    "recommendation_clicked",
+    "knowledge_reused",
+];
 
 pub async fn health() -> impl IntoResponse {
     ok(json!({
@@ -213,6 +223,78 @@ pub async fn get_extraction_job(
     ok(json!({ "job": job }))
 }
 
+pub async fn create_event(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateEventRequest>,
+) -> impl IntoResponse {
+    let user_id = match authorize_user(&headers, state.api_token.as_deref()) {
+        Ok(user_id) => user_id,
+        Err(err) => return err_response(StatusCode::UNAUTHORIZED, &err),
+    };
+
+    let event_name = match payload.event_name.map(|value| value.trim().to_string()) {
+        Some(value) if !value.is_empty() => value,
+        _ => return err_response(StatusCode::BAD_REQUEST, "event_name is required"),
+    };
+
+    let source = payload
+        .source
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    let properties = normalize_event_properties(payload.properties);
+
+    let event = EventRecord {
+        id: Uuid::new_v4().to_string(),
+        user_id,
+        event_name,
+        source,
+        properties,
+        created_at: normalize_timestamp(payload.occurred_at),
+    };
+
+    if let Err(err) = state.persistence.insert_event(&event) {
+        return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err);
+    }
+
+    ok(json!({
+        "event_id": event.id
+    }))
+}
+
+pub async fn get_event_summary(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<EventSummaryQuery>,
+) -> impl IntoResponse {
+    if let Err(err) = authorize_user(&headers, state.api_token.as_deref()) {
+        return err_response(StatusCode::UNAUTHORIZED, &err);
+    }
+
+    let days = query.days.unwrap_or(7).clamp(1, 90);
+    let since = (Utc::now() - Duration::days(days as i64)).to_rfc3339();
+
+    let pairs = match state.persistence.event_counts_since(Some(&since)) {
+        Ok(pairs) => pairs,
+        Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    };
+
+    let mut counts = serde_json::Map::new();
+    for event_name in FUNNEL_EVENTS {
+        counts.insert(event_name.to_string(), json!(0));
+    }
+    for (event_name, count) in pairs {
+        counts.insert(event_name, json!(count));
+    }
+
+    ok(json!({
+        "days": days,
+        "since": since,
+        "counts": counts
+    }))
+}
+
 pub async fn list_conversations(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -362,6 +444,13 @@ fn conversation_status_name(status: &ConversationStatus) -> &'static str {
         ConversationStatus::Processing => "processing",
         ConversationStatus::Processed => "processed",
         ConversationStatus::Failed => "failed",
+    }
+}
+
+fn normalize_event_properties(raw: Option<serde_json::Value>) -> serde_json::Value {
+    match raw {
+        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+        _ => json!({}),
     }
 }
 

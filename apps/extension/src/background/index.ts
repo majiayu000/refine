@@ -4,7 +4,12 @@
  * 处理后台任务与云端同步（不依赖本地桌面端服务）
  */
 
-import { checkCloudHealth, fetchCloudTotalItemsWithOptions, uploadConversation } from '../lib/api'
+import {
+  checkCloudHealth,
+  fetchCloudTotalItemsWithOptions,
+  trackEvent,
+  uploadConversation,
+} from '../lib/api'
 import {
   getCloudApiBase,
   OUTBOX_FLUSH_ALARM,
@@ -195,6 +200,17 @@ async function enqueueConversation(payload: ConversationPayload): Promise<{ queu
   snapshot.stats.todayExtracted += 1
   await saveSnapshot(snapshot)
 
+  void trackEvent({
+    event_name: 'conversation_extracted',
+    source: payload.source,
+    properties: {
+      provider: payload.source,
+      has_title: typeof payload.title === 'string' && payload.title.length > 0,
+      content_length: payload.content.length,
+    },
+    occurred_at: new Date().toISOString(),
+  })
+
   void flushOutbox()
 
   return {
@@ -237,6 +253,18 @@ async function flushOutboxWithOptions(options: { forceRetry: boolean }): Promise
       snapshot.syncState.lastSyncedAt = Date.now()
       snapshot.syncState.lastError = undefined
       changed = true
+
+      void trackEvent({
+        event_name: 'conversation_synced',
+        source: item.payload.source,
+        properties: {
+          provider: item.payload.source,
+          outbox_item_id: item.id,
+          remote_conversation_id: result.conversationId || null,
+          attempt_count: item.attemptCount,
+        },
+        occurred_at: new Date().toISOString(),
+      })
       continue
     }
 

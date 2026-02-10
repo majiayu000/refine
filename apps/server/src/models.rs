@@ -64,6 +64,16 @@ pub struct ExtractionJobRecord {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventRecord {
+    pub id: String,
+    pub user_id: String,
+    pub event_name: String,
+    pub source: String,
+    pub properties: serde_json::Value,
+    pub created_at: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateConversationRequest {
     pub content: Option<String>,
@@ -83,6 +93,14 @@ pub struct CreateExtractionJobRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct CreateEventRequest {
+    pub event_name: Option<String>,
+    pub source: Option<String>,
+    pub properties: Option<serde_json::Value>,
+    pub occurred_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ListItemsQuery {
     pub cursor: Option<usize>,
     pub limit: Option<usize>,
@@ -99,6 +117,11 @@ pub struct ListConversationsQuery {
 pub struct SearchQuery {
     pub q: Option<String>,
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EventSummaryQuery {
+    pub days: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]

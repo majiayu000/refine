@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use rusqlite::{params, Connection};
 
 use crate::models::{
-    ConversationRecord, ConversationStatus, ExtractionJobRecord, ExtractionMode, JobStatus,
+    ConversationRecord, ConversationStatus, EventRecord, ExtractionJobRecord, ExtractionMode,
+    JobStatus,
 };
 
 pub struct ServerPersistence {
@@ -176,6 +177,80 @@ impl ServerPersistence {
         Ok(())
     }
 
+    pub fn insert_event(&self, event: &EventRecord) -> Result<(), String> {
+        let conn = self.open()?;
+        let properties = serde_json::to_string(&event.properties).map_err(|e| e.to_string())?;
+
+        conn.execute(
+            r#"
+            INSERT INTO events
+              (id, user_id, event_name, source, properties_json, created_at)
+            VALUES
+              (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                event.id,
+                event.user_id,
+                event.event_name,
+                event.source,
+                properties,
+                event.created_at,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+
+        Ok(())
+    }
+
+    pub fn event_counts_since(&self, since: Option<&str>) -> Result<Vec<(String, usize)>, String> {
+        let conn = self.open()?;
+
+        if let Some(since) = since {
+            let mut stmt = conn
+                .prepare(
+                    r#"
+                    SELECT event_name, COUNT(*)
+                    FROM events
+                    WHERE created_at >= ?1
+                    GROUP BY event_name
+                    ORDER BY event_name ASC
+                    "#,
+                )
+                .map_err(|e| e.to_string())?;
+
+            let rows = stmt
+                .query_map([since], |row| {
+                    let event_name: String = row.get(0)?;
+                    let count: i64 = row.get(1)?;
+                    Ok((event_name, count))
+                })
+                .map_err(|e| e.to_string())?;
+
+            return collect_event_counts(rows);
+        }
+
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT event_name, COUNT(*)
+                FROM events
+                GROUP BY event_name
+                ORDER BY event_name ASC
+                "#,
+            )
+            .map_err(|e| e.to_string())?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let event_name: String = row.get(0)?;
+                let count: i64 = row.get(1)?;
+                Ok((event_name, count))
+            })
+            .map_err(|e| e.to_string())?;
+
+        collect_event_counts(rows)
+    }
+
     fn open(&self) -> Result<Connection, String> {
         Connection::open(&self.db_path).map_err(|e| e.to_string())
     }
@@ -218,6 +293,21 @@ impl ServerPersistence {
 
             CREATE INDEX IF NOT EXISTS idx_extraction_jobs_conversation
             ON extraction_jobs(conversation_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS events (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                event_name TEXT NOT NULL,
+                source TEXT NOT NULL,
+                properties_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_events_created_at
+            ON events(created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_events_event_name_created_at
+            ON events(event_name, created_at DESC);
             "#,
         )
         .map_err(|e| e.to_string())?;
@@ -280,5 +370,109 @@ fn job_status_from_db(raw: &str) -> JobStatus {
         "succeeded" => JobStatus::Succeeded,
         "failed" => JobStatus::Failed,
         _ => JobStatus::Pending,
+    }
+}
+
+fn collect_event_counts(
+    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<(String, i64)>>,
+) -> Result<Vec<(String, usize)>, String> {
+    let mut counts = Vec::new();
+    for row in rows {
+        let (event_name, count) = row.map_err(|e| e.to_string())?;
+        counts.push((event_name, count.max(0) as usize));
+    }
+    Ok(counts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ServerPersistence;
+    use crate::models::{now_iso, EventRecord};
+    use serde_json::json;
+    use std::path::{Path, PathBuf};
+    use uuid::Uuid;
+
+    fn temp_db_path() -> PathBuf {
+        std::env::temp_dir().join(format!("refine-server-persistence-test-{}.db", Uuid::new_v4()))
+    }
+
+    fn cleanup(path: &Path) {
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn build_event(name: &str, created_at: &str) -> EventRecord {
+        EventRecord {
+            id: Uuid::new_v4().to_string(),
+            user_id: "test-user".to_string(),
+            event_name: name.to_string(),
+            source: "extension".to_string(),
+            properties: json!({"from": "test"}),
+            created_at: created_at.to_string(),
+        }
+    }
+
+    #[test]
+    fn event_counts_since_returns_aggregated_counts() {
+        let path = temp_db_path();
+        let persistence = ServerPersistence::new(path.clone()).expect("persistence init failed");
+
+        let now = now_iso();
+        persistence
+            .insert_event(&build_event("conversation_extracted", &now))
+            .expect("insert event 1");
+        persistence
+            .insert_event(&build_event("conversation_extracted", &now))
+            .expect("insert event 2");
+        persistence
+            .insert_event(&build_event("conversation_synced", &now))
+            .expect("insert event 3");
+
+        let counts = persistence
+            .event_counts_since(None)
+            .expect("query counts failed");
+
+        let extracted = counts
+            .iter()
+            .find(|(name, _)| name == "conversation_extracted")
+            .map(|(_, count)| *count)
+            .unwrap_or(0);
+        let synced = counts
+            .iter()
+            .find(|(name, _)| name == "conversation_synced")
+            .map(|(_, count)| *count)
+            .unwrap_or(0);
+
+        assert_eq!(extracted, 2);
+        assert_eq!(synced, 1);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn event_counts_since_filters_old_events() {
+        let path = temp_db_path();
+        let persistence = ServerPersistence::new(path.clone()).expect("persistence init failed");
+
+        persistence
+            .insert_event(&build_event("conversation_extracted", "2020-01-01T00:00:00Z"))
+            .expect("insert old event");
+        let recent = now_iso();
+        persistence
+            .insert_event(&build_event("conversation_extracted", &recent))
+            .expect("insert recent event");
+
+        let counts = persistence
+            .event_counts_since(Some("2025-01-01T00:00:00Z"))
+            .expect("query counts failed");
+
+        let extracted = counts
+            .iter()
+            .find(|(name, _)| name == "conversation_extracted")
+            .map(|(_, count)| *count)
+            .unwrap_or(0);
+
+        assert_eq!(extracted, 1);
+
+        cleanup(&path);
     }
 }
