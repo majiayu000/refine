@@ -4,9 +4,10 @@ mod handlers;
 mod models;
 mod persistence;
 mod state;
+mod vector_search;
 
 use axum::http::{header, Method};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use state::AppState;
 use std::net::SocketAddr;
@@ -21,7 +22,7 @@ async fn main() {
         .with_env_filter("refine_server=info,refine_core=info")
         .init();
 
-    let state = match AppState::build() {
+    let state = match AppState::build().await {
         Ok(state) => Arc::new(state),
         Err(err) => {
             eprintln!("Failed to initialize app state: {}", err);
@@ -37,7 +38,7 @@ async fn main() {
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers([
             header::CONTENT_TYPE,
             header::AUTHORIZATION,
@@ -62,6 +63,7 @@ async fn main() {
             get(handlers::get_extraction_job),
         )
         .route("/v1/items", get(handlers::list_items))
+        .route("/v1/items/:item_id", delete(handlers::delete_item))
         .route("/v1/search", get(handlers::search_items))
         .route("/v1/recommendations", get(handlers::recommend_items))
         .layer(cors)

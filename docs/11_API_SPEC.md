@@ -216,7 +216,24 @@ GET /v1/items?cursor=0&limit=20
 
 ---
 
-### 2.6 搜索知识
+### 2.6 删除知识条目
+
+```http
+DELETE /v1/items/:item_id
+```
+
+**响应**：
+```json
+{
+  "success": true,
+  "deleted": true,
+  "id": "item-id"
+}
+```
+
+---
+
+### 2.7 搜索知识
 
 ```http
 GET /v1/search?q=rust&limit=20
@@ -224,7 +241,7 @@ GET /v1/search?q=rust&limit=20
 
 ---
 
-### 2.7 上报事件
+### 2.8 上报事件
 
 ```http
 POST /v1/events
@@ -243,7 +260,7 @@ X-Refine-Client: extension
 
 ---
 
-### 2.8 查询漏斗汇总
+### 2.9 查询漏斗汇总
 
 ```http
 GET /v1/events/summary?days=7
@@ -267,7 +284,7 @@ GET /v1/events/summary?days=7
 
 ---
 
-### 2.9 推荐候选（输入态调用）
+### 2.10 推荐候选（输入态调用）
 
 ```http
 GET /v1/recommendations?q=如何做 Rust 鉴权中间件&limit=5
@@ -289,12 +306,12 @@ GET /v1/recommendations?q=如何做 Rust 鉴权中间件&limit=5
       "content": "可直接复用的完整实现片段...",
       "tags": ["rust", "axum", "auth"],
       "score": 1.0,
-      "reason": "keyword_match"
+      "reason": "semantic_match"
     }
   ],
   "meta": {
     "latency_ms": 12,
-    "strategy": "keyword_search"
+    "strategy": "semantic_vector"
   }
 }
 ```
@@ -303,7 +320,7 @@ GET /v1/recommendations?q=如何做 Rust 鉴权中间件&limit=5
 - 当 `q` 长度小于 10 字符时，返回 `triggered=false`，避免高频无效请求。
 - 扩展侧默认 `300ms` 输入去抖、`1.5s` 请求超时；超时或服务不可达时自动静默隐藏面板。
 - 推荐面板支持 `复制` 与 `插入输入框`，并按站点记忆“推荐开关”状态。
-- 该接口为推荐协议入口，当前策略为关键词召回；后续可演进为混合检索（关键词+语义）。
+- 推荐策略由服务端配置决定：默认 `keyword_search`，开启 `REFINE_ENABLE_SEMANTIC_SEARCH` 后为 `semantic_vector`。
 
 ---
 
@@ -311,6 +328,7 @@ GET /v1/recommendations?q=如何做 Rust 鉴权中间件&limit=5
 - `idempotency_key` 用于去重，避免重复上传生成重复记录。
 - 生产环境建议启用 `Authorization: Bearer` 并绑定用户身份。
 - Claude 提炼可通过 `REFINE_ANTHROPIC_MODEL` 指定模型（默认 `claude-opus-4-6`），并通过 `REFINE_ANTHROPIC_BASE_URL` 对接 Anthropic 兼容网关。
+- 可通过 `REFINE_ENABLE_SEMANTIC_SEARCH=true` 开启语义向量检索。
 - 当前 `apps/server` 使用 Rust + Axum；`items`、`conversations`、`extraction_jobs`、`events` 已持久化到 SQLite。
 - 生产建议接入更细粒度鉴权（用户级身份）与独立异步任务队列。
 

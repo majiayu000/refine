@@ -3,6 +3,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::Json;
 use chrono::{Duration, Utc};
+use refine_core::knowledge::ItemId;
 use refine_core::search::SearchQuery as CoreSearchQuery;
 use serde_json::json;
 use std::sync::Arc;
@@ -380,6 +381,42 @@ pub async fn list_items(
     }))
 }
 
+pub async fn delete_item(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(item_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(err) = authorize_user(&headers, state.api_token.as_deref()) {
+        return err_response(StatusCode::UNAUTHORIZED, &err);
+    }
+
+    let normalized_id = item_id.trim().to_string();
+    if normalized_id.is_empty() {
+        return err_response(StatusCode::BAD_REQUEST, "item_id is required");
+    }
+
+    let deleted = match state.store.delete(&ItemId::from_str(&normalized_id)).await {
+        Ok(deleted) => deleted,
+        Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    };
+    if !deleted {
+        return err_response(StatusCode::NOT_FOUND, "Item not found");
+    }
+
+    if let Err(err) = state.engine.remove_from_index(&normalized_id).await {
+        tracing::warn!(
+            "item {} removed from store but failed to remove from vector index: {}",
+            normalized_id,
+            err
+        );
+    }
+
+    ok(json!({
+        "deleted": true,
+        "id": normalized_id
+    }))
+}
+
 pub async fn search_items(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -426,6 +463,16 @@ pub async fn recommend_items(
     let keyword = raw.trim().to_string();
     let limit = query.limit.unwrap_or(5).clamp(1, 20);
     let latency_start = Instant::now();
+    let strategy_name = if state.semantic_search_enabled {
+        "semantic_vector"
+    } else {
+        "keyword_search"
+    };
+    let reason_name = if state.semantic_search_enabled {
+        "semantic_match"
+    } else {
+        "keyword_match"
+    };
 
     if keyword.chars().count() < RECOMMENDATION_MIN_QUERY_CHARS {
         return ok(json!({
@@ -436,7 +483,7 @@ pub async fn recommend_items(
             "items": [],
             "meta": {
                 "latency_ms": latency_start.elapsed().as_millis(),
-                "strategy": "keyword_search"
+                "strategy": strategy_name
             }
         }));
     }
@@ -467,7 +514,7 @@ pub async fn recommend_items(
                     .map(|tag| tag.as_str().to_string())
                     .collect::<Vec<_>>(),
                 "score": hit.score,
-                "reason": "keyword_match"
+                "reason": reason_name
             })
         })
         .collect::<Vec<_>>();
@@ -479,7 +526,7 @@ pub async fn recommend_items(
         "items": items,
         "meta": {
             "latency_ms": latency_start.elapsed().as_millis(),
-            "strategy": "keyword_search"
+            "strategy": strategy_name
         }
     }))
 }

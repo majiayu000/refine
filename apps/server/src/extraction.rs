@@ -48,6 +48,13 @@ async fn run_extraction(
     let mut item_ids = Vec::with_capacity(items.len());
     for item in &items {
         state.store.save(item).await.map_err(|e| e.to_string())?;
+        if let Err(err) = state.engine.index_item(item).await {
+            tracing::warn!(
+                "failed to index item {} for semantic search: {}",
+                item.id(),
+                err
+            );
+        }
         item_ids.push(item.id().to_string());
     }
 

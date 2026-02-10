@@ -28,6 +28,7 @@ REFINE_ANTHROPIC_MODEL=claude-opus-4-6
 - `REFINE_ANTHROPIC_API_KEY` / `REFINE_OPENAI_API_KEY`：启用 LLM 提炼（未配置时使用 fallback 提炼）
 - `REFINE_ANTHROPIC_MODEL`：Anthropic 模型名（默认 `claude-opus-4-6`）
 - `REFINE_ANTHROPIC_BASE_URL`：Anthropic 兼容网关地址（默认 `https://api.anthropic.com`）
+- `REFINE_ENABLE_SEMANTIC_SEARCH`：开启语义向量检索（`true/1/on`）
 
 示例（使用 Yunyi Claude 网关）：
 
@@ -46,6 +47,7 @@ export REFINE_ANTHROPIC_MODEL=claude-opus-4-6
 - `POST /v1/extraction-jobs`
 - `GET /v1/extraction-jobs/:id`
 - `GET /v1/items?cursor=0&limit=20`
+- `DELETE /v1/items/:item_id`
 - `GET /v1/search?q=xxx&limit=20`
 - `GET /v1/recommendations?q=xxx&limit=5`
 
