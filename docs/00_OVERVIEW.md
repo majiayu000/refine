@@ -21,6 +21,7 @@
 | [03_RICE_PRIORITIZATION.md](./03_RICE_PRIORITIZATION.md) | RICE 功能优先级 | ✅ |
 | [04_COMPETITIVE_ANALYSIS.md](./04_COMPETITIVE_ANALYSIS.md) | 竞品分析 | ✅ |
 | [05_GTM_STRATEGY.md](./05_GTM_STRATEGY.md) | 上市策略 | ✅ |
+| [14_4W_EXECUTION_ROADMAP.md](./14_4W_EXECUTION_ROADMAP.md) | 4 周执行路线图（目标/KPI/验收） | ✅ |
 
 ### 设计文档
 
