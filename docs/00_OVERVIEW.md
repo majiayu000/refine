@@ -40,6 +40,7 @@
 | [10_DATA_MODEL.md](./10_DATA_MODEL.md) | 数据模型规格 | ✅ |
 | [11_API_SPEC.md](./11_API_SPEC.md) | Tauri/HTTP API 规格 | ✅ |
 | [12_TESTING.md](./12_TESTING.md) | 测试策略 | ✅ |
+| [15_RELEASE_CHECKLIST.md](./15_RELEASE_CHECKLIST.md) | 发布检查清单（观测/告警/回滚/FAQ） | ✅ |
 | [TECH_STACK.md](../TECH_STACK.md) | 技术选型 | ✅ |
 | [PRODUCT.md](../PRODUCT.md) | 产品形态设计 | ✅ |
 
