@@ -464,12 +464,12 @@ pub async fn recommend_items(
     let limit = query.limit.unwrap_or(5).clamp(1, 20);
     let latency_start = Instant::now();
     let strategy_name = if state.semantic_search_enabled {
-        "semantic_vector"
+        "hybrid_search"
     } else {
         "keyword_search"
     };
     let reason_name = if state.semantic_search_enabled {
-        "semantic_match"
+        "hybrid_match"
     } else {
         "keyword_match"
     };

@@ -306,12 +306,12 @@ GET /v1/recommendations?q=如何做 Rust 鉴权中间件&limit=5
       "content": "可直接复用的完整实现片段...",
       "tags": ["rust", "axum", "auth"],
       "score": 1.0,
-      "reason": "semantic_match"
+      "reason": "hybrid_match"
     }
   ],
   "meta": {
     "latency_ms": 12,
-    "strategy": "semantic_vector"
+    "strategy": "hybrid_search"
   }
 }
 ```
@@ -320,7 +320,7 @@ GET /v1/recommendations?q=如何做 Rust 鉴权中间件&limit=5
 - 当 `q` 长度小于 10 字符时，返回 `triggered=false`，避免高频无效请求。
 - 扩展侧默认 `300ms` 输入去抖、`1.5s` 请求超时；超时或服务不可达时自动静默隐藏面板。
 - 推荐面板支持 `复制` 与 `插入输入框`，并按站点记忆“推荐开关”状态。
-- 推荐策略由服务端配置决定：默认 `keyword_search`，开启 `REFINE_ENABLE_SEMANTIC_SEARCH` 后为 `semantic_vector`。
+- 推荐策略由服务端配置决定：默认 `keyword_search`，开启 `REFINE_ENABLE_SEMANTIC_SEARCH` 后为 `hybrid_search`（关键词+语义混排）。
 
 ---
 

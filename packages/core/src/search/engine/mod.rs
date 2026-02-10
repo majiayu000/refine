@@ -50,7 +50,7 @@ impl SearchEngine {
         }
 
         if let Some(vs) = &self.vector_search {
-            return self.semantic_search(vs, &query).await;
+            return self.hybrid_search(vs, &query).await;
         }
 
         self.keyword_search(&query).await
