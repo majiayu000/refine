@@ -4,6 +4,7 @@
 
 import { useState, useEffect } from 'react'
 import './style.css'
+import { readOnboardingTaskState, type OnboardingTaskState } from './lib/onboarding'
 import type { SyncStatus } from './lib/types'
 
 const POPUP_WIDTH_PX = 360
@@ -72,6 +73,13 @@ const DEFAULT_SYNC_STATUS: SyncStatus = {
   failed: 0,
   sent: 0,
   apiBase: '',
+}
+
+const DEFAULT_ONBOARDING_STATE: OnboardingTaskState = {
+  extracted: false,
+  searched: false,
+  reused: false,
+  updatedAt: 0,
 }
 
 async function safeRuntimeMessage<T>(message: unknown): Promise<T | null> {
@@ -234,10 +242,12 @@ export default function Popup() {
   const [extractMessageLevel, setExtractMessageLevel] = useState<MessageLevel>('')
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(DEFAULT_SYNC_STATUS)
   const [quota, setQuota] = useState<QuotaInfo | null>(null)
+  const [onboarding, setOnboarding] = useState<OnboardingTaskState>(DEFAULT_ONBOARDING_STATE)
 
   const queueSize = syncStatus.pending + syncStatus.syncing
   const displayedTotalItems = remoteTotalItems ?? stats.totalItems
   const totalSourceText = remoteTotalItems == null ? '本地缓存' : '云端实时'
+  const onboardingDoneCount = [onboarding.extracted, onboarding.searched, onboarding.reused].filter(Boolean).length
 
   const syncStateText = (() => {
     if (syncStatus.failed > 0) return `同步失败 ${syncStatus.failed} 条`
@@ -281,8 +291,10 @@ export default function Popup() {
 
     try {
       setStats(await readStoredStats())
+      setOnboarding(await readOnboardingTaskState())
     } catch {
       setStats({ totalItems: 0, todayExtracted: 0 })
+      setOnboarding(DEFAULT_ONBOARDING_STATE)
     }
   }
 
@@ -406,6 +418,16 @@ export default function Popup() {
           ) : null}
           {syncStatus.lastError ? <p className="status-error">{syncStatus.lastError}</p> : null}
         </div>
+      </section>
+
+      <section className="onboarding-card">
+        <div className="onboarding-head">
+          <p className="onboarding-title">首日任务流</p>
+          <span className="onboarding-progress">{onboardingDoneCount}/3</span>
+        </div>
+        <p className={`onboarding-item ${onboarding.extracted ? 'is-done' : ''}`}>1. 提取 1 条对话</p>
+        <p className={`onboarding-item ${onboarding.searched ? 'is-done' : ''}`}>2. 搜索/触发推荐 1 次</p>
+        <p className={`onboarding-item ${onboarding.reused ? 'is-done' : ''}`}>3. 复制或插入并复用 1 次</p>
       </section>
 
       <section className="actions">

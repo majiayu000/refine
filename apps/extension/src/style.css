@@ -294,6 +294,45 @@ body,
   word-break: break-word;
 }
 
+.onboarding-card {
+  position: relative;
+  margin-bottom: 12px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(132, 156, 214, 0.26);
+  background: rgba(12, 22, 44, 0.76);
+  z-index: 1;
+}
+
+.onboarding-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.onboarding-title {
+  margin: 0;
+  font-size: 13px;
+  color: #dce8ff;
+  font-weight: 700;
+}
+
+.onboarding-progress {
+  font-size: 11px;
+  color: #9fb2d6;
+}
+
+.onboarding-item {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #a9bcdf;
+}
+
+.onboarding-item.is-done {
+  color: #7af0c8;
+}
+
 .actions {
   position: relative;
   display: flex;

@@ -1,4 +1,5 @@
 import { fetchRecommendations, trackEvent, type RecommendationItem } from '../api'
+import { markOnboardingTask } from '../onboarding'
 import type { ConversationSource } from '../types'
 import { injectStyleOnce } from './runtime'
 
@@ -356,6 +357,7 @@ export function initRecommendationEngine(options: RecommendationEngineOptions): 
       },
       occurred_at: new Date().toISOString(),
     })
+    void markOnboardingTask('searched')
   }
 
   async function reportClicked(item: RecommendationItem, action: 'insert' | 'copy'): Promise<void> {
@@ -381,6 +383,7 @@ export function initRecommendationEngine(options: RecommendationEngineOptions): 
       },
       occurred_at: new Date().toISOString(),
     })
+    void markOnboardingTask('reused')
   }
 
   async function copyRecommendation(item: RecommendationItem): Promise<void> {

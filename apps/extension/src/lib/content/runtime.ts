@@ -1,4 +1,5 @@
 import type { ConversationSource } from '../types'
+import { markOnboardingTask } from '../onboarding'
 
 export interface EnqueueResponse {
   queued: boolean
@@ -93,7 +94,11 @@ export function enqueueConversation(
           })
           return
         }
-        resolve(response || { queued: false, message: 'No response from background' })
+        const normalized = response || { queued: false, message: 'No response from background' }
+        if (normalized.queued) {
+          void markOnboardingTask('extracted')
+        }
+        resolve(normalized)
       }
     )
   })
