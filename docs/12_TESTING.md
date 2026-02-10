@@ -202,6 +202,28 @@ async fn test_full_search_flow() {
 
 ---
 
+### 3.3 推荐检索评测（Top1/Top3 + P95）
+
+基于 `docs/eval/recommendation_queries.jsonl` 运行评测脚本：
+
+```bash
+node scripts/eval_recommendations.mjs \
+  --base-url http://localhost:8787 \
+  --dataset docs/eval/recommendation_queries.jsonl \
+  --out docs/eval/recommendation_eval_latest.md
+```
+
+输出：
+- 终端打印 JSON 汇总（成功率、Top1/Top3 命中率、P95/平均延迟）。
+- 生成 `docs/eval/recommendation_eval_latest.md` 报告，便于周度对比。
+
+可选参数：
+- `--token <token>`：服务端开启鉴权时传入。
+- `--timeout-ms <n>`：单请求超时，默认 `1500`。
+- `--limit <n>`：每次推荐返回条数，默认 `5`。
+
+---
+
 ## 4. 前端测试
 
 ### 4.1 工具链
