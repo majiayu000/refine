@@ -9,6 +9,7 @@ import {
   initQuickSaveEngine,
   type QuickSaveTarget,
 } from '../lib/content/quick-save-engine'
+import { initRecommendationEngine } from '../lib/content/recommendation-engine'
 import { delay, normalizeText } from '../lib/content/runtime'
 
 const MESSAGE_POLL_INTERVAL_MS = 350
@@ -21,6 +22,17 @@ export const config: PlasmoCSConfig = {
   matches: ['https://claude.ai/*'],
   all_frames: false,
 }
+
+initRecommendationEngine({
+  providerId: 'claude',
+  source: 'claude',
+  inputSelectors: [
+    'div[contenteditable="true"][role="textbox"]',
+    'div[contenteditable="true"][data-lexical-editor="true"]',
+    'textarea[placeholder*="Talk"]',
+    'textarea[placeholder*="消息"]',
+  ],
+})
 
 function extractConversation(): string {
   const messages: string[] = []

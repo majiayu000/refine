@@ -286,6 +286,7 @@ GET /v1/recommendations?q=如何做 Rust 鉴权中间件&limit=5
       "item_type": "knowledge",
       "title": "Axum 鉴权中间件实践",
       "summary": "使用 tower layer 组织鉴权链路",
+      "content": "可直接复用的完整实现片段...",
       "tags": ["rust", "axum", "auth"],
       "score": 1.0,
       "reason": "keyword_match"
@@ -300,6 +301,8 @@ GET /v1/recommendations?q=如何做 Rust 鉴权中间件&limit=5
 
 说明：
 - 当 `q` 长度小于 10 字符时，返回 `triggered=false`，避免高频无效请求。
+- 扩展侧默认 `300ms` 输入去抖、`1.5s` 请求超时；超时或服务不可达时自动静默隐藏面板。
+- 推荐面板支持 `复制` 与 `插入输入框`，并按站点记忆“推荐开关”状态。
 - 该接口为推荐协议入口，当前策略为关键词召回；后续可演进为混合检索（关键词+语义）。
 
 ---

@@ -459,6 +459,7 @@ pub async fn recommend_items(
                 "item_type": hit.item.item_type().as_str(),
                 "title": hit.item.title(),
                 "summary": hit.item.summary(),
+                "content": hit.item.content(),
                 "tags": hit
                     .item
                     .tags()

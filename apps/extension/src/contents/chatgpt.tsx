@@ -5,6 +5,7 @@
  */
 
 import type { PlasmoCSConfig } from 'plasmo'
+import { initRecommendationEngine } from '../lib/content/recommendation-engine'
 import {
   enqueueConversation,
   normalizeText,
@@ -18,6 +19,17 @@ export const config: PlasmoCSConfig = {
   matches: ['https://chat.openai.com/*', 'https://chatgpt.com/*'],
   all_frames: false,
 }
+
+initRecommendationEngine({
+  providerId: 'chatgpt',
+  source: 'chatgpt',
+  inputSelectors: [
+    '#prompt-textarea',
+    'textarea[data-id="root"]',
+    'textarea[placeholder*="Message"]',
+    'textarea[placeholder*="消息"]',
+  ],
+})
 
 function extractConversation(): string {
   const messages: string[] = []
