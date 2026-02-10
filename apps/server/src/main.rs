@@ -63,6 +63,7 @@ async fn main() {
         )
         .route("/v1/items", get(handlers::list_items))
         .route("/v1/search", get(handlers::search_items))
+        .route("/v1/recommendations", get(handlers::recommend_items))
         .layer(cors)
         .with_state(state);
 

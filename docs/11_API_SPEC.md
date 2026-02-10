@@ -267,6 +267,43 @@ GET /v1/events/summary?days=7
 
 ---
 
+### 2.9 推荐候选（输入态调用）
+
+```http
+GET /v1/recommendations?q=如何做 Rust 鉴权中间件&limit=5
+```
+
+**响应**：
+```json
+{
+  "success": true,
+  "triggered": true,
+  "query": "如何做 Rust 鉴权中间件",
+  "total": 3,
+  "items": [
+    {
+      "id": "item-id",
+      "item_type": "knowledge",
+      "title": "Axum 鉴权中间件实践",
+      "summary": "使用 tower layer 组织鉴权链路",
+      "tags": ["rust", "axum", "auth"],
+      "score": 1.0,
+      "reason": "keyword_match"
+    }
+  ],
+  "meta": {
+    "latency_ms": 12,
+    "strategy": "keyword_search"
+  }
+}
+```
+
+说明：
+- 当 `q` 长度小于 10 字符时，返回 `triggered=false`，避免高频无效请求。
+- 该接口为推荐协议入口，当前策略为关键词召回；后续可演进为混合检索（关键词+语义）。
+
+---
+
 说明：
 - `idempotency_key` 用于去重，避免重复上传生成重复记录。
 - 生产环境建议启用 `Authorization: Bearer` 并绑定用户身份。

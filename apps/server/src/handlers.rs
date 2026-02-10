@@ -6,6 +6,7 @@ use chrono::{Duration, Utc};
 use refine_core::search::SearchQuery as CoreSearchQuery;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Instant;
 use uuid::Uuid;
 
 use crate::auth::authorize_user;
@@ -14,7 +15,7 @@ use crate::models::{
     normalize_timestamp, now_iso, ConversationDto, ConversationRecord, ConversationStatus,
     CreateConversationRequest, CreateEventRequest, CreateExtractionJobRequest, EventRecord,
     EventSummaryQuery, ExtractionJobRecord, ExtractionMode, ItemDto, JobStatus,
-    ListConversationsQuery, ListItemsQuery, SearchQuery,
+    ListConversationsQuery, ListItemsQuery, RecommendationQuery, SearchQuery,
 };
 use crate::state::AppState;
 
@@ -25,6 +26,7 @@ const FUNNEL_EVENTS: [&str; 5] = [
     "recommendation_clicked",
     "knowledge_reused",
 ];
+const RECOMMENDATION_MIN_QUERY_CHARS: usize = 10;
 
 pub async fn health() -> impl IntoResponse {
     ok(json!({
@@ -409,6 +411,76 @@ pub async fn search_items(
         .collect::<Vec<_>>();
 
     ok(json!({ "items": data }))
+}
+
+pub async fn recommend_items(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<RecommendationQuery>,
+) -> impl IntoResponse {
+    if let Err(err) = authorize_user(&headers, state.api_token.as_deref()) {
+        return err_response(StatusCode::UNAUTHORIZED, &err);
+    }
+
+    let raw = query.q.unwrap_or_default();
+    let keyword = raw.trim().to_string();
+    let limit = query.limit.unwrap_or(5).clamp(1, 20);
+    let latency_start = Instant::now();
+
+    if keyword.chars().count() < RECOMMENDATION_MIN_QUERY_CHARS {
+        return ok(json!({
+            "triggered": false,
+            "reason": "query_too_short",
+            "min_chars": RECOMMENDATION_MIN_QUERY_CHARS,
+            "query": keyword,
+            "items": [],
+            "meta": {
+                "latency_ms": latency_start.elapsed().as_millis(),
+                "strategy": "keyword_search"
+            }
+        }));
+    }
+
+    let result = match state
+        .engine
+        .search(CoreSearchQuery::new(&keyword).with_limit(limit))
+        .await
+    {
+        Ok(result) => result,
+        Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    };
+
+    let items = result
+        .items
+        .iter()
+        .map(|hit| {
+            json!({
+                "id": hit.item.id().to_string(),
+                "item_type": hit.item.item_type().as_str(),
+                "title": hit.item.title(),
+                "summary": hit.item.summary(),
+                "tags": hit
+                    .item
+                    .tags()
+                    .iter()
+                    .map(|tag| tag.as_str().to_string())
+                    .collect::<Vec<_>>(),
+                "score": hit.score,
+                "reason": "keyword_match"
+            })
+        })
+        .collect::<Vec<_>>();
+
+    ok(json!({
+        "triggered": true,
+        "query": keyword,
+        "total": result.total,
+        "items": items,
+        "meta": {
+            "latency_ms": latency_start.elapsed().as_millis(),
+            "strategy": "keyword_search"
+        }
+    }))
 }
 
 async fn find_conversation_by_idempotency(state: &Arc<AppState>, key: &str) -> Option<String> {

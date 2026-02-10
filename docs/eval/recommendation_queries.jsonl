@@ -1,0 +1,50 @@
+{"id":"q001","query":"Rust axum 怎么做 JWT 鉴权中间件","expected_type":"knowledge","expected_tags":["rust","axum","auth"]}
+{"id":"q002","query":"tokio 里怎么优雅处理超时重试","expected_type":"knowledge","expected_tags":["rust","tokio","retry"]}
+{"id":"q003","query":"SQL 注入防护在 Rust 服务端怎么做","expected_type":"knowledge","expected_tags":["security","sql","rust"]}
+{"id":"q004","query":"如何在 React 里做大列表性能优化","expected_type":"knowledge","expected_tags":["react","performance","frontend"]}
+{"id":"q005","query":"TypeScript 中泛型约束的实战写法","expected_type":"knowledge","expected_tags":["typescript","generic"]}
+{"id":"q006","query":"Node.js API 限流应该怎么实现","expected_type":"knowledge","expected_tags":["nodejs","rate-limit","backend"]}
+{"id":"q007","query":"PostgreSQL 慢查询排查的完整流程","expected_type":"knowledge","expected_tags":["postgres","performance","database"]}
+{"id":"q008","query":"Docker Compose 多环境配置最佳实践","expected_type":"knowledge","expected_tags":["docker","devops"]}
+{"id":"q009","query":"Kubernetes readiness 和 liveness 怎么配","expected_type":"knowledge","expected_tags":["kubernetes","sre"]}
+{"id":"q010","query":"Nginx 反向代理 WebSocket 的注意点","expected_type":"knowledge","expected_tags":["nginx","websocket"]}
+{"id":"q011","query":"如何给 Python 脚本做并发爬取限速","expected_type":"snippet","expected_tags":["python","asyncio","crawler"]}
+{"id":"q012","query":"Pandas 大表内存优化有哪些技巧","expected_type":"knowledge","expected_tags":["python","pandas","data"]}
+{"id":"q013","query":"FastAPI 项目如何做分层架构","expected_type":"knowledge","expected_tags":["python","fastapi","architecture"]}
+{"id":"q014","query":"Go 服务优雅退出和连接排空方案","expected_type":"knowledge","expected_tags":["go","graceful-shutdown"]}
+{"id":"q015","query":"Gin 里统一错误处理应该怎么做","expected_type":"knowledge","expected_tags":["go","gin","error-handling"]}
+{"id":"q016","query":"Java Spring Boot 全局异常处理模板","expected_type":"snippet","expected_tags":["java","spring","exception"]}
+{"id":"q017","query":"Redis 缓存击穿和雪崩如何防止","expected_type":"knowledge","expected_tags":["redis","cache","backend"]}
+{"id":"q018","query":"消息队列幂等消费应该怎么设计","expected_type":"knowledge","expected_tags":["mq","idempotency","backend"]}
+{"id":"q019","query":"如何做 OpenAPI 文档自动化校验","expected_type":"knowledge","expected_tags":["api","openapi","testing"]}
+{"id":"q020","query":"GraphQL 分页游标模式怎么落地","expected_type":"knowledge","expected_tags":["graphql","pagination"]}
+{"id":"q021","query":"前端埋点事件模型应该如何设计","expected_type":"knowledge","expected_tags":["analytics","frontend","tracking"]}
+{"id":"q022","query":"如何在浏览器扩展里做离线队列重试","expected_type":"knowledge","expected_tags":["extension","offline","retry"]}
+{"id":"q023","query":"Chrome 插件 content script 与 background 通信","expected_type":"knowledge","expected_tags":["chrome-extension","messaging"]}
+{"id":"q024","query":"Tauri 应用如何暴露本地 HTTP API","expected_type":"knowledge","expected_tags":["tauri","rust","api"]}
+{"id":"q025","query":"SQLite FTS5 中文搜索要注意什么","expected_type":"knowledge","expected_tags":["sqlite","fts5","search"]}
+{"id":"q026","query":"语义搜索 embedding 存储方案对比","expected_type":"knowledge","expected_tags":["search","embedding","vector"]}
+{"id":"q027","query":"如何设计推荐系统曝光点击复用漏斗","expected_type":"knowledge","expected_tags":["recommendation","analytics","funnel"]}
+{"id":"q028","query":"推荐接口的去抖和节流参数怎么定","expected_type":"knowledge","expected_tags":["recommendation","performance"]}
+{"id":"q029","query":"用户输入态推荐的误触发怎么降低","expected_type":"knowledge","expected_tags":["recommendation","ux"]}
+{"id":"q030","query":"A/B 实验里推荐 CTR 怎么统计","expected_type":"knowledge","expected_tags":["ab-test","analytics","ctr"]}
+{"id":"q031","query":"如何写一份代码评审 Prompt 模板","expected_type":"skill","expected_tags":["prompt","code-review","skill"]}
+{"id":"q032","query":"PRD 章节自动生成技能模板示例","expected_type":"skill","expected_tags":["prompt","prd","skill"]}
+{"id":"q033","query":"面向运营的周报总结 Prompt 结构","expected_type":"skill","expected_tags":["prompt","summary","skill"]}
+{"id":"q034","query":"客服对话质检 Prompt 如何参数化","expected_type":"skill","expected_tags":["prompt","qa","skill"]}
+{"id":"q035","query":"SQL Explain 结果解读的通用模板","expected_type":"skill","expected_tags":["sql","performance","skill"]}
+{"id":"q036","query":"前端错误日志分类规则怎么制定","expected_type":"knowledge","expected_tags":["frontend","observability"]}
+{"id":"q037","query":"Sentry 告警降噪的最佳实践","expected_type":"knowledge","expected_tags":["sentry","alerting","sre"]}
+{"id":"q038","query":"Prometheus 指标命名规范推荐","expected_type":"knowledge","expected_tags":["prometheus","metrics"]}
+{"id":"q039","query":"Grafana 看板分层应该怎么做","expected_type":"knowledge","expected_tags":["grafana","observability"]}
+{"id":"q040","query":"CI 里如何并行执行单元和集成测试","expected_type":"knowledge","expected_tags":["ci","testing"]}
+{"id":"q041","query":"GitHub Actions 缓存加速配置示例","expected_type":"snippet","expected_tags":["github-actions","ci","snippet"]}
+{"id":"q042","query":"Monorepo 里变更影响范围检测方案","expected_type":"knowledge","expected_tags":["monorepo","ci"]}
+{"id":"q043","query":"如何做接口灰度发布和快速回滚","expected_type":"knowledge","expected_tags":["release","rollback","backend"]}
+{"id":"q044","query":"Feature Flag 的最小实现思路","expected_type":"knowledge","expected_tags":["feature-flag","release"]}
+{"id":"q045","query":"多租户系统鉴权模型怎么设计","expected_type":"knowledge","expected_tags":["auth","multi-tenant","backend"]}
+{"id":"q046","query":"Webhook 幂等处理和签名校验","expected_type":"knowledge","expected_tags":["webhook","security","idempotency"]}
+{"id":"q047","query":"如何在 API 网关做请求追踪","expected_type":"knowledge","expected_tags":["gateway","tracing","sre"]}
+{"id":"q048","query":"大模型调用失败重试和熔断策略","expected_type":"knowledge","expected_tags":["llm","retry","resilience"]}
+{"id":"q049","query":"RAG 检索结果重排有哪些常见方法","expected_type":"knowledge","expected_tags":["rag","retrieval","ranking"]}
+{"id":"q050","query":"向量库和 SQLite 混合检索怎么实现","expected_type":"knowledge","expected_tags":["vector-search","sqlite","hybrid-search"]}

@@ -120,6 +120,12 @@ pub struct SearchQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct RecommendationQuery {
+    pub q: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct EventSummaryQuery {
     pub days: Option<u32>,
 }

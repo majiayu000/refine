@@ -47,6 +47,7 @@ export REFINE_ANTHROPIC_MODEL=claude-opus-4-6
 - `GET /v1/extraction-jobs/:id`
 - `GET /v1/items?cursor=0&limit=20`
 - `GET /v1/search?q=xxx&limit=20`
+- `GET /v1/recommendations?q=xxx&limit=5`
 
 ## 存储说明
 
