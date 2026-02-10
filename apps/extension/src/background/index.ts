@@ -6,7 +6,9 @@
 
 import {
   checkCloudHealth,
+  fetchQuotaStatus,
   fetchCloudTotalItemsWithOptions,
+  type QuotaStatusResponse,
   trackEvent,
   uploadConversation,
 } from '../lib/api'
@@ -53,6 +55,7 @@ interface CloudStatusCache {
   updatedAt: number
   cloudHealthy: boolean
   remoteTotalItems: number | null
+  quota: QuotaStatusResponse | null
 }
 
 interface EnqueueMessage {
@@ -161,29 +164,38 @@ async function initializeStorage(): Promise<void> {
 async function getCloudStatusWithCache(): Promise<{
   cloudHealthy: boolean
   remoteTotalItems: number | null
+  quota: QuotaStatusResponse | null
 }> {
   const now = Date.now()
   if (cloudStatusCache && now - cloudStatusCache.updatedAt < CLOUD_STATUS_CACHE_TTL_MS) {
     return {
       cloudHealthy: cloudStatusCache.cloudHealthy,
       remoteTotalItems: cloudStatusCache.remoteTotalItems,
+      quota: cloudStatusCache.quota,
     }
   }
 
   const cloudHealthy = await checkCloudHealth()
-  const remoteTotalItems = cloudHealthy
-    ? await fetchCloudTotalItemsWithOptions({ allowLegacyScan: false })
-    : null
+  let remoteTotalItems: number | null = null
+  let quota: QuotaStatusResponse | null = null
+  if (cloudHealthy) {
+    ;[remoteTotalItems, quota] = await Promise.all([
+      fetchCloudTotalItemsWithOptions({ allowLegacyScan: false }),
+      fetchQuotaStatus(),
+    ])
+  }
 
   cloudStatusCache = {
     updatedAt: now,
     cloudHealthy,
     remoteTotalItems,
+    quota,
   }
 
   return {
     cloudHealthy,
     remoteTotalItems,
+    quota,
   }
 }
 
@@ -349,6 +361,7 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage, _sender, sendR
           cloudHealthy: cloud.cloudHealthy,
           status: buildSyncStatus(snapshot),
           remoteTotalItems: cloud.remoteTotalItems ?? undefined,
+          quota: cloud.quota ?? undefined,
         })
       })
       .catch((error: unknown) => {

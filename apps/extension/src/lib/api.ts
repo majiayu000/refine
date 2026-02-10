@@ -19,6 +19,14 @@ interface CloudItemsResponse {
   next_cursor?: number | null
 }
 
+export interface QuotaStatusResponse {
+  success: boolean
+  limit: number | null
+  used: number
+  remaining: number | null
+  exceeded: boolean
+}
+
 export interface RecommendationItem {
   id: string
   item_type: 'knowledge' | 'skill' | 'snippet' | string
@@ -199,6 +207,34 @@ export async function fetchRecommendations(
     return null
   } finally {
     globalThis.clearTimeout(timeoutId)
+  }
+}
+
+export async function fetchQuotaStatus(): Promise<QuotaStatusResponse | null> {
+  const apiBase = getCloudApiBase()
+
+  try {
+    const res = await fetch(`${apiBase}/v1/quota`, {
+      method: 'GET',
+      headers: {
+        'X-Refine-Client': 'extension',
+      },
+    })
+    if (!res.ok) return null
+
+    const data = (await res.json()) as QuotaStatusResponse
+    if (data.success !== true) return null
+    if (typeof data.used !== 'number' || typeof data.exceeded !== 'boolean') return null
+
+    return {
+      success: true,
+      limit: typeof data.limit === 'number' ? data.limit : null,
+      used: data.used,
+      remaining: typeof data.remaining === 'number' ? data.remaining : null,
+      exceeded: data.exceeded,
+    }
+  } catch {
+    return null
   }
 }
 

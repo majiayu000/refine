@@ -36,6 +36,7 @@ cp apps/server/.env.production.example .env
 - `REFINE_ANTHROPIC_MODEL`：Anthropic 模型名（默认 `claude-opus-4-6`）
 - `REFINE_ANTHROPIC_BASE_URL`：Anthropic 兼容网关地址（默认 `https://api.anthropic.com`）
 - `REFINE_ENABLE_SEMANTIC_SEARCH`：开启语义向量检索（`true/1/on`）
+- `REFINE_FREE_QUOTA_ITEMS`：免费额度上限（默认 `100`，设为 `0` 表示不限制）
 
 示例（使用 Yunyi Claude 网关）：
 
@@ -60,6 +61,7 @@ export REFINE_ANTHROPIC_MODEL=claude-opus-4-6
 - `GET /v1/extraction-jobs/:id`
 - `GET /v1/items?cursor=0&limit=20`
 - `DELETE /v1/items/:item_id`
+- `GET /v1/quota`
 - `GET /v1/search?q=xxx&limit=20`
 - `GET /v1/recommendations?q=xxx&limit=5`
 

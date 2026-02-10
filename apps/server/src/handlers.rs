@@ -83,6 +83,33 @@ pub async fn create_conversation(
         }
     }
 
+    if state.free_quota_items > 0 {
+        let used = match state.store.count_items(None).await {
+            Ok(total) => total,
+            Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+        };
+
+        if used >= state.free_quota_items {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "success": false,
+                    "message": format!(
+                        "Free quota exceeded ({}/{} items). Upgrade required.",
+                        used,
+                        state.free_quota_items
+                    ),
+                    "quota": {
+                        "used": used,
+                        "limit": state.free_quota_items,
+                        "remaining": 0,
+                        "exceeded": true
+                    }
+                })),
+            );
+        }
+    }
+
     let now = now_iso();
     let conversation_id = Uuid::new_v4().to_string();
     let mode = ExtractionMode::Auto;
@@ -378,6 +405,39 @@ pub async fn list_items(
         "items": data,
         "total": total,
         "next_cursor": next_cursor
+    }))
+}
+
+pub async fn get_quota(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = authorize_user(&headers, state.api_token.as_deref()) {
+        return err_response(StatusCode::UNAUTHORIZED, &err);
+    }
+
+    let used = match state.store.count_items(None).await {
+        Ok(total) => total,
+        Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    };
+
+    if state.free_quota_items == 0 {
+        return ok(json!({
+            "limit": null,
+            "used": used,
+            "remaining": null,
+            "exceeded": false
+        }));
+    }
+
+    let remaining = state.free_quota_items.saturating_sub(used);
+    let exceeded = used >= state.free_quota_items;
+
+    ok(json!({
+        "limit": state.free_quota_items,
+        "used": used,
+        "remaining": remaining,
+        "exceeded": exceeded
     }))
 }
 

@@ -283,6 +283,10 @@ body,
   color: var(--text-subtle);
 }
 
+.status-upgrade {
+  color: #ffd08b;
+}
+
 .status-error {
   margin: 5px 0 0;
   font-size: 11px;

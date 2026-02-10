@@ -44,6 +44,14 @@ interface SyncStatusResponse {
   cloudHealthy: boolean
   status: SyncStatus
   remoteTotalItems?: number
+  quota?: QuotaInfo
+}
+
+interface QuotaInfo {
+  limit: number | null
+  used: number
+  remaining: number | null
+  exceeded: boolean
 }
 
 interface ExtractResponse {
@@ -225,6 +233,7 @@ export default function Popup() {
   const [extractMessage, setExtractMessage] = useState('')
   const [extractMessageLevel, setExtractMessageLevel] = useState<MessageLevel>('')
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(DEFAULT_SYNC_STATUS)
+  const [quota, setQuota] = useState<QuotaInfo | null>(null)
 
   const queueSize = syncStatus.pending + syncStatus.syncing
   const displayedTotalItems = remoteTotalItems ?? stats.totalItems
@@ -256,15 +265,18 @@ export default function Popup() {
         setCloudHealthy(result.cloudHealthy)
         setSyncStatus(result.status)
         setRemoteTotalItems(typeof result.remoteTotalItems === 'number' ? result.remoteTotalItems : null)
+        setQuota(result.quota || null)
       } else {
         setCloudHealthy(false)
         setSyncStatus(DEFAULT_SYNC_STATUS)
         setRemoteTotalItems(null)
+        setQuota(null)
       }
     } catch {
       setCloudHealthy(false)
       setSyncStatus(DEFAULT_SYNC_STATUS)
       setRemoteTotalItems(null)
+      setQuota(null)
     }
 
     try {
@@ -383,6 +395,15 @@ export default function Popup() {
             {syncStateText}
           </p>
           <p className="status-detail">已发送 {syncStatus.sent} 条，队列 {queueSize} 条</p>
+          {quota ? (
+            <p className={`status-detail ${quota.exceeded ? 'status-upgrade' : ''}`}>
+              免费额度{' '}
+              {typeof quota.limit === 'number'
+                ? `${quota.used}/${quota.limit}`
+                : `${quota.used}/无限制`}
+              {quota.exceeded ? '（已超限，请升级）' : ''}
+            </p>
+          ) : null}
           {syncStatus.lastError ? <p className="status-error">{syncStatus.lastError}</p> : null}
         </div>
       </section>

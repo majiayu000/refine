@@ -14,6 +14,7 @@ pub struct AppState {
     pub store: Arc<dyn ItemRepository>,
     pub engine: Arc<SearchEngine>,
     pub semantic_search_enabled: bool,
+    pub free_quota_items: usize,
     pub llm_client: Option<Arc<dyn LlmClient>>,
     pub api_token: Option<String>,
     pub persistence: Arc<ServerPersistence>,
@@ -38,6 +39,7 @@ impl AppState {
         }
 
         let semantic_search_enabled = env_flag(&["REFINE_ENABLE_SEMANTIC_SEARCH"]);
+        let free_quota_items = env_usize(&["REFINE_FREE_QUOTA_ITEMS"]).unwrap_or(100);
         let mut engine_builder = SearchEngine::new(store.clone());
         if semantic_search_enabled {
             engine_builder =
@@ -87,6 +89,7 @@ impl AppState {
             store,
             engine,
             semantic_search_enabled,
+            free_quota_items,
             llm_client: build_llm_client_from_env(),
             api_token,
             persistence,
@@ -129,6 +132,10 @@ fn env_flag(keys: &[&str]) -> bool {
         raw.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on" | "enabled"
     )
+}
+
+fn env_usize(keys: &[&str]) -> Option<usize> {
+    env_var(keys).and_then(|raw| raw.trim().parse::<usize>().ok())
 }
 
 fn is_production_env() -> bool {

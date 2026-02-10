@@ -64,6 +64,7 @@ async fn main() {
         )
         .route("/v1/items", get(handlers::list_items))
         .route("/v1/items/:item_id", delete(handlers::delete_item))
+        .route("/v1/quota", get(handlers::get_quota))
         .route("/v1/search", get(handlers::search_items))
         .route("/v1/recommendations", get(handlers::recommend_items))
         .layer(cors)

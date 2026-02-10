@@ -135,6 +135,20 @@ GET /health
 }
 ```
 
+**超出免费额度（403）**：
+```json
+{
+  "success": false,
+  "message": "Free quota exceeded (100/100 items). Upgrade required.",
+  "quota": {
+    "used": 100,
+    "limit": 100,
+    "remaining": 0,
+    "exceeded": true
+  }
+}
+```
+
 ---
 
 ### 2.2 创建会话（扩展上传）
@@ -325,7 +339,31 @@ GET /v1/recommendations?q=如何做 Rust 鉴权中间件&limit=5
 
 ---
 
-### 2.11 未授权响应（统一）
+### 2.11 配额状态
+
+```http
+GET /v1/quota
+```
+
+**响应**：
+```json
+{
+  "success": true,
+  "limit": 100,
+  "used": 42,
+  "remaining": 58,
+  "exceeded": false
+}
+```
+
+说明：
+- `limit` 默认来自 `REFINE_FREE_QUOTA_ITEMS`（默认 `100`）。
+- 当 `limit=0` 时表示不限额，此时 `remaining=null`。
+- 当超出额度时，`POST /v1/conversations` 会返回 `403` 与升级提示。
+
+---
+
+### 2.12 未授权响应（统一）
 
 当请求缺少或使用了错误的 `Authorization: Bearer <token>` 时，接口统一返回：
 
@@ -344,6 +382,7 @@ GET /v1/recommendations?q=如何做 Rust 鉴权中间件&limit=5
 - 生产环境请求需携带 `Authorization: Bearer <token>`。
 - Claude 提炼可通过 `REFINE_ANTHROPIC_MODEL` 指定模型（默认 `claude-opus-4-6`），并通过 `REFINE_ANTHROPIC_BASE_URL` 对接 Anthropic 兼容网关。
 - 可通过 `REFINE_ENABLE_SEMANTIC_SEARCH=true` 开启语义向量检索。
+- 可通过 `REFINE_FREE_QUOTA_ITEMS` 配置免费额度上限（默认 `100`）。
 - 当前 `apps/server` 使用 Rust + Axum；`items`、`conversations`、`extraction_jobs`、`events` 已持久化到 SQLite。
 - 生产建议接入更细粒度鉴权（用户级身份）与独立异步任务队列。
 
