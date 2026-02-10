@@ -122,6 +122,11 @@ export function initRecommendationEngine(options: RecommendationEngineOptions): 
         border-color: rgba(96, 165, 250, 0.48);
       }
 
+      .refine-reco-chip[data-kind="reason"] {
+        color: #fde68a;
+        border-color: rgba(245, 158, 11, 0.5);
+      }
+
       .refine-reco-actions {
         display: flex;
         gap: 6px;
@@ -329,6 +334,13 @@ export function initRecommendationEngine(options: RecommendationEngineOptions): 
     }
   }
 
+  function reasonLabel(reason: string): string {
+    if (reason === 'keyword_match') return '关键词匹配'
+    if (reason === 'hybrid_match') return '混合匹配'
+    if (reason === 'semantic_match') return '语义匹配'
+    return reason || '命中'
+  }
+
   async function reportExposed(query: string, items: RecommendationItem[]): Promise<void> {
     const key = `${query}:${items.map((item) => item.id).join(',')}`
     if (key === exposedKey) return
@@ -414,6 +426,12 @@ export function initRecommendationEngine(options: RecommendationEngineOptions): 
       itemType.dataset.kind = 'type'
       itemType.textContent = item.item_type || 'knowledge'
       meta.appendChild(itemType)
+
+      const reason = document.createElement('span')
+      reason.className = 'refine-reco-chip'
+      reason.dataset.kind = 'reason'
+      reason.textContent = reasonLabel(item.reason)
+      meta.appendChild(reason)
 
       for (const tag of item.tags.slice(0, 3)) {
         const chip = document.createElement('span')
