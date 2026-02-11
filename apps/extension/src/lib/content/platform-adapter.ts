@@ -95,6 +95,8 @@ export function resolveQuickSaveTargetFromLink(
 
   try {
     const resolved = new URL(href, window.location.origin)
+    if (resolved.origin !== window.location.origin) return null
+
     const conversationKey = getConversationKey(resolved.toString())
     if (!conversationKey) return null
 
