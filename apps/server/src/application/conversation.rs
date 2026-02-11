@@ -118,7 +118,7 @@ pub async fn create_conversation(
     };
 
     state
-        .persistence
+        .conversation_repo
         .upsert_conversation(&conversation)
         .map_err(CreateConversationError::Internal)?;
 
@@ -144,7 +144,7 @@ pub async fn create_conversation(
             error: None,
         };
         state
-            .persistence
+            .job_repo
             .upsert_job(&job)
             .map_err(CreateConversationError::Internal)?;
         {
@@ -215,7 +215,7 @@ pub async fn create_extraction_job(
         conversation.clone()
     };
     state
-        .persistence
+        .conversation_repo
         .upsert_conversation(&queued_conversation)
         .map_err(CreateExtractionJobError::Internal)?;
 
@@ -233,7 +233,7 @@ pub async fn create_extraction_job(
     };
 
     state
-        .persistence
+        .job_repo
         .upsert_job(&job)
         .map_err(CreateExtractionJobError::Internal)?;
     {

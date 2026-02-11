@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use rusqlite::{params, Connection};
 
+use crate::application::ports::{ConversationRepository, EventRepository, JobRepository};
 use crate::models::{
     ConversationRecord, ConversationStatus, EventRecord, ExtractionJobRecord, ExtractionMode,
     JobStatus,
@@ -313,6 +314,36 @@ impl ServerPersistence {
         .map_err(|e| e.to_string())?;
 
         Ok(())
+    }
+}
+
+impl ConversationRepository for ServerPersistence {
+    fn load_conversations(&self) -> Result<Vec<ConversationRecord>, String> {
+        ServerPersistence::load_conversations(self)
+    }
+
+    fn upsert_conversation(&self, record: &ConversationRecord) -> Result<(), String> {
+        ServerPersistence::upsert_conversation(self, record)
+    }
+}
+
+impl JobRepository for ServerPersistence {
+    fn load_jobs(&self) -> Result<Vec<ExtractionJobRecord>, String> {
+        ServerPersistence::load_jobs(self)
+    }
+
+    fn upsert_job(&self, job: &ExtractionJobRecord) -> Result<(), String> {
+        ServerPersistence::upsert_job(self, job)
+    }
+}
+
+impl EventRepository for ServerPersistence {
+    fn insert_event(&self, event: &EventRecord) -> Result<(), String> {
+        ServerPersistence::insert_event(self, event)
+    }
+
+    fn event_counts_since(&self, since: Option<&str>) -> Result<Vec<(String, usize)>, String> {
+        ServerPersistence::event_counts_since(self, since)
     }
 }
 

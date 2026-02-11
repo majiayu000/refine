@@ -70,7 +70,7 @@ pub fn create_event(
         created_at: normalize_timestamp(payload.occurred_at),
     };
     state
-        .persistence
+        .event_repo
         .insert_event(&event)
         .map_err(CreateEventError::Internal)?;
 
@@ -110,7 +110,7 @@ pub fn get_event_summary(
     let days = normalize_days(requested_days);
     let since = (Utc::now() - Duration::days(days as i64)).to_rfc3339();
     let pairs = state
-        .persistence
+        .event_repo
         .event_counts_since(Some(&since))
         .map_err(EventSummaryError::Internal)?;
 

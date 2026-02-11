@@ -96,7 +96,7 @@ async fn set_job_running(state: &Arc<AppState>, job_id: &str) {
         }
     };
     if let Some(job) = job_snapshot {
-        if let Err(err) = state.persistence.upsert_job(&job) {
+        if let Err(err) = state.job_repo.upsert_job(&job) {
             tracing::warn!("persist running job failed: {}", err);
         }
     }
@@ -115,7 +115,7 @@ async fn set_job_succeeded(state: &Arc<AppState>, job_id: &str) {
         }
     };
     if let Some(job) = job_snapshot {
-        if let Err(err) = state.persistence.upsert_job(&job) {
+        if let Err(err) = state.job_repo.upsert_job(&job) {
             tracing::warn!("persist succeeded job failed: {}", err);
         }
     }
@@ -134,7 +134,7 @@ async fn set_job_failed(state: &Arc<AppState>, job_id: &str, error: &str) {
         }
     };
     if let Some(job) = job_snapshot {
-        if let Err(err) = state.persistence.upsert_job(&job) {
+        if let Err(err) = state.job_repo.upsert_job(&job) {
             tracing::warn!("persist failed job failed: {}", err);
         }
     }
@@ -155,7 +155,7 @@ async fn set_conversation_status(
         }
     };
     if let Some(conversation) = conversation_snapshot {
-        if let Err(err) = state.persistence.upsert_conversation(&conversation) {
+        if let Err(err) = state.conversation_repo.upsert_conversation(&conversation) {
             tracing::warn!("persist conversation status failed: {}", err);
         }
     }
@@ -178,7 +178,7 @@ async fn set_conversation_processed(
         }
     };
     if let Some(conversation) = conversation_snapshot {
-        if let Err(err) = state.persistence.upsert_conversation(&conversation) {
+        if let Err(err) = state.conversation_repo.upsert_conversation(&conversation) {
             tracing::warn!("persist processed conversation failed: {}", err);
         }
     }
@@ -196,7 +196,7 @@ async fn set_conversation_failed(state: &Arc<AppState>, conversation_id: &str, e
         }
     };
     if let Some(conversation) = conversation_snapshot {
-        if let Err(err) = state.persistence.upsert_conversation(&conversation) {
+        if let Err(err) = state.conversation_repo.upsert_conversation(&conversation) {
             tracing::warn!("persist failed conversation failed: {}", err);
         }
     }

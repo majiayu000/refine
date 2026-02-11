@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::application::ports::{ConversationRepository, EventRepository, JobRepository};
 use crate::models::{ConversationRecord, ExtractionJobRecord};
 use crate::persistence::ServerPersistence;
 use crate::vector_search::InMemoryVectorSearch;
@@ -23,7 +24,9 @@ pub struct AppState {
     pub free_quota_items: usize,
     pub llm_client: Option<Arc<dyn LlmClient>>,
     pub api_token: Option<String>,
-    pub persistence: Arc<ServerPersistence>,
+    pub conversation_repo: Arc<dyn ConversationRepository>,
+    pub job_repo: Arc<dyn JobRepository>,
+    pub event_repo: Arc<dyn EventRepository>,
     pub runtime: RuntimeState,
 }
 
@@ -32,6 +35,9 @@ impl AppState {
         let db_path = get_db_path();
         ensure_db_dir(&db_path)?;
         let persistence = Arc::new(ServerPersistence::new(db_path.clone())?);
+        let conversation_repo: Arc<dyn ConversationRepository> = persistence.clone();
+        let job_repo: Arc<dyn JobRepository> = persistence.clone();
+        let event_repo: Arc<dyn EventRepository> = persistence.clone();
 
         let sqlite_store = Arc::new(SqliteStore::open(&db_path).map_err(|e| e.to_string())?);
         let store: Arc<dyn ItemRepository> = sqlite_store;
@@ -71,8 +77,8 @@ impl AppState {
             );
         }
 
-        let conversation_vec = persistence.load_conversations()?;
-        let job_vec = persistence.load_jobs()?;
+        let conversation_vec = conversation_repo.load_conversations()?;
+        let job_vec = job_repo.load_jobs()?;
 
         let mut conversations = HashMap::new();
         let mut idempotency = HashMap::new();
@@ -96,7 +102,9 @@ impl AppState {
             free_quota_items,
             llm_client: build_llm_client_from_env(),
             api_token,
-            persistence,
+            conversation_repo,
+            job_repo,
+            event_repo,
             runtime: RuntimeState {
                 conversations: Arc::new(RwLock::new(conversations)),
                 idempotency: Arc::new(RwLock::new(idempotency)),
