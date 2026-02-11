@@ -65,6 +65,17 @@ pub fn apply_source_and_content_defaults(
     }
 }
 
+/// 提炼并补齐来源/内容默认值，供多端 ingest 流程复用。
+pub async fn extract_items_with_defaults(
+    llm_client: Option<&dyn LlmClient>,
+    input: &ItemExtractionInput<'_>,
+    source: &Source,
+) -> Vec<Item> {
+    let mut items = extract_items_or_fallback(llm_client, input).await;
+    apply_source_and_content_defaults(&mut items, source, input.raw_content);
+    items
+}
+
 /// 使用 LLM 提炼 Item 列表。
 ///
 /// 调用方可在失败时降级到 `build_fallback_item`。
@@ -318,6 +329,23 @@ mod tests {
         let items = extract_items_or_fallback(Some(&client), &input).await;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title(), "my title");
+    }
+
+    #[tokio::test]
+    async fn extract_items_with_defaults_applies_source_and_content() {
+        let input = ItemExtractionInput {
+            source: "chatgpt",
+            title: Some("示例"),
+            raw_content: "原始文本",
+            captured_at: None,
+            policy: ExtractionPolicy::default(),
+        };
+        let source = Source::new("chatgpt").with_url("https://example.com");
+        let items = extract_items_with_defaults(None, &input, &source).await;
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].source().map(|v| v.platform.as_str()), Some("chatgpt"));
+        assert_eq!(items[0].content(), "原始文本");
     }
 
     #[test]

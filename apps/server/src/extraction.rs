@@ -1,11 +1,10 @@
-use refine_core::knowledge::{Item, Source};
+use refine_core::knowledge::Source;
 use refine_core::refinement::{
-    apply_source_and_content_defaults, extract_items_or_fallback, ExtractionPolicy,
-    ItemExtractionInput,
+    extract_items_with_defaults, ExtractionPolicy, ItemExtractionInput,
 };
 use std::sync::Arc;
 
-use crate::models::{now_iso, ConversationRecord, ConversationStatus, ExtractionMode, JobStatus};
+use crate::models::{now_iso, ConversationStatus, ExtractionMode, JobStatus};
 use crate::state::AppState;
 
 pub fn spawn_extraction(
@@ -39,11 +38,17 @@ async fn run_extraction(
             .ok_or_else(|| "Conversation not found".to_string())?
     };
 
-    let mut items = build_items(&state, &conversation, mode).await;
     let source = Source::new(&conversation.source)
         .with_conversation_id(&conversation.id)
         .with_url(&conversation.url);
-    apply_source_and_content_defaults(&mut items, &source, &conversation.raw_content);
+    let input = ItemExtractionInput {
+        source: &conversation.source,
+        title: conversation.title.as_deref(),
+        raw_content: &conversation.raw_content,
+        captured_at: Some(&conversation.captured_at),
+        policy: mode_to_policy(mode),
+    };
+    let items = extract_items_with_defaults(state.llm_client.as_deref(), &input, &source).await;
 
     let mut item_ids = Vec::with_capacity(items.len());
     for item in &items {
@@ -62,21 +67,6 @@ async fn run_extraction(
     set_job_succeeded(&state, job_id).await;
 
     Ok(())
-}
-
-async fn build_items(
-    state: &Arc<AppState>,
-    conversation: &ConversationRecord,
-    mode: ExtractionMode,
-) -> Vec<Item> {
-    let input = ItemExtractionInput {
-        source: &conversation.source,
-        title: conversation.title.as_deref(),
-        raw_content: &conversation.raw_content,
-        captured_at: Some(&conversation.captured_at),
-        policy: mode_to_policy(mode),
-    };
-    extract_items_or_fallback(state.llm_client.as_deref(), &input).await
 }
 
 fn mode_to_policy(mode: ExtractionMode) -> ExtractionPolicy {

@@ -1,11 +1,8 @@
 use refine_core::infra::{
     build_llm_client_from_env as build_core_llm_client_from_env, LlmClient,
 };
-use refine_core::knowledge::{Item, ItemRepository, Source};
-use refine_core::refinement::{
-    apply_source_and_content_defaults, extract_items_or_fallback, ExtractionPolicy,
-    ItemExtractionInput,
-};
+use refine_core::knowledge::{ItemRepository, Source};
+use refine_core::refinement::{extract_items_with_defaults, ExtractionPolicy, ItemExtractionInput};
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
@@ -74,9 +71,15 @@ async fn extract_and_store(
     llm_client: Option<Arc<dyn LlmClient>>,
     req: IngestRequest,
 ) -> Result<Vec<String>, String> {
-    let mut items = build_items(llm_client, &req).await;
     let source = Source::new(&req.source).with_url(&req.url);
-    apply_source_and_content_defaults(&mut items, &source, &req.content);
+    let input = ItemExtractionInput {
+        source: &req.source,
+        title: req.title.as_deref(),
+        raw_content: &req.content,
+        captured_at: None,
+        policy: ExtractionPolicy::default(),
+    };
+    let items = extract_items_with_defaults(llm_client.as_deref(), &input, &source).await;
 
     let mut ids = Vec::with_capacity(items.len());
     for item in &items {
@@ -85,15 +88,4 @@ async fn extract_and_store(
     }
 
     Ok(ids)
-}
-
-async fn build_items(llm_client: Option<Arc<dyn LlmClient>>, req: &IngestRequest) -> Vec<Item> {
-    let input = ItemExtractionInput {
-        source: &req.source,
-        title: req.title.as_deref(),
-        raw_content: &req.content,
-        captured_at: None,
-        policy: ExtractionPolicy::default(),
-    };
-    extract_items_or_fallback(llm_client.as_deref(), &input).await
 }

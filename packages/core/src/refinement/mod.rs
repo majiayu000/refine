@@ -18,6 +18,6 @@ pub use extractor::{ExtractionResult, Extractor};
 pub use policy::{ExtractionPolicy, PromptTemplate};
 pub use usecase::{
     apply_source_and_content_defaults, build_fallback_item, extract_items_or_fallback,
-    extract_items_with_llm, ItemExtractionInput, EXTRACTION_SYSTEM_PROMPT,
-    JSON_REPAIR_SYSTEM_PROMPT,
+    extract_items_with_defaults, extract_items_with_llm, ItemExtractionInput,
+    EXTRACTION_SYSTEM_PROMPT, JSON_REPAIR_SYSTEM_PROMPT,
 };
