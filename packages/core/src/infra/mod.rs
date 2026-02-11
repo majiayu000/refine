@@ -12,8 +12,9 @@ mod sqlite;
 
 // 公共 API
 pub use contract::{
-    is_contract_compatible, normalize_contract_major, trim_optional, trim_required_field,
-    CreateConversationRequest, ItemDto, CONTRACT_VERSION, CONTRACT_VERSION_HEADER,
+    is_contract_compatible, normalize_contract_major, normalize_conversation_input, trim_optional,
+    trim_required_field, CreateConversationRequest, ItemDto, NormalizedConversationInput,
+    CONTRACT_VERSION, CONTRACT_VERSION_HEADER,
 };
 pub use llm::{
     build_llm_client_from_env, build_required_llm_client_from_env, ClaudeClient, LlmClient,

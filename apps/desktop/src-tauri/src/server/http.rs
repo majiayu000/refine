@@ -1,6 +1,6 @@
 use super::extract::{self, IngestRequest};
 use refine_core::infra::{
-    is_contract_compatible, trim_optional, trim_required_field, CreateConversationRequest, ItemDto,
+    is_contract_compatible, normalize_conversation_input, CreateConversationRequest, ItemDto,
     LlmClient, CONTRACT_VERSION, CONTRACT_VERSION_HEADER,
 };
 use refine_core::knowledge::ItemRepository;
@@ -115,7 +115,7 @@ fn handle_create_conversation(
                 400,
                 json!({"success": false, "message": err}),
                 allowed_origin,
-            )
+            );
         }
     };
 
@@ -128,49 +128,19 @@ fn handle_create_conversation(
         ..
     } = payload;
 
-    let content = match trim_required_field(content, "content") {
-        Ok(value) => value,
-        _ => {
-            return json_response(
-                400,
-                json!({"success": false, "message": "Missing required field: content"}),
-                allowed_origin,
-            )
-        }
-    };
-    let url = match trim_required_field(url, "url") {
-        Ok(value) => value,
-        _ => {
-            return json_response(
-                400,
-                json!({"success": false, "message": "Missing required field: url"}),
-                allowed_origin,
-            )
-        }
-    };
-    let source = match trim_required_field(source, "source") {
-        Ok(value) => value,
-        _ => {
-            return json_response(
-                400,
-                json!({"success": false, "message": "Missing required field: source"}),
-                allowed_origin,
-            )
-        }
-    };
-    let idempotency_key = match trim_required_field(idempotency_key, "idempotency_key") {
-        Ok(value) => value,
-        _ => {
-            return json_response(
-                400,
-                json!({"success": false, "message": "Missing required field: idempotency_key"}),
-                allowed_origin,
-            )
-        }
-    };
-    let title = title.and_then(|value| trim_optional(value.as_str()).map(ToString::to_string));
+    let normalized =
+        match normalize_conversation_input(content, url, source, title, idempotency_key) {
+            Ok(value) => value,
+            Err(err) => {
+                return json_response(
+                    400,
+                    json!({"success": false, "message": err}),
+                    allowed_origin,
+                );
+            }
+        };
 
-    if let Some(conversation_id) = find_idempotency_hit(&idempotency_key) {
+    if let Some(conversation_id) = find_idempotency_hit(&normalized.idempotency_key) {
         return json_response(
             200,
             json!({
@@ -188,17 +158,17 @@ fn handle_create_conversation(
         runtime,
         llm_client,
         IngestRequest {
-            content,
-            url,
-            source,
-            title,
+            content: normalized.content,
+            url: normalized.url,
+            source: normalized.source,
+            title: normalized.title,
         },
     );
 
     match extract_result {
         Ok(_) => {
             let conversation_id = generate_conversation_id();
-            remember_idempotency(idempotency_key, conversation_id.clone());
+            remember_idempotency(normalized.idempotency_key, conversation_id.clone());
             json_response(
                 200,
                 json!({

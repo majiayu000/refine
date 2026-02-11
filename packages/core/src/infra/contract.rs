@@ -16,6 +16,15 @@ pub struct CreateConversationRequest {
     pub metadata: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedConversationInput {
+    pub content: String,
+    pub url: String,
+    pub source: String,
+    pub title: Option<String>,
+    pub idempotency_key: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ItemDto {
     pub id: String,
@@ -60,6 +69,22 @@ pub fn trim_required_field(value: Option<String>, field_name: &str) -> Result<St
         .ok_or_else(|| format!("Missing required field: {}", field_name))
 }
 
+pub fn normalize_conversation_input(
+    content: Option<String>,
+    url: Option<String>,
+    source: Option<String>,
+    title: Option<String>,
+    idempotency_key: Option<String>,
+) -> Result<NormalizedConversationInput, String> {
+    Ok(NormalizedConversationInput {
+        content: trim_required_field(content, "content")?,
+        url: trim_required_field(url, "url")?,
+        source: trim_required_field(source, "source")?,
+        title: title.and_then(|value| trim_optional(value.as_str()).map(ToString::to_string)),
+        idempotency_key: trim_required_field(idempotency_key, "idempotency_key")?,
+    })
+}
+
 pub fn normalize_contract_major(version: &str) -> &str {
     let version = version.trim();
     version.split('.').next().unwrap_or(version)
@@ -74,8 +99,9 @@ pub fn is_contract_compatible(client_version: &str, server_version: &str) -> boo
 #[cfg(test)]
 mod tests {
     use super::{
-        is_contract_compatible, normalize_contract_major, trim_optional, trim_required_field,
-        CreateConversationRequest, ItemDto,
+        is_contract_compatible, normalize_contract_major, normalize_conversation_input,
+        trim_optional, trim_required_field, CreateConversationRequest, ItemDto,
+        NormalizedConversationInput,
     };
     use crate::knowledge::Item;
     use serde_json::json;
@@ -106,6 +132,35 @@ mod tests {
             trim_required_field(None, "content"),
             Err("Missing required field: content".to_string())
         );
+    }
+
+    #[test]
+    fn normalize_conversation_input_trims_and_validates_fields() {
+        let normalized = normalize_conversation_input(
+            Some(" content ".to_string()),
+            Some(" url ".to_string()),
+            Some(" source ".to_string()),
+            Some(" title ".to_string()),
+            Some(" key ".to_string()),
+        )
+        .expect("should normalize valid payload");
+        assert_eq!(
+            normalized,
+            NormalizedConversationInput {
+                content: "content".to_string(),
+                url: "url".to_string(),
+                source: "source".to_string(),
+                title: Some("title".to_string()),
+                idempotency_key: "key".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_conversation_input_reports_missing_required_field() {
+        let err = normalize_conversation_input(None, Some("url".to_string()), None, None, None)
+            .expect_err("should fail for missing content");
+        assert_eq!(err, "Missing required field: content");
     }
 
     #[test]

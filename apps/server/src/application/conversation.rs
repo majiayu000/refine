@@ -2,7 +2,7 @@ use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use refine_core::infra::{trim_optional, trim_required_field};
+use refine_core::infra::{normalize_conversation_input, trim_required_field};
 
 use crate::application::error::ApplicationErrorCode;
 use crate::extraction::spawn_extraction;
@@ -55,16 +55,21 @@ pub async fn create_conversation(
     user_id: String,
     payload: CreateConversationRequest,
 ) -> Result<CreateConversationResult, CreateConversationError> {
-    let content = trim_required_field(payload.content, "content")
-        .map_err(CreateConversationError::BadRequest)?;
-    let url =
-        trim_required_field(payload.url, "url").map_err(CreateConversationError::BadRequest)?;
-    let source = trim_required_field(payload.source, "source")
-        .map_err(CreateConversationError::BadRequest)?;
-    let idempotency_key = trim_required_field(payload.idempotency_key, "idempotency_key")
+    let crate::models::CreateConversationRequest {
+        content,
+        url,
+        source,
+        title,
+        captured_at,
+        idempotency_key,
+        ingest_only,
+        metadata,
+    } = payload;
+    let normalized = normalize_conversation_input(content, url, source, title, idempotency_key)
         .map_err(CreateConversationError::BadRequest)?;
 
-    if let Some(conversation_id) = find_conversation_by_idempotency(&state, &idempotency_key).await
+    if let Some(conversation_id) =
+        find_conversation_by_idempotency(&state, &normalized.idempotency_key).await
     {
         let conversations = state.runtime.conversations.read().await;
         if let Some(record) = conversations.get(&conversation_id) {
@@ -94,28 +99,25 @@ pub async fn create_conversation(
     let now = now_iso();
     let conversation_id = Uuid::new_v4().to_string();
     let mode = ExtractionMode::Auto;
-    let ingest_only = payload.ingest_only.unwrap_or(false);
+    let ingest_only = ingest_only.unwrap_or(false);
     let conversation_status = if ingest_only {
         ConversationStatus::Captured
     } else {
         ConversationStatus::Queued
     };
-    let title = payload
-        .title
-        .and_then(|value| trim_optional(value.as_str()).map(ToString::to_string));
 
     let conversation = crate::models::ConversationRecord {
         id: conversation_id.clone(),
         user_id,
-        source,
-        url,
-        title,
-        raw_content: content,
-        metadata: payload.metadata.unwrap_or_else(|| json!({})),
-        captured_at: normalize_timestamp(payload.captured_at),
+        source: normalized.source,
+        url: normalized.url,
+        title: normalized.title,
+        raw_content: normalized.content,
+        metadata: metadata.unwrap_or_else(|| json!({})),
+        captured_at: normalize_timestamp(captured_at),
         created_at: now.clone(),
         status: conversation_status.clone(),
-        idempotency_key: idempotency_key.clone(),
+        idempotency_key: normalized.idempotency_key.clone(),
         item_ids: Vec::new(),
         last_error: None,
     };
@@ -131,7 +133,7 @@ pub async fn create_conversation(
     }
     {
         let mut idempotency = state.runtime.idempotency.write().await;
-        idempotency.insert(idempotency_key, conversation_id.clone());
+        idempotency.insert(normalized.idempotency_key, conversation_id.clone());
     }
 
     let mut job_id = None;
