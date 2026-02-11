@@ -94,6 +94,25 @@ export function getNormalizedConversationTitleFromLink(
   return title || fallbackTitle
 }
 
+export function normalizeConversationId(
+  rawId: string | null | undefined,
+  invalidIds: ReadonlySet<string>
+): string | null {
+  if (!rawId) return null
+
+  let decoded = rawId
+  try {
+    decoded = decodeURIComponent(rawId)
+  } catch {
+    decoded = rawId
+  }
+
+  const normalized = decoded.trim()
+  if (!normalized) return null
+  if (invalidIds.has(normalized.toLowerCase())) return null
+  return normalized
+}
+
 export function resolveQuickSaveTargetFromLink(
   link: HTMLAnchorElement,
   getConversationKey: (rawUrl: string) => string | null

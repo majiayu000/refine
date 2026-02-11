@@ -15,6 +15,7 @@ import {
   getNormalizedConversationTitleFromLink,
   isCurrentConversationByKeyResolver,
   isSameConversationByKeyResolver,
+  normalizeConversationId,
   waitForConversationExtraction,
 } from '../lib/content/platform-adapter'
 import { delay, toErrorMessage } from '../lib/content/runtime'
@@ -144,28 +145,14 @@ function withCurrentAccountPrefix(url: URL): URL {
   return url
 }
 
-function decodeId(input: string): string {
-  try {
-    return decodeURIComponent(input)
-  } catch {
-    return input
-  }
-}
-
-function isValidConversationId(input: string | null | undefined): input is string {
-  if (!input) return false
-  const normalized = decodeId(input).trim().toLowerCase()
-  return normalized.length > 0 && !INVALID_CONVERSATION_IDS.has(normalized)
-}
-
 function getConversationKey(rawUrl: string): string | null {
   try {
     const parsed = withCurrentAccountPrefix(new URL(rawUrl, window.location.origin))
 
     const pathIdMatch = parsed.pathname.match(/\/app\/([^/?#]+)/i) || parsed.pathname.match(/\/chat\/([^/?#]+)/i)
     if (pathIdMatch) {
-      const id = decodeId(pathIdMatch[1]).trim()
-      if (!isValidConversationId(id)) return null
+      const id = normalizeConversationId(pathIdMatch[1], INVALID_CONVERSATION_IDS)
+      if (!id) return null
       return `path:${id}`
     }
 
@@ -176,8 +163,9 @@ function getConversationKey(rawUrl: string): string | null {
         parsed.searchParams.get('conversation_id') ||
         parsed.searchParams.get('id')
 
-      if (isValidConversationId(queryId)) {
-        return `query:${decodeId(queryId).trim()}`
+      const normalizedQueryId = normalizeConversationId(queryId, INVALID_CONVERSATION_IDS)
+      if (normalizedQueryId) {
+        return `query:${normalizedQueryId}`
       }
     }
 
@@ -193,7 +181,7 @@ function sanitizeConversationUrl(url: URL): URL {
 
   for (const key of maybeInvalidParamKeys) {
     const value = normalized.searchParams.get(key)
-    if (value && !isValidConversationId(value)) {
+    if (value && !normalizeConversationId(value, INVALID_CONVERSATION_IDS)) {
       normalized.searchParams.delete(key)
     }
   }

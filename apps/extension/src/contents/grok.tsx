@@ -9,6 +9,7 @@ import { initQuickSaveEngine } from '../lib/content/quick-save-engine'
 import {
   createStandardQuickSaveResolvers,
   extractConversationBySelectors,
+  normalizeConversationId,
   waitForConversationExtraction,
 } from '../lib/content/platform-adapter'
 import {
@@ -42,34 +43,21 @@ initRecommendationEngine({
   ],
 })
 
-function decodeId(input: string): string {
-  try {
-    return decodeURIComponent(input)
-  } catch {
-    return input
-  }
-}
-
-function isValidConversationId(input: string | null | undefined): input is string {
-  if (!input) return false
-  const normalized = decodeId(input).trim().toLowerCase()
-  return normalized.length > 0 && !INVALID_CONVERSATION_IDS.has(normalized)
-}
-
 function getConversationKey(rawUrl: string): string | null {
   try {
     const parsed = new URL(rawUrl, window.location.origin)
     const pathMatch = parsed.pathname.match(/\/(?:c|chat)\/([^/?#]+)/i)
     if (pathMatch) {
-      const id = decodeId(pathMatch[1]).trim()
-      if (!isValidConversationId(id)) return null
+      const id = normalizeConversationId(pathMatch[1], INVALID_CONVERSATION_IDS)
+      if (!id) return null
       return `path:${id}`
     }
 
     for (const key of QUERY_CONVERSATION_PARAM_KEYS) {
       const value = parsed.searchParams.get(key)
-      if (!isValidConversationId(value)) continue
-      return `query:${decodeId(value).trim()}`
+      const normalized = normalizeConversationId(value, INVALID_CONVERSATION_IDS)
+      if (!normalized) continue
+      return `query:${normalized}`
     }
 
     return null
