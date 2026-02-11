@@ -2,7 +2,6 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::Json;
-use refine_core::knowledge::ItemId;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -13,6 +12,8 @@ use crate::application::conversation::{
 use crate::application::event::{
     create_event as run_create_event, get_event_summary as run_get_event_summary,
 };
+use crate::application::item::delete_item as run_delete_item;
+use crate::application::job::get_extraction_job as run_get_extraction_job;
 use crate::application::query::{
     get_quota as run_get_quota, list_conversations as run_list_conversations,
     list_items as run_list_items, search_items as run_search_items,
@@ -104,12 +105,10 @@ pub async fn get_extraction_job(
         return err_response(StatusCode::UNAUTHORIZED, &err);
     }
 
-    let jobs = state.jobs.read().await;
-    let Some(job) = jobs.get(&job_id).cloned() else {
-        return err_response(StatusCode::NOT_FOUND, "Job not found");
-    };
-
-    ok(json!({ "job": job }))
+    match run_get_extraction_job(state, job_id).await {
+        Ok(result) => ok(json!({ "job": result.job })),
+        Err(err) => err_response(err.status_code(), err.message()),
+    }
 }
 
 pub async fn create_event(
@@ -211,31 +210,14 @@ pub async fn delete_item(
         return err_response(StatusCode::UNAUTHORIZED, &err);
     }
 
-    let normalized_id = item_id.trim().to_string();
-    if normalized_id.is_empty() {
-        return err_response(StatusCode::BAD_REQUEST, "item_id is required");
-    }
-
-    let deleted = match state.store.delete(&ItemId::from_str(&normalized_id)).await {
-        Ok(deleted) => deleted,
-        Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    let result = match run_delete_item(state, item_id).await {
+        Ok(result) => result,
+        Err(err) => return err_response(err.status_code(), err.message()),
     };
-    if !deleted {
-        return err_response(StatusCode::NOT_FOUND, "Item not found");
+    match serde_json::to_value(result) {
+        Ok(payload) => ok(payload),
+        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
     }
-
-    if let Err(err) = state.engine.remove_from_index(&normalized_id).await {
-        tracing::warn!(
-            "item {} removed from store but failed to remove from vector index: {}",
-            normalized_id,
-            err
-        );
-    }
-
-    ok(json!({
-        "deleted": true,
-        "id": normalized_id
-    }))
 }
 
 pub async fn search_items(
