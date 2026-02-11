@@ -63,7 +63,7 @@ pub async fn create_conversation(
 
     if let Some(conversation_id) = find_conversation_by_idempotency(&state, &idempotency_key).await
     {
-        let conversations = state.conversations.read().await;
+        let conversations = state.runtime.conversations.read().await;
         if let Some(record) = conversations.get(&conversation_id) {
             return Ok(CreateConversationResult {
                 conversation_id: record.id.clone(),
@@ -123,11 +123,11 @@ pub async fn create_conversation(
         .map_err(CreateConversationError::Internal)?;
 
     {
-        let mut conversations = state.conversations.write().await;
+        let mut conversations = state.runtime.conversations.write().await;
         conversations.insert(conversation_id.clone(), conversation);
     }
     {
-        let mut idempotency = state.idempotency.write().await;
+        let mut idempotency = state.runtime.idempotency.write().await;
         idempotency.insert(idempotency_key, conversation_id.clone());
     }
 
@@ -148,7 +148,7 @@ pub async fn create_conversation(
             .upsert_job(&job)
             .map_err(CreateConversationError::Internal)?;
         {
-            let mut jobs = state.jobs.write().await;
+            let mut jobs = state.runtime.jobs.write().await;
             jobs.insert(id.clone(), job);
         }
         spawn_extraction(state, conversation_id.clone(), id.clone(), mode);
@@ -204,7 +204,7 @@ pub async fn create_extraction_job(
         })?;
 
     let queued_conversation = {
-        let mut conversations = state.conversations.write().await;
+        let mut conversations = state.runtime.conversations.write().await;
         let Some(conversation) = conversations.get_mut(&conversation_id) else {
             return Err(CreateExtractionJobError::NotFound(
                 "Conversation not found".to_string(),
@@ -237,7 +237,7 @@ pub async fn create_extraction_job(
         .upsert_job(&job)
         .map_err(CreateExtractionJobError::Internal)?;
     {
-        let mut jobs = state.jobs.write().await;
+        let mut jobs = state.runtime.jobs.write().await;
         jobs.insert(job_id.clone(), job);
     }
 
@@ -265,7 +265,7 @@ fn trim_optional(value: &str) -> Option<&str> {
 }
 
 async fn find_conversation_by_idempotency(state: &Arc<AppState>, key: &str) -> Option<String> {
-    let index = state.idempotency.read().await;
+    let index = state.runtime.idempotency.read().await;
     index.get(key).cloned()
 }
 

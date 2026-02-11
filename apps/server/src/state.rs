@@ -10,6 +10,12 @@ use crate::models::{ConversationRecord, ExtractionJobRecord};
 use crate::persistence::ServerPersistence;
 use crate::vector_search::InMemoryVectorSearch;
 
+pub struct RuntimeState {
+    pub conversations: Arc<RwLock<HashMap<String, ConversationRecord>>>,
+    pub idempotency: Arc<RwLock<HashMap<String, String>>>,
+    pub jobs: Arc<RwLock<HashMap<String, ExtractionJobRecord>>>,
+}
+
 pub struct AppState {
     pub store: Arc<dyn ItemRepository>,
     pub engine: Arc<SearchEngine>,
@@ -18,9 +24,7 @@ pub struct AppState {
     pub llm_client: Option<Arc<dyn LlmClient>>,
     pub api_token: Option<String>,
     pub persistence: Arc<ServerPersistence>,
-    pub conversations: Arc<RwLock<HashMap<String, ConversationRecord>>>,
-    pub idempotency: Arc<RwLock<HashMap<String, String>>>,
-    pub jobs: Arc<RwLock<HashMap<String, ExtractionJobRecord>>>,
+    pub runtime: RuntimeState,
 }
 
 impl AppState {
@@ -93,9 +97,11 @@ impl AppState {
             llm_client: build_llm_client_from_env(),
             api_token,
             persistence,
-            conversations: Arc::new(RwLock::new(conversations)),
-            idempotency: Arc::new(RwLock::new(idempotency)),
-            jobs: Arc::new(RwLock::new(jobs)),
+            runtime: RuntimeState {
+                conversations: Arc::new(RwLock::new(conversations)),
+                idempotency: Arc::new(RwLock::new(idempotency)),
+                jobs: Arc::new(RwLock::new(jobs)),
+            },
         })
     }
 }

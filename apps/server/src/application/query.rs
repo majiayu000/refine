@@ -28,7 +28,7 @@ pub async fn list_conversations(
         .filter(|status| !status.is_empty());
 
     let mut conversations: Vec<ConversationRecord> = {
-        let guard = state.conversations.read().await;
+        let guard = state.runtime.conversations.read().await;
         guard.values().cloned().collect()
     };
     if let Some(filter_status) = status_filter {

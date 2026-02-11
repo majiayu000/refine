@@ -31,7 +31,7 @@ async fn run_extraction(
     set_conversation_status(&state, conversation_id, ConversationStatus::Processing).await;
 
     let conversation = {
-        let guard = state.conversations.read().await;
+        let guard = state.runtime.conversations.read().await;
         guard
             .get(conversation_id)
             .cloned()
@@ -85,7 +85,7 @@ fn mode_to_policy(mode: ExtractionMode) -> ExtractionPolicy {
 
 async fn set_job_running(state: &Arc<AppState>, job_id: &str) {
     let job_snapshot = {
-        let mut jobs = state.jobs.write().await;
+        let mut jobs = state.runtime.jobs.write().await;
         if let Some(job) = jobs.get_mut(job_id) {
             job.status = JobStatus::Running;
             job.updated_at = now_iso();
@@ -104,7 +104,7 @@ async fn set_job_running(state: &Arc<AppState>, job_id: &str) {
 
 async fn set_job_succeeded(state: &Arc<AppState>, job_id: &str) {
     let job_snapshot = {
-        let mut jobs = state.jobs.write().await;
+        let mut jobs = state.runtime.jobs.write().await;
         if let Some(job) = jobs.get_mut(job_id) {
             job.status = JobStatus::Succeeded;
             job.updated_at = now_iso();
@@ -123,7 +123,7 @@ async fn set_job_succeeded(state: &Arc<AppState>, job_id: &str) {
 
 async fn set_job_failed(state: &Arc<AppState>, job_id: &str, error: &str) {
     let job_snapshot = {
-        let mut jobs = state.jobs.write().await;
+        let mut jobs = state.runtime.jobs.write().await;
         if let Some(job) = jobs.get_mut(job_id) {
             job.status = JobStatus::Failed;
             job.updated_at = now_iso();
@@ -146,7 +146,7 @@ async fn set_conversation_status(
     status: ConversationStatus,
 ) {
     let conversation_snapshot = {
-        let mut conversations = state.conversations.write().await;
+        let mut conversations = state.runtime.conversations.write().await;
         if let Some(conversation) = conversations.get_mut(conversation_id) {
             conversation.status = status;
             Some(conversation.clone())
@@ -167,7 +167,7 @@ async fn set_conversation_processed(
     item_ids: Vec<String>,
 ) {
     let conversation_snapshot = {
-        let mut conversations = state.conversations.write().await;
+        let mut conversations = state.runtime.conversations.write().await;
         if let Some(conversation) = conversations.get_mut(conversation_id) {
             conversation.status = ConversationStatus::Processed;
             conversation.item_ids = item_ids;
@@ -186,7 +186,7 @@ async fn set_conversation_processed(
 
 async fn set_conversation_failed(state: &Arc<AppState>, conversation_id: &str, error: &str) {
     let conversation_snapshot = {
-        let mut conversations = state.conversations.write().await;
+        let mut conversations = state.runtime.conversations.write().await;
         if let Some(conversation) = conversations.get_mut(conversation_id) {
             conversation.status = ConversationStatus::Failed;
             conversation.last_error = Some(error.to_string());

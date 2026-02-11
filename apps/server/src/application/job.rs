@@ -32,7 +32,7 @@ pub async fn get_extraction_job(
     state: Arc<AppState>,
     job_id: String,
 ) -> Result<ExtractionJobResult, ExtractionJobError> {
-    let jobs = state.jobs.read().await;
+    let jobs = state.runtime.jobs.read().await;
     let Some(job) = jobs.get(&job_id).cloned() else {
         return Err(ExtractionJobError::NotFound("Job not found".to_string()));
     };
