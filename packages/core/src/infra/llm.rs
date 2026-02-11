@@ -42,6 +42,10 @@ pub fn build_llm_client_from_env() -> Option<Arc<dyn LlmClient>> {
 
     None
 }
+
+pub fn build_required_llm_client_from_env() -> Result<Arc<dyn LlmClient>, String> {
+    build_llm_client_from_env().ok_or_else(|| "missing API key".to_string())
+}
 /// Claude 客户端
 pub struct ClaudeClient {
     client: reqwest::Client,

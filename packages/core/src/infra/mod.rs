@@ -14,5 +14,8 @@ mod sqlite;
 pub use contract::{
     is_contract_compatible, normalize_contract_major, CONTRACT_VERSION, CONTRACT_VERSION_HEADER,
 };
-pub use llm::{build_llm_client_from_env, ClaudeClient, LlmClient, OpenAIClient};
+pub use llm::{
+    build_llm_client_from_env, build_required_llm_client_from_env, ClaudeClient, LlmClient,
+    OpenAIClient,
+};
 pub use sqlite::SqliteStore;

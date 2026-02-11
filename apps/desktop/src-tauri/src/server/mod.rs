@@ -5,8 +5,7 @@
 mod extract;
 mod http;
 
-use extract::build_llm_client_from_env;
-use refine_core::infra::LlmClient;
+use refine_core::infra::{build_required_llm_client_from_env, LlmClient};
 use refine_core::knowledge::ItemRepository;
 use std::sync::Arc;
 use tiny_http::Server;
@@ -27,7 +26,7 @@ pub fn start_server(store: Arc<dyn ItemRepository>) {
             }
         };
 
-        let llm_client = match build_llm_client_from_env() {
+        let llm_client = match build_required_llm_client_from_env() {
             Ok(client) => Some(client),
             Err(err) => {
                 eprintln!(

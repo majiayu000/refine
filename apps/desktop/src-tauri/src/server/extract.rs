@@ -1,6 +1,4 @@
-use refine_core::infra::{
-    build_llm_client_from_env as build_core_llm_client_from_env, LlmClient,
-};
+use refine_core::infra::LlmClient;
 use refine_core::knowledge::{ItemRepository, Source};
 use refine_core::refinement::{extract_items_with_defaults, ExtractionPolicy, ItemExtractionInput};
 use serde::Deserialize;
@@ -50,10 +48,6 @@ pub(super) fn ingest_conversation(
     req: IngestRequest,
 ) -> Result<Vec<String>, String> {
     runtime.block_on(extract_and_store(store, llm_client.map(Arc::clone), req))
-}
-
-pub(super) fn build_llm_client_from_env() -> Result<Arc<dyn LlmClient>, String> {
-    build_core_llm_client_from_env().ok_or_else(|| "missing API key".to_string())
 }
 
 fn parse_request_body(request: &mut tiny_http::Request) -> Result<ExtractRequest, String> {
