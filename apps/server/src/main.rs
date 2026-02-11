@@ -2,6 +2,7 @@ mod application;
 mod auth;
 mod extraction;
 mod handlers;
+mod request_guard;
 mod models;
 mod persistence;
 mod state;
