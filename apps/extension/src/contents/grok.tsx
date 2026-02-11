@@ -22,6 +22,7 @@ const MESSAGE_POLL_TIMEOUT_MS = 20_000
 const GROK_PENDING_SIDEBAR_IMPORT_KEY = '__refine_pending_sidebar_import_grok'
 const GROK_IMPORTED_CONVERSATIONS_KEY = '__refine_imported_conversations_grok'
 const INVALID_CONVERSATION_IDS = new Set(['', 'new', 'new_chat', 'newchat', 'null', 'none', 'undefined'])
+const QUERY_CONVERSATION_PARAM_KEYS = ['conversationId', 'conversation_id', 'cid', 'id']
 
 export const config: PlasmoCSConfig = {
   matches: ['https://grok.com/*'],
@@ -58,31 +59,95 @@ function getConversationKey(rawUrl: string): string | null {
   try {
     const parsed = new URL(rawUrl, window.location.origin)
     const pathMatch = parsed.pathname.match(/\/(?:c|chat)\/([^/?#]+)/i)
-    if (!pathMatch) return null
+    if (pathMatch) {
+      const id = decodeId(pathMatch[1]).trim()
+      if (!isValidConversationId(id)) return null
+      return `path:${id}`
+    }
 
-    const id = decodeId(pathMatch[1]).trim()
-    if (!isValidConversationId(id)) return null
-    return `path:${id}`
+    for (const key of QUERY_CONVERSATION_PARAM_KEYS) {
+      const value = parsed.searchParams.get(key)
+      if (!isValidConversationId(value)) continue
+      return `query:${decodeId(value).trim()}`
+    }
+
+    return null
   } catch {
     return null
   }
 }
 
+function extractConversationByKnownSelectors(): string {
+  return extractConversationBySelectors(
+    [
+      { role: 'Human', selector: 'div.message-bubble[data-role="user"]' },
+      { role: 'Assistant', selector: 'div.message-bubble[data-role="assistant"]' },
+      { role: 'Human', selector: 'main div.message-bubble.user' },
+      { role: 'Assistant', selector: 'main div.message-bubble.assistant' },
+      { role: 'Human', selector: 'main [data-testid="conversation-turn-user"]' },
+      { role: 'Human', selector: 'main [data-testid*="user-message"]' },
+      { role: 'Human', selector: 'main [data-message-author-role="user"]' },
+      { role: 'Human', selector: 'main [data-author="user"]' },
+      { role: 'Human', selector: 'main [data-role="user"]' },
+      { role: 'Human', selector: 'main [class*="user-message"]' },
+      { role: 'Assistant', selector: 'main [data-testid="conversation-turn-assistant"]' },
+      { role: 'Assistant', selector: 'main [data-testid*="assistant-message"]' },
+      { role: 'Assistant', selector: 'main [data-message-author-role="assistant"]' },
+      { role: 'Assistant', selector: 'main [data-author="assistant"]' },
+      { role: 'Assistant', selector: 'main [data-role="assistant"]' },
+      { role: 'Assistant', selector: 'main [class*="assistant-message"]' },
+    ],
+    document
+  )
+}
+
+function inferBubbleRole(bubble: Element, index: number): 'Human' | 'Assistant' {
+  const text = [
+    bubble.getAttribute('data-role') || '',
+    bubble.getAttribute('data-author') || '',
+    bubble.getAttribute('data-testid') || '',
+    bubble.className || '',
+  ]
+    .join(' ')
+    .toLowerCase()
+
+  if (text.includes('user') || text.includes('human')) return 'Human'
+  if (text.includes('assistant') || text.includes('grok') || text.includes('model') || text.includes('bot')) {
+    return 'Assistant'
+  }
+
+  return index % 2 === 0 ? 'Human' : 'Assistant'
+}
+
+function extractConversationByBubbleFallback(): string {
+  const container = document.querySelector('div#last-reply-container')?.parentElement
+  if (!container) return ''
+
+  const bubbles = Array.from(container.querySelectorAll('div.message-bubble'))
+  if (bubbles.length === 0) return ''
+
+  const messages: string[] = []
+  bubbles.forEach((bubble, index) => {
+    const content = (bubble as HTMLElement).innerText || bubble.textContent || ''
+    const normalized = content
+      .replace(/\u200b/g, '')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim()
+    if (!normalized) return
+
+    const role = inferBubbleRole(bubble, index)
+    messages.push(`${role}: ${normalized}`)
+  })
+
+  return messages.join('\n\n')
+}
+
 function extractConversation(): string {
-  return extractConversationBySelectors([
-    { role: 'Human', selector: 'main [data-testid="conversation-turn-user"]' },
-    { role: 'Human', selector: 'main [data-testid*="user-message"]' },
-    { role: 'Human', selector: 'main [data-message-author-role="user"]' },
-    { role: 'Human', selector: 'main [data-author="user"]' },
-    { role: 'Human', selector: 'main [data-role="user"]' },
-    { role: 'Human', selector: 'main [class*="user-message"]' },
-    { role: 'Assistant', selector: 'main [data-testid="conversation-turn-assistant"]' },
-    { role: 'Assistant', selector: 'main [data-testid*="assistant-message"]' },
-    { role: 'Assistant', selector: 'main [data-message-author-role="assistant"]' },
-    { role: 'Assistant', selector: 'main [data-author="assistant"]' },
-    { role: 'Assistant', selector: 'main [data-role="assistant"]' },
-    { role: 'Assistant', selector: 'main [class*="assistant-message"]' },
-  ])
+  const fromKnownSelectors = extractConversationByKnownSelectors()
+  if (fromKnownSelectors) return fromKnownSelectors
+
+  return extractConversationByBubbleFallback()
 }
 
 async function waitForConversationContent(timeoutMs = MESSAGE_POLL_TIMEOUT_MS): Promise<string | null> {
@@ -114,7 +179,7 @@ async function navigateToConversation(_link: HTMLAnchorElement, target: QuickSav
 initQuickSaveEngine({
   providerId: 'grok',
   source: 'grok',
-  linkSelector: 'aside a[href], nav a[href], [role="navigation"] a[href], a[href^="/c/"]',
+  linkSelector: 'aside a[href], nav a[href], [role="navigation"] a[href], a[href*="/c/"], a[href*="/chat/"]',
   pendingStorageKey: GROK_PENDING_SIDEBAR_IMPORT_KEY,
   importedStorageKey: GROK_IMPORTED_CONVERSATIONS_KEY,
   resolveTarget: resolveConversationTarget,
