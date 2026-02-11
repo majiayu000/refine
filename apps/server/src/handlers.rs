@@ -10,6 +10,7 @@ use crate::application::conversation::{
     create_conversation as run_create_conversation,
     create_extraction_job as run_create_extraction_job, CreateConversationError,
 };
+use crate::application::error::ApplicationErrorCode;
 use crate::application::event::{
     create_event as run_create_event, get_event_summary as run_get_event_summary,
 };
@@ -61,13 +62,17 @@ pub async fn create_conversation(
                 }),
             );
         }
-        Err(err) => return err_response(err.status_code(), &err.message()),
+        Err(err) => return err_response(status_from_error_code(err.code()), &err.message()),
     };
 
     let response = CreateConversationResponse {
         conversation_id: result.conversation_id,
         status: result.status,
-        deduplicated: if result.deduplicated { Some(true) } else { None },
+        deduplicated: if result.deduplicated {
+            Some(true)
+        } else {
+            None
+        },
         job_id: result.job_id,
     };
     ok_serializable(response)
@@ -83,7 +88,7 @@ pub async fn create_extraction_job(
             job_id: result.job_id,
             status: result.status,
         }),
-        Err(err) => err_response(err.status_code(), err.message()),
+        Err(err) => err_response(status_from_error_code(err.code()), err.message()),
     }
 }
 
@@ -94,7 +99,7 @@ pub async fn get_extraction_job(
 ) -> impl IntoResponse {
     match run_get_extraction_job(state, job_id).await {
         Ok(result) => ok_serializable(GetExtractionJobResponse { job: result.job }),
-        Err(err) => err_response(err.status_code(), err.message()),
+        Err(err) => err_response(status_from_error_code(err.code()), err.message()),
     }
 }
 
@@ -107,7 +112,7 @@ pub async fn create_event(
         Ok(result) => ok_serializable(CreateEventResponse {
             event_id: result.event_id,
         }),
-        Err(err) => err_response(err.status_code(), err.message()),
+        Err(err) => err_response(status_from_error_code(err.code()), err.message()),
     }
 }
 
@@ -118,7 +123,7 @@ pub async fn get_event_summary(
 ) -> impl IntoResponse {
     let result = match run_get_event_summary(state, query.days) {
         Ok(result) => result,
-        Err(err) => return err_response(err.status_code(), err.message()),
+        Err(err) => return err_response(status_from_error_code(err.code()), err.message()),
     };
     ok_serializable(result)
 }
@@ -139,7 +144,7 @@ pub async fn list_items(
 ) -> impl IntoResponse {
     let result = match run_list_items(state, query).await {
         Ok(result) => result,
-        Err(err) => return err_response(err.status_code(), err.message()),
+        Err(err) => return err_response(status_from_error_code(err.code()), err.message()),
     };
     ok_serializable(result)
 }
@@ -150,7 +155,7 @@ pub async fn get_quota(
 ) -> impl IntoResponse {
     let result = match run_get_quota(state).await {
         Ok(result) => result,
-        Err(err) => return err_response(err.status_code(), err.message()),
+        Err(err) => return err_response(status_from_error_code(err.code()), err.message()),
     };
     ok_serializable(result)
 }
@@ -162,7 +167,7 @@ pub async fn delete_item(
 ) -> impl IntoResponse {
     let result = match run_delete_item(state, item_id).await {
         Ok(result) => result,
-        Err(err) => return err_response(err.status_code(), err.message()),
+        Err(err) => return err_response(status_from_error_code(err.code()), err.message()),
     };
     ok_serializable(result)
 }
@@ -174,7 +179,7 @@ pub async fn search_items(
 ) -> impl IntoResponse {
     let result = match run_search_items(state, query).await {
         Ok(result) => result,
-        Err(err) => return err_response(err.status_code(), err.message()),
+        Err(err) => return err_response(status_from_error_code(err.code()), err.message()),
     };
     ok_serializable(result)
 }
@@ -229,6 +234,15 @@ where
     match serde_json::to_value(payload) {
         Ok(value) => ok(value),
         Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    }
+}
+
+fn status_from_error_code(code: ApplicationErrorCode) -> StatusCode {
+    match code {
+        ApplicationErrorCode::BadRequest => StatusCode::BAD_REQUEST,
+        ApplicationErrorCode::Forbidden => StatusCode::FORBIDDEN,
+        ApplicationErrorCode::NotFound => StatusCode::NOT_FOUND,
+        ApplicationErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 

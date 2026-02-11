@@ -1,6 +1,6 @@
-use axum::http::StatusCode;
 use std::sync::Arc;
 
+use crate::application::error::ApplicationErrorCode;
 use crate::models::ExtractionJobRecord;
 use crate::state::AppState;
 
@@ -15,9 +15,9 @@ pub enum ExtractionJobError {
 }
 
 impl ExtractionJobError {
-    pub fn status_code(&self) -> StatusCode {
+    pub fn code(&self) -> ApplicationErrorCode {
         match self {
-            Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::NotFound(_) => ApplicationErrorCode::NotFound,
         }
     }
 
@@ -42,12 +42,12 @@ pub async fn get_extraction_job(
 #[cfg(test)]
 mod tests {
     use super::ExtractionJobError;
-    use axum::http::StatusCode;
+    use crate::application::error::ApplicationErrorCode;
 
     #[test]
     fn extraction_job_error_maps_not_found_status() {
         let err = ExtractionJobError::NotFound("Job not found".to_string());
-        assert_eq!(err.status_code(), StatusCode::NOT_FOUND);
+        assert_eq!(err.code(), ApplicationErrorCode::NotFound);
         assert_eq!(err.message(), "Job not found");
     }
 }

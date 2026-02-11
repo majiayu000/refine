@@ -1,8 +1,8 @@
-use axum::http::StatusCode;
 use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::application::error::ApplicationErrorCode;
 use crate::extraction::spawn_extraction;
 use crate::models::{
     normalize_timestamp, now_iso, ConversationStatus, CreateConversationRequest,
@@ -26,11 +26,11 @@ pub enum CreateConversationError {
 }
 
 impl CreateConversationError {
-    pub fn status_code(&self) -> StatusCode {
+    pub fn code(&self) -> ApplicationErrorCode {
         match self {
-            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Self::QuotaExceeded { .. } => StatusCode::FORBIDDEN,
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::BadRequest(_) => ApplicationErrorCode::BadRequest,
+            Self::QuotaExceeded { .. } => ApplicationErrorCode::Forbidden,
+            Self::Internal(_) => ApplicationErrorCode::Internal,
         }
     }
 
@@ -177,11 +177,11 @@ pub enum CreateExtractionJobError {
 }
 
 impl CreateExtractionJobError {
-    pub fn status_code(&self) -> StatusCode {
+    pub fn code(&self) -> ApplicationErrorCode {
         match self {
-            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Self::NotFound(_) => StatusCode::NOT_FOUND,
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::BadRequest(_) => ApplicationErrorCode::BadRequest,
+            Self::NotFound(_) => ApplicationErrorCode::NotFound,
+            Self::Internal(_) => ApplicationErrorCode::Internal,
         }
     }
 
@@ -272,7 +272,7 @@ async fn find_conversation_by_idempotency(state: &Arc<AppState>, key: &str) -> O
 #[cfg(test)]
 mod tests {
     use super::{trim_optional, trim_required, CreateConversationError, CreateExtractionJobError};
-    use axum::http::StatusCode;
+    use crate::application::error::ApplicationErrorCode;
 
     #[test]
     fn trim_required_reports_missing_field_name() {
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn create_conversation_error_keeps_original_bad_request_message() {
         let err = CreateConversationError::BadRequest("custom error".to_string());
-        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.code(), ApplicationErrorCode::BadRequest);
         assert_eq!(err.message(), "custom error");
     }
 
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn extraction_job_error_maps_to_http_status() {
         let not_found = CreateExtractionJobError::NotFound("Conversation not found".to_string());
-        assert_eq!(not_found.status_code(), StatusCode::NOT_FOUND);
+        assert_eq!(not_found.code(), ApplicationErrorCode::NotFound);
         assert_eq!(not_found.message(), "Conversation not found");
     }
 }

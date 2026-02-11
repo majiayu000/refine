@@ -1,10 +1,10 @@
-use axum::http::StatusCode;
 use chrono::{Duration, Utc};
 use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::application::error::ApplicationErrorCode;
 use crate::models::{normalize_timestamp, CreateEventRequest, EventRecord};
 use crate::state::AppState;
 
@@ -28,10 +28,10 @@ pub enum CreateEventError {
 }
 
 impl CreateEventError {
-    pub fn status_code(&self) -> StatusCode {
+    pub fn code(&self) -> ApplicationErrorCode {
         match self {
-            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::BadRequest(_) => ApplicationErrorCode::BadRequest,
+            Self::Internal(_) => ApplicationErrorCode::Internal,
         }
     }
 
@@ -90,9 +90,9 @@ pub enum EventSummaryError {
 }
 
 impl EventSummaryError {
-    pub fn status_code(&self) -> StatusCode {
+    pub fn code(&self) -> ApplicationErrorCode {
         match self {
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Internal(_) => ApplicationErrorCode::Internal,
         }
     }
 
@@ -164,7 +164,10 @@ mod tests {
 
     #[test]
     fn normalize_event_properties_keeps_only_object_values() {
-        assert_eq!(normalize_event_properties(Some(json!({"k": "v"}))), json!({"k": "v"}));
+        assert_eq!(
+            normalize_event_properties(Some(json!({"k": "v"}))),
+            json!({"k": "v"})
+        );
         assert_eq!(normalize_event_properties(Some(json!(123))), json!({}));
         assert_eq!(normalize_event_properties(None), json!({}));
     }

@@ -1,8 +1,8 @@
-use axum::http::StatusCode;
 use refine_core::search::SearchQuery as CoreSearchQuery;
 use serde::Serialize;
 use std::sync::Arc;
 
+use crate::application::error::ApplicationErrorCode;
 use crate::models::{
     ConversationDto, ConversationRecord, ConversationStatus, ItemDto, ListConversationsQuery,
     ListItemsQuery, SearchQuery,
@@ -78,9 +78,9 @@ pub enum QueryError {
 }
 
 impl QueryError {
-    pub fn status_code(&self) -> StatusCode {
+    pub fn code(&self) -> ApplicationErrorCode {
         match self {
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Internal(_) => ApplicationErrorCode::Internal,
         }
     }
 
@@ -203,10 +203,25 @@ mod tests {
 
     #[test]
     fn conversation_status_name_is_stable_for_filters() {
-        assert_eq!(conversation_status_name(&ConversationStatus::Captured), "captured");
-        assert_eq!(conversation_status_name(&ConversationStatus::Queued), "queued");
-        assert_eq!(conversation_status_name(&ConversationStatus::Processing), "processing");
-        assert_eq!(conversation_status_name(&ConversationStatus::Processed), "processed");
-        assert_eq!(conversation_status_name(&ConversationStatus::Failed), "failed");
+        assert_eq!(
+            conversation_status_name(&ConversationStatus::Captured),
+            "captured"
+        );
+        assert_eq!(
+            conversation_status_name(&ConversationStatus::Queued),
+            "queued"
+        );
+        assert_eq!(
+            conversation_status_name(&ConversationStatus::Processing),
+            "processing"
+        );
+        assert_eq!(
+            conversation_status_name(&ConversationStatus::Processed),
+            "processed"
+        );
+        assert_eq!(
+            conversation_status_name(&ConversationStatus::Failed),
+            "failed"
+        );
     }
 }

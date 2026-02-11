@@ -1,8 +1,8 @@
-use axum::http::StatusCode;
 use refine_core::knowledge::ItemId;
 use serde::Serialize;
 use std::sync::Arc;
 
+use crate::application::error::ApplicationErrorCode;
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize)]
@@ -19,11 +19,11 @@ pub enum DeleteItemError {
 }
 
 impl DeleteItemError {
-    pub fn status_code(&self) -> StatusCode {
+    pub fn code(&self) -> ApplicationErrorCode {
         match self {
-            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Self::NotFound(_) => StatusCode::NOT_FOUND,
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::BadRequest(_) => ApplicationErrorCode::BadRequest,
+            Self::NotFound(_) => ApplicationErrorCode::NotFound,
+            Self::Internal(_) => ApplicationErrorCode::Internal,
         }
     }
 
@@ -68,7 +68,9 @@ pub async fn delete_item(
 fn normalize_item_id(item_id: String) -> Result<String, DeleteItemError> {
     let normalized_id = item_id.trim().to_string();
     if normalized_id.is_empty() {
-        return Err(DeleteItemError::BadRequest("item_id is required".to_string()));
+        return Err(DeleteItemError::BadRequest(
+            "item_id is required".to_string(),
+        ));
     }
     Ok(normalized_id)
 }
@@ -76,14 +78,14 @@ fn normalize_item_id(item_id: String) -> Result<String, DeleteItemError> {
 #[cfg(test)]
 mod tests {
     use super::{normalize_item_id, DeleteItemError};
-    use axum::http::StatusCode;
+    use crate::application::error::ApplicationErrorCode;
 
     #[test]
     fn normalize_item_id_rejects_blank_input() {
         let err = normalize_item_id("   ".to_string()).expect_err("blank id should fail");
         assert!(matches!(err, DeleteItemError::BadRequest(_)));
         assert_eq!(err.message(), "item_id is required");
-        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.code(), ApplicationErrorCode::BadRequest);
     }
 
     #[test]
