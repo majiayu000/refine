@@ -10,7 +10,14 @@ import {
   type QuickSaveTarget,
   type SilentExtractContentResult,
 } from '../lib/content/quick-save-engine'
-import { delay, normalizeText, toErrorMessage } from '../lib/content/runtime'
+import {
+  extractConversationBySelectors,
+  getNormalizedConversationTitleFromLink,
+  isCurrentConversationByKeyResolver,
+  isSameConversationByKeyResolver,
+  waitForConversationExtraction,
+} from '../lib/content/platform-adapter'
+import { delay, toErrorMessage } from '../lib/content/runtime'
 
 interface DebugLogEntry {
   ts: string
@@ -18,11 +25,6 @@ interface DebugLogEntry {
   event: string
   message: string
   context?: Record<string, string | number | boolean | null>
-}
-
-interface Turn {
-  role: 'Human' | 'Assistant'
-  el: Element
 }
 
 const GEMINI_PENDING_SIDEBAR_IMPORT_KEY = '__refine_pending_sidebar_import_gemini'
@@ -33,6 +35,15 @@ const HIDDEN_IFRAME_EXTRACT_TIMEOUT_MS = 18_000
 const INVALID_CONVERSATION_IDS = new Set(['', 'none', 'null', 'undefined', 'new', 'new_chat', 'newchat'])
 const DEBUG_LOG_KEY = '__refine_gemini_quicksave_logs'
 const DEBUG_LOG_LIMIT = 100
+const GEMINI_TURN_SELECTORS = [
+  { role: 'Human' as const, selector: 'main user-query' },
+  { role: 'Human' as const, selector: 'main [data-turn-role="user"]' },
+  { role: 'Human' as const, selector: 'main [data-source="user"]' },
+  { role: 'Assistant' as const, selector: 'main model-response' },
+  { role: 'Assistant' as const, selector: 'main [data-turn-role="model"]' },
+  { role: 'Assistant' as const, selector: 'main [data-turn-role="assistant"]' },
+  { role: 'Assistant' as const, selector: 'main [data-source="model"]' },
+]
 
 // Gemini 当前对 iframe 提取是策略级封禁（X-Frame-Options: deny），默认直接禁用该路径。
 let hiddenIframeCapability: 'unknown' | 'supported' | 'blocked' = 'blocked'
@@ -85,50 +96,8 @@ function debugLog(
   printer(`[Refine Gemini] ${event}: ${message}`, context || '')
 }
 
-function collectTurns(root: ParentNode = document): Turn[] {
-  const turns: Turn[] = []
-
-  const userNodes = root.querySelectorAll('main user-query, main [data-turn-role="user"], main [data-source="user"]')
-  userNodes.forEach((el) => {
-    turns.push({ role: 'Human', el })
-  })
-
-  const assistantNodes = root.querySelectorAll(
-    'main model-response, main [data-turn-role="model"], main [data-turn-role="assistant"], main [data-source="model"]'
-  )
-  assistantNodes.forEach((el) => {
-    turns.push({ role: 'Assistant', el })
-  })
-
-  const deduped: Turn[] = []
-  const seen = new Set<Element>()
-  for (const turn of turns) {
-    if (seen.has(turn.el)) continue
-    seen.add(turn.el)
-    deduped.push(turn)
-  }
-
-  deduped.sort((a, b) => {
-    const position = a.el.compareDocumentPosition(b.el)
-    if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1
-    if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1
-    return 0
-  })
-
-  return deduped
-}
-
 function extractConversationFromRoot(root: ParentNode = document): string {
-  const turns = collectTurns(root)
-  const messages: string[] = []
-
-  for (const { role, el } of turns) {
-    const text = normalizeText((el as HTMLElement).innerText || el.textContent || '')
-    if (!text) continue
-    messages.push(`${role}: ${text}`)
-  }
-
-  return messages.join('\n\n')
+  return extractConversationBySelectors(GEMINI_TURN_SELECTORS, root)
 }
 
 function extractConversation(): string {
@@ -136,30 +105,20 @@ function extractConversation(): string {
 }
 
 async function waitForConversationContent(timeoutMs = MESSAGE_POLL_TIMEOUT_MS): Promise<string | null> {
-  const startedAt = Date.now()
-
-  while (Date.now() - startedAt <= timeoutMs) {
-    const content = extractConversation()
-    if (content) return content
-    await delay(MESSAGE_POLL_INTERVAL_MS)
-  }
-
-  return null
+  return waitForConversationExtraction(extractConversation, {
+    timeoutMs,
+    intervalMs: MESSAGE_POLL_INTERVAL_MS,
+  })
 }
 
 async function waitForConversationInDocument(
   doc: Document,
   timeoutMs = HIDDEN_IFRAME_EXTRACT_TIMEOUT_MS
 ): Promise<string | null> {
-  const startedAt = Date.now()
-
-  while (Date.now() - startedAt <= timeoutMs) {
-    const content = extractConversationFromRoot(doc)
-    if (content) return content
-    await delay(MESSAGE_POLL_INTERVAL_MS)
-  }
-
-  return null
+  return waitForConversationExtraction(() => extractConversationFromRoot(doc), {
+    timeoutMs,
+    intervalMs: MESSAGE_POLL_INTERVAL_MS,
+  })
 }
 
 function extractAccountPrefix(pathname: string): string | null {
@@ -280,20 +239,15 @@ function resolveConversationTarget(link: HTMLAnchorElement): QuickSaveTarget | n
 }
 
 function isSameConversation(target: QuickSaveTarget): boolean {
-  const currentKey = getConversationKey(window.location.href)
-  return !!currentKey && currentKey === target.conversationKey
+  return isSameConversationByKeyResolver(target, getConversationKey)
 }
 
 function isCurrentConversation(conversationKey: string): boolean {
-  const currentKey = getConversationKey(window.location.href)
-  return !!currentKey && currentKey === conversationKey
+  return isCurrentConversationByKeyResolver(conversationKey, getConversationKey)
 }
 
 function getConversationTitleFromLink(link: HTMLAnchorElement): string {
-  const clone = link.cloneNode(true) as HTMLElement
-  clone.querySelectorAll('.refine-quick-save-btn').forEach((button) => button.remove())
-  const title = normalizeText(clone.textContent || '')
-  return title || document.title || 'Gemini Conversation'
+  return getNormalizedConversationTitleFromLink(link, document.title || 'Gemini Conversation')
 }
 
 function isHiddenIframeBlocked(): boolean {

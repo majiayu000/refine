@@ -109,6 +109,22 @@ export function resolveQuickSaveTargetFromLink(
   }
 }
 
+export function isSameConversationByKeyResolver(
+  target: QuickSaveTarget,
+  getConversationKey: (rawUrl: string) => string | null
+): boolean {
+  const currentKey = getConversationKey(window.location.href)
+  return !!currentKey && currentKey === target.conversationKey
+}
+
+export function isCurrentConversationByKeyResolver(
+  conversationKey: string,
+  getConversationKey: (rawUrl: string) => string | null
+): boolean {
+  const currentKey = getConversationKey(window.location.href)
+  return !!currentKey && currentKey === conversationKey
+}
+
 export async function navigateToQuickSaveTarget(target: QuickSaveTarget): Promise<boolean> {
   try {
     window.location.assign(target.url)

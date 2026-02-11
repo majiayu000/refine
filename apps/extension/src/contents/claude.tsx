@@ -12,10 +12,17 @@ import {
 import {
   extractConversationBySelectors,
   getNormalizedConversationTitleFromLink,
+  isCurrentConversationByKeyResolver,
+  isSameConversationByKeyResolver,
   navigateToQuickSaveTarget,
   resolveQuickSaveTargetFromLink,
   waitForConversationExtraction,
 } from '../lib/content/platform-adapter'
+import {
+  STANDARD_QUICK_SAVE_BUTTON_COPY,
+  STANDARD_QUICK_SAVE_PILL_STYLE_CSS,
+  standardQuickSaveNavigateFallbackToast,
+} from '../lib/content/quick-save-presets'
 import { initRecommendationEngine } from '../lib/content/recommendation-engine'
 
 const MESSAGE_POLL_TIMEOUT_MS = 20_000
@@ -73,13 +80,11 @@ function getConversationTitleFromLink(link: HTMLAnchorElement): string {
 }
 
 function isSameConversation(target: QuickSaveTarget): boolean {
-  const currentKey = getConversationKey(window.location.href)
-  return !!currentKey && currentKey === target.conversationKey
+  return isSameConversationByKeyResolver(target, getConversationKey)
 }
 
 function isCurrentConversation(conversationKey: string): boolean {
-  const currentKey = getConversationKey(window.location.href)
-  return !!currentKey && currentKey === conversationKey
+  return isCurrentConversationByKeyResolver(conversationKey, getConversationKey)
 }
 
 async function navigateToConversation(_link: HTMLAnchorElement, target: QuickSaveTarget): Promise<boolean> {
@@ -101,74 +106,11 @@ initQuickSaveEngine({
   extractConversation,
   waitForConversationContent,
   getConversationKeyFromUrl: getConversationKey,
-  buttonCopy: {
-    idleText: '入库',
-    savingText: '入库中',
-    doneText: '已入库',
-    importedText: '已入库',
-    errorText: '失败',
-  },
+  buttonCopy: STANDARD_QUICK_SAVE_BUTTON_COPY,
   messages: {
-    navigateFallbackToast: () => '正在打开会话，加载后自动入库...',
+    navigateFallbackToast: standardQuickSaveNavigateFallbackToast,
   },
-  styleCss: `
-    .refine-quick-save-host {
-      position: relative !important;
-      padding-right: 56px !important;
-    }
-
-    .refine-quick-save-btn {
-      position: absolute;
-      top: 50%;
-      right: 8px;
-      transform: translateY(-50%);
-      height: 22px;
-      min-width: 38px;
-      padding: 0 8px;
-      border-radius: 999px;
-      border: 1px solid rgba(148, 163, 184, 0.38);
-      background: rgba(15, 23, 42, 0.86);
-      color: #e2e8f0;
-      font-size: 11px;
-      line-height: 20px;
-      cursor: pointer;
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.18s ease, background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
-      z-index: 2;
-    }
-
-    .refine-quick-save-host:hover .refine-quick-save-btn,
-    .refine-quick-save-host:focus-within .refine-quick-save-btn,
-    .refine-quick-save-btn[data-state="saving"],
-    .refine-quick-save-btn[data-state="done"],
-    .refine-quick-save-btn[data-state="imported"],
-    .refine-quick-save-btn[data-state="error"] {
-      opacity: 1;
-      pointer-events: auto;
-    }
-
-    .refine-quick-save-btn:hover {
-      background: rgba(30, 41, 59, 0.92);
-      border-color: rgba(148, 163, 184, 0.56);
-    }
-
-    .refine-quick-save-btn[data-state="saving"] {
-      color: #bfdbfe;
-      border-color: rgba(96, 165, 250, 0.56);
-    }
-
-    .refine-quick-save-btn[data-state="done"],
-    .refine-quick-save-btn[data-state="imported"] {
-      color: #86efac;
-      border-color: rgba(52, 211, 153, 0.62);
-    }
-
-    .refine-quick-save-btn[data-state="error"] {
-      color: #fca5a5;
-      border-color: rgba(248, 113, 113, 0.62);
-    }
-  `,
+  styleCss: STANDARD_QUICK_SAVE_PILL_STYLE_CSS,
 })
 
 export default function ClaudeContent() {
