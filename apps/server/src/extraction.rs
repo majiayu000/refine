@@ -1,10 +1,10 @@
 use refine_core::knowledge::Source;
-use refine_core::refinement::{
-    extract_items_with_defaults, ExtractionPolicy, ItemExtractionInput,
-};
+use refine_core::refinement::{extract_items_with_defaults, ExtractionPolicy, ItemExtractionInput};
 use std::sync::Arc;
 
-use crate::models::{now_iso, ConversationStatus, ExtractionMode, JobStatus};
+use crate::models::{
+    now_iso, ConversationRecord, ConversationStatus, ExtractionJobRecord, ExtractionMode, JobStatus,
+};
 use crate::state::AppState;
 
 pub fn spawn_extraction(
@@ -84,60 +84,45 @@ fn mode_to_policy(mode: ExtractionMode) -> ExtractionPolicy {
 }
 
 async fn set_job_running(state: &Arc<AppState>, job_id: &str) {
-    let job_snapshot = {
-        let mut jobs = state.runtime.jobs.write().await;
-        if let Some(job) = jobs.get_mut(job_id) {
+    update_job(
+        state,
+        job_id,
+        |job| {
             job.status = JobStatus::Running;
             job.updated_at = now_iso();
             job.error = None;
-            Some(job.clone())
-        } else {
-            None
-        }
-    };
-    if let Some(job) = job_snapshot {
-        if let Err(err) = state.job_repo.upsert_job(&job) {
-            tracing::warn!("persist running job failed: {}", err);
-        }
-    }
+        },
+        "running",
+    )
+    .await;
 }
 
 async fn set_job_succeeded(state: &Arc<AppState>, job_id: &str) {
-    let job_snapshot = {
-        let mut jobs = state.runtime.jobs.write().await;
-        if let Some(job) = jobs.get_mut(job_id) {
+    update_job(
+        state,
+        job_id,
+        |job| {
             job.status = JobStatus::Succeeded;
             job.updated_at = now_iso();
             job.error = None;
-            Some(job.clone())
-        } else {
-            None
-        }
-    };
-    if let Some(job) = job_snapshot {
-        if let Err(err) = state.job_repo.upsert_job(&job) {
-            tracing::warn!("persist succeeded job failed: {}", err);
-        }
-    }
+        },
+        "succeeded",
+    )
+    .await;
 }
 
 async fn set_job_failed(state: &Arc<AppState>, job_id: &str, error: &str) {
-    let job_snapshot = {
-        let mut jobs = state.runtime.jobs.write().await;
-        if let Some(job) = jobs.get_mut(job_id) {
+    update_job(
+        state,
+        job_id,
+        |job| {
             job.status = JobStatus::Failed;
             job.updated_at = now_iso();
             job.error = Some(error.to_string());
-            Some(job.clone())
-        } else {
-            None
-        }
-    };
-    if let Some(job) = job_snapshot {
-        if let Err(err) = state.job_repo.upsert_job(&job) {
-            tracing::warn!("persist failed job failed: {}", err);
-        }
-    }
+        },
+        "failed",
+    )
+    .await;
 }
 
 async fn set_conversation_status(
@@ -145,20 +130,15 @@ async fn set_conversation_status(
     conversation_id: &str,
     status: ConversationStatus,
 ) {
-    let conversation_snapshot = {
-        let mut conversations = state.runtime.conversations.write().await;
-        if let Some(conversation) = conversations.get_mut(conversation_id) {
+    update_conversation(
+        state,
+        conversation_id,
+        move |conversation| {
             conversation.status = status;
-            Some(conversation.clone())
-        } else {
-            None
-        }
-    };
-    if let Some(conversation) = conversation_snapshot {
-        if let Err(err) = state.conversation_repo.upsert_conversation(&conversation) {
-            tracing::warn!("persist conversation status failed: {}", err);
-        }
-    }
+        },
+        "status",
+    )
+    .await;
 }
 
 async fn set_conversation_processed(
@@ -166,30 +146,64 @@ async fn set_conversation_processed(
     conversation_id: &str,
     item_ids: Vec<String>,
 ) {
-    let conversation_snapshot = {
-        let mut conversations = state.runtime.conversations.write().await;
-        if let Some(conversation) = conversations.get_mut(conversation_id) {
+    update_conversation(
+        state,
+        conversation_id,
+        move |conversation| {
             conversation.status = ConversationStatus::Processed;
             conversation.item_ids = item_ids;
             conversation.last_error = None;
-            Some(conversation.clone())
+        },
+        "processed",
+    )
+    .await;
+}
+
+async fn set_conversation_failed(state: &Arc<AppState>, conversation_id: &str, error: &str) {
+    update_conversation(
+        state,
+        conversation_id,
+        |conversation| {
+            conversation.status = ConversationStatus::Failed;
+            conversation.last_error = Some(error.to_string());
+        },
+        "failed",
+    )
+    .await;
+}
+
+async fn update_job<F>(state: &Arc<AppState>, job_id: &str, mutate: F, phase: &str)
+where
+    F: FnOnce(&mut ExtractionJobRecord),
+{
+    let job_snapshot = {
+        let mut jobs = state.runtime.jobs.write().await;
+        if let Some(job) = jobs.get_mut(job_id) {
+            mutate(job);
+            Some(job.clone())
         } else {
             None
         }
     };
-    if let Some(conversation) = conversation_snapshot {
-        if let Err(err) = state.conversation_repo.upsert_conversation(&conversation) {
-            tracing::warn!("persist processed conversation failed: {}", err);
+    if let Some(job) = job_snapshot {
+        if let Err(err) = state.job_repo.upsert_job(&job) {
+            tracing::warn!("persist {} job failed: {}", phase, err);
         }
     }
 }
 
-async fn set_conversation_failed(state: &Arc<AppState>, conversation_id: &str, error: &str) {
+async fn update_conversation<F>(
+    state: &Arc<AppState>,
+    conversation_id: &str,
+    mutate: F,
+    phase: &str,
+) where
+    F: FnOnce(&mut ConversationRecord),
+{
     let conversation_snapshot = {
         let mut conversations = state.runtime.conversations.write().await;
         if let Some(conversation) = conversations.get_mut(conversation_id) {
-            conversation.status = ConversationStatus::Failed;
-            conversation.last_error = Some(error.to_string());
+            mutate(conversation);
             Some(conversation.clone())
         } else {
             None
@@ -197,7 +211,7 @@ async fn set_conversation_failed(state: &Arc<AppState>, conversation_id: &str, e
     };
     if let Some(conversation) = conversation_snapshot {
         if let Err(err) = state.conversation_repo.upsert_conversation(&conversation) {
-            tracing::warn!("persist failed conversation failed: {}", err);
+            tracing::warn!("persist {} conversation failed: {}", phase, err);
         }
     }
 }
