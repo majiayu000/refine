@@ -1,3 +1,4 @@
+mod application;
 mod auth;
 mod extraction;
 mod handlers;

@@ -7,16 +7,19 @@ use refine_core::knowledge::ItemId;
 use refine_core::search::SearchQuery as CoreSearchQuery;
 use serde_json::json;
 use std::sync::Arc;
-use std::time::Instant;
 use uuid::Uuid;
 
+use crate::application::conversation::{
+    create_conversation as run_create_conversation,
+    create_extraction_job as run_create_extraction_job, CreateConversationError,
+};
+use crate::application::recommendation::recommend_items as run_recommend_items;
 use crate::auth::authorize_user;
-use crate::extraction::spawn_extraction;
 use crate::models::{
-    normalize_timestamp, now_iso, ConversationDto, ConversationRecord, ConversationStatus,
+    normalize_timestamp, ConversationDto, ConversationRecord, ConversationStatus,
     CreateConversationRequest, CreateEventRequest, CreateExtractionJobRequest, EventRecord,
-    EventSummaryQuery, ExtractionJobRecord, ExtractionMode, ItemDto, JobStatus,
-    ListConversationsQuery, ListItemsQuery, RecommendationQuery, SearchQuery,
+    EventSummaryQuery, ItemDto, ListConversationsQuery, ListItemsQuery, RecommendationQuery,
+    SearchQuery,
 };
 use crate::state::AppState;
 
@@ -27,7 +30,6 @@ const FUNNEL_EVENTS: [&str; 5] = [
     "recommendation_clicked",
     "knowledge_reused",
 ];
-const RECOMMENDATION_MIN_QUERY_CHARS: usize = 10;
 
 pub async fn health() -> impl IntoResponse {
     ok(json!({
@@ -49,131 +51,33 @@ pub async fn create_conversation(
         Err(err) => return err_response(StatusCode::UNAUTHORIZED, &err),
     };
 
-    let content = match payload.content.map(|v| v.trim().to_string()) {
-        Some(v) if !v.is_empty() => v,
-        _ => return err_response(StatusCode::BAD_REQUEST, "Missing required field: content"),
-    };
-    let url = match payload.url.map(|v| v.trim().to_string()) {
-        Some(v) if !v.is_empty() => v,
-        _ => return err_response(StatusCode::BAD_REQUEST, "Missing required field: url"),
-    };
-    let source = match payload.source.map(|v| v.trim().to_string()) {
-        Some(v) if !v.is_empty() => v,
-        _ => return err_response(StatusCode::BAD_REQUEST, "Missing required field: source"),
-    };
-    let idempotency_key = match payload.idempotency_key.map(|v| v.trim().to_string()) {
-        Some(v) if !v.is_empty() => v,
-        _ => {
-            return err_response(
-                StatusCode::BAD_REQUEST,
-                "Missing required field: idempotency_key",
-            )
-        }
-    };
-
-    if let Some(conversation_id) = find_conversation_by_idempotency(&state, &idempotency_key).await
-    {
-        let conversations = state.conversations.read().await;
-        if let Some(record) = conversations.get(&conversation_id) {
-            return ok(json!({
-                "conversation_id": record.id,
-                "status": record.status,
-                "deduplicated": true
-            }));
-        }
-    }
-
-    if state.free_quota_items > 0 {
-        let used = match state.store.count_items(None).await {
-            Ok(total) => total,
-            Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-        };
-
-        if used >= state.free_quota_items {
+    let result = match run_create_conversation(state, user_id, payload).await {
+        Ok(result) => result,
+        Err(CreateConversationError::QuotaExceeded { used, limit }) => {
             return (
                 StatusCode::FORBIDDEN,
                 Json(json!({
                     "success": false,
-                    "message": format!(
-                        "Free quota exceeded ({}/{} items). Upgrade required.",
-                        used,
-                        state.free_quota_items
-                    ),
+                    "message": format!("Free quota exceeded ({}/{} items). Upgrade required.", used, limit),
                     "quota": {
                         "used": used,
-                        "limit": state.free_quota_items,
+                        "limit": limit,
                         "remaining": 0,
                         "exceeded": true
                     }
                 })),
             );
         }
-    }
-
-    let now = now_iso();
-    let conversation_id = Uuid::new_v4().to_string();
-    let mode = ExtractionMode::Auto;
-    let ingest_only = payload.ingest_only.unwrap_or(false);
-    let conversation_status = if ingest_only {
-        ConversationStatus::Captured
-    } else {
-        ConversationStatus::Queued
+        Err(err) => return err_response(err.status_code(), &err.message()),
     };
 
-    let conversation = ConversationRecord {
-        id: conversation_id.clone(),
-        user_id,
-        source,
-        url,
-        title: payload.title.filter(|v| !v.trim().is_empty()),
-        raw_content: content,
-        metadata: payload.metadata.unwrap_or_else(|| json!({})),
-        captured_at: normalize_timestamp(payload.captured_at),
-        created_at: now.clone(),
-        status: conversation_status.clone(),
-        idempotency_key: idempotency_key.clone(),
-        item_ids: Vec::new(),
-        last_error: None,
-    };
-
-    if let Err(err) = state.persistence.upsert_conversation(&conversation) {
-        return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err);
-    }
-
-    {
-        let mut conversations = state.conversations.write().await;
-        conversations.insert(conversation_id.clone(), conversation);
-    }
-    {
-        let mut idempotency = state.idempotency.write().await;
-        idempotency.insert(idempotency_key, conversation_id.clone());
-    }
-    let mut job_id: Option<String> = None;
-    if !ingest_only {
-        let id = Uuid::new_v4().to_string();
-        let job = ExtractionJobRecord {
-            id: id.clone(),
-            conversation_id: conversation_id.clone(),
-            mode: mode.clone(),
-            status: JobStatus::Pending,
-            created_at: now.clone(),
-            updated_at: now,
-            error: None,
-        };
-        if let Err(err) = state.persistence.upsert_job(&job) {
-            return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err);
-        }
-        {
-            let mut jobs = state.jobs.write().await;
-            jobs.insert(id.clone(), job);
-        }
-        spawn_extraction(state, conversation_id.clone(), id.clone(), mode);
-        job_id = Some(id);
-    }
     let mut response = serde_json::Map::new();
-    response.insert("conversation_id".to_string(), json!(conversation_id));
-    response.insert("status".to_string(), json!(conversation_status));
-    if let Some(id) = job_id {
+    response.insert("conversation_id".to_string(), json!(result.conversation_id));
+    response.insert("status".to_string(), json!(result.status));
+    if result.deduplicated {
+        response.insert("deduplicated".to_string(), json!(true));
+    }
+    if let Some(id) = result.job_id {
         response.insert("job_id".to_string(), json!(id));
     }
     ok(serde_json::Value::Object(response))
@@ -188,52 +92,13 @@ pub async fn create_extraction_job(
         return err_response(StatusCode::UNAUTHORIZED, &err);
     }
 
-    let conversation_id = match payload.conversation_id.map(|v| v.trim().to_string()) {
-        Some(v) if !v.is_empty() => v,
-        _ => return err_response(StatusCode::BAD_REQUEST, "conversation_id is required"),
-    };
-
-    let queued_conversation = {
-        let mut conversations = state.conversations.write().await;
-        let Some(conversation) = conversations.get_mut(&conversation_id) else {
-            return err_response(StatusCode::NOT_FOUND, "Conversation not found");
-        };
-        conversation.status = ConversationStatus::Queued;
-        conversation.last_error = None;
-        conversation.clone()
-    };
-    if let Err(err) = state.persistence.upsert_conversation(&queued_conversation) {
-        return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err);
+    match run_create_extraction_job(state, payload).await {
+        Ok(result) => ok(json!({
+            "job_id": result.job_id,
+            "status": result.status
+        })),
+        Err(err) => err_response(err.status_code(), err.message()),
     }
-
-    let mode = ExtractionMode::from_option(payload.mode);
-    let now = now_iso();
-    let job_id = Uuid::new_v4().to_string();
-
-    let job = ExtractionJobRecord {
-        id: job_id.clone(),
-        conversation_id: conversation_id.clone(),
-        mode: mode.clone(),
-        status: JobStatus::Pending,
-        created_at: now.clone(),
-        updated_at: now,
-        error: None,
-    };
-    if let Err(err) = state.persistence.upsert_job(&job) {
-        return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err);
-    }
-
-    {
-        let mut jobs = state.jobs.write().await;
-        jobs.insert(job_id.clone(), job);
-    }
-
-    spawn_extraction(state, conversation_id, job_id.clone(), mode);
-
-    ok(json!({
-        "job_id": job_id,
-        "status": JobStatus::Pending
-    }))
 }
 
 pub async fn get_extraction_job(
@@ -519,81 +384,14 @@ pub async fn recommend_items(
         return err_response(StatusCode::UNAUTHORIZED, &err);
     }
 
-    let raw = query.q.unwrap_or_default();
-    let keyword = raw.trim().to_string();
-    let limit = query.limit.unwrap_or(5).clamp(1, 20);
-    let latency_start = Instant::now();
-    let strategy_name = if state.semantic_search_enabled {
-        "hybrid_search"
-    } else {
-        "keyword_search"
-    };
-    let reason_name = if state.semantic_search_enabled {
-        "hybrid_match"
-    } else {
-        "keyword_match"
-    };
-
-    if keyword.chars().count() < RECOMMENDATION_MIN_QUERY_CHARS {
-        return ok(json!({
-            "triggered": false,
-            "reason": "query_too_short",
-            "min_chars": RECOMMENDATION_MIN_QUERY_CHARS,
-            "query": keyword,
-            "items": [],
-            "meta": {
-                "latency_ms": latency_start.elapsed().as_millis(),
-                "strategy": strategy_name
-            }
-        }));
-    }
-
-    let result = match state
-        .engine
-        .search(CoreSearchQuery::new(&keyword).with_limit(limit))
-        .await
-    {
+    let result = match run_recommend_items(state, query.q, query.limit).await {
         Ok(result) => result,
-        Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+        Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err),
     };
-
-    let items = result
-        .items
-        .iter()
-        .map(|hit| {
-            json!({
-                "id": hit.item.id().to_string(),
-                "item_type": hit.item.item_type().as_str(),
-                "title": hit.item.title(),
-                "summary": hit.item.summary(),
-                "content": hit.item.content(),
-                "tags": hit
-                    .item
-                    .tags()
-                    .iter()
-                    .map(|tag| tag.as_str().to_string())
-                    .collect::<Vec<_>>(),
-                "score": hit.score,
-                "reason": reason_name
-            })
-        })
-        .collect::<Vec<_>>();
-
-    ok(json!({
-        "triggered": true,
-        "query": keyword,
-        "total": result.total,
-        "items": items,
-        "meta": {
-            "latency_ms": latency_start.elapsed().as_millis(),
-            "strategy": strategy_name
-        }
-    }))
-}
-
-async fn find_conversation_by_idempotency(state: &Arc<AppState>, key: &str) -> Option<String> {
-    let index = state.idempotency.read().await;
-    index.get(key).cloned()
+    match serde_json::to_value(result) {
+        Ok(payload) => ok(payload),
+        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    }
 }
 
 fn ok(payload: serde_json::Value) -> (StatusCode, Json<serde_json::Value>) {
