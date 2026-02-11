@@ -358,9 +358,9 @@ export default function Popup() {
     }
 
     const url = tab.url || ''
-    const isSupported = /^https:\/\/(chat\.openai\.com|chatgpt\.com|claude\.ai|gemini\.google\.com)\//.test(url)
+    const isSupported = /^https:\/\/(chat\.openai\.com|chatgpt\.com|claude\.ai|gemini\.google\.com|grok\.com)\//.test(url)
     if (!isSupported) {
-      setExtractMessage('当前页面不支持，请在 ChatGPT、Claude 或 Gemini 对话页使用')
+      setExtractMessage('当前页面不支持，请在 ChatGPT、Claude、Gemini 或 Grok 对话页使用')
       setExtractMessageLevel('error')
       return
     }

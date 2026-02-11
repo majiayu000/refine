@@ -2,7 +2,7 @@
   "name": "refine-extension",
   "displayName": "Refine - 智能知识复用",
   "version": "0.1.0",
-  "description": "从 AI 对话中自动提炼知识，支持 ChatGPT、Claude 等",
+  "description": "从 AI 对话中自动提炼知识，支持 ChatGPT、Claude、Gemini、Grok 等",
   "author": "Refine Team",
   "scripts": {
     "dev": "plasmo dev",
@@ -31,7 +31,8 @@
       "https://chat.openai.com/*",
       "https://chatgpt.com/*",
       "https://claude.ai/*",
-      "https://gemini.google.com/*"
+      "https://gemini.google.com/*",
+      "https://grok.com/*"
     ],
     "permissions": [
       "storage",
