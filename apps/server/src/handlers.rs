@@ -4,7 +4,6 @@ use axum::response::{Html, IntoResponse};
 use axum::Json;
 use chrono::{Duration, Utc};
 use refine_core::knowledge::ItemId;
-use refine_core::search::SearchQuery as CoreSearchQuery;
 use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -13,12 +12,15 @@ use crate::application::conversation::{
     create_conversation as run_create_conversation,
     create_extraction_job as run_create_extraction_job, CreateConversationError,
 };
+use crate::application::query::{
+    get_quota as run_get_quota, list_conversations as run_list_conversations,
+    list_items as run_list_items, search_items as run_search_items,
+};
 use crate::application::recommendation::recommend_items as run_recommend_items;
 use crate::auth::authorize_user;
 use crate::models::{
-    normalize_timestamp, ConversationDto, ConversationRecord, ConversationStatus,
-    CreateConversationRequest, CreateEventRequest, CreateExtractionJobRequest, EventRecord,
-    EventSummaryQuery, ItemDto, ListConversationsQuery, ListItemsQuery, RecommendationQuery,
+    normalize_timestamp, CreateConversationRequest, CreateEventRequest, CreateExtractionJobRequest,
+    EventRecord, EventSummaryQuery, ListConversationsQuery, ListItemsQuery, RecommendationQuery,
     SearchQuery,
 };
 use crate::state::AppState;
@@ -199,43 +201,11 @@ pub async fn list_conversations(
         return err_response(StatusCode::UNAUTHORIZED, &err);
     }
 
-    let cursor = query.cursor.unwrap_or(0);
-    let limit = query.limit.unwrap_or(20).clamp(1, 100);
-    let status_filter = query
-        .status
-        .map(|status| status.trim().to_ascii_lowercase())
-        .filter(|status| !status.is_empty());
-
-    let mut conversations: Vec<ConversationRecord> = {
-        let guard = state.conversations.read().await;
-        guard.values().cloned().collect()
-    };
-
-    if let Some(filter_status) = status_filter {
-        conversations.retain(|record| conversation_status_name(&record.status) == filter_status);
+    let result = run_list_conversations(state, query).await;
+    match serde_json::to_value(result) {
+        Ok(payload) => ok(payload),
+        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
     }
-
-    conversations.sort_by(|a, b| b.captured_at.cmp(&a.captured_at));
-
-    let total = conversations.len();
-    let paginated: Vec<ConversationDto> = conversations
-        .into_iter()
-        .skip(cursor)
-        .take(limit)
-        .map(|record| ConversationDto::from(&record))
-        .collect();
-
-    let next_cursor = if cursor + paginated.len() < total {
-        Some(cursor + paginated.len())
-    } else {
-        None
-    };
-
-    ok(json!({
-        "conversations": paginated,
-        "total": total,
-        "next_cursor": next_cursor
-    }))
 }
 
 pub async fn list_items(
@@ -247,30 +217,14 @@ pub async fn list_items(
         return err_response(StatusCode::UNAUTHORIZED, &err);
     }
 
-    let cursor = query.cursor.unwrap_or(0);
-    let limit = query.limit.unwrap_or(20).clamp(1, 100);
-
-    let total = match state.store.count_items(None).await {
-        Ok(total) => total,
-        Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    let result = match run_list_items(state, query).await {
+        Ok(result) => result,
+        Err(err) => return err_response(err.status_code(), err.message()),
     };
-    let items = match state.store.find_recent(None, cursor, limit).await {
-        Ok(items) => items,
-        Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-    };
-
-    let next_cursor = if cursor + items.len() < total {
-        Some(cursor + items.len())
-    } else {
-        None
-    };
-
-    let data = items.iter().map(ItemDto::from).collect::<Vec<_>>();
-    ok(json!({
-        "items": data,
-        "total": total,
-        "next_cursor": next_cursor
-    }))
+    match serde_json::to_value(result) {
+        Ok(payload) => ok(payload),
+        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    }
 }
 
 pub async fn get_quota(
@@ -281,29 +235,14 @@ pub async fn get_quota(
         return err_response(StatusCode::UNAUTHORIZED, &err);
     }
 
-    let used = match state.store.count_items(None).await {
-        Ok(total) => total,
-        Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    let result = match run_get_quota(state).await {
+        Ok(result) => result,
+        Err(err) => return err_response(err.status_code(), err.message()),
     };
-
-    if state.free_quota_items == 0 {
-        return ok(json!({
-            "limit": null,
-            "used": used,
-            "remaining": null,
-            "exceeded": false
-        }));
+    match serde_json::to_value(result) {
+        Ok(payload) => ok(payload),
+        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
     }
-
-    let remaining = state.free_quota_items.saturating_sub(used);
-    let exceeded = used >= state.free_quota_items;
-
-    ok(json!({
-        "limit": state.free_quota_items,
-        "used": used,
-        "remaining": remaining,
-        "exceeded": exceeded
-    }))
 }
 
 pub async fn delete_item(
@@ -351,28 +290,14 @@ pub async fn search_items(
         return err_response(StatusCode::UNAUTHORIZED, &err);
     }
 
-    let keyword = query.q.unwrap_or_default().trim().to_string();
-    let limit = query.limit.unwrap_or(20).clamp(1, 100);
-    if keyword.is_empty() {
-        return ok(json!({ "items": [] }));
-    }
-
-    let result = match state
-        .engine
-        .search(CoreSearchQuery::new(&keyword).with_limit(limit))
-        .await
-    {
+    let result = match run_search_items(state, query).await {
         Ok(result) => result,
-        Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+        Err(err) => return err_response(err.status_code(), err.message()),
     };
-
-    let data = result
-        .items
-        .iter()
-        .map(|hit| ItemDto::from(&hit.item))
-        .collect::<Vec<_>>();
-
-    ok(json!({ "items": data }))
+    match serde_json::to_value(result) {
+        Ok(payload) => ok(payload),
+        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    }
 }
 
 pub async fn recommend_items(
@@ -413,16 +338,6 @@ fn err_response(status: StatusCode, message: &str) -> (StatusCode, Json<serde_js
             "message": message
         })),
     )
-}
-
-fn conversation_status_name(status: &ConversationStatus) -> &'static str {
-    match status {
-        ConversationStatus::Captured => "captured",
-        ConversationStatus::Queued => "queued",
-        ConversationStatus::Processing => "processing",
-        ConversationStatus::Processed => "processed",
-        ConversationStatus::Failed => "failed",
-    }
 }
 
 fn normalize_event_properties(raw: Option<serde_json::Value>) -> serde_json::Value {
