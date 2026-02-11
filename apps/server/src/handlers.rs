@@ -44,9 +44,9 @@ pub async fn create_conversation(
     headers: HeaderMap,
     Json(payload): Json<CreateConversationRequest>,
 ) -> impl IntoResponse {
-    let user_id = match authorize_user(&headers, state.api_token.as_deref()) {
+    let user_id = match authorize_with_state(&headers, &state) {
         Ok(user_id) => user_id,
-        Err(err) => return err_response(StatusCode::UNAUTHORIZED, &err),
+        Err(response) => return response,
     };
 
     let result = match run_create_conversation(state, user_id, payload).await {
@@ -83,8 +83,8 @@ pub async fn create_extraction_job(
     headers: HeaderMap,
     Json(payload): Json<CreateExtractionJobRequest>,
 ) -> impl IntoResponse {
-    if let Err(err) = authorize_user(&headers, state.api_token.as_deref()) {
-        return err_response(StatusCode::UNAUTHORIZED, &err);
+    if let Err(response) = authorize_required(&headers, &state) {
+        return response;
     }
 
     match run_create_extraction_job(state, payload).await {
@@ -101,8 +101,8 @@ pub async fn get_extraction_job(
     headers: HeaderMap,
     Path(job_id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(err) = authorize_user(&headers, state.api_token.as_deref()) {
-        return err_response(StatusCode::UNAUTHORIZED, &err);
+    if let Err(response) = authorize_required(&headers, &state) {
+        return response;
     }
 
     match run_get_extraction_job(state, job_id).await {
@@ -116,9 +116,9 @@ pub async fn create_event(
     headers: HeaderMap,
     Json(payload): Json<CreateEventRequest>,
 ) -> impl IntoResponse {
-    let user_id = match authorize_user(&headers, state.api_token.as_deref()) {
+    let user_id = match authorize_with_state(&headers, &state) {
         Ok(user_id) => user_id,
-        Err(err) => return err_response(StatusCode::UNAUTHORIZED, &err),
+        Err(response) => return response,
     };
 
     match run_create_event(state, user_id, payload) {
@@ -134,8 +134,8 @@ pub async fn get_event_summary(
     headers: HeaderMap,
     Query(query): Query<EventSummaryQuery>,
 ) -> impl IntoResponse {
-    if let Err(err) = authorize_user(&headers, state.api_token.as_deref()) {
-        return err_response(StatusCode::UNAUTHORIZED, &err);
+    if let Err(response) = authorize_required(&headers, &state) {
+        return response;
     }
 
     let result = match run_get_event_summary(state, query.days) {
@@ -150,8 +150,8 @@ pub async fn list_conversations(
     headers: HeaderMap,
     Query(query): Query<ListConversationsQuery>,
 ) -> impl IntoResponse {
-    if let Err(err) = authorize_user(&headers, state.api_token.as_deref()) {
-        return err_response(StatusCode::UNAUTHORIZED, &err);
+    if let Err(response) = authorize_required(&headers, &state) {
+        return response;
     }
 
     let result = run_list_conversations(state, query).await;
@@ -163,8 +163,8 @@ pub async fn list_items(
     headers: HeaderMap,
     Query(query): Query<ListItemsQuery>,
 ) -> impl IntoResponse {
-    if let Err(err) = authorize_user(&headers, state.api_token.as_deref()) {
-        return err_response(StatusCode::UNAUTHORIZED, &err);
+    if let Err(response) = authorize_required(&headers, &state) {
+        return response;
     }
 
     let result = match run_list_items(state, query).await {
@@ -178,8 +178,8 @@ pub async fn get_quota(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(err) = authorize_user(&headers, state.api_token.as_deref()) {
-        return err_response(StatusCode::UNAUTHORIZED, &err);
+    if let Err(response) = authorize_required(&headers, &state) {
+        return response;
     }
 
     let result = match run_get_quota(state).await {
@@ -194,8 +194,8 @@ pub async fn delete_item(
     headers: HeaderMap,
     Path(item_id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(err) = authorize_user(&headers, state.api_token.as_deref()) {
-        return err_response(StatusCode::UNAUTHORIZED, &err);
+    if let Err(response) = authorize_required(&headers, &state) {
+        return response;
     }
 
     let result = match run_delete_item(state, item_id).await {
@@ -210,8 +210,8 @@ pub async fn search_items(
     headers: HeaderMap,
     Query(query): Query<SearchQuery>,
 ) -> impl IntoResponse {
-    if let Err(err) = authorize_user(&headers, state.api_token.as_deref()) {
-        return err_response(StatusCode::UNAUTHORIZED, &err);
+    if let Err(response) = authorize_required(&headers, &state) {
+        return response;
     }
 
     let result = match run_search_items(state, query).await {
@@ -226,8 +226,8 @@ pub async fn recommend_items(
     headers: HeaderMap,
     Query(query): Query<RecommendationQuery>,
 ) -> impl IntoResponse {
-    if let Err(err) = authorize_user(&headers, state.api_token.as_deref()) {
-        return err_response(StatusCode::UNAUTHORIZED, &err);
+    if let Err(response) = authorize_required(&headers, &state) {
+        return response;
     }
 
     let result = match run_recommend_items(state, query.q, query.limit).await {
@@ -266,6 +266,21 @@ where
         Ok(value) => ok(value),
         Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
     }
+}
+
+fn authorize_with_state(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    authorize_user(headers, state.api_token.as_deref())
+        .map_err(|err| err_response(StatusCode::UNAUTHORIZED, &err))
+}
+
+fn authorize_required(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    authorize_with_state(headers, state).map(|_| ())
 }
 
 const DASHBOARD_HTML: &str = include_str!("dashboard.html");
