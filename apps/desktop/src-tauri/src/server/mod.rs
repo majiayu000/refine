@@ -4,6 +4,7 @@
 
 mod extract;
 mod http;
+mod json;
 
 use refine_core::infra::{build_required_llm_client_from_env, LlmClient};
 use refine_core::knowledge::ItemRepository;

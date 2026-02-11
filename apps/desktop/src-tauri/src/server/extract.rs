@@ -1,3 +1,4 @@
+use super::json::parse_json_body;
 use refine_core::infra::LlmClient;
 use refine_core::knowledge::{ItemRepository, Source};
 use refine_core::refinement::{extract_items_with_defaults, ExtractionPolicy, ItemExtractionInput};
@@ -27,7 +28,7 @@ pub(super) fn handle_extract(
     runtime: &Runtime,
     llm_client: Option<&Arc<dyn LlmClient>>,
 ) -> Result<Vec<String>, String> {
-    let req = parse_request_body(request)?;
+    let req = parse_json_body::<ExtractRequest>(request)?;
     ingest_conversation(
         store,
         runtime,
@@ -48,16 +49,6 @@ pub(super) fn ingest_conversation(
     req: IngestRequest,
 ) -> Result<Vec<String>, String> {
     runtime.block_on(extract_and_store(store, llm_client.map(Arc::clone), req))
-}
-
-fn parse_request_body(request: &mut tiny_http::Request) -> Result<ExtractRequest, String> {
-    let mut body = String::new();
-    request
-        .as_reader()
-        .read_to_string(&mut body)
-        .map_err(|_| "Failed to read request body".to_string())?;
-
-    serde_json::from_str(&body).map_err(|e| format!("Invalid JSON: {}", e))
 }
 
 async fn extract_and_store(

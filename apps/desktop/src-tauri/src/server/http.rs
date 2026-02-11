@@ -1,10 +1,10 @@
 use super::extract::{self, IngestRequest};
+use super::json::parse_json_body;
 use refine_core::infra::{
     is_contract_compatible, normalize_conversation_input, CreateConversationRequest, ItemDto,
     LlmClient, CONTRACT_VERSION, CONTRACT_VERSION_HEADER,
 };
 use refine_core::knowledge::ItemRepository;
-use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -237,17 +237,6 @@ fn handle_list_items(
         }),
         allowed_origin,
     )
-}
-
-fn parse_json_body<T: for<'de> Deserialize<'de>>(
-    request: &mut tiny_http::Request,
-) -> Result<T, String> {
-    let mut body = String::new();
-    request
-        .as_reader()
-        .read_to_string(&mut body)
-        .map_err(|_| "Failed to read request body".to_string())?;
-    serde_json::from_str(&body).map_err(|err| format!("Invalid JSON: {}", err))
 }
 
 fn split_path_and_query(url: &str) -> (&str, Option<&str>) {
