@@ -3,6 +3,7 @@ use serde::Serialize;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::application::error::ApplicationErrorCode;
 use crate::state::AppState;
 
 pub const RECOMMENDATION_MIN_QUERY_CHARS: usize = 10;
@@ -45,11 +46,30 @@ struct RecommendationContext {
     reason_name: &'static str,
 }
 
+#[derive(Debug, Clone)]
+pub enum RecommendationError {
+    Internal(String),
+}
+
+impl RecommendationError {
+    pub fn code(&self) -> ApplicationErrorCode {
+        match self {
+            Self::Internal(_) => ApplicationErrorCode::Internal,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Internal(message) => message,
+        }
+    }
+}
+
 pub async fn recommend_items(
     state: Arc<AppState>,
     raw_query: Option<String>,
     raw_limit: Option<usize>,
-) -> Result<RecommendationResponse, String> {
+) -> Result<RecommendationResponse, RecommendationError> {
     let keyword = normalize_query(raw_query);
     let limit = raw_limit.unwrap_or(5).clamp(1, 20);
     let latency_start = Instant::now();
@@ -74,7 +94,7 @@ pub async fn recommend_items(
         .engine
         .search(CoreSearchQuery::new(&keyword).with_limit(limit))
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| RecommendationError::Internal(err.to_string()))?;
 
     let items = result
         .items
@@ -130,7 +150,11 @@ fn normalize_query(raw_query: Option<String>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_query, recommendation_context, RECOMMENDATION_MIN_QUERY_CHARS};
+    use super::{
+        normalize_query, recommendation_context, RecommendationError,
+        RECOMMENDATION_MIN_QUERY_CHARS,
+    };
+    use crate::application::error::ApplicationErrorCode;
 
     #[test]
     fn normalize_query_trims_whitespace() {
@@ -152,5 +176,12 @@ mod tests {
     #[test]
     fn min_chars_guard_is_ten() {
         assert_eq!(RECOMMENDATION_MIN_QUERY_CHARS, 10);
+    }
+
+    #[test]
+    fn recommendation_error_maps_to_internal_code() {
+        let err = RecommendationError::Internal("search failed".to_string());
+        assert_eq!(err.code(), ApplicationErrorCode::Internal);
+        assert_eq!(err.message(), "search failed");
     }
 }

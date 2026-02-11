@@ -194,7 +194,7 @@ pub async fn recommend_items(
 ) -> impl IntoResponse {
     let result = match run_recommend_items(state, query.q, query.limit).await {
         Ok(result) => result,
-        Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err),
+        Err(err) => return err_response(status_from_error_code(err.code()), err.message()),
     };
     ok_serializable(result)
 }
