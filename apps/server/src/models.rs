@@ -131,6 +131,32 @@ pub struct EventSummaryQuery {
 }
 
 #[derive(Debug, Serialize)]
+pub struct CreateConversationResponse {
+    pub conversation_id: String,
+    pub status: ConversationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deduplicated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateExtractionJobResponse {
+    pub job_id: String,
+    pub status: JobStatus,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateEventResponse {
+    pub event_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GetExtractionJobResponse {
+    pub job: ExtractionJobRecord,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ItemDto {
     pub id: String,
     pub item_type: String,
@@ -209,5 +235,81 @@ pub fn normalize_timestamp(raw: Option<String>) -> String {
             .map(|ts| ts.with_timezone(&Utc).to_rfc3339())
             .unwrap_or_else(|_| now_iso()),
         None => now_iso(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CreateConversationResponse, CreateEventResponse, CreateExtractionJobResponse,
+        ExtractionJobRecord, ExtractionMode, GetExtractionJobResponse, JobStatus,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn create_conversation_response_omits_optional_fields_when_absent() {
+        let value = serde_json::to_value(CreateConversationResponse {
+            conversation_id: "c1".to_string(),
+            status: super::ConversationStatus::Queued,
+            deduplicated: None,
+            job_id: None,
+        })
+        .expect("serialize response");
+
+        assert_eq!(value, json!({"conversation_id":"c1","status":"queued"}));
+    }
+
+    #[test]
+    fn create_conversation_response_includes_optional_fields_when_present() {
+        let value = serde_json::to_value(CreateConversationResponse {
+            conversation_id: "c1".to_string(),
+            status: super::ConversationStatus::Captured,
+            deduplicated: Some(true),
+            job_id: Some("j1".to_string()),
+        })
+        .expect("serialize response");
+
+        assert_eq!(
+            value,
+            json!({
+                "conversation_id":"c1",
+                "status":"captured",
+                "deduplicated":true,
+                "job_id":"j1"
+            })
+        );
+    }
+
+    #[test]
+    fn extraction_job_responses_keep_snake_case_contract() {
+        let create_value = serde_json::to_value(CreateExtractionJobResponse {
+            job_id: "j1".to_string(),
+            status: JobStatus::Pending,
+        })
+        .expect("serialize create response");
+        assert_eq!(create_value, json!({"job_id":"j1","status":"pending"}));
+
+        let job_record = ExtractionJobRecord {
+            id: "j1".to_string(),
+            conversation_id: "c1".to_string(),
+            mode: ExtractionMode::Auto,
+            status: JobStatus::Running,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:01Z".to_string(),
+            error: None,
+        };
+        let get_value = serde_json::to_value(GetExtractionJobResponse { job: job_record })
+            .expect("serialize get response");
+        assert_eq!(get_value["job"]["id"], "j1");
+        assert_eq!(get_value["job"]["status"], "running");
+    }
+
+    #[test]
+    fn create_event_response_uses_event_id_field() {
+        let value = serde_json::to_value(CreateEventResponse {
+            event_id: "e1".to_string(),
+        })
+        .expect("serialize event response");
+        assert_eq!(value, json!({"event_id":"e1"}));
     }
 }

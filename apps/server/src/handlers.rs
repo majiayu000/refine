@@ -21,8 +21,10 @@ use crate::application::query::{
 use crate::application::recommendation::recommend_items as run_recommend_items;
 use crate::auth::authorize_user;
 use crate::models::{
-    CreateConversationRequest, CreateEventRequest, CreateExtractionJobRequest, EventSummaryQuery,
-    ListConversationsQuery, ListItemsQuery, RecommendationQuery, SearchQuery,
+    CreateConversationRequest, CreateConversationResponse, CreateEventRequest, CreateEventResponse,
+    CreateExtractionJobRequest, CreateExtractionJobResponse, EventSummaryQuery,
+    GetExtractionJobResponse, ListConversationsQuery, ListItemsQuery, RecommendationQuery,
+    SearchQuery,
 };
 use crate::state::AppState;
 
@@ -66,16 +68,16 @@ pub async fn create_conversation(
         Err(err) => return err_response(err.status_code(), &err.message()),
     };
 
-    let mut response = serde_json::Map::new();
-    response.insert("conversation_id".to_string(), json!(result.conversation_id));
-    response.insert("status".to_string(), json!(result.status));
-    if result.deduplicated {
-        response.insert("deduplicated".to_string(), json!(true));
+    let response = CreateConversationResponse {
+        conversation_id: result.conversation_id,
+        status: result.status,
+        deduplicated: if result.deduplicated { Some(true) } else { None },
+        job_id: result.job_id,
+    };
+    match serde_json::to_value(response) {
+        Ok(payload) => ok(payload),
+        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
     }
-    if let Some(id) = result.job_id {
-        response.insert("job_id".to_string(), json!(id));
-    }
-    ok(serde_json::Value::Object(response))
 }
 
 pub async fn create_extraction_job(
@@ -88,10 +90,13 @@ pub async fn create_extraction_job(
     }
 
     match run_create_extraction_job(state, payload).await {
-        Ok(result) => ok(json!({
-            "job_id": result.job_id,
-            "status": result.status
-        })),
+        Ok(result) => match serde_json::to_value(CreateExtractionJobResponse {
+            job_id: result.job_id,
+            status: result.status,
+        }) {
+            Ok(payload) => ok(payload),
+            Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+        },
         Err(err) => err_response(err.status_code(), err.message()),
     }
 }
@@ -106,7 +111,10 @@ pub async fn get_extraction_job(
     }
 
     match run_get_extraction_job(state, job_id).await {
-        Ok(result) => ok(json!({ "job": result.job })),
+        Ok(result) => match serde_json::to_value(GetExtractionJobResponse { job: result.job }) {
+            Ok(payload) => ok(payload),
+            Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+        },
         Err(err) => err_response(err.status_code(), err.message()),
     }
 }
@@ -122,9 +130,12 @@ pub async fn create_event(
     };
 
     match run_create_event(state, user_id, payload) {
-        Ok(result) => ok(json!({
-            "event_id": result.event_id
-        })),
+        Ok(result) => match serde_json::to_value(CreateEventResponse {
+            event_id: result.event_id,
+        }) {
+            Ok(payload) => ok(payload),
+            Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+        },
         Err(err) => err_response(err.status_code(), err.message()),
     }
 }
