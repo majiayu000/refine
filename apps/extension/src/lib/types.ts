@@ -40,19 +40,3 @@ export interface SyncStatus {
   lastSyncedAt?: number
   apiBase: string
 }
-
-export interface CloudUploadRequest {
-  content: string
-  url: string
-  source: string
-  title?: string
-  captured_at: string
-  idempotency_key: string
-}
-
-export interface CloudUploadResult {
-  success: boolean
-  conversationId?: string
-  status?: string
-  message?: string
-}
