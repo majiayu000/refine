@@ -9,10 +9,15 @@ import {
   initQuickSaveEngine,
   type QuickSaveTarget,
 } from '../lib/content/quick-save-engine'
+import {
+  extractConversationBySelectors,
+  getNormalizedConversationTitleFromLink,
+  navigateToQuickSaveTarget,
+  resolveQuickSaveTargetFromLink,
+  waitForConversationExtraction,
+} from '../lib/content/platform-adapter'
 import { initRecommendationEngine } from '../lib/content/recommendation-engine'
-import { delay, normalizeText } from '../lib/content/runtime'
 
-const MESSAGE_POLL_INTERVAL_MS = 350
 const MESSAGE_POLL_TIMEOUT_MS = 20_000
 
 const CLAUDE_PENDING_SIDEBAR_IMPORT_KEY = '__refine_pending_sidebar_import'
@@ -35,43 +40,14 @@ initRecommendationEngine({
 })
 
 function extractConversation(): string {
-  const messages: string[] = []
-
-  const humanMessages = document.querySelectorAll('[data-testid="human-message"]')
-  const assistantMessages = document.querySelectorAll('[data-testid="assistant-message"]')
-
-  const allMessages = [
-    ...Array.from(humanMessages).map((el) => ({ role: 'Human', el })),
-    ...Array.from(assistantMessages).map((el) => ({ role: 'Assistant', el })),
-  ]
-
-  allMessages.sort((a, b) => {
-    const position = a.el.compareDocumentPosition(b.el)
-    if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1
-    if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1
-    return 0
-  })
-
-  allMessages.forEach(({ role, el }) => {
-    const content = normalizeText((el as HTMLElement).innerText || el.textContent || '')
-    if (content) {
-      messages.push(`${role}: ${content}`)
-    }
-  })
-
-  return messages.join('\n\n')
+  return extractConversationBySelectors([
+    { role: 'Human', selector: '[data-testid="human-message"]' },
+    { role: 'Assistant', selector: '[data-testid="assistant-message"]' },
+  ])
 }
 
 async function waitForConversationContent(timeoutMs = MESSAGE_POLL_TIMEOUT_MS): Promise<string | null> {
-  const startedAt = Date.now()
-
-  while (Date.now() - startedAt <= timeoutMs) {
-    const content = extractConversation()
-    if (content) return content
-    await delay(MESSAGE_POLL_INTERVAL_MS)
-  }
-
-  return null
+  return waitForConversationExtraction(extractConversation, { timeoutMs })
 }
 
 function getConversationPath(rawUrl: string): string | null {
@@ -89,28 +65,11 @@ function getConversationKey(rawUrl: string): string | null {
 }
 
 function resolveConversationTarget(link: HTMLAnchorElement): QuickSaveTarget | null {
-  const href = link.getAttribute('href')
-  if (!href) return null
-
-  try {
-    const resolved = new URL(href, window.location.origin)
-    const conversationKey = getConversationKey(resolved.toString())
-    if (!conversationKey) return null
-
-    return {
-      url: resolved.toString(),
-      conversationKey,
-    }
-  } catch {
-    return null
-  }
+  return resolveQuickSaveTargetFromLink(link, getConversationKey)
 }
 
 function getConversationTitleFromLink(link: HTMLAnchorElement): string {
-  const clone = link.cloneNode(true) as HTMLElement
-  clone.querySelectorAll('.refine-quick-save-btn').forEach((button) => button.remove())
-  const title = normalizeText(clone.textContent || '')
-  return title || document.title || 'Claude Conversation'
+  return getNormalizedConversationTitleFromLink(link, document.title || 'Claude Conversation')
 }
 
 function isSameConversation(target: QuickSaveTarget): boolean {
@@ -124,12 +83,7 @@ function isCurrentConversation(conversationKey: string): boolean {
 }
 
 async function navigateToConversation(_link: HTMLAnchorElement, target: QuickSaveTarget): Promise<boolean> {
-  try {
-    window.location.assign(target.url)
-    return true
-  } catch {
-    return false
-  }
+  return navigateToQuickSaveTarget(target)
 }
 
 initQuickSaveEngine({
