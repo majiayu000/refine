@@ -19,6 +19,15 @@ interface EnqueueConversationOptions {
   capturedAt?: number
 }
 
+interface PersistAndEnqueueOptions {
+  source: ConversationSource
+  content: string
+  title?: string
+  url?: string
+  saveFailedFallback?: string
+  onQueued?: () => void | Promise<void>
+}
+
 const TOAST_STYLE_ID = '__refine_content_toast_style'
 
 export function normalizeText(input: string): string {
@@ -102,6 +111,35 @@ export function enqueueConversation(
       }
     )
   })
+}
+
+export async function persistAndEnqueueConversation(
+  options: PersistAndEnqueueOptions
+): Promise<ExtractResult> {
+  const url = options.url || window.location.href
+  persistLastExtracted(options.content, url, options.source)
+
+  const enqueueResult = await enqueueConversation(options.content, {
+    source: options.source,
+    title: options.title,
+    url,
+  })
+
+  if (!enqueueResult.queued) {
+    return {
+      success: false,
+      message: enqueueResult.message || options.saveFailedFallback || '保存失败',
+    }
+  }
+
+  if (options.onQueued) {
+    await options.onQueued()
+  }
+
+  return {
+    success: true,
+    length: options.content.length,
+  }
 }
 
 function ensureToastAnimationStyle(): void {

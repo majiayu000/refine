@@ -5,11 +5,10 @@
  */
 
 import type { PlasmoCSConfig } from 'plasmo'
+import { extractConversationBySelectors } from '../lib/content/platform-adapter'
 import { initRecommendationEngine } from '../lib/content/recommendation-engine'
 import {
-  enqueueConversation,
-  normalizeText,
-  persistLastExtracted,
+  persistAndEnqueueConversation,
   registerExtractActionHandler,
   showToast,
   type ExtractResult,
@@ -32,65 +31,43 @@ initRecommendationEngine({
 })
 
 function extractConversation(): string {
-  const messages: string[] = []
-
-  const messageElements = document.querySelectorAll('[data-message-author-role]')
-
-  messageElements.forEach((el) => {
-    const role = el.getAttribute('data-message-author-role')
-    const content = normalizeText((el as HTMLElement).innerText || el.textContent || '')
-
-    if (!content) return
-    if (role === 'user') {
-      messages.push(`Human: ${content}`)
-      return
-    }
-    if (role === 'assistant') {
-      messages.push(`Assistant: ${content}`)
-    }
-  })
-
-  return messages.join('\n\n')
+  return extractConversationBySelectors([
+    { role: 'Human', selector: '[data-message-author-role="user"]' },
+    { role: 'Assistant', selector: '[data-message-author-role="assistant"]' },
+  ])
 }
 
 async function extractAndEnqueueConversation(): Promise<ExtractResult> {
   const conversation = extractConversation()
   if (!conversation) {
-    showToast('未找到对话内容')
     return {
       success: false,
       message: '未找到对话内容',
     }
   }
 
-  const url = window.location.href
-  persistLastExtracted(conversation, url, 'chatgpt')
-
-  const enqueueResult = await enqueueConversation(conversation, {
+  return persistAndEnqueueConversation({
     source: 'chatgpt',
-    url,
+    content: conversation,
+    url: window.location.href,
     title: document.title || 'ChatGPT Conversation',
+    saveFailedFallback: '保存失败',
   })
-
-  if (!enqueueResult.queued) {
-    const message = enqueueResult.message || '保存失败'
-    showToast(message)
-    return {
-      success: false,
-      message,
-    }
-  }
-
-  showToast('已加入同步队列，稍后上传到 Refine 云端')
-  return {
-    success: true,
-    length: conversation.length,
-  }
 }
 
 registerExtractActionHandler(async () => {
   try {
-    return await extractAndEnqueueConversation()
+    const result = await extractAndEnqueueConversation()
+    if (result.success) {
+      showToast('已加入同步队列，稍后上传到 Refine 云端')
+      return result
+    }
+
+    showToast(result.message || '保存失败')
+    return {
+      success: false,
+      message: result.message || '保存失败',
+    }
   } catch {
     showToast('对话已提取，但入队失败，请稍后重试')
     return {

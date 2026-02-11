@@ -1,8 +1,7 @@
 import type { ConversationSource } from '../types'
 import {
-  enqueueConversation,
   injectStyleOnce,
-  persistLastExtracted,
+  persistAndEnqueueConversation,
   registerExtractActionHandler,
   showToast,
   type ExtractResult,
@@ -301,36 +300,24 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
     }
   ): Promise<ExtractResult> {
     const url = enqueueOptions?.url || window.location.href
-    persistLastExtracted(content, url, options.source)
-
-    const enqueueResult = await enqueueConversation(content, {
-      source: options.source,
-      title: enqueueOptions?.title,
-      url,
-    })
-
-    if (!enqueueResult.queued) {
-      return {
-        success: false,
-        message: enqueueResult.message || messages.saveFailedFallback,
-      }
-    }
-
     const conversationKey =
       enqueueOptions?.conversationKey ||
       options.getConversationKeyFromUrl?.(url) ||
       options.getConversationKeyFromUrl?.(window.location.href) ||
       null
 
-    if (conversationKey) {
-      await markConversationImported(conversationKey)
-      setConversationButtonsState(conversationKey, 'imported')
-    }
-
-    return {
-      success: true,
-      length: content.length,
-    }
+    return persistAndEnqueueConversation({
+      source: options.source,
+      content,
+      title: enqueueOptions?.title,
+      url,
+      saveFailedFallback: messages.saveFailedFallback,
+      onQueued: async () => {
+        if (!conversationKey) return
+        await markConversationImported(conversationKey)
+        setConversationButtonsState(conversationKey, 'imported')
+      },
+    })
   }
 
   async function extractAndEnqueueConversation(params?: {
