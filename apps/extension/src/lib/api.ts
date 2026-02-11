@@ -18,6 +18,29 @@ export type { QuotaStatusResponse, RecommendationResponse, TrackEventRequest } f
 export type { RecommendationItem } from './cloud-contract'
 
 const DEFAULT_RECOMMENDATION_TIMEOUT_MS = 1_500
+const CONTRACT_VERSION_HEADER = 'X-Refine-Contract-Version'
+const CLIENT_HEADER_NAME = 'X-Refine-Client'
+const CLIENT_HEADER_VALUE = 'extension'
+export const EXTENSION_CONTRACT_VERSION = '1.0'
+
+function normalizeContractMajor(version: string): string {
+  const raw = version.trim()
+  if (!raw) return ''
+  return raw.split('.')[0] || raw
+}
+
+function isServerContractCompatible(serverVersion: string | null): boolean {
+  if (!serverVersion) return true
+  return normalizeContractMajor(serverVersion) === normalizeContractMajor(EXTENSION_CONTRACT_VERSION)
+}
+
+function buildHeaders(extraHeaders?: Record<string, string>): Record<string, string> {
+  return {
+    [CLIENT_HEADER_NAME]: CLIENT_HEADER_VALUE,
+    [CONTRACT_VERSION_HEADER]: EXTENSION_CONTRACT_VERSION,
+    ...(extraHeaders || {}),
+  }
+}
 
 function toRequestBody(item: OutboxItem): CloudUploadRequest {
   return {
@@ -36,11 +59,10 @@ export async function checkCloudHealth(): Promise<boolean> {
   try {
     const res = await fetch(`${apiBase}/health`, {
       method: 'GET',
-      headers: {
-        'X-Refine-Client': 'extension',
-      },
+      headers: buildHeaders(),
     })
     if (!res.ok) return false
+    if (!isServerContractCompatible(res.headers.get('x-refine-contract-version'))) return false
     const data = (await res.json()) as { success?: boolean }
     return data.success === true
   } catch {
@@ -54,10 +76,9 @@ export async function uploadConversation(item: OutboxItem): Promise<CloudUploadR
   try {
     const res = await fetch(`${apiBase}/v1/conversations`, {
       method: 'POST',
-      headers: {
+      headers: buildHeaders({
         'Content-Type': 'application/json',
-        'X-Refine-Client': 'extension',
-      },
+      }),
       body: JSON.stringify(toRequestBody(item)),
     })
 
@@ -99,9 +120,7 @@ export async function fetchCloudTotalItemsWithOptions(options?: {
   const allowLegacyScan = options?.allowLegacyScan ?? true
 
   try {
-    const headers = {
-      'X-Refine-Client': 'extension',
-    }
+    const headers = buildHeaders()
     const firstRes = await fetch(`${apiBase}/v1/items?cursor=0&limit=1`, { method: 'GET', headers })
     if (!firstRes.ok) return null
     const first = (await firstRes.json()) as CloudItemsResponse
@@ -153,9 +172,7 @@ export async function fetchRecommendations(
   try {
     const res = await fetch(`${apiBase}/v1/recommendations?q=${q}&limit=${limit}`, {
       method: 'GET',
-      headers: {
-        'X-Refine-Client': 'extension',
-      },
+      headers: buildHeaders(),
       signal: controller.signal,
     })
 
@@ -174,9 +191,7 @@ export async function fetchQuotaStatus(): Promise<QuotaStatusResponse | null> {
   try {
     const res = await fetch(`${apiBase}/v1/quota`, {
       method: 'GET',
-      headers: {
-        'X-Refine-Client': 'extension',
-      },
+      headers: buildHeaders(),
     })
     if (!res.ok) return null
 
@@ -202,10 +217,9 @@ export async function trackEvent(payload: TrackEventRequest): Promise<boolean> {
   try {
     const res = await fetch(`${apiBase}/v1/events`, {
       method: 'POST',
-      headers: {
+      headers: buildHeaders({
         'Content-Type': 'application/json',
-        'X-Refine-Client': 'extension',
-      },
+      }),
       body: JSON.stringify(payload),
     })
 

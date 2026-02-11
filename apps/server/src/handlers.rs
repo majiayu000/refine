@@ -1,9 +1,9 @@
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{Html, IntoResponse};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
-use serde_json::json;
 use serde::Serialize;
+use serde_json::json;
 use std::sync::Arc;
 
 use crate::application::conversation::{
@@ -29,9 +29,13 @@ use crate::models::{
 };
 use crate::state::AppState;
 
+const SERVER_CONTRACT_VERSION: &str = "1.0";
+const CONTRACT_VERSION_HEADER: &str = "x-refine-contract-version";
+
 pub async fn health() -> impl IntoResponse {
     ok(json!({
-        "message": "Refine cloud API (Rust) is running"
+        "message": "Refine cloud API (Rust) is running",
+        "contract_version": SERVER_CONTRACT_VERSION
     }))
 }
 
@@ -52,10 +56,9 @@ pub async fn create_conversation(
     let result = match run_create_conversation(state, user_id, payload).await {
         Ok(result) => result,
         Err(CreateConversationError::QuotaExceeded { used, limit }) => {
-            return (
+            return err_response_payload(
                 StatusCode::FORBIDDEN,
-                Json(json!({
-                    "success": false,
+                json!({
                     "message": format!("Free quota exceeded ({}/{} items). Upgrade required.", used, limit),
                     "quota": {
                         "used": used,
@@ -63,7 +66,7 @@ pub async fn create_conversation(
                         "remaining": 0,
                         "exceeded": true
                     }
-                })),
+                }),
             );
         }
         Err(err) => return err_response(err.status_code(), &err.message()),
@@ -237,7 +240,7 @@ pub async fn recommend_items(
     ok_serializable(result)
 }
 
-fn ok(payload: serde_json::Value) -> (StatusCode, Json<serde_json::Value>) {
+fn ok(payload: serde_json::Value) -> Response {
     let mut body = serde_json::Map::new();
     body.insert("success".to_string(), serde_json::Value::Bool(true));
     if let serde_json::Value::Object(map) = payload {
@@ -245,20 +248,30 @@ fn ok(payload: serde_json::Value) -> (StatusCode, Json<serde_json::Value>) {
             body.insert(k, v);
         }
     }
-    (StatusCode::OK, Json(serde_json::Value::Object(body)))
+    with_contract_header((StatusCode::OK, Json(serde_json::Value::Object(body))).into_response())
 }
 
-fn err_response(status: StatusCode, message: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (
+fn err_response(status: StatusCode, message: &str) -> Response {
+    err_response_payload(
         status,
-        Json(json!({
-            "success": false,
+        json!({
             "message": message
-        })),
+        }),
     )
 }
 
-fn ok_serializable<T>(payload: T) -> (StatusCode, Json<serde_json::Value>)
+fn err_response_payload(status: StatusCode, payload: serde_json::Value) -> Response {
+    let mut body = serde_json::Map::new();
+    body.insert("success".to_string(), serde_json::Value::Bool(false));
+    if let serde_json::Value::Object(map) = payload {
+        for (k, v) in map {
+            body.insert(k, v);
+        }
+    }
+    with_contract_header((status, Json(serde_json::Value::Object(body))).into_response())
+}
+
+fn ok_serializable<T>(payload: T) -> Response
 where
     T: Serialize,
 {
@@ -268,19 +281,90 @@ where
     }
 }
 
-fn authorize_with_state(
-    headers: &HeaderMap,
-    state: &AppState,
-) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+fn authorize_with_state(headers: &HeaderMap, state: &AppState) -> Result<String, Response> {
+    validate_client_contract(headers)?;
     authorize_user(headers, state.api_token.as_deref())
         .map_err(|err| err_response(StatusCode::UNAUTHORIZED, &err))
 }
 
-fn authorize_required(
-    headers: &HeaderMap,
-    state: &AppState,
-) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+fn authorize_required(headers: &HeaderMap, state: &AppState) -> Result<(), Response> {
     authorize_with_state(headers, state).map(|_| ())
+}
+
+fn validate_client_contract(headers: &HeaderMap) -> Result<(), Response> {
+    let Some(raw) = headers.get(CONTRACT_VERSION_HEADER) else {
+        return Ok(());
+    };
+    let raw = raw
+        .to_str()
+        .map_err(|_| err_response(StatusCode::BAD_REQUEST, "invalid contract version header"))?;
+    if raw.trim().is_empty() {
+        return Ok(());
+    }
+    if is_contract_compatible(raw) {
+        return Ok(());
+    }
+    Err(err_response(
+        StatusCode::UPGRADE_REQUIRED,
+        &format!(
+            "Client contract version {} is incompatible with server {}",
+            raw, SERVER_CONTRACT_VERSION
+        ),
+    ))
+}
+
+fn is_contract_compatible(client_version: &str) -> bool {
+    let client_major = normalize_contract_major(client_version);
+    let server_major = normalize_contract_major(SERVER_CONTRACT_VERSION);
+    !client_major.is_empty() && client_major == server_major
+}
+
+fn normalize_contract_major(version: &str) -> &str {
+    let version = version.trim();
+    version.split('.').next().unwrap_or(version)
+}
+
+fn with_contract_header(mut response: Response) -> Response {
+    if let Ok(value) = HeaderValue::from_str(SERVER_CONTRACT_VERSION) {
+        response.headers_mut().insert(CONTRACT_VERSION_HEADER, value);
+    }
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        is_contract_compatible, normalize_contract_major, validate_client_contract,
+        CONTRACT_VERSION_HEADER,
+    };
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+
+    #[test]
+    fn normalize_contract_major_uses_first_segment() {
+        assert_eq!(normalize_contract_major("1.2.3"), "1");
+        assert_eq!(normalize_contract_major(" 2 "), "2");
+    }
+
+    #[test]
+    fn contract_compatibility_checks_major_version() {
+        assert!(is_contract_compatible("1.0"));
+        assert!(is_contract_compatible("1.9.9"));
+        assert!(!is_contract_compatible("2.0"));
+    }
+
+    #[test]
+    fn validate_contract_allows_missing_header() {
+        let headers = HeaderMap::new();
+        assert!(validate_client_contract(&headers).is_ok());
+    }
+
+    #[test]
+    fn validate_contract_rejects_incompatible_version() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTRACT_VERSION_HEADER, HeaderValue::from_static("2.0"));
+        let response = validate_client_contract(&headers).expect_err("expected mismatch error");
+        assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
+    }
 }
 
 const DASHBOARD_HTML: &str = include_str!("dashboard.html");
