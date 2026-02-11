@@ -2,6 +2,8 @@ use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use refine_core::infra::{trim_optional, trim_required_field};
+
 use crate::application::error::ApplicationErrorCode;
 use crate::extraction::spawn_extraction;
 use crate::models::{
@@ -53,12 +55,13 @@ pub async fn create_conversation(
     user_id: String,
     payload: CreateConversationRequest,
 ) -> Result<CreateConversationResult, CreateConversationError> {
-    let content =
-        trim_required(payload.content, "content").map_err(CreateConversationError::BadRequest)?;
-    let url = trim_required(payload.url, "url").map_err(CreateConversationError::BadRequest)?;
-    let source =
-        trim_required(payload.source, "source").map_err(CreateConversationError::BadRequest)?;
-    let idempotency_key = trim_required(payload.idempotency_key, "idempotency_key")
+    let content = trim_required_field(payload.content, "content")
+        .map_err(CreateConversationError::BadRequest)?;
+    let url =
+        trim_required_field(payload.url, "url").map_err(CreateConversationError::BadRequest)?;
+    let source = trim_required_field(payload.source, "source")
+        .map_err(CreateConversationError::BadRequest)?;
+    let idempotency_key = trim_required_field(payload.idempotency_key, "idempotency_key")
         .map_err(CreateConversationError::BadRequest)?;
 
     if let Some(conversation_id) = find_conversation_by_idempotency(&state, &idempotency_key).await
@@ -199,7 +202,7 @@ pub async fn create_extraction_job(
     payload: CreateExtractionJobRequest,
 ) -> Result<CreateExtractionJobResult, CreateExtractionJobError> {
     let conversation_id =
-        trim_required(payload.conversation_id, "conversation_id").map_err(|_| {
+        trim_required_field(payload.conversation_id, "conversation_id").map_err(|_| {
             CreateExtractionJobError::BadRequest("conversation_id is required".to_string())
         })?;
 
@@ -249,21 +252,6 @@ pub async fn create_extraction_job(
     })
 }
 
-fn trim_required(value: Option<String>, field_name: &str) -> Result<String, String> {
-    value
-        .and_then(|value| trim_optional(value.as_str()).map(ToString::to_string))
-        .ok_or_else(|| format!("Missing required field: {}", field_name))
-}
-
-fn trim_optional(value: &str) -> Option<&str> {
-    let value = value.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
-}
-
 async fn find_conversation_by_idempotency(state: &Arc<AppState>, key: &str) -> Option<String> {
     let index = state.runtime.idempotency.read().await;
     index.get(key).cloned()
@@ -271,12 +259,13 @@ async fn find_conversation_by_idempotency(state: &Arc<AppState>, key: &str) -> O
 
 #[cfg(test)]
 mod tests {
-    use super::{trim_optional, trim_required, CreateConversationError, CreateExtractionJobError};
+    use super::{CreateConversationError, CreateExtractionJobError};
     use crate::application::error::ApplicationErrorCode;
+    use refine_core::infra::{trim_optional, trim_required_field};
 
     #[test]
     fn trim_required_reports_missing_field_name() {
-        let err = trim_required(None, "content").expect_err("missing field should fail");
+        let err = trim_required_field(None, "content").expect_err("missing field should fail");
         assert_eq!(err, "Missing required field: content");
     }
 

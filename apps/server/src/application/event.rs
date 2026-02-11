@@ -1,4 +1,5 @@
 use chrono::{Duration, Utc};
+use refine_core::infra::trim_optional;
 use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -140,18 +141,10 @@ fn normalize_event_properties(raw: Option<serde_json::Value>) -> serde_json::Val
     }
 }
 
-fn trim_optional(value: &str) -> Option<&str> {
-    let value = value.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{normalize_days, normalize_event_properties};
+    use refine_core::infra::trim_optional;
     use serde_json::json;
 
     #[test]
@@ -170,5 +163,11 @@ mod tests {
         );
         assert_eq!(normalize_event_properties(Some(json!(123))), json!({}));
         assert_eq!(normalize_event_properties(None), json!({}));
+    }
+
+    #[test]
+    fn trim_optional_rejects_blank_values() {
+        assert_eq!(trim_optional("   "), None);
+        assert_eq!(trim_optional(" value "), Some("value"));
     }
 }

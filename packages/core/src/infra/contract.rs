@@ -1,5 +1,64 @@
+use crate::knowledge::Item;
+use serde::{Deserialize, Serialize};
+
 pub const CONTRACT_VERSION: &str = "1.0";
 pub const CONTRACT_VERSION_HEADER: &str = "x-refine-contract-version";
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateConversationRequest {
+    pub content: Option<String>,
+    pub url: Option<String>,
+    pub source: Option<String>,
+    pub title: Option<String>,
+    pub captured_at: Option<String>,
+    pub idempotency_key: Option<String>,
+    pub ingest_only: Option<bool>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ItemDto {
+    pub id: String,
+    pub item_type: String,
+    pub title: String,
+    pub summary: String,
+    pub content: String,
+    pub tags: Vec<String>,
+    pub created_at: String,
+}
+
+impl From<&Item> for ItemDto {
+    fn from(item: &Item) -> Self {
+        Self {
+            id: item.id().to_string(),
+            item_type: item.item_type().as_str().to_string(),
+            title: item.title().to_string(),
+            summary: item.summary().to_string(),
+            content: item.content().to_string(),
+            tags: item
+                .tags()
+                .iter()
+                .map(|tag| tag.as_str().to_string())
+                .collect(),
+            created_at: item.created_at().to_rfc3339(),
+        }
+    }
+}
+
+pub fn trim_optional(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+pub fn trim_required_field(value: Option<String>, field_name: &str) -> Result<String, String> {
+    value
+        .and_then(|value| trim_optional(value.as_str()).map(ToString::to_string))
+        .ok_or_else(|| format!("Missing required field: {}", field_name))
+}
 
 pub fn normalize_contract_major(version: &str) -> &str {
     let version = version.trim();
@@ -14,7 +73,12 @@ pub fn is_contract_compatible(client_version: &str, server_version: &str) -> boo
 
 #[cfg(test)]
 mod tests {
-    use super::{is_contract_compatible, normalize_contract_major};
+    use super::{
+        is_contract_compatible, normalize_contract_major, trim_optional, trim_required_field,
+        CreateConversationRequest, ItemDto,
+    };
+    use crate::knowledge::Item;
+    use serde_json::json;
 
     #[test]
     fn normalize_contract_major_uses_first_segment() {
@@ -28,5 +92,45 @@ mod tests {
         assert!(is_contract_compatible("1.9", "1.0"));
         assert!(!is_contract_compatible("2.0", "1.0"));
         assert!(!is_contract_compatible("", "1.0"));
+    }
+
+    #[test]
+    fn trim_helpers_normalize_required_fields() {
+        assert_eq!(trim_optional(" value "), Some("value"));
+        assert_eq!(trim_optional("  "), None);
+        assert_eq!(
+            trim_required_field(Some(" x ".to_string()), "content"),
+            Ok("x".to_string())
+        );
+        assert_eq!(
+            trim_required_field(None, "content"),
+            Err("Missing required field: content".to_string())
+        );
+    }
+
+    #[test]
+    fn create_conversation_request_deserializes_optional_fields() {
+        let payload = json!({
+            "content": "c",
+            "url": "u",
+            "source": "s",
+            "title": "t",
+            "idempotency_key": "k"
+        });
+        let parsed: CreateConversationRequest =
+            serde_json::from_value(payload).expect("payload should parse");
+        assert_eq!(parsed.content.as_deref(), Some("c"));
+        assert_eq!(parsed.url.as_deref(), Some("u"));
+        assert_eq!(parsed.source.as_deref(), Some("s"));
+        assert_eq!(parsed.title.as_deref(), Some("t"));
+        assert_eq!(parsed.idempotency_key.as_deref(), Some("k"));
+    }
+
+    #[test]
+    fn item_dto_uses_item_type_string_contract() {
+        let item = Item::new_knowledge("title", "summary");
+        let dto = ItemDto::from(&item);
+        assert_eq!(dto.item_type, "knowledge");
+        assert_eq!(dto.title, "title");
     }
 }

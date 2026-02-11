@@ -1,5 +1,4 @@
 use chrono::{DateTime, Utc};
-use refine_core::knowledge::Item;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,17 +73,7 @@ pub struct EventRecord {
     pub created_at: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct CreateConversationRequest {
-    pub content: Option<String>,
-    pub url: Option<String>,
-    pub source: Option<String>,
-    pub title: Option<String>,
-    pub captured_at: Option<String>,
-    pub idempotency_key: Option<String>,
-    pub ingest_only: Option<bool>,
-    pub metadata: Option<serde_json::Value>,
-}
+pub type CreateConversationRequest = refine_core::infra::CreateConversationRequest;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateExtractionJobRequest {
@@ -156,34 +145,7 @@ pub struct GetExtractionJobResponse {
     pub job: ExtractionJobRecord,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ItemDto {
-    pub id: String,
-    pub item_type: String,
-    pub title: String,
-    pub summary: String,
-    pub content: String,
-    pub tags: Vec<String>,
-    pub created_at: String,
-}
-
-impl From<&Item> for ItemDto {
-    fn from(item: &Item) -> Self {
-        Self {
-            id: item.id().to_string(),
-            item_type: item.item_type().as_str().to_string(),
-            title: item.title().to_string(),
-            summary: item.summary().to_string(),
-            content: item.content().to_string(),
-            tags: item
-                .tags()
-                .iter()
-                .map(|tag| tag.as_str().to_string())
-                .collect(),
-            created_at: item.created_at().to_rfc3339(),
-        }
-    }
-}
+pub type ItemDto = refine_core::infra::ItemDto;
 
 #[derive(Debug, Serialize)]
 pub struct ConversationDto {

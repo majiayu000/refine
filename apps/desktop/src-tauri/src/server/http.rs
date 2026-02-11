@@ -1,9 +1,10 @@
 use super::extract::{self, IngestRequest};
 use refine_core::infra::{
-    is_contract_compatible, LlmClient, CONTRACT_VERSION, CONTRACT_VERSION_HEADER,
+    is_contract_compatible, trim_optional, trim_required_field, CreateConversationRequest, ItemDto,
+    LlmClient, CONTRACT_VERSION, CONTRACT_VERSION_HEADER,
 };
-use refine_core::knowledge::{Item, ItemRepository};
-use serde::{Deserialize, Serialize};
+use refine_core::knowledge::ItemRepository;
+use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -14,44 +15,6 @@ use tokio::runtime::Runtime;
 
 const CLIENT_HEADER_NAME: &str = "X-Refine-Client";
 const CLIENT_HEADER_VALUE: &str = "extension";
-
-#[derive(Debug, Deserialize)]
-struct CreateConversationRequest {
-    content: Option<String>,
-    url: Option<String>,
-    source: Option<String>,
-    title: Option<String>,
-    idempotency_key: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct ItemDto {
-    id: String,
-    item_type: String,
-    title: String,
-    summary: String,
-    content: String,
-    tags: Vec<String>,
-    created_at: String,
-}
-
-impl From<&Item> for ItemDto {
-    fn from(item: &Item) -> Self {
-        Self {
-            id: item.id().to_string(),
-            item_type: item.item_type().as_str().to_string(),
-            title: item.title().to_string(),
-            summary: item.summary().to_string(),
-            content: item.content().to_string(),
-            tags: item
-                .tags()
-                .iter()
-                .map(|tag| tag.as_str().to_string())
-                .collect(),
-            created_at: item.created_at().to_rfc3339(),
-        }
-    }
-}
 
 pub(super) fn handle_request(
     request: &mut tiny_http::Request,
@@ -156,8 +119,17 @@ fn handle_create_conversation(
         }
     };
 
-    let content = match payload.content.map(|value| value.trim().to_string()) {
-        Some(value) if !value.is_empty() => value,
+    let CreateConversationRequest {
+        content,
+        url,
+        source,
+        title,
+        idempotency_key,
+        ..
+    } = payload;
+
+    let content = match trim_required_field(content, "content") {
+        Ok(value) => value,
         _ => {
             return json_response(
                 400,
@@ -166,8 +138,8 @@ fn handle_create_conversation(
             )
         }
     };
-    let url = match payload.url.map(|value| value.trim().to_string()) {
-        Some(value) if !value.is_empty() => value,
+    let url = match trim_required_field(url, "url") {
+        Ok(value) => value,
         _ => {
             return json_response(
                 400,
@@ -176,8 +148,8 @@ fn handle_create_conversation(
             )
         }
     };
-    let source = match payload.source.map(|value| value.trim().to_string()) {
-        Some(value) if !value.is_empty() => value,
+    let source = match trim_required_field(source, "source") {
+        Ok(value) => value,
         _ => {
             return json_response(
                 400,
@@ -186,11 +158,8 @@ fn handle_create_conversation(
             )
         }
     };
-    let idempotency_key = match payload
-        .idempotency_key
-        .map(|value| value.trim().to_string())
-    {
-        Some(value) if !value.is_empty() => value,
+    let idempotency_key = match trim_required_field(idempotency_key, "idempotency_key") {
+        Ok(value) => value,
         _ => {
             return json_response(
                 400,
@@ -199,6 +168,7 @@ fn handle_create_conversation(
             )
         }
     };
+    let title = title.and_then(|value| trim_optional(value.as_str()).map(ToString::to_string));
 
     if let Some(conversation_id) = find_idempotency_hit(&idempotency_key) {
         return json_response(
@@ -221,7 +191,7 @@ fn handle_create_conversation(
             content,
             url,
             source,
-            title: payload.title,
+            title,
         },
     );
 
