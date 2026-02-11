@@ -1,11 +1,12 @@
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+pub use refine_core::infra::CONTRACT_VERSION_HEADER;
+use refine_core::infra::CONTRACT_VERSION;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
-pub const SERVER_CONTRACT_VERSION: &str = "1.0";
-pub const CONTRACT_VERSION_HEADER: &str = "x-refine-contract-version";
+pub const SERVER_CONTRACT_VERSION: &str = CONTRACT_VERSION;
 
 pub fn with_contract_header(mut response: Response) -> Response {
     if let Ok(value) = HeaderValue::from_str(SERVER_CONTRACT_VERSION) {

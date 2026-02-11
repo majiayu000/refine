@@ -46,8 +46,12 @@ async fn main() {
             header::CONTENT_TYPE,
             header::AUTHORIZATION,
             header::HeaderName::from_static("x-refine-client"),
+            header::HeaderName::from_static(api_response::CONTRACT_VERSION_HEADER),
         ])
-        .expose_headers([header::CONTENT_TYPE])
+        .expose_headers([
+            header::CONTENT_TYPE,
+            header::HeaderName::from_static(api_response::CONTRACT_VERSION_HEADER),
+        ])
         .max_age(std::time::Duration::from_secs(60 * 60));
 
     let app = Router::new()

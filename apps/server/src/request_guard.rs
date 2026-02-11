@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use axum::extract::{FromRef, FromRequestParts};
 use axum::http::{request::Parts, HeaderMap, StatusCode};
 use axum::response::Response;
+use refine_core::infra::{is_contract_compatible, normalize_contract_major};
 use std::sync::Arc;
 
 use crate::api_response::error_message;
@@ -39,7 +40,7 @@ pub fn validate_client_contract(headers: &HeaderMap) -> Result<(), Response> {
     if raw.trim().is_empty() {
         return Ok(());
     }
-    if is_contract_compatible(raw) {
+    if is_contract_compatible(raw, SERVER_CONTRACT_VERSION) {
         return Ok(());
     }
     Err(error_message(
@@ -49,17 +50,6 @@ pub fn validate_client_contract(headers: &HeaderMap) -> Result<(), Response> {
             raw, SERVER_CONTRACT_VERSION
         ),
     ))
-}
-
-fn is_contract_compatible(client_version: &str) -> bool {
-    let client_major = normalize_contract_major(client_version);
-    let server_major = normalize_contract_major(SERVER_CONTRACT_VERSION);
-    !client_major.is_empty() && client_major == server_major
-}
-
-fn normalize_contract_major(version: &str) -> &str {
-    let version = version.trim();
-    version.split('.').next().unwrap_or(version)
 }
 
 #[cfg(test)]
@@ -78,9 +68,9 @@ mod tests {
 
     #[test]
     fn contract_compatibility_checks_major_version() {
-        assert!(is_contract_compatible("1.0"));
-        assert!(is_contract_compatible("1.9.9"));
-        assert!(!is_contract_compatible("2.0"));
+        assert!(is_contract_compatible("1.0", "1.2"));
+        assert!(is_contract_compatible("1.9.9", "1"));
+        assert!(!is_contract_compatible("2.0", "1.0"));
     }
 
     #[test]

@@ -1,5 +1,7 @@
 use super::extract::{self, IngestRequest};
-use refine_core::infra::LlmClient;
+use refine_core::infra::{
+    is_contract_compatible, LlmClient, CONTRACT_VERSION, CONTRACT_VERSION_HEADER,
+};
 use refine_core::knowledge::{Item, ItemRepository};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -75,13 +77,21 @@ pub(super) fn handle_request(
         );
     }
 
+    if let Some(response) = incompatible_contract_response(request, allowed_origin.as_deref()) {
+        return response;
+    }
+
     let (path, query) = split_path_and_query(request.url());
     let method = request.method().clone();
 
     match (method, path) {
         (Method::Get, "/health") => json_response(
             200,
-            json!({"success": true, "message": "Refine local API is running"}),
+            json!({
+                "success": true,
+                "message": "Refine local API is running",
+                "contract_version": CONTRACT_VERSION
+            }),
             allowed_origin.as_deref(),
         ),
         (Method::Post, "/extract") => {
@@ -388,6 +398,42 @@ fn get_client_header(request: &tiny_http::Request) -> Option<String> {
         .map(|header| header.value.as_str().to_string())
 }
 
+fn get_contract_version_header(request: &tiny_http::Request) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv(CONTRACT_VERSION_HEADER))
+        .map(|header| header.value.as_str().to_string())
+}
+
+fn is_client_contract_compatible(raw_version: &str) -> bool {
+    let version = raw_version.trim();
+    version.is_empty() || is_contract_compatible(version, CONTRACT_VERSION)
+}
+
+fn incompatible_contract_response(
+    request: &tiny_http::Request,
+    allowed_origin: Option<&str>,
+) -> Option<Response<Cursor<Vec<u8>>>> {
+    let raw = get_contract_version_header(request)?;
+    if is_client_contract_compatible(&raw) {
+        return None;
+    }
+
+    Some(json_response(
+        426,
+        json!({
+            "success": false,
+            "message": format!(
+                "Client contract version {} is incompatible with server {}",
+                raw.trim(),
+                CONTRACT_VERSION
+            )
+        }),
+        allowed_origin,
+    ))
+}
+
 fn empty_response(status_code: u16, allowed_origin: Option<&str>) -> Response<Cursor<Vec<u8>>> {
     let mut response = Response::from_data(Vec::new()).with_status_code(status_code);
     add_common_headers(&mut response, allowed_origin);
@@ -407,6 +453,7 @@ fn json_response(
 
 fn add_common_headers(response: &mut Response<Cursor<Vec<u8>>>, allowed_origin: Option<&str>) {
     response.add_header(Header::from_bytes("Content-Type", "application/json").unwrap());
+    response.add_header(Header::from_bytes(CONTRACT_VERSION_HEADER, CONTRACT_VERSION).unwrap());
 
     if let Some(origin) = allowed_origin {
         response.add_header(Header::from_bytes("Access-Control-Allow-Origin", origin).unwrap());
@@ -417,9 +464,32 @@ fn add_common_headers(response: &mut Response<Cursor<Vec<u8>>>, allowed_origin: 
         response.add_header(
             Header::from_bytes(
                 "Access-Control-Allow-Headers",
-                format!("Content-Type, Authorization, {}", CLIENT_HEADER_NAME),
+                format!(
+                    "Content-Type, Authorization, {}, {}",
+                    CLIENT_HEADER_NAME, CONTRACT_VERSION_HEADER
+                ),
             )
             .unwrap(),
         );
+        response.add_header(
+            Header::from_bytes(
+                "Access-Control-Expose-Headers",
+                format!("Content-Type, {}", CONTRACT_VERSION_HEADER),
+            )
+            .unwrap(),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_client_contract_compatible;
+
+    #[test]
+    fn client_contract_compatibility_uses_major_version() {
+        assert!(is_client_contract_compatible(""));
+        assert!(is_client_contract_compatible("1.0"));
+        assert!(is_client_contract_compatible("1.9.9"));
+        assert!(!is_client_contract_compatible("2.0"));
     }
 }
