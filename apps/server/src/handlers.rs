@@ -1,11 +1,14 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse};
 use axum::Json;
-use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
 
+use crate::api_response::{
+    error_message as err_response, error_payload as err_response_payload, ok, ok_serializable,
+    SERVER_CONTRACT_VERSION,
+};
 use crate::application::conversation::{
     create_conversation as run_create_conversation,
     create_extraction_job as run_create_extraction_job, CreateConversationError,
@@ -27,7 +30,7 @@ use crate::models::{
     GetExtractionJobResponse, ListConversationsQuery, ListItemsQuery, RecommendationQuery,
     SearchQuery,
 };
-use crate::request_guard::{with_contract_header, AuthenticatedUser, SERVER_CONTRACT_VERSION};
+use crate::request_guard::AuthenticatedUser;
 use crate::state::AppState;
 
 pub async fn health() -> impl IntoResponse {
@@ -194,47 +197,6 @@ pub async fn recommend_items(
         Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err),
     };
     ok_serializable(result)
-}
-
-fn ok(payload: serde_json::Value) -> Response {
-    let mut body = serde_json::Map::new();
-    body.insert("success".to_string(), serde_json::Value::Bool(true));
-    if let serde_json::Value::Object(map) = payload {
-        for (k, v) in map {
-            body.insert(k, v);
-        }
-    }
-    with_contract_header((StatusCode::OK, Json(serde_json::Value::Object(body))).into_response())
-}
-
-fn err_response(status: StatusCode, message: &str) -> Response {
-    err_response_payload(
-        status,
-        json!({
-            "message": message
-        }),
-    )
-}
-
-fn err_response_payload(status: StatusCode, payload: serde_json::Value) -> Response {
-    let mut body = serde_json::Map::new();
-    body.insert("success".to_string(), serde_json::Value::Bool(false));
-    if let serde_json::Value::Object(map) = payload {
-        for (k, v) in map {
-            body.insert(k, v);
-        }
-    }
-    with_contract_header((status, Json(serde_json::Value::Object(body))).into_response())
-}
-
-fn ok_serializable<T>(payload: T) -> Response
-where
-    T: Serialize,
-{
-    match serde_json::to_value(payload) {
-        Ok(value) => ok(value),
-        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-    }
 }
 
 fn status_from_error_code(code: ApplicationErrorCode) -> StatusCode {
