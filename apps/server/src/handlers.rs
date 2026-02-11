@@ -2,15 +2,16 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::Json;
-use chrono::{Duration, Utc};
 use refine_core::knowledge::ItemId;
 use serde_json::json;
 use std::sync::Arc;
-use uuid::Uuid;
 
 use crate::application::conversation::{
     create_conversation as run_create_conversation,
     create_extraction_job as run_create_extraction_job, CreateConversationError,
+};
+use crate::application::event::{
+    create_event as run_create_event, get_event_summary as run_get_event_summary,
 };
 use crate::application::query::{
     get_quota as run_get_quota, list_conversations as run_list_conversations,
@@ -19,19 +20,10 @@ use crate::application::query::{
 use crate::application::recommendation::recommend_items as run_recommend_items;
 use crate::auth::authorize_user;
 use crate::models::{
-    normalize_timestamp, CreateConversationRequest, CreateEventRequest, CreateExtractionJobRequest,
-    EventRecord, EventSummaryQuery, ListConversationsQuery, ListItemsQuery, RecommendationQuery,
-    SearchQuery,
+    CreateConversationRequest, CreateEventRequest, CreateExtractionJobRequest, EventSummaryQuery,
+    ListConversationsQuery, ListItemsQuery, RecommendationQuery, SearchQuery,
 };
 use crate::state::AppState;
-
-const FUNNEL_EVENTS: [&str; 5] = [
-    "conversation_extracted",
-    "conversation_synced",
-    "recommendation_exposed",
-    "recommendation_clicked",
-    "knowledge_reused",
-];
 
 pub async fn health() -> impl IntoResponse {
     ok(json!({
@@ -130,34 +122,12 @@ pub async fn create_event(
         Err(err) => return err_response(StatusCode::UNAUTHORIZED, &err),
     };
 
-    let event_name = match payload.event_name.map(|value| value.trim().to_string()) {
-        Some(value) if !value.is_empty() => value,
-        _ => return err_response(StatusCode::BAD_REQUEST, "event_name is required"),
-    };
-
-    let source = payload
-        .source
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
-    let properties = normalize_event_properties(payload.properties);
-
-    let event = EventRecord {
-        id: Uuid::new_v4().to_string(),
-        user_id,
-        event_name,
-        source,
-        properties,
-        created_at: normalize_timestamp(payload.occurred_at),
-    };
-
-    if let Err(err) = state.persistence.insert_event(&event) {
-        return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err);
+    match run_create_event(state, user_id, payload) {
+        Ok(result) => ok(json!({
+            "event_id": result.event_id
+        })),
+        Err(err) => err_response(err.status_code(), err.message()),
     }
-
-    ok(json!({
-        "event_id": event.id
-    }))
 }
 
 pub async fn get_event_summary(
@@ -169,27 +139,14 @@ pub async fn get_event_summary(
         return err_response(StatusCode::UNAUTHORIZED, &err);
     }
 
-    let days = query.days.unwrap_or(7).clamp(1, 90);
-    let since = (Utc::now() - Duration::days(days as i64)).to_rfc3339();
-
-    let pairs = match state.persistence.event_counts_since(Some(&since)) {
-        Ok(pairs) => pairs,
-        Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    let result = match run_get_event_summary(state, query.days) {
+        Ok(result) => result,
+        Err(err) => return err_response(err.status_code(), err.message()),
     };
-
-    let mut counts = serde_json::Map::new();
-    for event_name in FUNNEL_EVENTS {
-        counts.insert(event_name.to_string(), json!(0));
+    match serde_json::to_value(result) {
+        Ok(payload) => ok(payload),
+        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
     }
-    for (event_name, count) in pairs {
-        counts.insert(event_name, json!(count));
-    }
-
-    ok(json!({
-        "days": days,
-        "since": since,
-        "counts": counts
-    }))
 }
 
 pub async fn list_conversations(
@@ -338,13 +295,6 @@ fn err_response(status: StatusCode, message: &str) -> (StatusCode, Json<serde_js
             "message": message
         })),
     )
-}
-
-fn normalize_event_properties(raw: Option<serde_json::Value>) -> serde_json::Value {
-    match raw {
-        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
-        _ => json!({}),
-    }
 }
 
 const DASHBOARD_HTML: &str = include_str!("dashboard.html");
