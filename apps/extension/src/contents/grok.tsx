@@ -5,17 +5,10 @@
  */
 
 import type { PlasmoCSConfig } from 'plasmo'
+import { initQuickSaveEngine } from '../lib/content/quick-save-engine'
 import {
-  initQuickSaveEngine,
-  type QuickSaveTarget,
-} from '../lib/content/quick-save-engine'
-import {
+  createStandardQuickSaveResolvers,
   extractConversationBySelectors,
-  getNormalizedConversationTitleFromLink,
-  isCurrentConversationByKeyResolver,
-  isSameConversationByKeyResolver,
-  navigateToQuickSaveTarget,
-  resolveQuickSaveTargetFromLink,
   waitForConversationExtraction,
 } from '../lib/content/platform-adapter'
 import {
@@ -84,6 +77,17 @@ function getConversationKey(rawUrl: string): string | null {
     return null
   }
 }
+
+const {
+  resolveConversationTarget,
+  getConversationTitleFromLink,
+  isSameConversation,
+  isCurrentConversation,
+  navigateToConversation,
+} = createStandardQuickSaveResolvers({
+  getConversationKey,
+  fallbackTitle: 'Grok Conversation',
+})
 
 function extractConversationByKnownSelectors(): string {
   return extractConversationBySelectors(
@@ -156,26 +160,6 @@ function extractConversation(): string {
 
 async function waitForConversationContent(timeoutMs = MESSAGE_POLL_TIMEOUT_MS): Promise<string | null> {
   return waitForConversationExtraction(extractConversation, { timeoutMs })
-}
-
-function resolveConversationTarget(link: HTMLAnchorElement): QuickSaveTarget | null {
-  return resolveQuickSaveTargetFromLink(link, getConversationKey)
-}
-
-function getConversationTitleFromLink(link: HTMLAnchorElement): string {
-  return getNormalizedConversationTitleFromLink(link, document.title || 'Grok Conversation')
-}
-
-function isSameConversation(target: QuickSaveTarget): boolean {
-  return isSameConversationByKeyResolver(target, getConversationKey)
-}
-
-function isCurrentConversation(conversationKey: string): boolean {
-  return isCurrentConversationByKeyResolver(conversationKey, getConversationKey)
-}
-
-async function navigateToConversation(_link: HTMLAnchorElement, target: QuickSaveTarget): Promise<boolean> {
-  return navigateToQuickSaveTarget(target)
 }
 
 initQuickSaveEngine({

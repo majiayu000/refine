@@ -6,6 +6,14 @@ export interface ConversationTurnSelector {
   selector: string
 }
 
+export interface StandardQuickSaveResolvers {
+  resolveConversationTarget: (link: HTMLAnchorElement) => QuickSaveTarget | null
+  getConversationTitleFromLink: (link: HTMLAnchorElement) => string
+  isSameConversation: (target: QuickSaveTarget) => boolean
+  isCurrentConversation: (conversationKey: string) => boolean
+  navigateToConversation: (_link: HTMLAnchorElement, target: QuickSaveTarget) => Promise<boolean>
+}
+
 interface ConversationTurn {
   role: 'Human' | 'Assistant'
   el: Element
@@ -131,5 +139,20 @@ export async function navigateToQuickSaveTarget(target: QuickSaveTarget): Promis
     return true
   } catch {
     return false
+  }
+}
+
+export function createStandardQuickSaveResolvers(options: {
+  getConversationKey: (rawUrl: string) => string | null
+  fallbackTitle: string
+}): StandardQuickSaveResolvers {
+  return {
+    resolveConversationTarget: (link) => resolveQuickSaveTargetFromLink(link, options.getConversationKey),
+    getConversationTitleFromLink: (link) =>
+      getNormalizedConversationTitleFromLink(link, document.title || options.fallbackTitle),
+    isSameConversation: (target) => isSameConversationByKeyResolver(target, options.getConversationKey),
+    isCurrentConversation: (conversationKey) =>
+      isCurrentConversationByKeyResolver(conversationKey, options.getConversationKey),
+    navigateToConversation: (_link, target) => navigateToQuickSaveTarget(target),
   }
 }
