@@ -3,6 +3,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::Json;
 use serde_json::json;
+use serde::Serialize;
 use std::sync::Arc;
 
 use crate::application::conversation::{
@@ -74,10 +75,7 @@ pub async fn create_conversation(
         deduplicated: if result.deduplicated { Some(true) } else { None },
         job_id: result.job_id,
     };
-    match serde_json::to_value(response) {
-        Ok(payload) => ok(payload),
-        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-    }
+    ok_serializable(response)
 }
 
 pub async fn create_extraction_job(
@@ -90,13 +88,10 @@ pub async fn create_extraction_job(
     }
 
     match run_create_extraction_job(state, payload).await {
-        Ok(result) => match serde_json::to_value(CreateExtractionJobResponse {
+        Ok(result) => ok_serializable(CreateExtractionJobResponse {
             job_id: result.job_id,
             status: result.status,
-        }) {
-            Ok(payload) => ok(payload),
-            Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-        },
+        }),
         Err(err) => err_response(err.status_code(), err.message()),
     }
 }
@@ -111,10 +106,7 @@ pub async fn get_extraction_job(
     }
 
     match run_get_extraction_job(state, job_id).await {
-        Ok(result) => match serde_json::to_value(GetExtractionJobResponse { job: result.job }) {
-            Ok(payload) => ok(payload),
-            Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-        },
+        Ok(result) => ok_serializable(GetExtractionJobResponse { job: result.job }),
         Err(err) => err_response(err.status_code(), err.message()),
     }
 }
@@ -130,12 +122,9 @@ pub async fn create_event(
     };
 
     match run_create_event(state, user_id, payload) {
-        Ok(result) => match serde_json::to_value(CreateEventResponse {
+        Ok(result) => ok_serializable(CreateEventResponse {
             event_id: result.event_id,
-        }) {
-            Ok(payload) => ok(payload),
-            Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-        },
+        }),
         Err(err) => err_response(err.status_code(), err.message()),
     }
 }
@@ -153,10 +142,7 @@ pub async fn get_event_summary(
         Ok(result) => result,
         Err(err) => return err_response(err.status_code(), err.message()),
     };
-    match serde_json::to_value(result) {
-        Ok(payload) => ok(payload),
-        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-    }
+    ok_serializable(result)
 }
 
 pub async fn list_conversations(
@@ -169,10 +155,7 @@ pub async fn list_conversations(
     }
 
     let result = run_list_conversations(state, query).await;
-    match serde_json::to_value(result) {
-        Ok(payload) => ok(payload),
-        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-    }
+    ok_serializable(result)
 }
 
 pub async fn list_items(
@@ -188,10 +171,7 @@ pub async fn list_items(
         Ok(result) => result,
         Err(err) => return err_response(err.status_code(), err.message()),
     };
-    match serde_json::to_value(result) {
-        Ok(payload) => ok(payload),
-        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-    }
+    ok_serializable(result)
 }
 
 pub async fn get_quota(
@@ -206,10 +186,7 @@ pub async fn get_quota(
         Ok(result) => result,
         Err(err) => return err_response(err.status_code(), err.message()),
     };
-    match serde_json::to_value(result) {
-        Ok(payload) => ok(payload),
-        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-    }
+    ok_serializable(result)
 }
 
 pub async fn delete_item(
@@ -225,10 +202,7 @@ pub async fn delete_item(
         Ok(result) => result,
         Err(err) => return err_response(err.status_code(), err.message()),
     };
-    match serde_json::to_value(result) {
-        Ok(payload) => ok(payload),
-        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-    }
+    ok_serializable(result)
 }
 
 pub async fn search_items(
@@ -244,10 +218,7 @@ pub async fn search_items(
         Ok(result) => result,
         Err(err) => return err_response(err.status_code(), err.message()),
     };
-    match serde_json::to_value(result) {
-        Ok(payload) => ok(payload),
-        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-    }
+    ok_serializable(result)
 }
 
 pub async fn recommend_items(
@@ -263,10 +234,7 @@ pub async fn recommend_items(
         Ok(result) => result,
         Err(err) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &err),
     };
-    match serde_json::to_value(result) {
-        Ok(payload) => ok(payload),
-        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-    }
+    ok_serializable(result)
 }
 
 fn ok(payload: serde_json::Value) -> (StatusCode, Json<serde_json::Value>) {
@@ -288,6 +256,16 @@ fn err_response(status: StatusCode, message: &str) -> (StatusCode, Json<serde_js
             "message": message
         })),
     )
+}
+
+fn ok_serializable<T>(payload: T) -> (StatusCode, Json<serde_json::Value>)
+where
+    T: Serialize,
+{
+    match serde_json::to_value(payload) {
+        Ok(value) => ok(value),
+        Err(err) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    }
 }
 
 const DASHBOARD_HTML: &str = include_str!("dashboard.html");
