@@ -361,9 +361,7 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
   ): Promise<void> {
     const target = options.resolveTarget(link)
     if (!target) {
-      setQuickSaveButtonState(button, 'error')
-      showToast(messages.invalidTargetToast)
-      resetQuickSaveButtonStateLater(button)
+      setButtonErrorState(button, messages.invalidTargetToast)
       return
     }
 
@@ -419,18 +417,14 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
       requestedAt: Date.now(),
     })
     if (!written) {
-      setQuickSaveButtonState(button, 'error')
-      showToast(messages.pendingWriteFailedToast)
-      resetQuickSaveButtonStateLater(button)
+      setButtonErrorState(button, messages.pendingWriteFailedToast)
       return
     }
 
     showToast(messages.navigateFallbackToast(silentFailureMessage))
     const opened = await options.navigateToTarget(link, target)
     if (!opened) {
-      setQuickSaveButtonState(button, 'error')
-      showToast(messages.openFailedToast)
-      resetQuickSaveButtonStateLater(button)
+      setButtonErrorState(button, messages.openFailedToast)
     }
   }
 
@@ -561,10 +555,11 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
           message,
         }
       } catch {
-        showToast(messages.queueFailedToast)
+        const message = messages.queueFailedToast
+        showToast(message)
         return {
           success: false,
-          message: '入队失败，请稍后重试',
+          message,
         }
       }
     })
