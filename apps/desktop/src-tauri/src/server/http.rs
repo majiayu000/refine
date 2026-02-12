@@ -312,26 +312,22 @@ fn is_allowed_extension_origin(origin: &str) -> bool {
 }
 
 fn get_origin_header(request: &tiny_http::Request) -> Option<String> {
-    request
-        .headers()
-        .iter()
-        .find(|header| header.field.equiv("Origin"))
-        .map(|header| header.value.as_str().to_string())
+    get_header_value(request, "Origin")
 }
 
 fn get_client_header(request: &tiny_http::Request) -> Option<String> {
-    request
-        .headers()
-        .iter()
-        .find(|header| header.field.equiv(CLIENT_HEADER_NAME))
-        .map(|header| header.value.as_str().to_string())
+    get_header_value(request, CLIENT_HEADER_NAME)
 }
 
 fn get_contract_version_header(request: &tiny_http::Request) -> Option<String> {
+    get_header_value(request, CONTRACT_VERSION_HEADER)
+}
+
+fn get_header_value(request: &tiny_http::Request, header_name: &str) -> Option<String> {
     request
         .headers()
         .iter()
-        .find(|header| header.field.equiv(CONTRACT_VERSION_HEADER))
+        .find(|header| header.field.to_string().eq_ignore_ascii_case(header_name))
         .map(|header| header.value.as_str().to_string())
 }
 
