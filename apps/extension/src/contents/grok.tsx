@@ -8,6 +8,7 @@ import type { PlasmoCSConfig } from 'plasmo'
 import { initQuickSaveEngine } from '../lib/content/quick-save-engine'
 import {
   createStandardQuickSaveResolvers,
+  DEFAULT_CONVERSATION_QUERY_PARAM_KEYS,
   DEFAULT_INVALID_CONVERSATION_IDS,
   extractConversationBySelectors,
   resolveConversationPathKey,
@@ -25,7 +26,7 @@ import { normalizeText } from '../lib/content/runtime'
 const MESSAGE_POLL_TIMEOUT_MS = 20_000
 const GROK_PENDING_SIDEBAR_IMPORT_KEY = '__refine_pending_sidebar_import_grok'
 const GROK_IMPORTED_CONVERSATIONS_KEY = '__refine_imported_conversations_grok'
-const QUERY_CONVERSATION_PARAM_KEYS = ['conversationId', 'conversation_id', 'cid', 'id']
+const QUERY_CONVERSATION_PARAM_KEYS = [...DEFAULT_CONVERSATION_QUERY_PARAM_KEYS, 'cid'] as const
 
 export const config: PlasmoCSConfig = {
   matches: ['https://grok.com/*'],

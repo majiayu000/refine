@@ -32,6 +32,12 @@ export const DEFAULT_INVALID_CONVERSATION_IDS: ReadonlySet<string> = new Set([
   'newchat',
 ])
 
+export const DEFAULT_CONVERSATION_QUERY_PARAM_KEYS = [
+  'conversationId',
+  'conversation_id',
+  'id',
+] as const
+
 function sortTurnsByDocumentOrder(turns: ConversationTurn[]): ConversationTurn[] {
   return turns.sort((a, b) => {
     const position = a.el.compareDocumentPosition(b.el)

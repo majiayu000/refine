@@ -11,6 +11,7 @@ import {
   type SilentExtractContentResult,
 } from '../lib/content/quick-save-engine'
 import {
+  DEFAULT_CONVERSATION_QUERY_PARAM_KEYS,
   DEFAULT_INVALID_CONVERSATION_IDS,
   extractConversationBySelectors,
   getNormalizedConversationTitleFromLink,
@@ -38,6 +39,7 @@ const MESSAGE_POLL_TIMEOUT_MS = 20_000
 const HIDDEN_IFRAME_EXTRACT_TIMEOUT_MS = 18_000
 const DEBUG_LOG_KEY = '__refine_gemini_quicksave_logs'
 const DEBUG_LOG_LIMIT = 100
+const GEMINI_CONVERSATION_QUERY_PARAM_KEYS = ['pageId', ...DEFAULT_CONVERSATION_QUERY_PARAM_KEYS] as const
 const GEMINI_TURN_SELECTORS = [
   { role: 'Human' as const, selector: 'main user-query' },
   { role: 'Human' as const, selector: 'main [data-turn-role="user"]' },
@@ -160,7 +162,7 @@ function getConversationKey(rawUrl: string): string | null {
     if (/\/(?:u\/\d+\/)?app\/?$/i.test(parsed.pathname)) {
       return resolveConversationQueryKey(
         parsed.searchParams,
-        ['pageId', 'conversationId', 'conversation_id', 'id'],
+        GEMINI_CONVERSATION_QUERY_PARAM_KEYS,
         DEFAULT_INVALID_CONVERSATION_IDS
       )
     }
@@ -173,7 +175,7 @@ function getConversationKey(rawUrl: string): string | null {
 
 function sanitizeConversationUrl(url: URL): URL {
   const normalized = new URL(url.toString())
-  const maybeInvalidParamKeys = ['pageId', 'conversationId', 'conversation_id', 'id']
+  const maybeInvalidParamKeys = GEMINI_CONVERSATION_QUERY_PARAM_KEYS
 
   for (const key of maybeInvalidParamKeys) {
     const value = normalized.searchParams.get(key)
