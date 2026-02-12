@@ -8,6 +8,7 @@ import type { PlasmoCSConfig } from 'plasmo'
 import { initQuickSaveEngine } from '../lib/content/quick-save-engine'
 import {
   createStandardQuickSaveResolvers,
+  DEFAULT_INVALID_CONVERSATION_IDS,
   extractConversationBySelectors,
   normalizeConversationId,
   waitForConversationExtraction,
@@ -23,7 +24,6 @@ import { normalizeText } from '../lib/content/runtime'
 const MESSAGE_POLL_TIMEOUT_MS = 20_000
 const GROK_PENDING_SIDEBAR_IMPORT_KEY = '__refine_pending_sidebar_import_grok'
 const GROK_IMPORTED_CONVERSATIONS_KEY = '__refine_imported_conversations_grok'
-const INVALID_CONVERSATION_IDS = new Set(['', 'new', 'new_chat', 'newchat', 'null', 'none', 'undefined'])
 const QUERY_CONVERSATION_PARAM_KEYS = ['conversationId', 'conversation_id', 'cid', 'id']
 
 export const config: PlasmoCSConfig = {
@@ -48,14 +48,14 @@ function getConversationKey(rawUrl: string): string | null {
     const parsed = new URL(rawUrl, window.location.origin)
     const pathMatch = parsed.pathname.match(/\/(?:c|chat)\/([^/?#]+)/i)
     if (pathMatch) {
-      const id = normalizeConversationId(pathMatch[1], INVALID_CONVERSATION_IDS)
+      const id = normalizeConversationId(pathMatch[1], DEFAULT_INVALID_CONVERSATION_IDS)
       if (!id) return null
       return `path:${id}`
     }
 
     for (const key of QUERY_CONVERSATION_PARAM_KEYS) {
       const value = parsed.searchParams.get(key)
-      const normalized = normalizeConversationId(value, INVALID_CONVERSATION_IDS)
+      const normalized = normalizeConversationId(value, DEFAULT_INVALID_CONVERSATION_IDS)
       if (!normalized) continue
       return `query:${normalized}`
     }

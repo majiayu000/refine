@@ -22,6 +22,16 @@ interface ConversationTurn {
 const DEFAULT_POLL_INTERVAL_MS = 350
 const DEFAULT_POLL_TIMEOUT_MS = 20_000
 
+export const DEFAULT_INVALID_CONVERSATION_IDS: ReadonlySet<string> = new Set([
+  '',
+  'none',
+  'null',
+  'undefined',
+  'new',
+  'new_chat',
+  'newchat',
+])
+
 function sortTurnsByDocumentOrder(turns: ConversationTurn[]): ConversationTurn[] {
   return turns.sort((a, b) => {
     const position = a.el.compareDocumentPosition(b.el)

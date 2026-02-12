@@ -11,6 +11,7 @@ import {
   type SilentExtractContentResult,
 } from '../lib/content/quick-save-engine'
 import {
+  DEFAULT_INVALID_CONVERSATION_IDS,
   extractConversationBySelectors,
   getNormalizedConversationTitleFromLink,
   isCurrentConversationByKeyResolver,
@@ -33,7 +34,6 @@ const GEMINI_IMPORTED_CONVERSATIONS_KEY = '__refine_imported_conversations_gemin
 const MESSAGE_POLL_INTERVAL_MS = 350
 const MESSAGE_POLL_TIMEOUT_MS = 20_000
 const HIDDEN_IFRAME_EXTRACT_TIMEOUT_MS = 18_000
-const INVALID_CONVERSATION_IDS = new Set(['', 'none', 'null', 'undefined', 'new', 'new_chat', 'newchat'])
 const DEBUG_LOG_KEY = '__refine_gemini_quicksave_logs'
 const DEBUG_LOG_LIMIT = 100
 const GEMINI_TURN_SELECTORS = [
@@ -151,7 +151,7 @@ function getConversationKey(rawUrl: string): string | null {
 
     const pathIdMatch = parsed.pathname.match(/\/app\/([^/?#]+)/i) || parsed.pathname.match(/\/chat\/([^/?#]+)/i)
     if (pathIdMatch) {
-      const id = normalizeConversationId(pathIdMatch[1], INVALID_CONVERSATION_IDS)
+      const id = normalizeConversationId(pathIdMatch[1], DEFAULT_INVALID_CONVERSATION_IDS)
       if (!id) return null
       return `path:${id}`
     }
@@ -163,7 +163,7 @@ function getConversationKey(rawUrl: string): string | null {
         parsed.searchParams.get('conversation_id') ||
         parsed.searchParams.get('id')
 
-      const normalizedQueryId = normalizeConversationId(queryId, INVALID_CONVERSATION_IDS)
+      const normalizedQueryId = normalizeConversationId(queryId, DEFAULT_INVALID_CONVERSATION_IDS)
       if (normalizedQueryId) {
         return `query:${normalizedQueryId}`
       }
@@ -181,7 +181,7 @@ function sanitizeConversationUrl(url: URL): URL {
 
   for (const key of maybeInvalidParamKeys) {
     const value = normalized.searchParams.get(key)
-    if (value && !normalizeConversationId(value, INVALID_CONVERSATION_IDS)) {
+    if (value && !normalizeConversationId(value, DEFAULT_INVALID_CONVERSATION_IDS)) {
       normalized.searchParams.delete(key)
     }
   }
