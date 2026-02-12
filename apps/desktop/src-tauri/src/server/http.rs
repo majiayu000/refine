@@ -1,7 +1,7 @@
 use super::extract::{self, IngestRequest};
 use super::json::parse_json_body;
 use refine_core::infra::{
-    is_contract_compatible, normalize_conversation_input, CreateConversationRequest, ItemDto,
+    normalize_conversation_input, validate_contract_version, CreateConversationRequest, ItemDto,
     LlmClient, CONTRACT_VERSION, CONTRACT_VERSION_HEADER,
 };
 use refine_core::knowledge::ItemRepository;
@@ -335,32 +335,22 @@ fn get_contract_version_header(request: &tiny_http::Request) -> Option<String> {
         .map(|header| header.value.as_str().to_string())
 }
 
-fn is_client_contract_compatible(raw_version: &str) -> bool {
-    let version = raw_version.trim();
-    version.is_empty() || is_contract_compatible(version, CONTRACT_VERSION)
-}
-
 fn incompatible_contract_response(
     request: &tiny_http::Request,
     allowed_origin: Option<&str>,
 ) -> Option<Response<Cursor<Vec<u8>>>> {
     let raw = get_contract_version_header(request)?;
-    if is_client_contract_compatible(&raw) {
-        return None;
+    match validate_contract_version(Some(raw.as_str()), CONTRACT_VERSION) {
+        Ok(()) => None,
+        Err(message) => Some(json_response(
+            426,
+            json!({
+                "success": false,
+                "message": message
+            }),
+            allowed_origin,
+        )),
     }
-
-    Some(json_response(
-        426,
-        json!({
-            "success": false,
-            "message": format!(
-                "Client contract version {} is incompatible with server {}",
-                raw.trim(),
-                CONTRACT_VERSION
-            )
-        }),
-        allowed_origin,
-    ))
 }
 
 fn empty_response(status_code: u16, allowed_origin: Option<&str>) -> Response<Cursor<Vec<u8>>> {
@@ -412,13 +402,14 @@ fn add_common_headers(response: &mut Response<Cursor<Vec<u8>>>, allowed_origin: 
 
 #[cfg(test)]
 mod tests {
-    use super::is_client_contract_compatible;
+    use super::CONTRACT_VERSION;
+    use refine_core::infra::validate_contract_version;
 
     #[test]
     fn client_contract_compatibility_uses_major_version() {
-        assert!(is_client_contract_compatible(""));
-        assert!(is_client_contract_compatible("1.0"));
-        assert!(is_client_contract_compatible("1.9.9"));
-        assert!(!is_client_contract_compatible("2.0"));
+        assert!(validate_contract_version(Some(""), CONTRACT_VERSION).is_ok());
+        assert!(validate_contract_version(Some("1.0"), CONTRACT_VERSION).is_ok());
+        assert!(validate_contract_version(Some("1.9.9"), CONTRACT_VERSION).is_ok());
+        assert!(validate_contract_version(Some("2.0"), CONTRACT_VERSION).is_err());
     }
 }

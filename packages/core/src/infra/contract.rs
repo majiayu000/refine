@@ -96,12 +96,35 @@ pub fn is_contract_compatible(client_version: &str, server_version: &str) -> boo
     !client_major.is_empty() && client_major == server_major
 }
 
+pub fn contract_incompatible_message(client_version: &str, server_version: &str) -> String {
+    format!(
+        "Client contract version {} is incompatible with server {}",
+        client_version.trim(),
+        server_version
+    )
+}
+
+pub fn validate_contract_version(
+    client_version: Option<&str>,
+    server_version: &str,
+) -> Result<(), String> {
+    let Some(client_version) = client_version else {
+        return Ok(());
+    };
+    let version = client_version.trim();
+    if version.is_empty() || is_contract_compatible(version, server_version) {
+        Ok(())
+    } else {
+        Err(contract_incompatible_message(version, server_version))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        is_contract_compatible, normalize_contract_major, normalize_conversation_input,
-        trim_optional, trim_required_field, CreateConversationRequest, ItemDto,
-        NormalizedConversationInput,
+        contract_incompatible_message, is_contract_compatible, normalize_contract_major,
+        normalize_conversation_input, trim_optional, trim_required_field,
+        validate_contract_version, CreateConversationRequest, ItemDto, NormalizedConversationInput,
     };
     use crate::knowledge::Item;
     use serde_json::json;
@@ -187,5 +210,19 @@ mod tests {
         let dto = ItemDto::from(&item);
         assert_eq!(dto.item_type, "knowledge");
         assert_eq!(dto.title, "title");
+    }
+
+    #[test]
+    fn validate_contract_version_allows_missing_and_empty_header() {
+        assert!(validate_contract_version(None, "1.0").is_ok());
+        assert!(validate_contract_version(Some(""), "1.0").is_ok());
+        assert!(validate_contract_version(Some("   "), "1.0").is_ok());
+    }
+
+    #[test]
+    fn validate_contract_version_rejects_incompatible_major() {
+        let err =
+            validate_contract_version(Some("2.0"), "1.0").expect_err("version mismatch expected");
+        assert_eq!(err, contract_incompatible_message("2.0", "1.0"));
     }
 }

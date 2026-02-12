@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use axum::extract::{FromRef, FromRequestParts};
 use axum::http::{request::Parts, HeaderMap, StatusCode};
 use axum::response::Response;
-use refine_core::infra::{is_contract_compatible, normalize_contract_major};
+use refine_core::infra::{
+    is_contract_compatible, normalize_contract_major, validate_contract_version,
+};
 use std::sync::Arc;
 
 use crate::api_response::error_message;
@@ -31,25 +33,16 @@ where
 }
 
 pub fn validate_client_contract(headers: &HeaderMap) -> Result<(), Response> {
-    let Some(raw) = headers.get(CONTRACT_VERSION_HEADER) else {
-        return Ok(());
-    };
-    let raw = raw
-        .to_str()
-        .map_err(|_| error_message(StatusCode::BAD_REQUEST, "invalid contract version header"))?;
-    if raw.trim().is_empty() {
-        return Ok(());
-    }
-    if is_contract_compatible(raw, SERVER_CONTRACT_VERSION) {
-        return Ok(());
-    }
-    Err(error_message(
-        StatusCode::UPGRADE_REQUIRED,
-        &format!(
-            "Client contract version {} is incompatible with server {}",
-            raw, SERVER_CONTRACT_VERSION
-        ),
-    ))
+    let raw = headers
+        .get(CONTRACT_VERSION_HEADER)
+        .map(|value| {
+            value.to_str().map_err(|_| {
+                error_message(StatusCode::BAD_REQUEST, "invalid contract version header")
+            })
+        })
+        .transpose()?;
+    validate_contract_version(raw, SERVER_CONTRACT_VERSION)
+        .map_err(|message| error_message(StatusCode::UPGRADE_REQUIRED, &message))
 }
 
 #[cfg(test)]
