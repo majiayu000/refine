@@ -291,6 +291,16 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
     }, 1_800)
   }
 
+  function saveFailedMessage(result: { message?: string }): string {
+    return result.message || messages.saveFailedFallback
+  }
+
+  function setButtonErrorState(button: HTMLButtonElement, message: string): void {
+    setQuickSaveButtonState(button, 'error')
+    showToast(message)
+    resetQuickSaveButtonStateLater(button)
+  }
+
   async function enqueueExtractedContent(
     content: string,
     enqueueOptions?: {
@@ -378,9 +388,7 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
       if (result.success) {
         showToast(messages.successToast)
       } else {
-        setQuickSaveButtonState(button, 'error')
-        showToast(result.message || messages.saveFailedFallback)
-        resetQuickSaveButtonStateLater(button)
+        setButtonErrorState(button, saveFailedMessage(result))
       }
       return
     }
@@ -397,9 +405,7 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
         if (enqueueResult.success) {
           showToast(messages.silentSuccessToast)
         } else {
-          setQuickSaveButtonState(button, 'error')
-          showToast(enqueueResult.message || messages.saveFailedFallback)
-          resetQuickSaveButtonStateLater(button)
+          setButtonErrorState(button, saveFailedMessage(enqueueResult))
         }
         return
       }
@@ -532,7 +538,7 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
       if (result.success) {
         showToast(messages.successToast)
       } else {
-        showToast(result.message || messages.saveFailedFallback)
+        showToast(saveFailedMessage(result))
       }
     } finally {
       pendingImportProcessing = false
@@ -548,10 +554,11 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
           return result
         }
 
-        showToast(result.message || messages.saveFailedFallback)
+        const message = saveFailedMessage(result)
+        showToast(message)
         return {
           success: false,
-          message: result.message || messages.saveFailedFallback,
+          message,
         }
       } catch {
         showToast(messages.queueFailedToast)
