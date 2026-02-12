@@ -17,6 +17,8 @@ import {
   isCurrentConversationByKeyResolver,
   isSameConversationByKeyResolver,
   normalizeConversationId,
+  resolveConversationPathKey,
+  resolveConversationQueryKey,
   waitForConversationExtraction,
 } from '../lib/content/platform-adapter'
 import { delay, toErrorMessage } from '../lib/content/runtime'
@@ -148,25 +150,19 @@ function withCurrentAccountPrefix(url: URL): URL {
 function getConversationKey(rawUrl: string): string | null {
   try {
     const parsed = withCurrentAccountPrefix(new URL(rawUrl, window.location.origin))
-
-    const pathIdMatch = parsed.pathname.match(/\/app\/([^/?#]+)/i) || parsed.pathname.match(/\/chat\/([^/?#]+)/i)
-    if (pathIdMatch) {
-      const id = normalizeConversationId(pathIdMatch[1], DEFAULT_INVALID_CONVERSATION_IDS)
-      if (!id) return null
-      return `path:${id}`
-    }
+    const pathKey = resolveConversationPathKey(
+      parsed.pathname,
+      [/\/app\/([^/?#]+)/i, /\/chat\/([^/?#]+)/i],
+      DEFAULT_INVALID_CONVERSATION_IDS
+    )
+    if (pathKey) return pathKey
 
     if (/\/(?:u\/\d+\/)?app\/?$/i.test(parsed.pathname)) {
-      const queryId =
-        parsed.searchParams.get('pageId') ||
-        parsed.searchParams.get('conversationId') ||
-        parsed.searchParams.get('conversation_id') ||
-        parsed.searchParams.get('id')
-
-      const normalizedQueryId = normalizeConversationId(queryId, DEFAULT_INVALID_CONVERSATION_IDS)
-      if (normalizedQueryId) {
-        return `query:${normalizedQueryId}`
-      }
+      return resolveConversationQueryKey(
+        parsed.searchParams,
+        ['pageId', 'conversationId', 'conversation_id', 'id'],
+        DEFAULT_INVALID_CONVERSATION_IDS
+      )
     }
 
     return null

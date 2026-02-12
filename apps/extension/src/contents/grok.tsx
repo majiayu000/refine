@@ -10,7 +10,8 @@ import {
   createStandardQuickSaveResolvers,
   DEFAULT_INVALID_CONVERSATION_IDS,
   extractConversationBySelectors,
-  normalizeConversationId,
+  resolveConversationPathKey,
+  resolveConversationQueryKey,
   waitForConversationExtraction,
 } from '../lib/content/platform-adapter'
 import {
@@ -46,21 +47,18 @@ initRecommendationEngine({
 function getConversationKey(rawUrl: string): string | null {
   try {
     const parsed = new URL(rawUrl, window.location.origin)
-    const pathMatch = parsed.pathname.match(/\/(?:c|chat)\/([^/?#]+)/i)
-    if (pathMatch) {
-      const id = normalizeConversationId(pathMatch[1], DEFAULT_INVALID_CONVERSATION_IDS)
-      if (!id) return null
-      return `path:${id}`
-    }
-
-    for (const key of QUERY_CONVERSATION_PARAM_KEYS) {
-      const value = parsed.searchParams.get(key)
-      const normalized = normalizeConversationId(value, DEFAULT_INVALID_CONVERSATION_IDS)
-      if (!normalized) continue
-      return `query:${normalized}`
-    }
-
-    return null
+    return (
+      resolveConversationPathKey(
+        parsed.pathname,
+        [/\/(?:c|chat)\/([^/?#]+)/i],
+        DEFAULT_INVALID_CONVERSATION_IDS
+      ) ||
+      resolveConversationQueryKey(
+        parsed.searchParams,
+        QUERY_CONVERSATION_PARAM_KEYS,
+        DEFAULT_INVALID_CONVERSATION_IDS
+      )
+    )
   } catch {
     return null
   }

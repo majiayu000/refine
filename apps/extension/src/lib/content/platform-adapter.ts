@@ -123,6 +123,33 @@ export function normalizeConversationId(
   return normalized
 }
 
+export function resolveConversationPathKey(
+  pathname: string,
+  patterns: RegExp[],
+  invalidIds: ReadonlySet<string> = DEFAULT_INVALID_CONVERSATION_IDS
+): string | null {
+  for (const pattern of patterns) {
+    const matched = pathname.match(pattern)
+    if (!matched) continue
+    const normalized = normalizeConversationId(matched[1], invalidIds)
+    if (normalized) return `path:${normalized}`
+  }
+  return null
+}
+
+export function resolveConversationQueryKey(
+  searchParams: URLSearchParams,
+  keys: readonly string[],
+  invalidIds: ReadonlySet<string> = DEFAULT_INVALID_CONVERSATION_IDS
+): string | null {
+  for (const key of keys) {
+    const value = searchParams.get(key)
+    const normalized = normalizeConversationId(value, invalidIds)
+    if (normalized) return `query:${normalized}`
+  }
+  return null
+}
+
 export function resolveQuickSaveTargetFromLink(
   link: HTMLAnchorElement,
   getConversationKey: (rawUrl: string) => string | null
