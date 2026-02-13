@@ -98,7 +98,8 @@ function debugLog(
 
   const printer =
     level === 'error' ? console.error : level === 'warn' ? console.warn : console.info
-  printer(`[Refine Gemini] ${event}: ${message}`, context || '')
+  const contextStr = context ? ` ${JSON.stringify(context)}` : ''
+  printer(`[Refine Gemini] ${event}: ${message}${contextStr}`)
 }
 
 function extractConversationFromRoot(root: ParentNode = document): string {
@@ -206,7 +207,7 @@ function resolveConversationTarget(link: HTMLAnchorElement): QuickSaveTarget | n
     const sanitized = sanitizeConversationUrl(resolved)
     const conversationKey = getConversationKey(sanitized.toString())
     if (!conversationKey) {
-      debugLog('warn', 'resolve_target', 'conversation key invalid', {
+      debugLog('info', 'resolve_target', 'conversation key invalid', {
         href: sanitized.toString(),
       })
       return null

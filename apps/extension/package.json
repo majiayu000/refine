@@ -32,7 +32,12 @@
       "https://chatgpt.com/*",
       "https://claude.ai/*",
       "https://gemini.google.com/*",
-      "https://grok.com/*"
+      "https://grok.com/*",
+      "https://*.grok.com/*",
+      "https://x.com/i/grok*",
+      "https://twitter.com/i/grok*",
+      "https://x.ai/grok*",
+      "https://*.x.ai/grok*"
     ],
     "permissions": [
       "storage",

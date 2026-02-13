@@ -82,6 +82,36 @@ const DEFAULT_ONBOARDING_STATE: OnboardingTaskState = {
   updatedAt: 0,
 }
 
+function isSupportedConversationUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'https:') return false
+
+    const host = parsed.hostname.toLowerCase()
+    const path = parsed.pathname.toLowerCase()
+
+    if (host === 'chat.openai.com' || host === 'chatgpt.com' || host === 'claude.ai' || host === 'gemini.google.com') {
+      return true
+    }
+
+    if (host === 'grok.com' || host.endsWith('.grok.com')) {
+      return true
+    }
+
+    if ((host === 'x.com' || host === 'twitter.com') && path.startsWith('/i/grok')) {
+      return true
+    }
+
+    if ((host === 'x.ai' || host.endsWith('.x.ai')) && path.startsWith('/grok')) {
+      return true
+    }
+
+    return false
+  } catch {
+    return false
+  }
+}
+
 async function safeRuntimeMessage<T>(message: unknown): Promise<T | null> {
   try {
     return (await chrome.runtime.sendMessage(message)) as T
@@ -358,7 +388,7 @@ export default function Popup() {
     }
 
     const url = tab.url || ''
-    const isSupported = /^https:\/\/(chat\.openai\.com|chatgpt\.com|claude\.ai|gemini\.google\.com|grok\.com)\//.test(url)
+    const isSupported = isSupportedConversationUrl(url)
     if (!isSupported) {
       setExtractMessage('当前页面不支持，请在 ChatGPT、Claude、Gemini 或 Grok 对话页使用')
       setExtractMessageLevel('error')

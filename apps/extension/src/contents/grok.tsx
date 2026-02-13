@@ -26,10 +26,24 @@ import { normalizeText } from '../lib/content/runtime'
 const MESSAGE_POLL_TIMEOUT_MS = 20_000
 const GROK_PENDING_SIDEBAR_IMPORT_KEY = '__refine_pending_sidebar_import_grok'
 const GROK_IMPORTED_CONVERSATIONS_KEY = '__refine_imported_conversations_grok'
-const QUERY_CONVERSATION_PARAM_KEYS = [...DEFAULT_CONVERSATION_QUERY_PARAM_KEYS, 'cid'] as const
+const QUERY_CONVERSATION_PARAM_KEYS = [
+  ...DEFAULT_CONVERSATION_QUERY_PARAM_KEYS,
+  'cid',
+  'conversation',
+  'conversationKey',
+  'chatId',
+  'threadId',
+] as const
 
 export const config: PlasmoCSConfig = {
-  matches: ['https://grok.com/*'],
+  matches: [
+    'https://grok.com/*',
+    'https://*.grok.com/*',
+    'https://x.com/i/grok*',
+    'https://twitter.com/i/grok*',
+    'https://x.ai/grok*',
+    'https://*.x.ai/grok*',
+  ],
   all_frames: false,
 }
 
@@ -51,7 +65,10 @@ function getConversationKey(rawUrl: string): string | null {
     return (
       resolveConversationPathKey(
         parsed.pathname,
-        [/\/(?:c|chat)\/([^/?#]+)/i],
+        [
+          /\/(?:c|chat|conversation|conversations)\/([^/?#]+)/i,
+          /\/i\/grok\/(?:c|chat|conversation|conversations|s)\/([^/?#]+)/i,
+        ],
         DEFAULT_INVALID_CONVERSATION_IDS
       ) ||
       resolveConversationQueryKey(
@@ -152,7 +169,8 @@ async function waitForConversationContent(timeoutMs = MESSAGE_POLL_TIMEOUT_MS): 
 initQuickSaveEngine({
   providerId: 'grok',
   source: 'grok',
-  linkSelector: 'aside a[href], nav a[href], [role="navigation"] a[href], a[href*="/c/"], a[href*="/chat/"]',
+  linkSelector:
+    'aside a[href], nav a[href], [role="navigation"] a[href], a[href*="/c/"], a[href*="/chat/"], a[href*="/conversation/"], a[href*="/i/grok/"]',
   pendingStorageKey: GROK_PENDING_SIDEBAR_IMPORT_KEY,
   importedStorageKey: GROK_IMPORTED_CONVERSATIONS_KEY,
   resolveTarget: resolveConversationTarget,
