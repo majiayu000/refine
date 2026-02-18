@@ -44,7 +44,7 @@ pub async fn delete_item(
 
     let deleted = state
         .store
-        .delete(&ItemId::from_str(&normalized_id))
+        .delete(&ItemId::from(normalized_id.as_str()))
         .await
         .map_err(|err| DeleteItemError::Internal(err.to_string()))?;
     if !deleted {

@@ -18,12 +18,14 @@ impl ItemId {
         Self(Uuid::new_v4().to_string())
     }
 
-    pub fn from_str(s: &str) -> Self {
-        Self(s.to_string())
-    }
-
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl From<&str> for ItemId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
     }
 }
 

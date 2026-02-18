@@ -7,6 +7,19 @@ use crate::knowledge::types::{ItemId, ItemType, Source, Tag};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// 从持久化存储还原 Item 的参数
+pub struct RestoreParams {
+    pub id: ItemId,
+    pub item_type: ItemType,
+    pub title: String,
+    pub summary: String,
+    pub content: String,
+    pub tags: Vec<Tag>,
+    pub source: Option<Source>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// 知识片段 - 聚合根
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Item {
@@ -54,31 +67,21 @@ impl Item {
     }
 
     /// 从持久化存储还原实体（不触发业务时间更新）
-    pub fn restore(
-        id: ItemId,
-        item_type: ItemType,
-        title: String,
-        summary: String,
-        content: String,
-        tags: Vec<Tag>,
-        source: Option<Source>,
-        created_at: DateTime<Utc>,
-        updated_at: DateTime<Utc>,
-    ) -> Result<Self, DomainError> {
-        if tags.len() > 20 {
+    pub fn restore(params: RestoreParams) -> Result<Self, DomainError> {
+        if params.tags.len() > 20 {
             return Err(DomainError::TooManyTags);
         }
 
         Ok(Self {
-            id,
-            item_type,
-            title,
-            summary,
-            content,
-            tags,
-            source,
-            created_at,
-            updated_at,
+            id: params.id,
+            item_type: params.item_type,
+            title: params.title,
+            summary: params.summary,
+            content: params.content,
+            tags: params.tags,
+            source: params.source,
+            created_at: params.created_at,
+            updated_at: params.updated_at,
         })
     }
 

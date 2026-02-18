@@ -31,7 +31,7 @@ pub async fn get_items(
 
 #[tauri::command]
 pub async fn get_item(state: State<'_, AppState>, id: String) -> Result<Option<ItemDto>, String> {
-    let item_id = ItemId::from_str(&id);
+    let item_id = ItemId::from(id.as_str());
 
     state
         .store
@@ -110,7 +110,7 @@ pub async fn update_item(
     summary: Option<String>,
     content: Option<String>,
 ) -> Result<ItemDto, String> {
-    let item_id = ItemId::from_str(&id);
+    let item_id = ItemId::from(id.as_str());
 
     let mut item = state
         .store
@@ -135,7 +135,7 @@ pub async fn update_item(
 
 #[tauri::command]
 pub async fn delete_item(state: State<'_, AppState>, id: String) -> Result<bool, String> {
-    let item_id = ItemId::from_str(&id);
+    let item_id = ItemId::from(id.as_str());
     state
         .store
         .delete(&item_id)

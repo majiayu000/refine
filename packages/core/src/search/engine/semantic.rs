@@ -38,7 +38,7 @@ impl SearchEngine {
         }
 
         for (rank, (id, raw_score)) in semantic.into_iter().enumerate() {
-            let Some(item) = self.item_repo.find_by_id(&ItemId::from_str(&id)).await? else {
+            let Some(item) = self.item_repo.find_by_id(&ItemId::from(id.as_str())).await? else {
                 continue;
             };
             if !Self::matches_filter(&item, &query.filter) {

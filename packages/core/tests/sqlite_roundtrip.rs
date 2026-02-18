@@ -1,6 +1,6 @@
 use chrono::{Duration, TimeZone, Utc};
 use refine_core::infra::SqliteStore;
-use refine_core::knowledge::{Item, ItemId, ItemRepository, ItemType, Source, Tag};
+use refine_core::knowledge::{Item, ItemId, ItemRepository, ItemType, RestoreParams, Source, Tag};
 use std::collections::HashSet;
 
 #[tokio::test]
@@ -13,17 +13,17 @@ async fn roundtrip_preserves_timestamps_and_content() {
         .expect("invalid created_at");
     let updated_at = created_at + Duration::minutes(5);
 
-    let item = Item::restore(
-        ItemId::from_str("item-1"),
-        ItemType::Knowledge,
-        "Rust Time Semantics".to_string(),
-        "Verify persisted timestamps are stable".to_string(),
-        "Detailed content should survive roundtrip.".to_string(),
-        vec![Tag::new("rust").expect("invalid tag")],
-        Some(Source::new("claude").with_url("https://claude.ai/chat/abc")),
+    let item = Item::restore(RestoreParams {
+        id: ItemId::from("item-1"),
+        item_type: ItemType::Knowledge,
+        title: "Rust Time Semantics".to_string(),
+        summary: "Verify persisted timestamps are stable".to_string(),
+        content: "Detailed content should survive roundtrip.".to_string(),
+        tags: vec![Tag::new("rust").expect("invalid tag")],
+        source: Some(Source::new("claude").with_url("https://claude.ai/chat/abc")),
         created_at,
         updated_at,
-    )
+    })
     .expect("failed to restore item");
 
     store.save(&item).await.expect("failed to save item");

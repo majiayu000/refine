@@ -1,5 +1,5 @@
 use crate::error::{InfraError, InfraResult};
-use crate::knowledge::{Item, ItemId, ItemType, Tag};
+use crate::knowledge::{Item, ItemId, ItemType, RestoreParams, Tag};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use std::time::Duration;
@@ -103,8 +103,8 @@ pub(super) fn row_to_item(row: &rusqlite::Row) -> InfraResult<Item> {
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|e| InfraError::Serialization(format!("updated_at 解析失败: {}", e)))?;
 
-    Item::restore(
-        ItemId::from_str(&id),
+    Item::restore(RestoreParams {
+        id: ItemId::from(id.as_str()),
         item_type,
         title,
         summary,
@@ -113,7 +113,7 @@ pub(super) fn row_to_item(row: &rusqlite::Row) -> InfraResult<Item> {
         source,
         created_at,
         updated_at,
-    )
+    })
     .map_err(|e| InfraError::Serialization(e.to_string()))
 }
 

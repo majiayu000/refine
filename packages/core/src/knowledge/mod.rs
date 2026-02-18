@@ -11,6 +11,6 @@ mod repository;
 mod types;
 
 // 公共 API
-pub use item::Item;
+pub use item::{Item, RestoreParams};
 pub use repository::ItemRepository;
 pub use types::{ItemId, ItemType, Source, Tag};

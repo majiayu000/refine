@@ -98,7 +98,7 @@ async fn handle_list(r#type: Option<String>, limit: usize, store: Arc<SqliteStor
 }
 
 async fn handle_show(id: &str, store: Arc<SqliteStore>) -> Result<()> {
-    let item_id = ItemId::from_str(id);
+    let item_id = ItemId::from(id);
     match store.find_by_id(&item_id).await? {
         Some(item) => println!("{}", format_item(&item, true)),
         None => println!("未找到 ID 为 {} 的知识", id),
@@ -108,7 +108,7 @@ async fn handle_show(id: &str, store: Arc<SqliteStore>) -> Result<()> {
 }
 
 async fn handle_delete(id: &str, store: Arc<SqliteStore>) -> Result<()> {
-    let item_id = ItemId::from_str(id);
+    let item_id = ItemId::from(id);
     if store.delete(&item_id).await? {
         println!("已删除: {}", id);
     } else {
