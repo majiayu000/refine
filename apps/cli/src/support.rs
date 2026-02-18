@@ -3,25 +3,7 @@ use refine_core::infra::{
     build_llm_client_from_env as build_core_llm_client_from_env, LlmClient,
 };
 use refine_core::knowledge::{Item, ItemType};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-pub fn get_db_path(db: &str) -> PathBuf {
-    if db.starts_with("~/") {
-        dirs::home_dir()
-            .map(|home| home.join(&db[2..]))
-            .unwrap_or_else(|| PathBuf::from(db))
-    } else {
-        PathBuf::from(db)
-    }
-}
-
-pub fn ensure_db_dir(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    Ok(())
-}
 
 pub fn parse_item_type(raw: &str) -> Option<ItemType> {
     match raw.to_lowercase().as_str() {

@@ -5,9 +5,9 @@ use clap::{Parser, Subcommand};
 #[command(about = "智能知识复用引擎 - 从 AI 对话中提炼知识", long_about = None)]
 #[command(version)]
 pub struct Cli {
-    /// 数据库路径
-    #[arg(long, default_value = "~/.refine/data.db")]
-    pub db: String,
+    /// 数据库路径（默认使用与 server/desktop 相同的统一路径）
+    #[arg(long)]
+    pub db: Option<String>,
 
     #[command(subcommand)]
     pub command: Commands,

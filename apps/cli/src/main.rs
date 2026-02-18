@@ -9,9 +9,10 @@ mod support;
 use anyhow::{Context, Result};
 use clap::Parser;
 use cli::Cli;
-use refine_core::infra::SqliteStore;
+use refine_core::infra::{ensure_db_dir, resolve_db_path, SqliteStore};
 use refine_core::knowledge::ItemRepository;
 use refine_core::search::SearchEngine;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -21,8 +22,11 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let db_path = support::get_db_path(&cli.db);
-    support::ensure_db_dir(&db_path)?;
+    let db_path = match &cli.db {
+        Some(raw) => PathBuf::from(raw),
+        None => resolve_db_path(&[]),
+    };
+    ensure_db_dir(&db_path).map_err(|e| anyhow::anyhow!(e))?;
 
     let store = Arc::new(SqliteStore::open(&db_path).context("打开数据库失败")?);
     let repo: Arc<dyn ItemRepository> = store.clone();

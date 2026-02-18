@@ -17,6 +17,7 @@ tracing.workspace = true
 reqwest.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+dirs = "5"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

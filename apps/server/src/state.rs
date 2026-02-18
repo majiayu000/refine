@@ -1,8 +1,9 @@
-use refine_core::infra::{build_llm_client_from_env, LlmClient, SqliteStore};
+use refine_core::infra::{
+    build_llm_client_from_env, ensure_db_dir, resolve_db_path, LlmClient, SqliteStore,
+};
 use refine_core::knowledge::ItemRepository;
 use refine_core::search::SearchEngine;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -32,7 +33,7 @@ pub struct AppState {
 
 impl AppState {
     pub async fn build() -> Result<Self, String> {
-        let db_path = get_db_path();
+        let db_path = resolve_db_path(&["REFINE_SERVER_DB_PATH"]);
         ensure_db_dir(&db_path)?;
         let persistence = Arc::new(ServerPersistence::new(db_path.clone())?);
         let conversation_repo: Arc<dyn ConversationRepository> = persistence.clone();
@@ -114,23 +115,6 @@ impl AppState {
     }
 }
 
-fn get_db_path() -> PathBuf {
-    if let Some(raw) = env_var(&["REFINE_SERVER_DB_PATH"]) {
-        return PathBuf::from(raw);
-    }
-
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("refine")
-        .join("server.db")
-}
-
-fn ensure_db_dir(path: &Path) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
 
 fn env_var(keys: &[&str]) -> Option<String> {
     keys.iter()

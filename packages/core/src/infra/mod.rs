@@ -8,6 +8,7 @@
 
 mod contract;
 mod llm;
+mod paths;
 mod sqlite;
 
 // 公共 API
@@ -21,4 +22,5 @@ pub use llm::{
     build_llm_client_from_env, build_required_llm_client_from_env, ClaudeClient, LlmClient,
     OpenAIClient,
 };
+pub use paths::{default_db_path, ensure_db_dir, resolve_db_path};
 pub use sqlite::SqliteStore;
