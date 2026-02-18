@@ -2,9 +2,7 @@ use async_trait::async_trait;
 use axum::extract::{FromRef, FromRequestParts};
 use axum::http::{request::Parts, HeaderMap, StatusCode};
 use axum::response::Response;
-use refine_core::infra::{
-    is_contract_compatible, normalize_contract_major, validate_contract_version,
-};
+use refine_core::infra::validate_contract_version;
 use std::sync::Arc;
 
 use crate::api_response::error_message;
@@ -32,6 +30,7 @@ where
     }
 }
 
+#[allow(clippy::result_large_err)] // Response is the idiomatic Axum rejection type
 pub fn validate_client_contract(headers: &HeaderMap) -> Result<(), Response> {
     let raw = headers
         .get(CONTRACT_VERSION_HEADER)
@@ -47,10 +46,8 @@ pub fn validate_client_contract(headers: &HeaderMap) -> Result<(), Response> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        is_contract_compatible, normalize_contract_major, validate_client_contract,
-        CONTRACT_VERSION_HEADER,
-    };
+    use super::{validate_client_contract, CONTRACT_VERSION_HEADER};
+    use refine_core::infra::{is_contract_compatible, normalize_contract_major};
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
 
     #[test]

@@ -78,7 +78,7 @@ impl Conversation {
         for line in text.lines() {
             let trimmed = line.trim();
 
-            if trimmed.starts_with("Human:") {
+            if let Some(rest) = trimmed.strip_prefix("Human:") {
                 if let Some(role) = current_role.take() {
                     messages.push(Message {
                         role,
@@ -86,8 +86,8 @@ impl Conversation {
                     });
                 }
                 current_role = Some(Role::Human);
-                current_content = trimmed.strip_prefix("Human:").unwrap().to_string();
-            } else if trimmed.starts_with("Assistant:") {
+                current_content = rest.to_string();
+            } else if let Some(rest) = trimmed.strip_prefix("Assistant:") {
                 if let Some(role) = current_role.take() {
                     messages.push(Message {
                         role,
@@ -95,7 +95,7 @@ impl Conversation {
                     });
                 }
                 current_role = Some(Role::Assistant);
-                current_content = trimmed.strip_prefix("Assistant:").unwrap().to_string();
+                current_content = rest.to_string();
             } else if current_role.is_some() {
                 current_content.push('\n');
                 current_content.push_str(line);
@@ -129,7 +129,7 @@ impl Conversation {
         for line in text.lines() {
             let trimmed = line.trim();
 
-            if trimmed.starts_with("Q:") {
+            if let Some(rest) = trimmed.strip_prefix("Q:") {
                 if let Some(role) = current_role.take() {
                     messages.push(Message {
                         role,
@@ -137,8 +137,8 @@ impl Conversation {
                     });
                 }
                 current_role = Some(Role::Human);
-                current_content = trimmed.strip_prefix("Q:").unwrap().to_string();
-            } else if trimmed.starts_with("A:") {
+                current_content = rest.to_string();
+            } else if let Some(rest) = trimmed.strip_prefix("A:") {
                 if let Some(role) = current_role.take() {
                     messages.push(Message {
                         role,
@@ -146,7 +146,7 @@ impl Conversation {
                     });
                 }
                 current_role = Some(Role::Assistant);
-                current_content = trimmed.strip_prefix("A:").unwrap().to_string();
+                current_content = rest.to_string();
             } else if current_role.is_some() {
                 current_content.push('\n');
                 current_content.push_str(line);
