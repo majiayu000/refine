@@ -40,7 +40,16 @@ function formatShortDate(date: string): string {
 }
 
 export function ItemList() {
-  const { items, selectedItem, selectItem, isLoading } = useStore()
+  const {
+    items,
+    totalItems,
+    nextCursor,
+    selectedItem,
+    selectItem,
+    isLoading,
+    isLoadingMore,
+    loadMoreItems,
+  } = useStore()
 
   if (isLoading) {
     return (
@@ -64,17 +73,35 @@ export function ItemList() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto px-3 pb-3 pt-2 md:px-4">
-      <div className="space-y-2">
-        {items.map((item) => (
-          <ItemCard
-            key={item.id}
-            item={item}
-            isSelected={selectedItem?.id === item.id}
-            onClick={() => selectItem(item)}
-          />
-        ))}
+    <div className="flex min-h-0 flex-1 flex-col px-3 pb-3 pt-2 md:px-4">
+      <div className="mb-2 flex items-center justify-between px-1 text-xs text-slate-500">
+        <span>已加载 {items.length} / 共 {totalItems} 条</span>
+        <span>{nextCursor === null ? '已全部加载' : `剩余 ${Math.max(totalItems - items.length, 0)} 条`}</span>
       </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="space-y-2">
+          {items.map((item) => (
+            <ItemCard
+              key={item.id}
+              item={item}
+              isSelected={selectedItem?.id === item.id}
+              onClick={() => selectItem(item)}
+            />
+          ))}
+        </div>
+      </div>
+
+      {nextCursor !== null && (
+        <button
+          onClick={() => void loadMoreItems()}
+          disabled={isLoadingMore}
+          className="mt-3 inline-flex items-center justify-center gap-2 rounded-xl border border-sand-200 bg-white/85 px-3 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {isLoadingMore && <LoaderCircle className="h-4 w-4 animate-spin" />}
+          {isLoadingMore ? '正在加载...' : '加载更多'}
+        </button>
+      )}
     </div>
   )
 }

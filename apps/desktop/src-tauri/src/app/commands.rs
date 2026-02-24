@@ -1,4 +1,4 @@
-use super::dto::{ItemDto, SearchResultDto};
+use super::dto::{ItemDto, ItemListResultDto, SearchResultDto};
 use super::state::AppState;
 use refine_core::knowledge::{Item, ItemId, ItemType, Tag};
 use refine_core::search::SearchQuery;
@@ -8,25 +8,43 @@ use tauri::State;
 pub async fn get_items(
     state: State<'_, AppState>,
     item_type: Option<String>,
+    cursor: Option<usize>,
     limit: Option<usize>,
-) -> Result<Vec<ItemDto>, String> {
-    let limit = limit.unwrap_or(50);
+) -> Result<ItemListResultDto, String> {
+    let cursor = cursor.unwrap_or(0);
+    let limit = limit.unwrap_or(50).clamp(1, 100);
 
-    let items = if let Some(type_str) = item_type {
-        let item_type = match type_str.as_str() {
+    let item_type_filter = match item_type {
+        Some(type_str) => Some(match type_str.as_str() {
             "knowledge" => ItemType::Knowledge,
             "skill" => ItemType::Skill,
             "snippet" => ItemType::Snippet,
             _ => return Err("无效的类型".to_string()),
-        };
-        state.store.find_by_type(item_type).await
-    } else {
-        state.store.find_all().await
+        }),
+        None => None,
     };
 
-    items
-        .map(|items| items.iter().take(limit).map(ItemDto::from).collect())
-        .map_err(|e| e.to_string())
+    let total = state
+        .store
+        .count_items(item_type_filter.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    let items = state
+        .store
+        .find_recent(item_type_filter, cursor, limit)
+        .await
+        .map_err(|e| e.to_string())?;
+    let next_cursor = if cursor + items.len() < total {
+        Some(cursor + items.len())
+    } else {
+        None
+    };
+
+    Ok(ItemListResultDto {
+        items: items.iter().map(ItemDto::from).collect(),
+        total,
+        next_cursor,
+    })
 }
 
 #[tauri::command]

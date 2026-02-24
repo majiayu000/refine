@@ -15,6 +15,18 @@ export interface SearchResult {
   total: number
 }
 
+export interface ItemListResult {
+  items: Item[]
+  total: number
+  nextCursor: number | null
+}
+
+interface RawItemListResult {
+  items?: Item[]
+  total?: number
+  next_cursor?: number | null
+}
+
 const DEFAULT_API_BASE = 'http://127.0.0.1:8787'
 
 function isTauriRuntime(): boolean {
@@ -44,25 +56,43 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T
 }
 
+function normalizeItemListResult(data: RawItemListResult): ItemListResult {
+  const items = Array.isArray(data.items) ? data.items : []
+  return {
+    items,
+    total: typeof data.total === 'number' ? data.total : items.length,
+    nextCursor: typeof data.next_cursor === 'number' ? data.next_cursor : null,
+  }
+}
+
 // 获取所有知识
 export async function getItems(params?: {
   item_type?: string
+  cursor?: number
   limit?: number
-}): Promise<Item[]> {
+}): Promise<ItemListResult> {
+  const cursor = params?.cursor ?? 0
+  const limit = params?.limit ?? 50
+
   if (!isTauriRuntime()) {
-    const limit = params?.limit ?? 50
     const query = new URLSearchParams({
-      cursor: '0',
+      cursor: String(cursor),
       limit: String(limit),
     })
     if (params?.item_type) {
       query.set('item_type', params.item_type)
     }
 
-    const data = await requestJson<{ items: Item[] }>(`/v1/items?${query.toString()}`)
-    return data.items || []
+    const data = await requestJson<RawItemListResult>(`/v1/items?${query.toString()}`)
+    return normalizeItemListResult(data)
   }
-  return invoke('get_items', params || {})
+
+  const data = await invoke<RawItemListResult>('get_items', {
+    item_type: params?.item_type,
+    cursor,
+    limit,
+  })
+  return normalizeItemListResult(data)
 }
 
 // 获取单个知识

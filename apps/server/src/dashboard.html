@@ -546,10 +546,12 @@
       query: "",
       loading: false,
       items: [],
+      itemsTotal: 0,
       convCursor: 0,
       convNextCursor: null,
       convLoading: false,
       conversations: [],
+      convTotal: 0,
       funnelLoading: false,
       funnelDays: 7,
       funnelCounts: {
@@ -631,7 +633,9 @@
         statPill.textContent = "加载中"
         return
       }
-      statPill.textContent = `知识 ${state.items.length} · 待总结 ${state.conversations.length}`
+      const itemsTotal = Number.isFinite(state.itemsTotal) ? state.itemsTotal : state.items.length
+      const convTotal = Number.isFinite(state.convTotal) ? state.convTotal : state.conversations.length
+      statPill.textContent = `知识 ${state.items.length}/${itemsTotal} · 待总结 ${state.conversations.length}/${convTotal}`
     }
 
     function renderEmpty() {
@@ -655,7 +659,7 @@
       } else if (!state.items.length) {
         renderEmpty()
       } else {
-        setNotice(`已加载 ${state.items.length} 条知识`)
+        setNotice(`已加载 ${state.items.length}/${state.itemsTotal} 条知识`)
         listEl.innerHTML = state.items.map(item => `
           <article class="item">
             <div class="item-head">
@@ -788,6 +792,7 @@
         state.cursor = 0
         state.nextCursor = null
         state.items = []
+        state.itemsTotal = 0
       }
 
       try {
@@ -797,6 +802,7 @@
           resp = await requestJson(`/v1/search?q=${q}&limit=100`)
           if (!resp.ok) throw resp
           state.items = resp.data.items || []
+          state.itemsTotal = state.items.length
           state.nextCursor = null
         } else {
           const respPath = `/v1/items?cursor=${state.cursor}&limit=30`
@@ -804,6 +810,7 @@
           if (!resp.ok) throw resp
           const loaded = resp.data.items || []
           state.items = reset ? loaded : state.items.concat(loaded)
+          state.itemsTotal = Number(resp.data.total ?? state.items.length)
           state.nextCursor = resp.data.next_cursor ?? null
         }
       } catch (err) {
@@ -828,6 +835,7 @@
         state.convCursor = 0
         state.convNextCursor = null
         state.conversations = []
+        state.convTotal = 0
       }
 
       try {
@@ -837,6 +845,7 @@
 
         const loaded = resp.data.conversations || []
         state.conversations = reset ? loaded : state.conversations.concat(loaded)
+        state.convTotal = Number(resp.data.total ?? state.conversations.length)
         state.convNextCursor = resp.data.next_cursor ?? null
       } catch (err) {
         if (err && err.status === 401) {
