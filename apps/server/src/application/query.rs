@@ -142,14 +142,14 @@ pub async fn search_items(
     })
 }
 
-pub async fn get_quota(state: Arc<AppState>) -> Result<QuotaResult, QueryError> {
+pub async fn get_quota(state: Arc<AppState>, user_id: &str) -> Result<QuotaResult, QueryError> {
     let used = state
         .store
         .count_items(None)
         .await
         .map_err(|err| QueryError::Internal(err.to_string()))?;
 
-    if state.free_quota_items == 0 {
+    if state.free_quota_items == 0 || state.is_premium_user(user_id) {
         return Ok(QuotaResult {
             limit: None,
             used,

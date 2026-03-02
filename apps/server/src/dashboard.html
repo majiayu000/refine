@@ -362,6 +362,12 @@
       box-shadow: none;
     }
 
+    .inline-action.danger {
+      color: #991b1b;
+      background: linear-gradient(145deg, #fff5f5, #fee2e2);
+      border-color: #fecaca;
+    }
+
     .empty {
       text-align: center;
       border-style: dashed;
@@ -669,6 +675,12 @@
             <div class="meta">${esc(formatTime(item.created_at || ""))}</div>
             <p class="summary">${esc(item.summary || "暂无摘要")}</p>
             <pre class="content">${esc(item.content || "")}</pre>
+            <div class="item-row">
+              <span class="chip">${esc((item.id || "").slice(0, 8))}</span>
+              <button class="inline-action danger" data-action="delete-item" data-item-id="${esc(item.id || "")}">
+                删除
+              </button>
+            </div>
           </article>
         `).join("")
       }
@@ -783,6 +795,19 @@
       return { ok: res.ok, status: res.status, data }
     }
 
+    async function deleteJson(path) {
+      const res = await fetch(path, {
+        method: "DELETE",
+        headers: authHeaders()
+      })
+
+      let data = {}
+      try {
+        data = await res.json()
+      } catch (_) {}
+      return { ok: res.ok, status: res.status, data }
+    }
+
     async function loadItems(reset = true) {
       if (state.loading) return
       state.loading = true
@@ -884,6 +909,30 @@
       }
     }
 
+    async function deleteItem(itemId) {
+      if (!itemId) return
+      if (!window.confirm("确定要删除这条知识吗？")) return
+
+      try {
+        const resp = await deleteJson(`/v1/items/${encodeURIComponent(itemId)}`)
+        if (!resp.ok || !resp.data?.success) throw resp
+
+        setNotice("删除成功")
+        state.items = state.items.filter(item => item.id !== itemId)
+        state.itemsTotal = Math.max(0, Number(state.itemsTotal || 0) - 1)
+        renderItems()
+
+        await loadItems(true)
+      } catch (err) {
+        if (err && err.status === 401) {
+          setNotice("鉴权失败：请填写正确 Token 后重试。", true)
+        } else {
+          const msg = err?.data?.message || "删除失败，请稍后重试。"
+          setNotice(msg, true)
+        }
+      }
+    }
+
     async function loadFunnelSummary() {
       if (state.funnelLoading) return
       state.funnelLoading = true
@@ -969,6 +1018,14 @@
       if (target.dataset.action !== "summarize") return
       const conversationId = target.dataset.conversationId
       void summarizeConversation(conversationId)
+    })
+
+    listEl.addEventListener("click", (event) => {
+      const target = event.target
+      if (!(target instanceof HTMLElement)) return
+      if (target.dataset.action !== "delete-item") return
+      const itemId = target.dataset.itemId
+      void deleteItem(itemId)
     })
 
     void loadConversations(true)

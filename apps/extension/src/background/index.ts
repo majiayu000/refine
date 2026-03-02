@@ -8,6 +8,7 @@ import {
   checkCloudHealth,
   fetchQuotaStatus,
   fetchCloudTotalItemsWithOptions,
+  fetchRecommendations,
   type QuotaStatusResponse,
   trackEvent,
   uploadConversation,
@@ -63,6 +64,12 @@ interface EnqueueMessage {
   payload: ConversationPayload
 }
 
+interface EnqueueConversationResult {
+  queued: boolean
+  id?: string
+  message?: string
+}
+
 interface GetSyncStatusMessage {
   action: 'getSyncStatus'
 }
@@ -71,7 +78,27 @@ interface ForceSyncMessage {
   action: 'forceSync'
 }
 
-type BackgroundMessage = EnqueueMessage | GetSyncStatusMessage | ForceSyncMessage
+interface FetchRecommendationsMessage {
+  action: 'fetchRecommendations'
+  query: string
+  options?: {
+    limit?: number
+    timeoutMs?: number
+  }
+}
+
+type BackgroundMessage =
+  | EnqueueMessage
+  | GetSyncStatusMessage
+  | ForceSyncMessage
+  | FetchRecommendationsMessage
+
+function formatQuotaExceededMessage(quota: QuotaStatusResponse): string {
+  if (typeof quota.limit === 'number') {
+    return `额度不足（${quota.used}/${quota.limit}），请升级会员或提高服务端额度后重试。`
+  }
+  return '额度不足，请升级会员或提高服务端额度后重试。'
+}
 
 function backoffDelayMs(attemptCount: number): number {
   const multiplier = Math.max(0, attemptCount - 1)
@@ -205,7 +232,15 @@ async function resetDailyStats(): Promise<void> {
   await saveSnapshot(snapshot)
 }
 
-async function enqueueConversation(payload: ConversationPayload): Promise<{ queued: boolean; id: string }> {
+async function enqueueConversation(payload: ConversationPayload): Promise<EnqueueConversationResult> {
+  const quota = await fetchQuotaStatus()
+  if (quota?.success && quota.exceeded) {
+    return {
+      queued: false,
+      message: formatQuotaExceededMessage(quota),
+    }
+  }
+
   const snapshot = await loadSnapshot()
   const item = createOutboxItem(payload)
   snapshot.outbox.push(item)
@@ -394,6 +429,17 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage, _sender, sendR
           ok: false,
           message: error instanceof Error ? error.message : String(error),
         })
+      })
+    return true
+  }
+
+  if (message.action === 'fetchRecommendations') {
+    fetchRecommendations(message.query, message.options)
+      .then((result) => {
+        sendResponse(result)
+      })
+      .catch(() => {
+        sendResponse(null)
       })
     return true
   }

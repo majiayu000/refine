@@ -483,8 +483,8 @@ initQuickSaveEngine({
     errorText: '!',
     idleTitle: '入库此会话',
     savingTitle: '入库中',
-    doneTitle: '已入库',
-    importedTitle: '已入库',
+    doneTitle: '已入队',
+    importedTitle: '已入队',
     errorTitle: '入库失败',
   },
   messages: {

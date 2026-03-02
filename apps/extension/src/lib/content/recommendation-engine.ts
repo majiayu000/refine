@@ -1,4 +1,4 @@
-import { fetchRecommendations, trackEvent, type RecommendationItem } from '../api'
+import { trackEvent, type RecommendationItem, type RecommendationResponse } from '../api'
 import { markOnboardingTask } from '../onboarding'
 import type { ConversationSource } from '../types'
 import { injectStyleOnce } from './runtime'
@@ -308,6 +308,42 @@ export function initRecommendationEngine(options: RecommendationEngineOptions): 
     return null
   }
 
+  function isActiveInput(inputEl: HTMLElement): boolean {
+    const active = document.activeElement
+    if (!(active instanceof HTMLElement)) return false
+    if (inputEl === active) return true
+    if (inputEl.contains(active)) return true
+    if (active.contains(inputEl)) return true
+    return false
+  }
+
+  function fetchRecommendationsFromBackground(query: string): Promise<RecommendationResponse | null> {
+    return new Promise((resolve) => {
+      if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+        resolve(null)
+        return
+      }
+
+      chrome.runtime.sendMessage(
+        {
+          action: 'fetchRecommendations',
+          query,
+          options: {
+            limit: maxItems,
+            timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+          },
+        },
+        (response: RecommendationResponse | null | undefined) => {
+          if (chrome.runtime.lastError) {
+            resolve(null)
+            return
+          }
+          resolve(response ?? null)
+        }
+      )
+    })
+  }
+
   function readInputText(inputEl: HTMLElement): string {
     if (inputEl instanceof HTMLTextAreaElement || inputEl instanceof HTMLInputElement) {
       return inputEl.value || ''
@@ -481,6 +517,11 @@ export function initRecommendationEngine(options: RecommendationEngineOptions): 
       return
     }
 
+    if (!isActiveInput(inputEl)) {
+      hidePanel()
+      return
+    }
+
     const query = readInputText(inputEl).trim()
     if (query.length < minChars) {
       hidePanel()
@@ -488,10 +529,7 @@ export function initRecommendationEngine(options: RecommendationEngineOptions): 
     }
 
     const currentRequestId = ++requestId
-    const response = await fetchRecommendations(query, {
-      limit: maxItems,
-      timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
-    })
+    const response = await fetchRecommendationsFromBackground(query)
     if (currentRequestId !== requestId) return
 
     if (!response?.success || !response.triggered || !Array.isArray(response.items) || response.items.length === 0) {
@@ -508,6 +546,8 @@ export function initRecommendationEngine(options: RecommendationEngineOptions): 
       hidePanel()
       return
     }
+
+    if (!isActiveInput(inputEl)) return
 
     if (debounceTimer) window.clearTimeout(debounceTimer)
     debounceTimer = window.setTimeout(() => {

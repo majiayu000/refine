@@ -98,8 +98,8 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
 
   const messages: QuickSaveMessages = {
     successToast: '已加入同步队列，稍后上传到 Refine 云端',
-    silentSuccessToast: '已后台入库，无需跳转',
-    alreadyImportedToast: '该会话已入库',
+    silentSuccessToast: '已后台入队，无需跳转',
+    alreadyImportedToast: '该会话已有历史入队记录，本次将按最新内容再次入队',
     invalidTargetToast: '无法识别会话链接',
     pendingWriteFailedToast: '暂存入库任务失败，请刷新页面后重试',
     openFailedToast: '链接打开失败，请手动进入该会话后再点入库',
@@ -239,7 +239,7 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
 
   function setQuickSaveButtonState(button: HTMLButtonElement, state: QuickSaveButtonState): void {
     button.dataset.state = state
-    button.disabled = state === 'saving' || state === 'imported'
+    button.disabled = state === 'saving'
 
     const doneText = options.buttonCopy.doneText
     const doneTitle = options.buttonCopy.doneTitle
@@ -366,10 +366,10 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
     }
 
     await ensureImportedConversationsLoaded()
-    if (isConversationImported(target.conversationKey)) {
+    const alreadyImported = isConversationImported(target.conversationKey)
+    if (alreadyImported) {
       setConversationButtonsState(target.conversationKey, 'imported')
       showToast(messages.alreadyImportedToast)
-      return
     }
 
     const title = options.getConversationTitleFromLink(link)

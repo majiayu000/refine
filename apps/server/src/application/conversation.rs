@@ -41,7 +41,7 @@ impl CreateConversationError {
             Self::BadRequest(message) => message.clone(),
             Self::QuotaExceeded { used, limit } => {
                 format!(
-                    "Free quota exceeded ({}/{} items). Upgrade required.",
+                    "Configured quota exceeded ({}/{} items).",
                     used, limit
                 )
             }
@@ -82,7 +82,7 @@ pub async fn create_conversation(
         }
     }
 
-    if state.free_quota_items > 0 {
+    if state.free_quota_items > 0 && !state.is_premium_user(&user_id) {
         let used = state
             .store
             .count_items(None)

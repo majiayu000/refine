@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "build": {
     "beforeDevCommand": "cd ../ui && bun run dev",
-    "devUrl": "http://localhost:7788",
+    "devUrl": "http://localhost:8987",
     "beforeBuildCommand": "cd ../ui && bun run build",
     "frontendDist": "../ui/dist"
   },

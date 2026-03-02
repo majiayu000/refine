@@ -357,8 +357,9 @@ GET /v1/quota
 ```
 
 说明：
-- `limit` 默认来自 `REFINE_FREE_QUOTA_ITEMS`（默认 `100`）。
+- `limit` 默认来自 `REFINE_FREE_QUOTA_ITEMS`（默认 `0`，即不限额）。
 - 当 `limit=0` 时表示不限额，此时 `remaining=null`。
+- 会员用户（`REFINE_PREMIUM_USERS` 命中）固定返回不限额。
 - 当超出额度时，`POST /v1/conversations` 会返回 `403` 与升级提示。
 
 ---
@@ -382,7 +383,8 @@ GET /v1/quota
 - 生产环境请求需携带 `Authorization: Bearer <token>`。
 - Claude 提炼可通过 `REFINE_ANTHROPIC_MODEL` 指定模型（默认 `claude-opus-4-6`），并通过 `REFINE_ANTHROPIC_BASE_URL` 对接 Anthropic 兼容网关。
 - 可通过 `REFINE_ENABLE_SEMANTIC_SEARCH=true` 开启语义向量检索。
-- 可通过 `REFINE_FREE_QUOTA_ITEMS` 配置免费额度上限（默认 `100`）。
+- 可通过 `REFINE_FREE_QUOTA_ITEMS` 配置免费额度上限（默认 `0`，不限额）。
+- 可通过 `REFINE_PREMIUM_USERS` 配置会员用户（逗号分隔）；当前单用户自用默认 `dev-user,token-user`。
 - 当前 `apps/server` 使用 Rust + Axum；`items`、`conversations`、`extraction_jobs`、`events` 已持久化到 SQLite。
 - 生产建议接入更细粒度鉴权（用户级身份）与独立异步任务队列。
 

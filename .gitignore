@@ -23,3 +23,10 @@ Thumbs.db
 
 # Tauri
 apps/desktop/src-tauri/target/
+
+# Runtime artifacts
+.backup/
+.run/*.log
+.run/*.err.log
+.run/*.out.log
+.run/*.pid

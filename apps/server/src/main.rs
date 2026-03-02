@@ -17,6 +17,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
+const DEFAULT_BIND_HOST: &str = "127.0.0.1";
+
 #[tokio::main]
 async fn main() {
     let _ = dotenvy::dotenv();
@@ -75,17 +77,22 @@ async fn main() {
         .route("/v1/search", get(handlers::search_items))
         .route("/v1/recommendations", get(handlers::recommend_items))
         .layer(cors)
-        .with_state(state);
+        .with_state(state.clone());
 
     let port = std::env::var("PORT")
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
         .unwrap_or(8787);
-    let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let host = std::env::var("HOST").unwrap_or_else(|_| DEFAULT_BIND_HOST.to_string());
 
-    let addr: SocketAddr = format!("{}:{}", host, port)
-        .parse()
-        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], port)));
+    let addr = parse_bind_addr(&host, port);
+    if requires_api_token_for_bind(&addr) && state.api_token.is_none() {
+        eprintln!(
+            "REFINE_API_TOKEN is required when binding to non-loopback address: {}",
+            addr.ip()
+        );
+        std::process::exit(1);
+    }
 
     println!("Refine cloud API (Rust) listening on http://{}", addr);
 
@@ -93,4 +100,34 @@ async fn main() {
         .await
         .expect("failed to bind tcp listener");
     axum::serve(listener, app).await.expect("server exited");
+}
+
+fn parse_bind_addr(host: &str, port: u16) -> SocketAddr {
+    format!("{}:{}", host, port)
+        .parse()
+        .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], port)))
+}
+
+fn requires_api_token_for_bind(addr: &SocketAddr) -> bool {
+    !addr.ip().is_loopback()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_bind_addr, requires_api_token_for_bind};
+    use std::net::SocketAddr;
+
+    #[test]
+    fn parse_bind_addr_falls_back_to_loopback_for_invalid_host() {
+        let addr = parse_bind_addr("localhost", 8787);
+        assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 8787)));
+    }
+
+    #[test]
+    fn non_loopback_bindings_require_api_token() {
+        assert!(requires_api_token_for_bind(&SocketAddr::from(([0, 0, 0, 0], 8787))));
+        assert!(requires_api_token_for_bind(&SocketAddr::from(([192, 168, 1, 8], 8787))));
+        assert!(!requires_api_token_for_bind(&SocketAddr::from(([127, 0, 0, 1], 8787))));
+        assert!(!requires_api_token_for_bind(&SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 8787))));
+    }
 }

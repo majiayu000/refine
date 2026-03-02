@@ -479,11 +479,11 @@ export default function Popup() {
           <p className="status-detail">已发送 {syncStatus.sent} 条，队列 {queueSize} 条</p>
           {quota ? (
             <p className={`status-detail ${quota.exceeded ? 'status-upgrade' : ''}`}>
-              免费额度{' '}
+              配额{' '}
               {typeof quota.limit === 'number'
                 ? `${quota.used}/${quota.limit}`
                 : `${quota.used}/无限制`}
-              {quota.exceeded ? '（已超限，请升级）' : ''}
+              {quota.exceeded ? '（已超限）' : ''}
             </p>
           ) : null}
           {syncStatus.lastError ? <p className="status-error">{syncStatus.lastError}</p> : null}

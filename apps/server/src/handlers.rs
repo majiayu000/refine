@@ -55,7 +55,7 @@ pub async fn create_conversation(
             return err_response_payload(
                 StatusCode::FORBIDDEN,
                 json!({
-                    "message": format!("Free quota exceeded ({}/{} items). Upgrade required.", used, limit),
+                    "message": format!("Configured quota exceeded ({}/{} items).", used, limit),
                     "quota": {
                         "used": used,
                         "limit": limit,
@@ -154,9 +154,9 @@ pub async fn list_items(
 
 pub async fn get_quota(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedUser,
+    AuthenticatedUser(user_id): AuthenticatedUser,
 ) -> impl IntoResponse {
-    let result = match run_get_quota(state).await {
+    let result = match run_get_quota(state, &user_id).await {
         Ok(result) => result,
         Err(err) => return err_response(status_from_error_code(err.code()), err.message()),
     };

@@ -10,7 +10,7 @@ import {
 } from 'lucide-react'
 import { useStore } from '../lib/store'
 import { cn } from '../lib/utils'
-import type { Item } from '../lib/tauri'
+import type { Item } from '../lib/api/types'
 
 const typeMeta: Record<
   Item['item_type'],

@@ -2,16 +2,50 @@ use super::rows::{row_to_item, to_fts_query};
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{Item, ItemType};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::HashSet;
+
+const FTS_BOOTSTRAP_USER_VERSION: i64 = 1;
 
 pub(super) fn init_schema(conn: &Connection) -> InfraResult<()> {
     conn.execute_batch(include_str!("../schema.sql"))
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
-    conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')", [])
-        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let _ = maybe_rebuild_fts_index(conn)?;
 
     Ok(())
+}
+
+fn maybe_rebuild_fts_index(conn: &Connection) -> InfraResult<bool> {
+    let user_version = conn
+        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    if user_version < FTS_BOOTSTRAP_USER_VERSION {
+        let item_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        let rebuilt = if item_count > 0 {
+            conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')", [])
+                .map_err(|e| InfraError::Database(e.to_string()))?;
+            true
+        } else {
+            false
+        };
+        conn.pragma_update(None, "user_version", FTS_BOOTSTRAP_USER_VERSION)
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        return Ok(rebuilt);
+    }
+
+    if conn
+        .execute("INSERT INTO items_fts(items_fts) VALUES('integrity-check')", [])
+        .is_ok()
+    {
+        return Ok(false);
+    }
+
+    conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')", [])
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    conn.execute("INSERT INTO items_fts(items_fts) VALUES('integrity-check')", [])
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    Ok(true)
 }
 pub(super) fn find_by_id(conn: &Connection, id: &str) -> InfraResult<Option<Item>> {
     let mut stmt = conn
@@ -101,24 +135,44 @@ pub(super) fn count_items(conn: &Connection, item_type: Option<ItemType>) -> Inf
     Ok(count.max(0) as usize)
 }
 pub(super) fn find_by_tags(conn: &Connection, tags: &[String]) -> InfraResult<Vec<Item>> {
-    let all_items = find_all(conn)?;
     if tags.is_empty() {
-        return Ok(all_items);
+        return find_all(conn);
     }
 
-    let required: Vec<String> = tags.iter().map(|tag| tag.to_lowercase()).collect();
+    let required: Vec<String> = tags
+        .iter()
+        .map(|tag| tag.trim().to_lowercase())
+        .filter(|tag| !tag.is_empty())
+        .collect();
+    if required.is_empty() {
+        return find_all(conn);
+    }
+    let required_json =
+        serde_json::to_string(&required).map_err(|e| InfraError::Serialization(e.to_string()))?;
 
-    Ok(all_items
-        .into_iter()
-        .filter(|item| {
-            let item_tags: HashSet<String> = item
-                .tags()
-                .iter()
-                .map(|tag| tag.as_str().to_lowercase())
-                .collect();
-            required.iter().all(|tag| item_tags.contains(tag))
-        })
-        .collect())
+    let mut stmt = conn
+        .prepare(
+            "SELECT i.id, i.item_type, i.title, i.summary, i.content, i.tags, i.source, i.created_at, i.updated_at
+             FROM items i
+             WHERE json_valid(i.tags)
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM json_each(?1) AS required
+                   WHERE LOWER(CAST(required.value AS TEXT)) NOT IN (
+                       SELECT LOWER(CAST(item_tag.value AS TEXT))
+                       FROM json_each(i.tags) AS item_tag
+                   )
+               )
+             ORDER BY i.created_at DESC",
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+
+    let rows = stmt
+        .query_map([required_json], |row| row_to_item(row).map_err(to_row_err))
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+
+    rows.map(|r| r.map_err(|e| InfraError::Database(e.to_string())))
+        .collect()
 }
 pub(super) fn save(conn: &Connection, item: &Item) -> InfraResult<()> {
     let tags_json =
@@ -210,4 +264,47 @@ pub(super) fn count_text_hits(conn: &Connection, query: &str) -> InfraResult<usi
 }
 fn to_row_err(err: InfraError) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{init_schema, maybe_rebuild_fts_index, FTS_BOOTSTRAP_USER_VERSION};
+    use rusqlite::Connection;
+
+    const INSERT_ITEM_SQL: &str = r#"
+        INSERT INTO items (id, item_type, title, summary, content, tags, source, created_at, updated_at)
+        VALUES (?1, 'knowledge', 'title', 'summary', 'content', '["rust"]', NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+    "#;
+
+    #[test]
+    fn init_schema_skips_rebuild_when_fts_count_matches_items() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        init_schema(&conn).expect("init schema");
+        conn.execute(INSERT_ITEM_SQL, ["item-1"])
+            .expect("insert item");
+
+        let rebuilt = maybe_rebuild_fts_index(&conn).expect("check fts state");
+        assert!(!rebuilt);
+    }
+
+    #[test]
+    fn init_schema_rebuilds_once_for_existing_rows_without_bootstrap_marker() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        init_schema(&conn).expect("init schema");
+        conn.execute(INSERT_ITEM_SQL, ["item-1"])
+            .expect("insert item");
+        conn.execute_batch("PRAGMA user_version = 0;")
+            .expect("reset user_version");
+
+        let rebuilt = maybe_rebuild_fts_index(&conn).expect("check fts state");
+        assert!(rebuilt);
+
+        let user_version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read user_version");
+        assert_eq!(user_version, FTS_BOOTSTRAP_USER_VERSION);
+
+        let rebuilt_again = maybe_rebuild_fts_index(&conn).expect("check fts state again");
+        assert!(!rebuilt_again);
+    }
 }

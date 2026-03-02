@@ -85,18 +85,35 @@ export async function waitForConversationExtraction(
   options?: {
     timeoutMs?: number
     intervalMs?: number
+    stableForMs?: number
   }
 ): Promise<string | null> {
   const timeoutMs = options?.timeoutMs ?? DEFAULT_POLL_TIMEOUT_MS
   const intervalMs = options?.intervalMs ?? DEFAULT_POLL_INTERVAL_MS
+  const stableForMs = options?.stableForMs ?? 1_200
   const startedAt = Date.now()
+  let latestContent = ''
+  let longestContent = ''
+  let stableSince = 0
 
   while (Date.now() - startedAt <= timeoutMs) {
     const content = extractConversation()
-    if (content) return content
+    if (content) {
+      if (content.length > longestContent.length) {
+        longestContent = content
+      }
+      if (content !== latestContent) {
+        latestContent = content
+        stableSince = Date.now()
+      } else if (stableSince > 0 && Date.now() - stableSince >= stableForMs) {
+        return content
+      }
+    }
     await delay(intervalMs)
   }
 
+  if (longestContent) return longestContent
+  if (latestContent) return latestContent
   return null
 }
 

@@ -17,8 +17,8 @@ import {
 } from 'lucide-react'
 import { useStore } from '../lib/store'
 import { cn } from '../lib/utils'
-import { searchItems } from '../lib/tauri'
-import type { Item } from '../lib/tauri'
+import { getApiClient } from '../lib/api/client'
+import type { Item } from '../lib/api/types'
 
 interface SpotlightProps {
   isOpen: boolean
@@ -44,6 +44,7 @@ const typeMeta: Record<Item['item_type'], { label: string; icon: LucideIcon; chi
 }
 
 export function Spotlight({ isOpen, onClose }: SpotlightProps) {
+  const api = getApiClient()
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<Item[]>([])
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -60,7 +61,7 @@ export function Spotlight({ isOpen, onClose }: SpotlightProps) {
     const timer = setTimeout(async () => {
       setIsSearching(true)
       try {
-        const result = await searchItems(query, 10)
+        const result = await api.searchItems(query, 10)
         setResults(result.items)
       } catch {
         setResults([])
@@ -70,7 +71,7 @@ export function Spotlight({ isOpen, onClose }: SpotlightProps) {
     }, 140)
 
     return () => clearTimeout(timer)
-  }, [query, items])
+  }, [api, query, items])
 
   useEffect(() => {
     if (isOpen) {

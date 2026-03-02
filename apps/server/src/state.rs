@@ -3,7 +3,7 @@ use refine_core::infra::{
 };
 use refine_core::knowledge::ItemRepository;
 use refine_core::search::SearchEngine;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -23,6 +23,7 @@ pub struct AppState {
     pub engine: Arc<SearchEngine>,
     pub semantic_search_enabled: bool,
     pub free_quota_items: usize,
+    pub premium_users: HashSet<String>,
     pub llm_client: Option<Arc<dyn LlmClient>>,
     pub api_token: Option<String>,
     pub conversation_repo: Arc<dyn ConversationRepository>,
@@ -50,7 +51,16 @@ impl AppState {
         }
 
         let semantic_search_enabled = env_flag(&["REFINE_ENABLE_SEMANTIC_SEARCH"]);
-        let free_quota_items = env_usize(&["REFINE_FREE_QUOTA_ITEMS"]).unwrap_or(100);
+        // Self-host default: no quota limit unless explicitly configured.
+        let free_quota_items =
+            env_usize(&["REFINE_MAX_ITEMS", "REFINE_FREE_QUOTA_ITEMS"]).unwrap_or(0);
+        // Single-user self-host default: treat built-in user ids as premium unless explicitly configured.
+        let premium_users = env_csv_set(&["REFINE_PREMIUM_USERS"]).unwrap_or_else(|| {
+            HashSet::from([
+                "dev-user".to_string(),
+                "token-user".to_string(),
+            ])
+        });
         let mut engine_builder = SearchEngine::new(store.clone());
         if semantic_search_enabled {
             engine_builder =
@@ -101,6 +111,7 @@ impl AppState {
             engine,
             semantic_search_enabled,
             free_quota_items,
+            premium_users,
             llm_client: build_llm_client_from_env(),
             api_token,
             conversation_repo,
@@ -115,11 +126,32 @@ impl AppState {
     }
 }
 
+impl AppState {
+    pub fn is_premium_user(&self, user_id: &str) -> bool {
+        let normalized = user_id.trim();
+        !normalized.is_empty() && self.premium_users.contains(normalized)
+    }
+}
+
 
 fn env_var(keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|key| std::env::var(key).ok())
         .filter(|value| !value.trim().is_empty())
+}
+
+fn env_csv_set(keys: &[&str]) -> Option<HashSet<String>> {
+    for key in keys {
+        if let Ok(raw) = std::env::var(key) {
+            let set = raw
+                .split(',')
+                .map(|entry| entry.trim().to_string())
+                .filter(|entry| !entry.is_empty())
+                .collect::<HashSet<_>>();
+            return Some(set);
+        }
+    }
+    None
 }
 
 fn env_flag(keys: &[&str]) -> bool {

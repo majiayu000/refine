@@ -1,11 +1,13 @@
 import { create } from 'zustand'
-import type { Item } from './tauri'
-import * as api from './tauri'
+import { getApiClient } from './api/client'
+import type { ApiCapabilities, Item } from './api/types'
 
 const PAGE_SIZE = 50
+const api = getApiClient()
 
 interface AppState {
   // 状态
+  apiCapabilities: ApiCapabilities
   items: Item[]
   totalItems: number
   nextCursor: number | null
@@ -27,6 +29,7 @@ interface AppState {
 }
 
 export const useStore = create<AppState>((set, get) => ({
+  apiCapabilities: api.getCapabilities(),
   items: [],
   totalItems: 0,
   nextCursor: null,

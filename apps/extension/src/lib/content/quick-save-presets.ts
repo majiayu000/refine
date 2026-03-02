@@ -3,8 +3,8 @@ import type { QuickSaveButtonCopy } from './quick-save-engine'
 export const STANDARD_QUICK_SAVE_BUTTON_COPY: QuickSaveButtonCopy = {
   idleText: '入库',
   savingText: '入库中',
-  doneText: '已入库',
-  importedText: '已入库',
+  doneText: '已入队',
+  importedText: '已入队',
   errorText: '失败',
 }
 
