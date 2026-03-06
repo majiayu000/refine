@@ -15,15 +15,19 @@ pub trait LlmClient: Send + Sync {
 /// 从环境变量构建 LLM 客户端。
 ///
 /// 优先级：
-/// 1. Anthropic (`REFINE_ANTHROPIC_API_KEY` / `ANTHROPIC_API_KEY`)
+/// 1. Anthropic (`REFINE_ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`)
 /// 2. OpenAI (`REFINE_OPENAI_API_KEY` / `OPENAI_API_KEY`)
 pub fn build_llm_client_from_env() -> Option<Arc<dyn LlmClient>> {
-    if let Some(api_key) = env_var(&["REFINE_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]) {
+    if let Some(api_key) = env_var(&[
+        "REFINE_ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+    ]) {
         let mut client = ClaudeClient::new(&api_key);
         if let Some(model) = env_var(&["REFINE_ANTHROPIC_MODEL"]) {
             client = client.with_model(&model);
         }
-        if let Some(base_url) = env_var(&["REFINE_ANTHROPIC_BASE_URL"]) {
+        if let Some(base_url) = env_var(&["REFINE_ANTHROPIC_BASE_URL", "ANTHROPIC_BASE_URL"]) {
             client = client.with_base_url(&base_url);
         }
         return Some(Arc::new(client));
