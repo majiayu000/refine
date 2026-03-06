@@ -30,6 +30,8 @@ pub struct LlmItem {
     pub summary: String,
     pub content: String,
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub excerpt: Option<String>,
 }
 
 /// 提炼器
@@ -259,6 +261,14 @@ impl Extractor {
 
             if let Err(e) = item.set_tags(tags) {
                 tracing::warn!("设置标签失败: {}", e);
+            }
+
+            // 设置原文引用
+            if let Some(excerpt) = &llm_item.excerpt {
+                let trimmed = excerpt.trim();
+                if !trimmed.is_empty() {
+                    item.set_excerpt(trimmed);
+                }
             }
 
             items.push(item);

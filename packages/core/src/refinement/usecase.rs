@@ -5,7 +5,7 @@
 
 use crate::error::{DomainError, DomainResult};
 use crate::infra::LlmClient;
-use crate::knowledge::{Item, Source};
+use crate::knowledge::{DocumentId, Item, Source};
 use crate::refinement::{
     Conversation, ExtractionPolicy, ExtractionResult, Extractor, PromptTemplate,
 };
@@ -51,28 +51,31 @@ pub async fn extract_items_or_fallback(
     }
 }
 
-/// 为提炼结果补齐统一来源与兜底 content。
-pub fn apply_source_and_content_defaults(
+/// 为提炼结果补齐来源、文档关联与兜底 content。
+pub fn apply_defaults(
     items: &mut [Item],
     source: &Source,
+    document_id: &DocumentId,
     raw_content: &str,
 ) {
     for item in items {
         item.set_source(source.clone());
+        item.set_document_id(document_id.clone());
         if item.content().trim().is_empty() {
             item.set_content(raw_content);
         }
     }
 }
 
-/// 提炼并补齐来源/内容默认值，供多端 ingest 流程复用。
+/// 提炼并补齐来源/文档关联/内容默认值，供多端 ingest 流程复用。
 pub async fn extract_items_with_defaults(
     llm_client: Option<&dyn LlmClient>,
     input: &ItemExtractionInput<'_>,
     source: &Source,
+    document_id: &DocumentId,
 ) -> Vec<Item> {
     let mut items = extract_items_or_fallback(llm_client, input).await;
-    apply_source_and_content_defaults(&mut items, source, input.raw_content);
+    apply_defaults(&mut items, source, document_id, input.raw_content);
     items
 }
 
@@ -172,7 +175,8 @@ fn build_json_repair_prompt(raw_response: &str, parse_error: &str) -> String {
      "title": "...",
      "summary": "...",
      "content": "...",
-     "tags": ["..."]
+     "tags": ["..."],
+     "excerpt": "从原文逐字引用的关键片段（可选）"
    }}
 4) 若无法可靠修复，请返回 {{"items":[]}}；
 5) 不要输出 markdown 代码块，不要输出任何解释文字。
@@ -341,20 +345,24 @@ mod tests {
             policy: ExtractionPolicy::default(),
         };
         let source = Source::new("chatgpt").with_url("https://example.com");
-        let items = extract_items_with_defaults(None, &input, &source).await;
+        let doc_id = DocumentId::new();
+        let items = extract_items_with_defaults(None, &input, &source, &doc_id).await;
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].source().map(|v| v.platform.as_str()), Some("chatgpt"));
         assert_eq!(items[0].content(), "原始文本");
+        assert_eq!(items[0].document_id().map(|id| id.as_str()), Some(doc_id.as_str()));
     }
 
     #[test]
-    fn apply_source_and_content_defaults_fills_missing_fields() {
+    fn apply_defaults_fills_missing_fields() {
         let mut items = vec![Item::new_knowledge("t", "s")];
         let source = Source::new("chatgpt").with_url("https://example.com");
-        apply_source_and_content_defaults(&mut items, &source, "raw text");
+        let doc_id = DocumentId::new();
+        apply_defaults(&mut items, &source, &doc_id, "raw text");
 
         assert_eq!(items[0].source().map(|s| s.platform.as_str()), Some("chatgpt"));
         assert_eq!(items[0].content(), "raw text");
+        assert_eq!(items[0].document_id().map(|id| id.as_str()), Some(doc_id.as_str()));
     }
 }

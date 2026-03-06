@@ -6,7 +6,7 @@ mod keyword;
 mod semantic;
 
 use crate::error::{InfraResult, RepoResult, RepositoryError};
-use crate::knowledge::{Item, ItemRepository};
+use crate::knowledge::{Document, DocumentRepository, Item, ItemRepository};
 use crate::search::query::{SearchHit, SearchQuery, SearchResult};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -27,6 +27,7 @@ pub trait VectorSearch: Send + Sync {
 /// 搜索引擎
 pub struct SearchEngine {
     item_repo: Arc<dyn ItemRepository>,
+    doc_repo: Option<Arc<dyn DocumentRepository>>,
     vector_search: Option<Arc<dyn VectorSearch>>,
 }
 
@@ -34,8 +35,14 @@ impl SearchEngine {
     pub fn new(item_repo: Arc<dyn ItemRepository>) -> Self {
         Self {
             item_repo,
+            doc_repo: None,
             vector_search: None,
         }
+    }
+
+    pub fn with_doc_repo(mut self, doc_repo: Arc<dyn DocumentRepository>) -> Self {
+        self.doc_repo = Some(doc_repo);
+        self
     }
 
     pub fn with_vector_search(mut self, vs: Arc<dyn VectorSearch>) -> Self {
@@ -43,7 +50,7 @@ impl SearchEngine {
         self
     }
 
-    /// 执行搜索
+    /// 执行搜索（Items）
     pub async fn search(&self, query: SearchQuery) -> RepoResult<SearchResult<Item>> {
         if query.text.trim().is_empty() {
             return self.get_recent(&query).await;
@@ -54,6 +61,38 @@ impl SearchEngine {
         }
 
         self.keyword_search(&query).await
+    }
+
+    /// 执行文档搜索
+    pub async fn search_documents(
+        &self,
+        query: &SearchQuery,
+    ) -> RepoResult<SearchResult<Document>> {
+        let Some(doc_repo) = &self.doc_repo else {
+            return Ok(SearchResult::empty(query.clone()));
+        };
+
+        if query.text.trim().is_empty() {
+            let total = doc_repo.count().await?;
+            let docs = doc_repo
+                .find_recent(query.pagination.offset, query.pagination.limit)
+                .await?;
+            return Ok(SearchResult {
+                items: Self::to_doc_hits(docs),
+                total,
+                query: query.clone(),
+            });
+        }
+
+        let total = doc_repo.count_text_hits(&query.text).await?;
+        let docs = doc_repo
+            .search_text(&query.text, query.pagination.offset, query.pagination.limit)
+            .await?;
+        Ok(SearchResult {
+            items: Self::to_doc_hits(docs),
+            total,
+            query: query.clone(),
+        })
     }
 
     /// 索引 Item
@@ -79,6 +118,12 @@ impl SearchEngine {
         items
             .into_iter()
             .map(|item| SearchHit::new(item, 1.0))
+            .collect()
+    }
+
+    fn to_doc_hits(docs: Vec<Document>) -> Vec<SearchHit<Document>> {
+        docs.into_iter()
+            .map(|doc| SearchHit::new(doc, 1.0))
             .collect()
     }
 }

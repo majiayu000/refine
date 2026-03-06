@@ -10,4 +10,4 @@ mod query;
 
 // 公共 API
 pub use engine::{SearchEngine, VectorSearch};
-pub use query::{Pagination, SearchFilter, SearchHit, SearchQuery, SearchResult};
+pub use query::{Pagination, SearchFilter, SearchHit, SearchQuery, SearchResult, SearchScope};

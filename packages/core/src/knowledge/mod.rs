@@ -1,16 +1,19 @@
 //! 知识管理模块
 //!
-//! ## 文件结构（固定，禁止新增）
-//!
-//! - `types.rs` - 值对象 (ItemId, Tag, Source, ItemType)
+//! - `types.rs` - 值对象 (ItemId, DocumentId, Tag, Source, ItemType)
 //! - `item.rs` - Item 聚合根
-//! - `repository.rs` - 仓储接口
+//! - `document.rs` - Document 聚合根
+//! - `repository.rs` - Item 仓储接口
+//! - `doc_repository.rs` - Document 仓储接口
 
+mod doc_repository;
+mod document;
 mod item;
 mod repository;
 mod types;
 
-// 公共 API
+pub use doc_repository::DocumentRepository;
+pub use document::{Document, RestoreDocumentParams};
 pub use item::{Item, RestoreParams};
 pub use repository::ItemRepository;
-pub use types::{ItemId, ItemType, Source, Tag};
+pub use types::{DocumentId, ItemId, ItemType, Source, Tag};

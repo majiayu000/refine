@@ -4,6 +4,18 @@
 
 use crate::knowledge::ItemType;
 
+/// 搜索范围
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchScope {
+    /// 只搜索 Items
+    #[default]
+    Items,
+    /// 只搜索 Documents
+    Documents,
+    /// 同时搜索 Items 和 Documents
+    All,
+}
+
 /// 搜索查询
 #[derive(Debug, Clone)]
 pub struct SearchQuery {
@@ -13,6 +25,8 @@ pub struct SearchQuery {
     pub filter: SearchFilter,
     /// 分页
     pub pagination: Pagination,
+    /// 搜索范围
+    pub scope: SearchScope,
 }
 
 impl SearchQuery {
@@ -21,7 +35,13 @@ impl SearchQuery {
             text: text.to_string(),
             filter: SearchFilter::default(),
             pagination: Pagination::default(),
+            scope: SearchScope::default(),
         }
+    }
+
+    pub fn with_scope(mut self, scope: SearchScope) -> Self {
+        self.scope = scope;
+        self
     }
 
     pub fn with_type(mut self, item_type: ItemType) -> Self {

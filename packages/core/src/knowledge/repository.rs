@@ -3,7 +3,7 @@
 //! 定义在领域层，实现在 infra 层
 
 use crate::error::RepoResult;
-use crate::knowledge::{Item, ItemId, ItemType, Tag};
+use crate::knowledge::{DocumentId, Item, ItemId, ItemType, Tag};
 use async_trait::async_trait;
 
 /// Item 仓储接口
@@ -46,4 +46,7 @@ pub trait ItemRepository: Send + Sync {
 
     /// 全文搜索命中总数
     async fn count_text_hits(&self, query: &str) -> RepoResult<usize>;
+
+    /// 按文档 ID 查找关联的 items
+    async fn find_by_document_id(&self, doc_id: &DocumentId) -> RepoResult<Vec<Item>>;
 }

@@ -9,9 +9,38 @@ pub(super) fn init_schema(conn: &Connection) -> InfraResult<()> {
     conn.execute_batch(include_str!("../schema.sql"))
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
+    migrate_items_add_document_columns(conn)?;
     let _ = maybe_rebuild_fts_index(conn)?;
 
     Ok(())
+}
+
+fn migrate_items_add_document_columns(conn: &Connection) -> InfraResult<()> {
+    let has_document_id = column_exists(conn, "items", "document_id")?;
+    if !has_document_id {
+        conn.execute_batch("ALTER TABLE items ADD COLUMN document_id TEXT")
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+    }
+    let has_excerpt = column_exists(conn, "items", "excerpt")?;
+    if !has_excerpt {
+        conn.execute_batch("ALTER TABLE items ADD COLUMN excerpt TEXT")
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+    }
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_items_document ON items(document_id)")
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    Ok(())
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> InfraResult<bool> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({})", table))
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let names: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| InfraError::Database(e.to_string()))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(names.iter().any(|n| n == column))
 }
 
 fn maybe_rebuild_fts_index(conn: &Connection) -> InfraResult<bool> {
@@ -49,7 +78,7 @@ fn maybe_rebuild_fts_index(conn: &Connection) -> InfraResult<bool> {
 }
 pub(super) fn find_by_id(conn: &Connection, id: &str) -> InfraResult<Option<Item>> {
     let mut stmt = conn
-        .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at FROM items WHERE id = ?1")
+        .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at, document_id, excerpt FROM items WHERE id = ?1")
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     stmt.query_row([id], |row| row_to_item(row).map_err(to_row_err))
@@ -58,7 +87,7 @@ pub(super) fn find_by_id(conn: &Connection, id: &str) -> InfraResult<Option<Item
 }
 pub(super) fn find_all(conn: &Connection) -> InfraResult<Vec<Item>> {
     let mut stmt = conn
-        .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at FROM items ORDER BY created_at DESC")
+        .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at, document_id, excerpt FROM items ORDER BY created_at DESC")
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     let rows = stmt
@@ -70,7 +99,7 @@ pub(super) fn find_all(conn: &Connection) -> InfraResult<Vec<Item>> {
 }
 pub(super) fn find_by_type(conn: &Connection, item_type: ItemType) -> InfraResult<Vec<Item>> {
     let mut stmt = conn
-        .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at FROM items WHERE item_type = ?1 ORDER BY created_at DESC")
+        .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at, document_id, excerpt FROM items WHERE item_type = ?1 ORDER BY created_at DESC")
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     let rows = stmt
@@ -94,7 +123,7 @@ pub(super) fn find_recent(
     match item_type {
         Some(item_type) => {
             let mut stmt = conn
-                .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at FROM items WHERE item_type = ?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3")
+                .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at, document_id, excerpt FROM items WHERE item_type = ?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3")
                 .map_err(|e| InfraError::Database(e.to_string()))?;
             let rows = stmt
                 .query_map(params![item_type.as_str(), limit, offset], |row| {
@@ -106,7 +135,7 @@ pub(super) fn find_recent(
         }
         None => {
             let mut stmt = conn
-                .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at FROM items ORDER BY created_at DESC LIMIT ?1 OFFSET ?2")
+                .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at, document_id, excerpt FROM items ORDER BY created_at DESC LIMIT ?1 OFFSET ?2")
                 .map_err(|e| InfraError::Database(e.to_string()))?;
             let rows = stmt
                 .query_map(params![limit, offset], |row| {
@@ -152,7 +181,7 @@ pub(super) fn find_by_tags(conn: &Connection, tags: &[String]) -> InfraResult<Ve
 
     let mut stmt = conn
         .prepare(
-            "SELECT i.id, i.item_type, i.title, i.summary, i.content, i.tags, i.source, i.created_at, i.updated_at
+            "SELECT i.id, i.item_type, i.title, i.summary, i.content, i.tags, i.source, i.created_at, i.updated_at, i.document_id, i.excerpt
              FROM items i
              WHERE json_valid(i.tags)
                AND NOT EXISTS (
@@ -184,7 +213,7 @@ pub(super) fn save(conn: &Connection, item: &Item) -> InfraResult<()> {
         .map_err(|e| InfraError::Serialization(e.to_string()))?;
 
     conn.execute(
-        "INSERT OR REPLACE INTO items (id, item_type, title, summary, content, tags, source, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT OR REPLACE INTO items (id, item_type, title, summary, content, tags, source, created_at, updated_at, document_id, excerpt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             item.id().as_str(),
             item.item_type().as_str(),
@@ -195,6 +224,8 @@ pub(super) fn save(conn: &Connection, item: &Item) -> InfraResult<()> {
             source_json,
             item.created_at().to_rfc3339(),
             item.updated_at().to_rfc3339(),
+            item.document_id().map(|id| id.as_str().to_string()),
+            item.excerpt(),
         ],
     )
     .map_err(|e| InfraError::Database(e.to_string()))?;
@@ -230,7 +261,7 @@ pub(super) fn search_text(
 
     let mut stmt = conn
         .prepare(
-            "SELECT i.id, i.item_type, i.title, i.summary, i.content, i.tags, i.source, i.created_at, i.updated_at
+            "SELECT i.id, i.item_type, i.title, i.summary, i.content, i.tags, i.source, i.created_at, i.updated_at, i.document_id, i.excerpt
              FROM items i
              JOIN items_fts fts ON i.rowid = fts.rowid
              WHERE items_fts MATCH ?1
@@ -262,6 +293,21 @@ pub(super) fn count_text_hits(conn: &Connection, query: &str) -> InfraResult<usi
 
     Ok(count.max(0) as usize)
 }
+pub(super) fn find_by_document_id(conn: &Connection, document_id: &str) -> InfraResult<Vec<Item>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at, document_id, excerpt FROM items WHERE document_id = ?1 ORDER BY created_at DESC",
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+
+    let rows = stmt
+        .query_map([document_id], |row| row_to_item(row).map_err(to_row_err))
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+
+    rows.map(|r| r.map_err(|e| InfraError::Database(e.to_string())))
+        .collect()
+}
+
 fn to_row_err(err: InfraError) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
 }

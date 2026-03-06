@@ -3,7 +3,7 @@
 //! 知识片段的核心实体，控制内部一致性
 
 use crate::error::DomainError;
-use crate::knowledge::types::{ItemId, ItemType, Source, Tag};
+use crate::knowledge::types::{DocumentId, ItemId, ItemType, Source, Tag};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +16,8 @@ pub struct RestoreParams {
     pub content: String,
     pub tags: Vec<Tag>,
     pub source: Option<Source>,
+    pub document_id: Option<DocumentId>,
+    pub excerpt: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -30,6 +32,8 @@ pub struct Item {
     content: String,
     tags: Vec<Tag>,
     source: Option<Source>,
+    document_id: Option<DocumentId>,
+    excerpt: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -61,6 +65,8 @@ impl Item {
             content: String::new(),
             tags: Vec::new(),
             source: None,
+            document_id: None,
+            excerpt: None,
             created_at: now,
             updated_at: now,
         }
@@ -80,6 +86,8 @@ impl Item {
             content: params.content,
             tags: params.tags,
             source: params.source,
+            document_id: params.document_id,
+            excerpt: params.excerpt,
             created_at: params.created_at,
             updated_at: params.updated_at,
         })
@@ -115,6 +123,14 @@ impl Item {
 
     pub fn source(&self) -> Option<&Source> {
         self.source.as_ref()
+    }
+
+    pub fn document_id(&self) -> Option<&DocumentId> {
+        self.document_id.as_ref()
+    }
+
+    pub fn excerpt(&self) -> Option<&str> {
+        self.excerpt.as_deref()
     }
 
     pub fn created_at(&self) -> DateTime<Utc> {
@@ -166,6 +182,16 @@ impl Item {
 
     pub fn set_source(&mut self, source: Source) {
         self.source = Some(source);
+        self.touch();
+    }
+
+    pub fn set_document_id(&mut self, id: DocumentId) {
+        self.document_id = Some(id);
+        self.touch();
+    }
+
+    pub fn set_excerpt(&mut self, excerpt: &str) {
+        self.excerpt = Some(excerpt.to_string());
         self.touch();
     }
 

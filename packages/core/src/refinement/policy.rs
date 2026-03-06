@@ -15,8 +15,8 @@ pub struct ExtractionPolicy {
     pub extract_snippets: bool,
     /// 最大标签数
     pub max_tags: usize,
-    /// 摘要最大长度
-    pub max_summary_len: usize,
+    /// 是否要求 LLM 返回原文引用片段
+    pub require_excerpt: bool,
 }
 
 impl Default for ExtractionPolicy {
@@ -26,7 +26,7 @@ impl Default for ExtractionPolicy {
             extract_skills: true,
             extract_snippets: true,
             max_tags: 5,
-            max_summary_len: 200,
+            require_excerpt: true,
         }
     }
 }
@@ -79,14 +79,27 @@ impl PromptTemplate {
             types.push("代码片段 (snippet)");
         }
 
+        let excerpt_instruction = if policy.require_excerpt {
+            r#"
+excerpt 要求: 必须从原文中逐字引用最能代表该知识点的片段，不要改写。"#
+        } else {
+            ""
+        };
+
+        let excerpt_field = if policy.require_excerpt {
+            r#",
+      "excerpt": "从原文逐字引用的关键片段""#
+        } else {
+            ""
+        };
+
         format!(
-            r#"分析以下对话，提取有价值的内容。
+            r#"分析以下文档，生成结构化知识视图。
 
 提取类型: {}
-每个提取项最多 {} 个标签
-摘要最长 {} 字
+每个提取项最多 {} 个标签{excerpt_instruction}
 
-对话内容:
+文档内容:
 {}
 
 请以 JSON 格式返回:
@@ -96,15 +109,14 @@ impl PromptTemplate {
       "type": "knowledge|skill|snippet",
       "title": "标题",
       "summary": "简短摘要",
-      "content": "详细内容",
-      "tags": ["标签1", "标签2"]
+      "content": "结构化阐述（在理解基础上组织，保留关键细节）",
+      "tags": ["标签1", "标签2"]{excerpt_field}
     }}
   ]
 }}"#,
             types.join(", "),
             policy.max_tags,
-            policy.max_summary_len,
-            conversation
+            conversation,
         )
     }
 }

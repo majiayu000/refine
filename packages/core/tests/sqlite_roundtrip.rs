@@ -21,6 +21,8 @@ async fn roundtrip_preserves_timestamps_and_content() {
         content: "Detailed content should survive roundtrip.".to_string(),
         tags: vec![Tag::new("rust").expect("invalid tag")],
         source: Some(Source::new("claude").with_url("https://claude.ai/chat/abc")),
+        document_id: None,
+        excerpt: None,
         created_at,
         updated_at,
     })

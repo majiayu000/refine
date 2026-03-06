@@ -73,13 +73,47 @@ impl Tag {
 }
 
 // ════════════════════════════════════════════════════════════
+// DocumentId - 文档唯一标识
+// ════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DocumentId(String);
+
+impl DocumentId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4().to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for DocumentId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl Default for DocumentId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for DocumentId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// ════════════════════════════════════════════════════════════
 // Source - 来源信息
 // ════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
     pub platform: String,
-    pub conversation_id: Option<String>,
     pub url: Option<String>,
 }
 
@@ -87,14 +121,8 @@ impl Source {
     pub fn new(platform: &str) -> Self {
         Self {
             platform: platform.to_string(),
-            conversation_id: None,
             url: None,
         }
-    }
-
-    pub fn with_conversation_id(mut self, id: &str) -> Self {
-        self.conversation_id = Some(id.to_string());
-        self
     }
 
     pub fn with_url(mut self, url: &str) -> Self {

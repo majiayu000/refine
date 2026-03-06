@@ -1,7 +1,7 @@
-use super::ops;
+use super::{doc_ops, ops};
 use super::rows::configure_connection;
 use crate::error::{InfraError, InfraResult};
-use crate::knowledge::{Item, ItemType};
+use crate::knowledge::{Document, Item, ItemType};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -58,6 +58,41 @@ pub(super) enum SqliteCommand {
         resp: oneshot::Sender<InfraResult<Vec<Item>>>,
     },
     CountTextHits {
+        query: String,
+        resp: oneshot::Sender<InfraResult<usize>>,
+    },
+    FindByDocumentId {
+        document_id: String,
+        resp: oneshot::Sender<InfraResult<Vec<Item>>>,
+    },
+    // Document 操作
+    DocSave {
+        doc: Document,
+        resp: oneshot::Sender<InfraResult<()>>,
+    },
+    DocFindById {
+        id: String,
+        resp: oneshot::Sender<InfraResult<Option<Document>>>,
+    },
+    DocFindRecent {
+        offset: usize,
+        limit: usize,
+        resp: oneshot::Sender<InfraResult<Vec<Document>>>,
+    },
+    DocCount {
+        resp: oneshot::Sender<InfraResult<usize>>,
+    },
+    DocDelete {
+        id: String,
+        resp: oneshot::Sender<InfraResult<bool>>,
+    },
+    DocSearchText {
+        query: String,
+        offset: usize,
+        limit: usize,
+        resp: oneshot::Sender<InfraResult<Vec<Document>>>,
+    },
+    DocCountTextHits {
         query: String,
         resp: oneshot::Sender<InfraResult<usize>>,
     },
@@ -167,6 +202,30 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
         }
         SqliteCommand::CountTextHits { query, resp } => {
             let _ = resp.send(ops::count_text_hits(conn, &query));
+        }
+        SqliteCommand::FindByDocumentId { document_id, resp } => {
+            let _ = resp.send(ops::find_by_document_id(conn, &document_id));
+        }
+        SqliteCommand::DocSave { doc, resp } => {
+            let _ = resp.send(doc_ops::save(conn, &doc));
+        }
+        SqliteCommand::DocFindById { id, resp } => {
+            let _ = resp.send(doc_ops::find_by_id(conn, &id));
+        }
+        SqliteCommand::DocFindRecent { offset, limit, resp } => {
+            let _ = resp.send(doc_ops::find_recent(conn, offset, limit));
+        }
+        SqliteCommand::DocCount { resp } => {
+            let _ = resp.send(doc_ops::count(conn));
+        }
+        SqliteCommand::DocDelete { id, resp } => {
+            let _ = resp.send(doc_ops::delete(conn, &id));
+        }
+        SqliteCommand::DocSearchText { query, offset, limit, resp } => {
+            let _ = resp.send(doc_ops::search_text(conn, &query, offset, limit));
+        }
+        SqliteCommand::DocCountTextHits { query, resp } => {
+            let _ = resp.send(doc_ops::count_text_hits(conn, &query));
         }
     }
 }

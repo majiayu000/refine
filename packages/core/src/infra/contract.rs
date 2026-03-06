@@ -33,6 +33,10 @@ pub struct ItemDto {
     pub summary: String,
     pub content: String,
     pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<String>,
     pub created_at: String,
 }
 
@@ -49,9 +53,34 @@ impl From<&Item> for ItemDto {
                 .iter()
                 .map(|tag| tag.as_str().to_string())
                 .collect(),
+            document_id: item.document_id().map(|id| id.to_string()),
+            excerpt: item.excerpt().map(|s| s.to_string()),
             created_at: item.created_at().to_rfc3339(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentDto {
+    pub id: String,
+    pub title: String,
+    pub source: String,
+    pub url: String,
+    pub item_count: usize,
+    pub captured_at: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentDetailDto {
+    pub id: String,
+    pub title: String,
+    pub raw_content: String,
+    pub source: String,
+    pub url: String,
+    pub captured_at: String,
+    pub created_at: String,
+    pub items: Vec<ItemDto>,
 }
 
 pub fn trim_optional(value: &str) -> Option<&str> {

@@ -4,11 +4,12 @@
 
 use crate::error::{InfraError, InfraResult};
 use crate::error::RepoResult;
-use crate::knowledge::{Item, ItemId, ItemRepository, ItemType, Tag};
+use crate::knowledge::{Document, DocumentId, DocumentRepository, Item, ItemId, ItemRepository, ItemType, Tag};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use tokio::sync::oneshot;
 
+mod doc_ops;
 mod ops;
 mod rows;
 mod worker;
@@ -136,6 +137,63 @@ impl ItemRepository for SqliteStore {
     async fn count_text_hits(&self, query: &str) -> RepoResult<usize> {
         let query = query.to_string();
         self.request(|resp| SqliteCommand::CountTextHits { query, resp })
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn find_by_document_id(&self, doc_id: &DocumentId) -> RepoResult<Vec<Item>> {
+        let id = doc_id.as_str().to_string();
+        self.request(|resp| SqliteCommand::FindByDocumentId { document_id: id, resp })
+            .await
+            .map_err(Into::into)
+    }
+}
+
+#[async_trait]
+impl DocumentRepository for SqliteStore {
+    async fn find_by_id(&self, id: &DocumentId) -> RepoResult<Option<Document>> {
+        let id = id.as_str().to_string();
+        self.request(|resp| SqliteCommand::DocFindById { id, resp })
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn find_recent(&self, offset: usize, limit: usize) -> RepoResult<Vec<Document>> {
+        self.request(|resp| SqliteCommand::DocFindRecent { offset, limit, resp })
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn count(&self) -> RepoResult<usize> {
+        self.request(|resp| SqliteCommand::DocCount { resp })
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn save(&self, doc: &Document) -> RepoResult<()> {
+        let doc = doc.clone();
+        self.request(|resp| SqliteCommand::DocSave { doc, resp })
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn delete(&self, id: &DocumentId) -> RepoResult<bool> {
+        let id = id.as_str().to_string();
+        self.request(|resp| SqliteCommand::DocDelete { id, resp })
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn search_text(&self, query: &str, offset: usize, limit: usize) -> RepoResult<Vec<Document>> {
+        let query = query.to_string();
+        self.request(|resp| SqliteCommand::DocSearchText { query, offset, limit, resp })
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn count_text_hits(&self, query: &str) -> RepoResult<usize> {
+        let query = query.to_string();
+        self.request(|resp| SqliteCommand::DocCountTextHits { query, resp })
             .await
             .map_err(Into::into)
     }
