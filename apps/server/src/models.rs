@@ -103,6 +103,12 @@ pub struct ListConversationsQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ListDocumentsQuery {
+    pub cursor: Option<usize>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SearchQuery {
     pub q: Option<String>,
     pub limit: Option<usize>,

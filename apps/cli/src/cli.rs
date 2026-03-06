@@ -60,4 +60,23 @@ pub enum Commands {
         #[arg(long, default_value = "knowledge")]
         r#type: String,
     },
+    /// 列出所有文档
+    Docs {
+        /// 限制数量
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+    },
+    /// 显示文档详情及关联知识
+    DocShow {
+        /// 文档 ID
+        id: String,
+    },
+    /// 搜索文档原文
+    DocSearch {
+        /// 搜索关键词
+        query: String,
+        /// 限制结果数量
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+    },
 }

@@ -20,15 +20,16 @@ use crate::application::event::{
 use crate::application::item::delete_item as run_delete_item;
 use crate::application::job::get_extraction_job as run_get_extraction_job;
 use crate::application::query::{
-    get_quota as run_get_quota, list_conversations as run_list_conversations,
+    get_document as run_get_document, get_quota as run_get_quota,
+    list_conversations as run_list_conversations, list_documents as run_list_documents,
     list_items as run_list_items, search_items as run_search_items,
 };
 use crate::application::recommendation::recommend_items as run_recommend_items;
 use crate::models::{
     CreateConversationRequest, CreateConversationResponse, CreateEventRequest, CreateEventResponse,
     CreateExtractionJobRequest, CreateExtractionJobResponse, EventSummaryQuery,
-    GetExtractionJobResponse, ListConversationsQuery, ListItemsQuery, RecommendationQuery,
-    SearchQuery,
+    GetExtractionJobResponse, ListConversationsQuery, ListDocumentsQuery, ListItemsQuery,
+    RecommendationQuery, SearchQuery,
 };
 use crate::request_guard::AuthenticatedUser;
 use crate::state::AppState;
@@ -197,6 +198,30 @@ pub async fn recommend_items(
         Err(err) => return err_response(status_from_error_code(err.code()), err.message()),
     };
     ok_serializable(result)
+}
+
+pub async fn list_documents(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedUser,
+    Query(query): Query<ListDocumentsQuery>,
+) -> impl IntoResponse {
+    let cursor = query.cursor.unwrap_or(0);
+    let limit = query.limit.unwrap_or(20);
+    match run_list_documents(state, cursor, limit).await {
+        Ok(result) => ok_serializable(result),
+        Err(err) => err_response(status_from_error_code(err.code()), err.message()),
+    }
+}
+
+pub async fn get_document(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedUser,
+    Path(doc_id): Path<String>,
+) -> impl IntoResponse {
+    match run_get_document(state, &doc_id).await {
+        Ok(result) => ok_serializable(result),
+        Err(err) => err_response(status_from_error_code(err.code()), err.message()),
+    }
 }
 
 fn status_from_error_code(code: ApplicationErrorCode) -> StatusCode {

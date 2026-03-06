@@ -6,10 +6,13 @@ import type {
   CreateExtractionJobParams,
   CreateExtractionJobResult,
   CreateItemParams,
+  DocumentDetail,
+  DocumentListResult,
   EventSummaryResult,
   Item,
   ItemListResult,
   ListConversationsParams,
+  ListDocumentsParams,
   ListItemsParams,
   QuotaResult,
   SearchResult,
@@ -28,6 +31,8 @@ export interface RefineApiClient {
   updateItem: (params: UpdateItemParams) => Promise<Item>
   deleteItem: (id: string) => Promise<boolean>
   listConversations: (params?: ListConversationsParams) => Promise<ConversationListResult>
+  getDocuments: (params?: ListDocumentsParams) => Promise<DocumentListResult>
+  getDocument: (id: string) => Promise<DocumentDetail | null>
   getEventSummary: (days?: number) => Promise<EventSummaryResult>
   createExtractionJob: (params: CreateExtractionJobParams) => Promise<CreateExtractionJobResult>
   getQuota: () => Promise<QuotaResult>

@@ -6,10 +6,13 @@ import type {
   CreateExtractionJobParams,
   CreateExtractionJobResult,
   CreateItemParams,
+  DocumentDetail,
+  DocumentListResult,
   EventSummaryResult,
   Item,
   ItemListResult,
   ListConversationsParams,
+  ListDocumentsParams,
   ListItemsParams,
   QuotaResult,
   SearchResult,
@@ -47,6 +50,7 @@ const capabilities: ApiCapabilities = {
   },
   ops: {
     conversations: false,
+    documents: false,
     funnel: false,
     extractionJobs: false,
     quota: false,
@@ -106,6 +110,14 @@ export function createTauriAdapter(): RefineApiClient {
       }),
 
     deleteItem: (id: string): Promise<boolean> => invoke('delete_item', { id }),
+
+    getDocuments: async (_params?: ListDocumentsParams): Promise<DocumentListResult> => {
+      throw unsupported('文档列表（/v1/documents）')
+    },
+
+    getDocument: async (_id: string): Promise<DocumentDetail | null> => {
+      throw unsupported('文档详情（/v1/documents/:id）')
+    },
 
     listConversations: async (_params?: ListConversationsParams): Promise<ConversationListResult> => {
       throw unsupported('会话管理（/v1/conversations）')

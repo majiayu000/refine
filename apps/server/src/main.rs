@@ -71,6 +71,8 @@ async fn main() {
             "/v1/extraction-jobs/:job_id",
             get(handlers::get_extraction_job),
         )
+        .route("/v1/documents", get(handlers::list_documents))
+        .route("/v1/documents/:doc_id", get(handlers::get_document))
         .route("/v1/items", get(handlers::list_items))
         .route("/v1/items/:item_id", delete(handlers::delete_item))
         .route("/v1/quota", get(handlers::get_quota))

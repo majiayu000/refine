@@ -6,11 +6,15 @@ import type {
   CreateExtractionJobParams,
   CreateExtractionJobResult,
   CreateItemParams,
+  Document,
+  DocumentDetail,
+  DocumentListResult,
   EventSummaryResult,
   FunnelCounts,
   Item,
   ItemListResult,
   ListConversationsParams,
+  ListDocumentsParams,
   ListItemsParams,
   QuotaResult,
   SearchResult,
@@ -37,6 +41,7 @@ const capabilities: ApiCapabilities = {
   },
   ops: {
     conversations: true,
+    documents: true,
     funnel: true,
     extractionJobs: true,
     quota: true,
@@ -204,6 +209,35 @@ export function createHttpAdapter(): RefineApiClient {
         method: 'DELETE',
       })
       return Boolean(data.deleted)
+    },
+
+    getDocuments: async (params?: ListDocumentsParams): Promise<DocumentListResult> => {
+      const cursor = params?.cursor ?? 0
+      const limit = params?.limit ?? 20
+      const query = new URLSearchParams({
+        cursor: String(cursor),
+        limit: String(limit),
+      })
+      const data = await requestJson<{
+        documents?: Document[]
+        total?: number
+        next_cursor?: number | null
+      }>(`/v1/documents?${query.toString()}`)
+      const documents = Array.isArray(data.documents) ? data.documents : []
+      return {
+        documents,
+        total: toNumber(data.total, documents.length),
+        nextCursor: toOptionalNumber(data.next_cursor),
+      }
+    },
+
+    getDocument: async (id: string): Promise<DocumentDetail | null> => {
+      try {
+        const data = await requestJson<DocumentDetail>(`/v1/documents/${encodeURIComponent(id)}`)
+        return data
+      } catch {
+        return null
+      }
     },
 
     listConversations: async (

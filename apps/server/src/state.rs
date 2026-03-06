@@ -1,7 +1,7 @@
 use refine_core::infra::{
     build_llm_client_from_env, ensure_db_dir, resolve_db_path, LlmClient, SqliteStore,
 };
-use refine_core::knowledge::ItemRepository;
+use refine_core::knowledge::{DocumentRepository, ItemRepository};
 use refine_core::search::SearchEngine;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -20,6 +20,7 @@ pub struct RuntimeState {
 
 pub struct AppState {
     pub store: Arc<dyn ItemRepository>,
+    pub doc_store: Arc<dyn DocumentRepository>,
     pub engine: Arc<SearchEngine>,
     pub semantic_search_enabled: bool,
     pub free_quota_items: usize,
@@ -42,7 +43,8 @@ impl AppState {
         let event_repo: Arc<dyn EventRepository> = persistence.clone();
 
         let sqlite_store = Arc::new(SqliteStore::open(&db_path).map_err(|e| e.to_string())?);
-        let store: Arc<dyn ItemRepository> = sqlite_store;
+        let store: Arc<dyn ItemRepository> = sqlite_store.clone();
+        let doc_store: Arc<dyn DocumentRepository> = sqlite_store;
         let api_token = env_var(&["REFINE_API_TOKEN"]);
         if is_production_env() && api_token.is_none() {
             return Err(
@@ -108,6 +110,7 @@ impl AppState {
 
         Ok(Self {
             store,
+            doc_store,
             engine,
             semantic_search_enabled,
             free_quota_items,

@@ -7,6 +7,8 @@ export interface Item {
   summary: string
   content: string
   tags: string[]
+  document_id?: string
+  excerpt?: string
   created_at: string
 }
 
@@ -19,6 +21,38 @@ export interface ItemListResult {
 export interface SearchResult {
   items: Item[]
   total: number
+}
+
+export interface Document {
+  id: string
+  title: string
+  source: string
+  url: string
+  item_count: number
+  captured_at: string
+  created_at: string
+}
+
+export interface DocumentDetail {
+  id: string
+  title: string
+  raw_content: string
+  source: string
+  url: string
+  captured_at: string
+  created_at: string
+  items: Item[]
+}
+
+export interface DocumentListResult {
+  documents: Document[]
+  total: number
+  nextCursor: number | null
+}
+
+export interface ListDocumentsParams {
+  cursor?: number
+  limit?: number
 }
 
 export interface CreateItemParams {
@@ -111,6 +145,7 @@ export interface ApiCapabilities {
   }
   ops: {
     conversations: boolean
+    documents: boolean
     funnel: boolean
     extractionJobs: boolean
     quota: boolean

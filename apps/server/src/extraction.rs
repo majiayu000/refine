@@ -1,4 +1,4 @@
-use refine_core::knowledge::Source;
+use refine_core::knowledge::{Document, DocumentRepository, Source};
 use refine_core::refinement::{extract_items_with_defaults, ExtractionPolicy, ItemExtractionInput};
 use std::sync::Arc;
 
@@ -39,8 +39,16 @@ async fn run_extraction(
     };
 
     let source = Source::new(&conversation.source)
-        .with_conversation_id(&conversation.id)
         .with_url(&conversation.url);
+
+    let mut doc = Document::new(&conversation.source, &conversation.raw_content);
+    doc.set_url(&conversation.url);
+    if let Some(title) = &conversation.title {
+        doc.set_title(title);
+    }
+    let doc_id = doc.id().clone();
+    save_document(&state.doc_store, &doc).await?;
+
     let input = ItemExtractionInput {
         source: &conversation.source,
         title: conversation.title.as_deref(),
@@ -48,7 +56,7 @@ async fn run_extraction(
         captured_at: Some(&conversation.captured_at),
         policy: mode_to_policy(mode),
     };
-    let items = extract_items_with_defaults(state.llm_client.as_deref(), &input, &source).await;
+    let items = extract_items_with_defaults(state.llm_client.as_deref(), &input, &source, &doc_id).await;
 
     let mut item_ids = Vec::with_capacity(items.len());
     for item in &items {
@@ -190,6 +198,16 @@ where
             tracing::warn!("persist {} job failed: {}", phase, err);
         }
     }
+}
+
+async fn save_document(
+    doc_store: &Arc<dyn DocumentRepository>,
+    doc: &Document,
+) -> Result<(), String> {
+    doc_store
+        .save(doc)
+        .await
+        .map_err(|e| format!("failed to save document: {}", e))
 }
 
 async fn update_conversation<F>(

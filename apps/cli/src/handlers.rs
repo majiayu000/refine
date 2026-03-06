@@ -2,9 +2,11 @@ use crate::cli::Commands;
 use crate::support::{build_llm_client_from_env, format_item, parse_item_type};
 use anyhow::{Context, Result};
 use refine_core::infra::SqliteStore;
-use refine_core::knowledge::{Item, ItemId, ItemRepository, ItemType, Source};
+use refine_core::knowledge::{
+    DocumentId, DocumentRepository, Item, ItemId, ItemRepository, ItemType, Source,
+};
 use refine_core::refinement::{
-    apply_source_and_content_defaults, extract_items_with_llm, ExtractionPolicy,
+    apply_defaults, extract_items_with_llm, ExtractionPolicy,
 };
 use refine_core::search::{SearchEngine, SearchQuery};
 use std::io::{self, Read};
@@ -26,6 +28,9 @@ pub async fn run(
             summary,
             r#type,
         } => handle_add(&title, &summary, &r#type, store).await,
+        Commands::Docs { limit } => handle_docs(limit, store).await,
+        Commands::DocShow { id } => handle_doc_show(&id, store).await,
+        Commands::DocSearch { query, limit } => handle_doc_search(&query, limit, store).await,
     }
 }
 
@@ -44,11 +49,13 @@ async fn handle_extract(stdin: bool, store: Arc<SqliteStore>) -> Result<()> {
         .await
         .context("提炼失败")?;
     let source = Source::new("cli");
-    apply_source_and_content_defaults(&mut items, &source, &content);
+    let doc_id = DocumentId::new();
+    apply_defaults(&mut items, &source, &doc_id, &content);
 
+    let item_store: &dyn ItemRepository = store.as_ref();
     println!("提炼完成：{} 条", items.len());
     for item in &items {
-        store.save(item).await?;
+        item_store.save(item).await?;
         println!(
             "  + [{}] {} ({})",
             format!("{:?}", item.item_type()).to_lowercase(),
@@ -98,8 +105,9 @@ async fn handle_list(r#type: Option<String>, limit: usize, store: Arc<SqliteStor
 }
 
 async fn handle_show(id: &str, store: Arc<SqliteStore>) -> Result<()> {
+    let item_store: &dyn ItemRepository = store.as_ref();
     let item_id = ItemId::from(id);
-    match store.find_by_id(&item_id).await? {
+    match item_store.find_by_id(&item_id).await? {
         Some(item) => println!("{}", format_item(&item, true)),
         None => println!("未找到 ID 为 {} 的知识", id),
     }
@@ -108,8 +116,9 @@ async fn handle_show(id: &str, store: Arc<SqliteStore>) -> Result<()> {
 }
 
 async fn handle_delete(id: &str, store: Arc<SqliteStore>) -> Result<()> {
+    let item_store: &dyn ItemRepository = store.as_ref();
     let item_id = ItemId::from(id);
-    if store.delete(&item_id).await? {
+    if item_store.delete(&item_id).await? {
         println!("已删除: {}", id);
     } else {
         println!("未找到 ID 为 {} 的知识", id);
@@ -119,6 +128,7 @@ async fn handle_delete(id: &str, store: Arc<SqliteStore>) -> Result<()> {
 }
 
 async fn handle_add(title: &str, summary: &str, raw_type: &str, store: Arc<SqliteStore>) -> Result<()> {
+    let item_store: &dyn ItemRepository = store.as_ref();
     let item_type = parse_add_item_type(raw_type)?;
     let item = match item_type {
         ItemType::Knowledge => Item::new_knowledge(title, summary),
@@ -126,8 +136,86 @@ async fn handle_add(title: &str, summary: &str, raw_type: &str, store: Arc<Sqlit
         ItemType::Snippet => Item::new_snippet(title, summary),
     };
 
-    store.save(&item).await?;
+    item_store.save(&item).await?;
     println!("已添加: {} ({})", item.id().as_str(), item.title());
+
+    Ok(())
+}
+
+async fn handle_docs(limit: usize, store: Arc<SqliteStore>) -> Result<()> {
+    let doc_store: &dyn DocumentRepository = store.as_ref();
+    let total = doc_store.count().await?;
+    let docs = doc_store.find_recent(0, limit).await?;
+
+    if docs.is_empty() {
+        println!("暂无文档");
+    } else {
+        println!("共 {} 篇文档:\n", total);
+        for doc in &docs {
+            let title = doc.title().unwrap_or("(无标题)");
+            println!(
+                "  {} | {} | {} | {}",
+                doc.id().as_str().chars().take(8).collect::<String>(),
+                title,
+                doc.source(),
+                doc.created_at().format("%Y-%m-%d %H:%M"),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_doc_show(id: &str, store: Arc<SqliteStore>) -> Result<()> {
+    let doc_store: &dyn DocumentRepository = store.as_ref();
+    let item_store: &dyn ItemRepository = store.as_ref();
+    let doc_id = DocumentId::from(id);
+    let doc = doc_store.find_by_id(&doc_id).await?;
+
+    let Some(doc) = doc else {
+        println!("未找到 ID 为 {} 的文档", id);
+        return Ok(());
+    };
+
+    let title = doc.title().unwrap_or("(无标题)");
+    println!("ID: {}", doc.id());
+    println!("标题: {}", title);
+    println!("来源: {}", doc.source());
+    println!("URL: {}", doc.url());
+    println!("创建: {}", doc.created_at().format("%Y-%m-%d %H:%M"));
+    println!("---");
+    println!("{}", doc.raw_content());
+
+    let items = item_store.find_by_document_id(&doc_id).await?;
+    if !items.is_empty() {
+        println!("\n关联知识 ({} 条):\n", items.len());
+        for item in &items {
+            println!("{}", format_item(item, false));
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_doc_search(query: &str, limit: usize, store: Arc<SqliteStore>) -> Result<()> {
+    let doc_store: &dyn DocumentRepository = store.as_ref();
+    let total = doc_store.count_text_hits(query).await?;
+    let docs = doc_store.search_text(query, 0, limit).await?;
+
+    if docs.is_empty() {
+        println!("未找到匹配的文档");
+    } else {
+        println!("找到 {} 篇匹配文档:\n", total);
+        for doc in &docs {
+            let title = doc.title().unwrap_or("(无标题)");
+            println!(
+                "  {} | {} | {}",
+                doc.id().as_str().chars().take(8).collect::<String>(),
+                title,
+                doc.source(),
+            );
+        }
+    }
 
     Ok(())
 }

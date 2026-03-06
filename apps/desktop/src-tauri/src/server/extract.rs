@@ -1,6 +1,6 @@
 use super::json::parse_json_body;
 use refine_core::infra::LlmClient;
-use refine_core::knowledge::{ItemRepository, Source};
+use refine_core::knowledge::{DocumentId, ItemRepository, Source};
 use refine_core::refinement::{extract_items_with_defaults, ExtractionPolicy, ItemExtractionInput};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -64,7 +64,8 @@ async fn extract_and_store(
         captured_at: None,
         policy: ExtractionPolicy::default(),
     };
-    let items = extract_items_with_defaults(llm_client.as_deref(), &input, &source).await;
+    let doc_id = DocumentId::new();
+    let items = extract_items_with_defaults(llm_client.as_deref(), &input, &source, &doc_id).await;
 
     let mut ids = Vec::with_capacity(items.len());
     for item in &items {
