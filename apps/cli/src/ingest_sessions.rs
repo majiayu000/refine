@@ -21,7 +21,7 @@ pub async fn handle_ingest_sessions(
     options: IngestOptions,
     item_store: Arc<dyn ItemRepository>,
     doc_store: Arc<dyn DocumentRepository>,
-    llm_client: Arc<dyn LlmClient>,
+    llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
     // 1. 发现会话文件
     let discovered = discover_sessions(options.source);
@@ -77,12 +77,14 @@ pub async fn handle_ingest_sessions(
             continue;
         }
 
-        // 5. 分块 + facet 提取
+        // 5. 分块 + facet 提取（非 dry-run 必有 LLM）
+        let client = llm_client.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("非 dry-run 模式需要 LLM API Key"))?;
         let content = if needs_chunking(&session) {
             let chunks = chunk_session(&session);
             let mut summaries = Vec::new();
             for chunk in &chunks {
-                match extract_facets_from_content(&chunk.content, &llm_client).await {
+                match extract_facets_from_content(&chunk.content, client).await {
                     Ok(text) => summaries.push(text),
                     Err(e) => tracing::warn!("分块提取失败: {}", e),
                 }
@@ -92,7 +94,7 @@ pub async fn handle_ingest_sessions(
             session.to_document_content()
         };
 
-        let facet_response = match extract_and_parse_facets(&content, &llm_client).await {
+        let facet_response = match extract_and_parse_facets(&content, client).await {
             Ok(f) => f,
             Err(e) => {
                 tracing::warn!("facet 提取失败 {}: {}", url, e);

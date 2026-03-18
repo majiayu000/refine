@@ -37,7 +37,11 @@ pub async fn run(
             dry_run,
         } => {
             let source_filter = source.as_deref().and_then(parse_session_source);
-            let llm_client = build_llm_client_from_env()?;
+            let llm_client = if dry_run {
+                None
+            } else {
+                Some(build_llm_client_from_env()?)
+            };
             let item_store: Arc<dyn ItemRepository> = store.clone();
             let doc_store: Arc<dyn DocumentRepository> = store.clone();
             handle_ingest_sessions(
