@@ -10,6 +10,7 @@ pub(super) fn init_schema(conn: &Connection) -> InfraResult<()> {
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     migrate_items_add_document_columns(conn)?;
+    migrate_documents_add_url_index(conn)?;
     let _ = maybe_rebuild_fts_index(conn)?;
 
     Ok(())
@@ -27,6 +28,12 @@ fn migrate_items_add_document_columns(conn: &Connection) -> InfraResult<()> {
             .map_err(|e| InfraError::Database(e.to_string()))?;
     }
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_items_document ON items(document_id)")
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    Ok(())
+}
+
+fn migrate_documents_add_url_index(conn: &Connection) -> InfraResult<()> {
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_documents_url ON documents(url)")
         .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(())
 }

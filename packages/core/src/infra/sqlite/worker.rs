@@ -66,6 +66,10 @@ pub(super) enum SqliteCommand {
         resp: oneshot::Sender<InfraResult<Vec<Item>>>,
     },
     // Document 操作
+    DocFindByUrl {
+        url: String,
+        resp: oneshot::Sender<InfraResult<Option<Document>>>,
+    },
     DocSave {
         doc: Document,
         resp: oneshot::Sender<InfraResult<()>>,
@@ -205,6 +209,9 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
         }
         SqliteCommand::FindByDocumentId { document_id, resp } => {
             let _ = resp.send(ops::find_by_document_id(conn, &document_id));
+        }
+        SqliteCommand::DocFindByUrl { url, resp } => {
+            let _ = resp.send(doc_ops::find_by_url(conn, &url));
         }
         SqliteCommand::DocSave { doc, resp } => {
             let _ = resp.send(doc_ops::save(conn, &doc));

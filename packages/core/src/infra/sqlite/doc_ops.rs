@@ -32,6 +32,16 @@ pub(super) fn find_by_id(conn: &Connection, id: &str) -> InfraResult<Option<Docu
         .map_err(|e| InfraError::Database(e.to_string()))
 }
 
+pub(super) fn find_by_url(conn: &Connection, url: &str) -> InfraResult<Option<Document>> {
+    let mut stmt = conn
+        .prepare("SELECT id, title, raw_content, source, url, captured_at, created_at, updated_at FROM documents WHERE url = ?1")
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+
+    stmt.query_row([url], |row| row_to_document(row).map_err(to_row_err))
+        .optional()
+        .map_err(|e| InfraError::Database(e.to_string()))
+}
+
 pub(super) fn find_recent(
     conn: &Connection,
     offset: usize,

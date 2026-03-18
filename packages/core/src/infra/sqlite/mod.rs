@@ -158,6 +158,13 @@ impl DocumentRepository for SqliteStore {
             .map_err(Into::into)
     }
 
+    async fn find_by_url(&self, url: &str) -> RepoResult<Option<Document>> {
+        let url = url.to_string();
+        self.request(|resp| SqliteCommand::DocFindByUrl { url, resp })
+            .await
+            .map_err(Into::into)
+    }
+
     async fn find_recent(&self, offset: usize, limit: usize) -> RepoResult<Vec<Document>> {
         self.request(|resp| SqliteCommand::DocFindRecent { offset, limit, resp })
             .await
