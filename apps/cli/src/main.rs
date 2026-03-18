@@ -4,6 +4,7 @@
 
 mod cli;
 mod handlers;
+mod ingest_sessions;
 mod support;
 
 use anyhow::{Context, Result};

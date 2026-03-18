@@ -1,4 +1,5 @@
 use crate::cli::Commands;
+use crate::ingest_sessions::{handle_ingest_sessions, IngestOptions};
 use crate::support::{build_llm_client_from_env, format_item, parse_item_type};
 use anyhow::{Context, Result};
 use refine_core::infra::SqliteStore;
@@ -9,6 +10,7 @@ use refine_core::refinement::{
     apply_defaults, extract_items_with_llm, ExtractionPolicy,
 };
 use refine_core::search::{SearchEngine, SearchQuery};
+use refine_core::session::SessionSource;
 use std::io::{self, Read};
 use std::sync::Arc;
 
@@ -28,6 +30,27 @@ pub async fn run(
             summary,
             r#type,
         } => handle_add(&title, &summary, &r#type, store).await,
+        Commands::IngestSessions {
+            source,
+            limit,
+            dry_run,
+        } => {
+            let source_filter = source.as_deref().and_then(parse_session_source);
+            let llm_client = build_llm_client_from_env()?;
+            let item_store: Arc<dyn ItemRepository> = store.clone();
+            let doc_store: Arc<dyn DocumentRepository> = store.clone();
+            handle_ingest_sessions(
+                IngestOptions {
+                    source: source_filter,
+                    limit,
+                    dry_run,
+                },
+                item_store,
+                doc_store,
+                llm_client,
+            )
+            .await
+        }
         Commands::Docs { limit } => handle_docs(limit, store).await,
         Commands::DocShow { id } => handle_doc_show(&id, store).await,
         Commands::DocSearch { query, limit } => handle_doc_search(&query, limit, store).await,
@@ -219,6 +242,14 @@ async fn handle_doc_search(query: &str, limit: usize, store: Arc<SqliteStore>) -
     }
 
     Ok(())
+}
+
+fn parse_session_source(raw: &str) -> Option<SessionSource> {
+    match raw.to_lowercase().as_str() {
+        "claude" | "claude-code" => Some(SessionSource::ClaudeCode),
+        "codex" => Some(SessionSource::Codex),
+        _ => None,
+    }
 }
 
 fn parse_add_item_type(raw_type: &str) -> Result<ItemType> {

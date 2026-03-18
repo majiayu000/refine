@@ -71,6 +71,18 @@ pub enum Commands {
         /// 文档 ID
         id: String,
     },
+    /// 从 AI 编程会话中提取认知观测
+    IngestSessions {
+        /// 来源过滤 (claude, codex)
+        #[arg(long)]
+        source: Option<String>,
+        /// 限制处理数量
+        #[arg(short, long)]
+        limit: Option<usize>,
+        /// 仅预览，不实际处理
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// 搜索文档原文
     DocSearch {
         /// 搜索关键词
