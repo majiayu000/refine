@@ -66,12 +66,14 @@ pub async fn run(
                 None
             };
             let item_store: Arc<dyn ItemRepository> = store.clone();
+            let doc_store: Arc<dyn DocumentRepository> = store.clone();
             handle_insights(
                 InsightsOptions {
                     period,
                     with_prescription: prescription,
                 },
                 item_store,
+                doc_store,
                 llm_client,
             )
             .await
