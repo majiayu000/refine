@@ -60,11 +60,7 @@ pub async fn run(
             period,
             prescription,
         } => {
-            let llm_client = if prescription {
-                Some(build_llm_client_from_env()?)
-            } else {
-                None
-            };
+            let llm_client = Some(build_llm_client_from_env()?);
             let item_store: Arc<dyn ItemRepository> = store.clone();
             let doc_store: Arc<dyn DocumentRepository> = store.clone();
             handle_insights(
