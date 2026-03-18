@@ -141,6 +141,7 @@ pub enum ItemType {
     Knowledge,
     Skill,
     Snippet,
+    Observation,
 }
 
 impl ItemType {
@@ -149,6 +150,7 @@ impl ItemType {
             Self::Knowledge => "knowledge",
             Self::Skill => "skill",
             Self::Snippet => "snippet",
+            Self::Observation => "observation",
         }
     }
 }

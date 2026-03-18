@@ -104,6 +104,7 @@ pub async fn create_item(
         ItemType::Knowledge => Item::new_knowledge(&title, &summary),
         ItemType::Skill => Item::new_skill(&title, &summary),
         ItemType::Snippet => Item::new_snippet(&title, &summary),
+        ItemType::Observation => Item::new_observation(&title, &summary),
     };
 
     item.set_content(&content);

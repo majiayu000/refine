@@ -55,6 +55,10 @@ impl Item {
         Self::create(ItemType::Snippet, title, summary)
     }
 
+    pub fn new_observation(title: &str, summary: &str) -> Self {
+        Self::create(ItemType::Observation, title, summary)
+    }
+
     fn create(item_type: ItemType, title: &str, summary: &str) -> Self {
         let now = Utc::now();
         Self {

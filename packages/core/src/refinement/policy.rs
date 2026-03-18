@@ -58,6 +58,7 @@ impl ExtractionPolicy {
             ItemType::Knowledge => self.extract_knowledge,
             ItemType::Skill => self.extract_skills,
             ItemType::Snippet => self.extract_snippets,
+            ItemType::Observation => false,
         }
     }
 }

@@ -134,6 +134,7 @@ async fn handle_add(title: &str, summary: &str, raw_type: &str, store: Arc<Sqlit
         ItemType::Knowledge => Item::new_knowledge(title, summary),
         ItemType::Skill => Item::new_skill(title, summary),
         ItemType::Snippet => Item::new_snippet(title, summary),
+        ItemType::Observation => Item::new_observation(title, summary),
     };
 
     item_store.save(&item).await?;

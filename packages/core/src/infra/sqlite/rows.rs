@@ -84,6 +84,7 @@ pub(super) fn row_to_item(row: &rusqlite::Row) -> InfraResult<Item> {
     let item_type = match type_str.as_str() {
         "skill" => ItemType::Skill,
         "snippet" => ItemType::Snippet,
+        "observation" => ItemType::Observation,
         _ => ItemType::Knowledge,
     };
 

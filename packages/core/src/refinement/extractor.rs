@@ -246,6 +246,7 @@ impl Extractor {
                 ItemType::Knowledge => Item::new_knowledge(&llm_item.title, &llm_item.summary),
                 ItemType::Skill => Item::new_skill(&llm_item.title, &llm_item.summary),
                 ItemType::Snippet => Item::new_snippet(&llm_item.title, &llm_item.summary),
+                ItemType::Observation => Item::new_observation(&llm_item.title, &llm_item.summary),
             };
 
             // 设置内容

@@ -10,6 +10,7 @@ pub fn parse_item_type(raw: &str) -> Option<ItemType> {
         "knowledge" => Some(ItemType::Knowledge),
         "skill" => Some(ItemType::Skill),
         "snippet" => Some(ItemType::Snippet),
+        "observation" => Some(ItemType::Observation),
         _ => None,
     }
 }
