@@ -83,6 +83,15 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// 生成认知洞察报告
+    Insights {
+        /// 分析最近 N 天（默认全部）
+        #[arg(short, long)]
+        period: Option<usize>,
+        /// 生成 L4 处方（需要 LLM）
+        #[arg(long)]
+        prescription: bool,
+    },
     /// 搜索文档原文
     DocSearch {
         /// 搜索关键词

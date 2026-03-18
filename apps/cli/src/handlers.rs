@@ -1,5 +1,6 @@
 use crate::cli::Commands;
 use crate::ingest_sessions::{handle_ingest_sessions, IngestOptions};
+use crate::insights::{handle_insights, InsightsOptions};
 use crate::support::{build_llm_client_from_env, format_item, parse_item_type};
 use anyhow::{Context, Result};
 use refine_core::infra::SqliteStore;
@@ -47,6 +48,26 @@ pub async fn run(
                 },
                 item_store,
                 doc_store,
+                llm_client,
+            )
+            .await
+        }
+        Commands::Insights {
+            period,
+            prescription,
+        } => {
+            let llm_client = if prescription {
+                Some(build_llm_client_from_env()?)
+            } else {
+                None
+            };
+            let item_store: Arc<dyn ItemRepository> = store.clone();
+            handle_insights(
+                InsightsOptions {
+                    period,
+                    with_prescription: prescription,
+                },
+                item_store,
                 llm_client,
             )
             .await
