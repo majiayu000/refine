@@ -40,12 +40,12 @@
 //! let results = engine.search(SearchQuery::new("Rust")).await?;
 //! ```
 
-// 禁止新增顶层模块
 pub mod error;
 pub mod infra;
 pub mod knowledge;
 pub mod refinement;
 pub mod search;
+pub mod session;
 
 // 常用类型重导出
 pub use error::{AppError, DomainError, InfraError, RepositoryError, Result};
