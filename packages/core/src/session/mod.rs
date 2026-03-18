@@ -2,6 +2,7 @@
 //!
 //! 从 Claude Code / Codex 会话中提取认知观测
 
+mod aggregation;
 mod chunking;
 mod discovery;
 mod facets;
@@ -9,6 +10,7 @@ mod filter;
 mod parser;
 mod types;
 
+pub use aggregation::{aggregate_observations, format_report, AggregationReport};
 pub use chunking::{chunk_session, needs_chunking, SessionChunk};
 pub use discovery::{discover_sessions, discover_sessions_in, DiscoveredSession};
 pub use facets::{
