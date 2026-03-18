@@ -19,6 +19,10 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if let Err(e) = dotenvy::dotenv() {
+        eprintln!("提示: 未加载 .env 文件 ({})", e);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter("refine=info,refine_core=info")
         .init();
