@@ -1,14 +1,19 @@
-//! insights 命令实现
-//!
-//! 把 observation 的具体内容直接喂给 LLM，生成有实质的报告
+//! insights v2 — 两级分析：本地聚类 + 10 路 LLM 并发
 
 use anyhow::{Context, Result};
 use refine_core::infra::LlmClient;
-use refine_core::knowledge::{Document, DocumentRepository, Item, ItemRepository, ItemType};
+use refine_core::knowledge::{Document, DocumentRepository, ItemRepository, ItemType};
+use refine_core::session::{
+    build_final_prompt, cluster_observations, merge_route_results, plan_routes,
+    RouteResult, INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
+};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Semaphore;
 
-const INSIGHTS_SYSTEM_PROMPT: &str = "你是技术成长分析师。基于开发者的真实编程会话观测数据，生成具体、有实质内容的洞察报告。\
-所有判断必须引用具体的会话数据作为证据。禁止泛泛而谈。使用中文。";
+const LLM_CONCURRENCY: usize = 10;
+const MAX_RETRIES: usize = 5;
+const RETRY_BASE_DELAY_SECS: u64 = 10;
 
 pub struct InsightsOptions {
     pub period: Option<usize>,
@@ -21,6 +26,15 @@ pub async fn handle_insights(
     doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
+    let client = match &llm_client {
+        Some(c) => c.clone(),
+        None => {
+            println!("insights 需要 LLM。请配置 API Key。");
+            return Ok(());
+        }
+    };
+
+    // Step 0: 加载全量 observation
     let observations = item_store
         .find_by_type(ItemType::Observation)
         .await
@@ -31,158 +45,113 @@ pub async fn handle_insights(
         return Ok(());
     }
 
-    let items = if let Some(_period) = options.period {
-        observations
-    } else {
-        observations
-    };
+    println!("加载 {} 条观测数据...", observations.len());
 
-    println!("加载 {} 条观测数据，构建分析上下文...\n", items.len());
+    // Step 1: 本地聚类（纯 Rust，无 LLM）
+    let cluster_result = cluster_observations(&observations);
+    let stats = &cluster_result.global_stats;
 
-    let client = match &llm_client {
-        Some(c) => c.as_ref(),
-        None => {
-            println!("insights 需要 LLM。请配置 API Key。");
-            return Ok(());
+    println!(
+        "聚类完成: {} 个项目, {} sessions, {} decisions, {} bugs\n",
+        stats.project_ranking.len(),
+        stats.total_sessions,
+        stats.total_decisions,
+        stats.total_bugfixes,
+    );
+
+    // Step 2: 规划 LLM 分析路由
+    let routes = plan_routes(&cluster_result);
+    println!("规划 {} 路并发 LLM 分析...\n", routes.len());
+
+    // Step 3: 并发执行 LLM 分析
+    let semaphore = Arc::new(Semaphore::new(LLM_CONCURRENCY));
+    let mut handles = Vec::new();
+
+    for route in routes {
+        let sem = semaphore.clone();
+        let client = client.clone();
+        let handle = tokio::spawn(async move {
+            let _permit = sem.acquire().await.expect("semaphore closed");
+            let content = match llm_with_retry(&client, &route.prompt, ROUTE_SYSTEM_PROMPT).await {
+                Ok(c) => c,
+                Err(e) => format!("分析失败: {}", e),
+            };
+            eprintln!("  ✓ Route {}: {}", route.id, route.title);
+            RouteResult {
+                route_id: route.id,
+                route_title: route.title,
+                content,
+            }
+        });
+        handles.push(handle);
+    }
+
+    let mut route_results = Vec::new();
+    for handle in handles {
+        if let Ok(result) = handle.await {
+            route_results.push(result);
         }
-    };
+    }
 
-    // 把具体内容整理成结构化文本喂给 LLM
-    let context = build_rich_context(&items);
+    println!("\n{} 路分析完成，合并生成最终报告...\n", route_results.len());
 
-    println!("上下文: {} 字符，发送给 LLM...\n", context.len());
+    // Step 4: 合并 + 最终报告
+    let combined = merge_route_results(&route_results);
+    let final_prompt = build_final_prompt(&combined, stats, options.with_prescription);
 
-    let prompt = build_insights_prompt(&context, options.with_prescription);
-    let response = client
-        .complete(&prompt, Some(INSIGHTS_SYSTEM_PROMPT))
+    let report = llm_with_retry(&client, &final_prompt, INSIGHTS_SYSTEM_PROMPT)
         .await
-        .map_err(|e| anyhow::anyhow!("LLM 调用失败: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("最终报告生成失败: {}", e))?;
 
-    println!("{}", response);
+    println!("{}", report);
 
-    // 保存到数据库
-    let mut doc = Document::new("session-insights", &response);
+    // Step 5: 保存
+    let mut doc = Document::new("session-insights-v2", &report);
     let title = format!(
-        "Session Insights {}",
+        "Session Insights v2 {}",
         doc.created_at().format("%Y-%m-%d %H:%M")
     );
     doc.set_title(&title);
-    doc.set_url(&format!("insights://{}", doc.created_at().to_rfc3339()));
+    doc.set_url(&format!("insights-v2://{}", doc.created_at().to_rfc3339()));
     doc_store.save(&doc).await.context("保存报告失败")?;
 
     println!("\n报告已保存 (ID: {})", doc.id());
-    println!("查看: refine doc-show {}", doc.id());
 
     Ok(())
 }
 
-/// 从 observations 中提取具体内容，按类别分组
-fn build_rich_context(items: &[Item]) -> String {
-    let mut summaries = Vec::new();
-    let mut decisions = Vec::new();
-    let mut bugs = Vec::new();
-    let mut other_observations = Vec::new();
+async fn llm_with_retry(
+    client: &Arc<dyn LlmClient>,
+    prompt: &str,
+    system: &str,
+) -> Result<String> {
+    let mut last_err = String::new();
+    for attempt in 0..MAX_RETRIES {
+        match client.complete(prompt, Some(system)).await {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                last_err = e.to_string();
+                let is_retryable = last_err.contains("cooldown")
+                    || last_err.contains("service_busy")
+                    || last_err.contains("rate")
+                    || last_err.contains("429")
+                    || last_err.contains("Upstream")
+                    || last_err.contains("timeout")
+                    || last_err.contains("empty response");
 
-    for item in items {
-        let tags: Vec<&str> = item.tags().iter().map(|t| t.as_str()).collect();
-        let title = item.title();
-        let content = item.content();
-
-        if tags.contains(&"decision") {
-            decisions.push(title.to_string());
-        } else if tags.contains(&"bugfix") {
-            bugs.push(title.to_string());
-        } else {
-            // 综合 observation — 包含会话摘要和完整内容
-            summaries.push(format!("【{}】\n{}", title, content));
-            // 从内容中提取有标签的其他条目
-            for line in content.lines() {
-                let line = line.trim();
-                if line.starts_with("- ") && line.len() > 4 {
-                    other_observations.push(line.trim_start_matches("- ").to_string());
+                if !is_retryable || attempt == MAX_RETRIES - 1 {
+                    break;
                 }
+                let delay = RETRY_BASE_DELAY_SECS * (1 << attempt);
+                eprintln!(
+                    "    ⏳ 重试 ({}/{}) 等待 {}s...",
+                    attempt + 1,
+                    MAX_RETRIES,
+                    delay,
+                );
+                tokio::time::sleep(Duration::from_secs(delay)).await;
             }
         }
     }
-
-    let mut out = String::new();
-
-    const MAX_CONTEXT_CHARS: usize = 30_000;
-
-    // 会话摘要
-    out.push_str(&format!("=== 会话观测详情 ({} 个会话) ===\n\n", summaries.len()));
-    for summary in &summaries {
-        if out.len() + summary.len() > MAX_CONTEXT_CHARS / 2 {
-            break;
-        }
-        out.push_str(summary);
-        out.push_str("\n\n---\n\n");
-    }
-
-    // 具体决策列表
-    if !decisions.is_empty() {
-        out.push_str(&format!("\n=== 技术决策 ({} 条) ===\n", decisions.len()));
-        for (i, d) in decisions.iter().enumerate() {
-            if out.len() > MAX_CONTEXT_CHARS * 3 / 4 {
-                out.push_str(&format!("... 还有 {} 条\n", decisions.len() - i));
-                break;
-            }
-            out.push_str(&format!("{}. {}\n", i + 1, d));
-        }
-    }
-
-    // 具体 bug 列表
-    if !bugs.is_empty() {
-        out.push_str(&format!("\n=== Bug 修复 ({} 条) ===\n", bugs.len()));
-        for (i, b) in bugs.iter().enumerate() {
-            if out.len() > MAX_CONTEXT_CHARS {
-                out.push_str(&format!("... 还有 {} 条\n", bugs.len() - i));
-                break;
-            }
-            out.push_str(&format!("{}. {}\n", i + 1, b));
-        }
-    }
-
-    out
-}
-
-fn build_insights_prompt(context: &str, with_prescription: bool) -> String {
-    let prescription_section = if with_prescription {
-        r#"
-
-## L4: 成长处方
-基于以上所有具体数据：
-- **你做得好的地方**：引用具体的会话和决策
-- **阻力热点**：列出反复出现的具体问题模式
-- **技能路线图**：基于你实际做的项目推荐 3-5 个深入方向
-- **AI 协作改进**：基于协作模式的具体观察给建议
-- **下一步行动**：3 个可立即执行的具体行动"#
-    } else {
-        ""
-    };
-
-    format!(
-        r#"以下是一位开发者最近编程会话的完整观测数据。请基于这些**具体内容**生成洞察报告。
-
-要求：
-- 每个判断必须引用具体的会话/决策/bug 作为证据
-- 禁止输出 "competent: 32" 这样的纯计数
-- 用具体项目名、工具名、技术栈代替泛化描述
-- 直接说"你在 xx 项目中做了 xx"，不要说"该开发者倾向于..."
-
-{context}
-
----
-
-请生成以下报告：
-
-## L1: 你在做什么
-按项目/领域分组，描述每个领域具体做了什么，列出关键成就。
-
-## L2: 技术决策与模式
-从决策列表中提炼关键的技术选型和架构模式，指出反复出现的决策倾向。
-
-## L3: 阻力与 Bug 模式
-从 bug 列表和阻力描述中归纳具体的问题类型，指出根因模式。{prescription_section}"#
-    )
+    Err(anyhow::anyhow!("LLM 调用失败 ({}次重试): {}", MAX_RETRIES, last_err))
 }
