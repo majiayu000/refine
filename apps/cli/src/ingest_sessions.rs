@@ -1,6 +1,7 @@
 //! ingest-sessions 命令实现
 //!
 //! 从 Claude Code / Codex 会话文件中提取认知观测
+//! 支持断点续传（find_by_url 去重）和 API 限流重试
 
 use anyhow::{Context, Result};
 use refine_core::infra::LlmClient;
@@ -10,6 +11,10 @@ use refine_core::session::{
     parse_facet_response, parse_session_file, FilterConfig, SessionSource, FACET_SYSTEM_PROMPT,
 };
 use std::sync::Arc;
+use std::time::Duration;
+
+const MAX_RETRIES: usize = 3;
+const RETRY_BASE_DELAY_SECS: u64 = 15;
 
 pub struct IngestOptions {
     pub source: Option<SessionSource>,
@@ -23,7 +28,6 @@ pub async fn handle_ingest_sessions(
     doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
-    // 1. 发现会话文件
     let discovered = discover_sessions(options.source);
     println!("发现 {} 个会话文件", discovered.len());
 
@@ -36,18 +40,19 @@ pub async fn handle_ingest_sessions(
     let mut processed = 0usize;
     let mut skipped_dup = 0usize;
     let mut skipped_filter = 0usize;
+    let mut failed = 0usize;
     let mut total_items = 0usize;
 
-    for discovered_session in &sessions_to_process {
+    for (idx, discovered_session) in sessions_to_process.iter().enumerate() {
         let url = discovered_session.path.to_string_lossy().to_string();
 
-        // 2. 去重检查
+        // 去重检查
         if doc_store.find_by_url(&url).await?.is_some() {
             skipped_dup += 1;
             continue;
         }
 
-        // 3. 解析
+        // 解析
         let session = match parse_session_file(
             &discovered_session.path,
             discovered_session.source.clone(),
@@ -59,7 +64,7 @@ pub async fn handle_ingest_sessions(
             }
         };
 
-        // 4. 过滤
+        // 过滤
         if !refine_core::session::passes_filter(&session, &filter_config) {
             skipped_filter += 1;
             continue;
@@ -77,14 +82,16 @@ pub async fn handle_ingest_sessions(
             continue;
         }
 
-        // 5. 分块 + facet 提取（非 dry-run 必有 LLM）
-        let client = llm_client.as_ref()
+        // 分块 + facet 提取（带重试）
+        let client = llm_client
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("非 dry-run 模式需要 LLM API Key"))?;
+
         let content = if needs_chunking(&session) {
             let chunks = chunk_session(&session);
             let mut summaries = Vec::new();
             for chunk in &chunks {
-                match extract_facets_from_content(&chunk.content, client).await {
+                match llm_call_with_retry(client, &chunk.content).await {
                     Ok(text) => summaries.push(text),
                     Err(e) => tracing::warn!("分块提取失败: {}", e),
                 }
@@ -94,15 +101,21 @@ pub async fn handle_ingest_sessions(
             session.to_document_content()
         };
 
-        let facet_response = match extract_and_parse_facets(&content, client).await {
+        let facet_response = match extract_and_parse_facets_with_retry(&content, client).await {
             Ok(f) => f,
             Err(e) => {
-                tracing::warn!("facet 提取失败 {}: {}", url, e);
+                eprintln!(
+                    "  ✗ [{}/{}] facet 提取失败，跳过: {}",
+                    idx + 1,
+                    sessions_to_process.len(),
+                    e
+                );
+                failed += 1;
                 continue;
             }
         };
 
-        // 6. 保存 Document
+        // 保存 Document
         let doc_id = DocumentId::new();
         let mut doc = Document::new(discovered_session.source.as_str(), &content);
         doc.set_title(&facet_response.session_summary);
@@ -112,7 +125,7 @@ pub async fn handle_ingest_sessions(
             .await
             .context("保存 Document 失败")?;
 
-        // 7. 保存 Observation Items
+        // 保存 Observation Items
         let items =
             facets_to_items(&facet_response, &doc_id, discovered_session.project.as_deref());
         for item in &items {
@@ -123,35 +136,68 @@ pub async fn handle_ingest_sessions(
         processed += 1;
 
         println!(
-            "  + {} | {} items | {}",
+            "  + [{}/{}] {} | {} items",
+            idx + 1,
+            sessions_to_process.len(),
             &facet_response.session_summary,
             items.len(),
-            url,
         );
     }
 
-    println!("\n完成: 处理 {}, 跳过重复 {}, 过滤 {}, 生成 {} 条观测",
-        processed, skipped_dup, skipped_filter, total_items);
+    println!(
+        "\n完成: 处理 {}, 跳过重复 {}, 过滤 {}, 失败 {}, 生成 {} 条观测",
+        processed, skipped_dup, skipped_filter, failed, total_items
+    );
+    if skipped_dup > 0 || failed > 0 {
+        println!("提示: 重新运行即可续传（已处理的会自动跳过）");
+    }
 
     Ok(())
 }
 
-async fn extract_facets_from_content(
+/// LLM 调用 + 指数退避重试
+async fn llm_call_with_retry(
+    client: &Arc<dyn LlmClient>,
     content: &str,
-    llm_client: &Arc<dyn LlmClient>,
 ) -> Result<String> {
     let prompt = build_facet_prompt(content);
-    let response = llm_client
-        .complete(&prompt, Some(FACET_SYSTEM_PROMPT))
-        .await
-        .map_err(|e| anyhow::anyhow!("LLM 调用失败: {}", e))?;
-    Ok(response)
+    let mut last_err = String::new();
+
+    for attempt in 0..MAX_RETRIES {
+        match client.complete(&prompt, Some(FACET_SYSTEM_PROMPT)).await {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                last_err = e.to_string();
+                let is_retryable = last_err.contains("cooldown")
+                    || last_err.contains("service_busy")
+                    || last_err.contains("rate")
+                    || last_err.contains("429")
+                    || last_err.contains("Upstream")
+                    || last_err.contains("timeout");
+
+                if !is_retryable || attempt == MAX_RETRIES - 1 {
+                    break;
+                }
+
+                let delay = RETRY_BASE_DELAY_SECS * (1 << attempt);
+                eprintln!(
+                    "    ⏳ API 限流，等待 {}s 后重试 ({}/{})...",
+                    delay,
+                    attempt + 1,
+                    MAX_RETRIES
+                );
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!("LLM 调用失败 (重试 {} 次): {}", MAX_RETRIES, last_err))
 }
 
-async fn extract_and_parse_facets(
+async fn extract_and_parse_facets_with_retry(
     content: &str,
-    llm_client: &Arc<dyn LlmClient>,
+    client: &Arc<dyn LlmClient>,
 ) -> Result<refine_core::session::FacetResponse> {
-    let response = extract_facets_from_content(content, llm_client).await?;
+    let response = llm_call_with_retry(client, content).await?;
     parse_facet_response(&response).map_err(|e| anyhow::anyhow!(e))
 }
