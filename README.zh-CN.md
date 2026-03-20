@@ -1,21 +1,40 @@
-# Refine
+<h1 align="center">Refine</h1>
 
-> 智能知识复用引擎 — 让每一次 AI 对话都成为可复用的资产
+<p align="center"><strong>Re + Fine — 持续精进，每一次对话都更好一点。</strong></p>
 
-从 AI 对话中自动提炼知识，在需要时主动推荐。支持 Claude Code、Codex、ChatGPT 等对话来源。
+<p align="center">把 ChatGPT、Claude、Gemini、Grok、Claude Code、Codex 的对话知识统一同步到一个知识库。</p>
 
-[English](./README.md)
+<p align="center"><a href="./README.md">English</a></p>
 
 ## 核心功能
 
-- **智能提炼** — 从 AI 对话中提取知识卡片、技能、代码片段
+- **跨平台知识同步（主线）** — 把 ChatGPT、Claude、Gemini、Grok、Claude Code、Codex 的对话知识统一同步
+- **会话存储与可追溯** — 原文文档入库，并可回溯到对应提炼结果
+- **智能提炼（可选能力层）** — 从已同步对话中提取知识卡片、技能、代码片段
 - **全文搜索** — SQLite FTS5 驱动的中英混合搜索
-- **文档管理** — 原文存储 + 关联知识追溯
-- **Session Insights** — 从 Claude Code / Codex 会话中提取认知洞察，追踪成长
-- **成长追踪** — 终端 motd + CLI 仪表盘 + Claude Code statusline
-- **多端支持** — CLI / 桌面应用 / 浏览器插件 / API 服务
+- **Session Insights 与成长分析（可选能力层）** — 对 Claude Code / Codex 会话做认知分析
+- **多端访问** — 浏览器扩展 / API 服务 / CLI / 桌面应用
+
+## Refine 主要是干嘛的
+
+- **主流程**：先把多平台聊天知识同步到统一知识库
+- **后续能力**：在同步数据上做搜索、提炼、推荐、洞察
+
+## 文档导航
+
+- [使用指南](./docs/USAGE.md)
+- [项目总览](./docs/00_OVERVIEW.md)
+- [服务端说明](./apps/server/README.md)
+- [API 规格](./docs/11_API_SPEC.md)
+- [Claude Hook 无感导入设计](./docs/13_CLAUDE_HOOK_INGESTION.md)
+
+## 浏览器扩展示意
+
+![Refine 浏览器扩展面板](docs/images/extension-dashboard.png)
 
 ## 快速开始
+
+CLI 本地链路（优先）：
 
 ```bash
 # 安装
@@ -63,9 +82,12 @@ refine extract --stdin                  # 从标准输入提炼知识
 refine search "query"                   # 搜索知识
 refine list                             # 列出所有知识
 refine list --type observation          # 列出认知观测
+refine add --title "t" --summary "s" --type knowledge  # 添加知识
 refine show <id>                        # 查看详情
+refine delete <id>                      # 删除知识
 refine docs                             # 列出会话文档
 refine doc-show <id>                    # 查看会话/报告详情
+refine doc-search "query"               # 搜索原文文档
 ```
 
 ## 认知仪表盘
@@ -108,7 +130,7 @@ Claude Code / Codex 会话文件 (.jsonl)
     本地聚类（按项目分组）→ 10 路并发 LLM 分析 → 合并报告
     │
     ▼ 三层持续追踪
-    终端 motd | refine growth | Claude Code statusline
+    终端 motd | refine growth | 周报追踪脚本
 ```
 
 ### 提取的 12 个维度
@@ -147,9 +169,10 @@ refine/
 ├── apps/
 │   ├── cli/             # CLI 工具（refine 命令）
 │   ├── server/          # API 服务（Axum）
-│   └── desktop/         # 桌面应用（Tauri）
+│   ├── desktop/         # 桌面应用（Tauri）
+│   └── extension/       # 浏览器扩展（Plasmo）
 └── scripts/
-    ├── weekly-insights.sh    # 每日自动分析（launchd）
+    ├── weekly-insights.sh    # 每周自动分析（launchd/cron）
     └── reset-weekly-tracker.sh # 周计数器重置
 ```
 

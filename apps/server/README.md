@@ -31,7 +31,7 @@ cp apps/server/.env.production.example .env
 - `PORT`：服务端口（默认 `8787`）
 - `REFINE_ENV`：运行环境（`production` 时强制要求 `REFINE_API_TOKEN`）
 - `REFINE_API_TOKEN`：鉴权令牌；设置后要求 `Authorization: Bearer <token>`
-- `REFINE_SERVER_DB_PATH`：SQLite 路径（默认 `$XDG_DATA_HOME/refine/server.db`）
+- `REFINE_SERVER_DB_PATH`：SQLite 路径（默认 `$XDG_DATA_HOME/refine/refine.db`）
 - `REFINE_ANTHROPIC_API_KEY` / `REFINE_OPENAI_API_KEY`：启用 LLM 提炼（未配置时使用 fallback 提炼）
 - `REFINE_ANTHROPIC_MODEL`：Anthropic 模型名（默认 `claude-opus-4-6`）
 - `REFINE_ANTHROPIC_BASE_URL`：Anthropic 兼容网关地址（默认 `https://api.anthropic.com`）
@@ -70,8 +70,8 @@ export REFINE_ANTHROPIC_MODEL=claude-opus-4-6
 ## 存储说明
 
 - `items` 由 `refine-core` 的 SQLite 存储持久化。
-- `conversations` 与 `extraction_jobs` 当前在内存维护（进程重启后会重建）。
-- 生产环境建议将会话与任务状态迁移到持久化存储，并接入独立任务队列。
+- `conversations`、`extraction_jobs`、`events` 已持久化到 SQLite（重启可恢复）。
+- 运行时保留内存缓存用于快速读写，变更会回写数据库。
 
 ## 后期设计（暂缓）
 

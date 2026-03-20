@@ -1,25 +1,46 @@
-# Refine
+<h1 align="center">Refine</h1>
 
-[![CI](https://github.com/majiayu000/refine/actions/workflows/ci.yml/badge.svg)](https://github.com/majiayu000/refine/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+<p align="center">
+  <a href="https://github.com/majiayu000/refine/actions/workflows/ci.yml"><img src="https://github.com/majiayu000/refine/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.75%2B-orange.svg" alt="Rust"></a>
+</p>
 
-> Smart knowledge reuse engine — turn every AI conversation into a reusable asset
+<p align="center"><strong>Re + Fine — improve continuously, conversation by conversation.</strong></p>
 
-Extract knowledge from AI conversations (Claude Code, Codex, ChatGPT), get proactive recommendations when you need them.
+<p align="center">Sync and organize knowledge from ChatGPT, Claude, Gemini, Grok, Claude Code, and Codex conversations.</p>
 
-[中文文档](./README.zh-CN.md)
+<p align="center"><a href="./README.zh-CN.md">中文文档</a></p>
 
 ## Features
 
-- **Knowledge Extraction** — Auto-extract knowledge cards, skills, and code snippets from AI conversations
+- **Cross-Platform Knowledge Sync (Primary)** — Capture and sync conversation knowledge from ChatGPT, Claude, Gemini, Grok, Claude Code, and Codex
+- **Conversation Storage & Traceability** — Store raw conversation documents and link extracted items back to source
+- **Knowledge Extraction (Optional Layer)** — Auto-extract knowledge cards, skills, and code snippets from synced conversations
 - **Full-Text Search** — SQLite FTS5 powered, supports mixed CJK/Latin search
-- **Document Management** — Raw content storage with linked knowledge tracing
-- **Session Insights** — Analyze Claude Code / Codex sessions for cognitive growth patterns
-- **Growth Tracking** — Terminal motd, CLI dashboard, Claude Code statusline
-- **Multi-Platform** — CLI / Desktop (Tauri) / Browser Extension / API Server
+- **Session Insights & Growth (Optional Layer)** — Analyze Claude Code / Codex sessions for cognitive growth patterns
+- **Multi-Platform Access** — Browser Extension / API Server / CLI / Desktop (Tauri)
+
+## What Refine Is Mainly For
+
+- **Main workflow**: sync chat knowledge across AI platforms into one knowledge base
+- **Then**: search, extract, recommend, and analyze on top of synced data
+
+## Documentation
+
+- [Usage Guide](./docs/USAGE.md)
+- [Project Overview](./docs/00_OVERVIEW.md)
+- [Server Guide](./apps/server/README.md)
+- [API Spec](./docs/11_API_SPEC.md)
+- [Claude Hook Ingestion Design](./docs/13_CLAUDE_HOOK_INGESTION.md)
+
+## Extension Preview
+
+![Refine Browser Extension Dashboard](docs/images/extension-dashboard.png)
 
 ## Quick Start
+
+CLI-first local workflow:
 
 ```bash
 # Install
@@ -29,7 +50,7 @@ cargo install --path apps/cli
 cat > .env << 'EOF'
 REFINE_OPENAI_API_KEY=your_key
 REFINE_OPENAI_BASE_URL=https://api.openai.com
-REFINE_OPENAI_MODEL=gpt-4o
+REFINE_OPENAI_MODEL=gpt-5.2
 EOF
 
 # Ingest your AI coding sessions
@@ -40,6 +61,33 @@ refine insights --prescription
 
 # View growth dashboard
 refine growth
+```
+
+## Browser Extension (Plasmo)
+
+```bash
+# 1) Start local Refine server (default: http://localhost:8787)
+cargo run --package refine-server
+
+# 2) Run extension in another terminal
+cd apps/extension
+bun install
+bun run dev
+```
+
+Optional custom API endpoint:
+
+```bash
+cd apps/extension
+PLASMO_PUBLIC_REFINE_API_BASE=https://api.refine.so bun run dev
+```
+
+Build / package:
+
+```bash
+cd apps/extension
+bun run build
+bun run package
 ```
 
 ## CLI Commands
@@ -67,9 +115,12 @@ refine extract --stdin                  # Extract knowledge from stdin
 refine search "query"                   # Search knowledge base
 refine list                             # List all knowledge items
 refine list --type observation          # List cognitive observations
+refine add --title "t" --summary "s" --type knowledge  # Add an item
 refine show <id>                        # View details
+refine delete <id>                      # Delete an item
 refine docs                             # List session documents
 refine doc-show <id>                    # View session/report details
+refine doc-search "query"               # Search raw documents
 ```
 
 ## Growth Dashboard
@@ -112,7 +163,7 @@ Claude Code / Codex session files (.jsonl)
     Local clustering (by project) → 10-way concurrent LLM analysis → Merged report
     │
     ▼ 3-layer continuous tracking
-    Terminal motd | refine growth | Claude Code statusline
+    Terminal motd | refine growth | weekly tracker scripts
 ```
 
 ### 12 Extracted Dimensions
@@ -151,9 +202,10 @@ refine/
 ├── apps/
 │   ├── cli/                # CLI tool (refine command)
 │   ├── server/             # API server (Axum)
-│   └── desktop/            # Desktop app (Tauri)
+│   ├── desktop/            # Desktop app (Tauri)
+│   └── extension/          # Browser extension (Plasmo)
 └── scripts/
-    ├── weekly-insights.sh       # Daily auto-analysis (launchd)
+    ├── weekly-insights.sh       # Weekly auto-analysis (launchd/cron)
     └── reset-weekly-tracker.sh  # Weekly counter reset
 ```
 
@@ -170,4 +222,3 @@ refine/
 ## License
 
 MIT
-

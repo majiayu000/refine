@@ -1,12 +1,12 @@
 # Refine - 项目总览
 
-> 智能知识复用引擎 - 让每一次 AI 对话都成为可复用的资产
+> Re + Fine — 持续精进，每一次对话都更好一点。
 
 ---
 
 ## 项目简介
 
-**Refine** 是一个专为 AI 对话设计的知识管理工具，自动从与 ChatGPT、Claude 等 AI 的对话中提炼知识片段和可执行技能，在用户需要时主动推荐，消除重复提问，放大 AI 对话的价值。
+**Refine** 是一个专为 AI 对话设计的知识同步与复用工具。主线是把 ChatGPT、Claude、Gemini、Grok 等平台的聊天知识统一同步入库，再在此基础上进行提炼、搜索、推荐与分析，消除重复提问，放大 AI 对话价值。
 
 ---
 
@@ -33,6 +33,7 @@
 
 | 文档 | 说明 | 状态 |
 |-----|------|------|
+| [USAGE.md](./USAGE.md) | 任务导向使用指南（同步/扩展/CLI/API） | ✅ |
 | [07_RUST_GUIDELINES.md](./07_RUST_GUIDELINES.md) | Rust 核心库编码规范 | ✅ |
 | [08_REACT_GUIDELINES.md](./08_REACT_GUIDELINES.md) | React/Tauri 前端规范 | ✅ |
 | [09_ARCHITECTURE.md](./09_ARCHITECTURE.md) | 模块化架构设计 | ✅ |
@@ -89,6 +90,20 @@
 │          桌面应用 │ 浏览器插件 │ CLI │ 全局搜索              │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+### 核心架构中的浏览器扩展面板（消费层示意）
+
+![Refine 浏览器扩展面板](./images/extension-dashboard.png)
+
+---
+
+## 产品形态
+
+浏览器扩展（Plasmo）面板示意：
+
+![Refine 浏览器扩展面板](./images/extension-dashboard.png)
+
+完整产品形态说明见 [PRODUCT.md](../PRODUCT.md)。
 
 ---
 
