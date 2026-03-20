@@ -102,4 +102,8 @@ pub enum Commands {
     },
     /// 认知成长仪表盘
     Growth,
+    /// 标记一次探索 session
+    Explore,
+    /// 标记一次深度思考 session
+    DeepInquiry,
 }

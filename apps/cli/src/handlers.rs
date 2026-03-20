@@ -78,6 +78,8 @@ pub async fn run(
         Commands::DocShow { id } => handle_doc_show(&id, store).await,
         Commands::DocSearch { query, limit } => handle_doc_search(&query, limit, store).await,
         Commands::Growth => crate::growth::handle_growth(store).await,
+        Commands::Explore => crate::growth::handle_tag_session("exploration_sessions"),
+        Commands::DeepInquiry => crate::growth::handle_tag_session("deep_inquiry_sessions"),
     }
 }
 

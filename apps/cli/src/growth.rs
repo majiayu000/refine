@@ -118,6 +118,36 @@ pub async fn handle_growth(store: Arc<SqliteStore>) -> Result<()> {
     Ok(())
 }
 
+/// 手动标记一次 session 类型（探索/深度思考）
+pub fn handle_tag_session(field: &str) -> anyhow::Result<()> {
+    let Some(home) = dirs::home_dir() else {
+        return Err(anyhow::anyhow!("无法获取 home 目录"));
+    };
+    let path = home.join(".refine").join("growth-tracker.json");
+    let mut data: serde_json::Value = if path.exists() {
+        let content = std::fs::read_to_string(&path)?;
+        serde_json::from_str(&content)?
+    } else {
+        serde_json::json!({"total_sessions": 0, "exploration_sessions": 0, "deep_inquiry_sessions": 0})
+    };
+
+    let current = data.get(field).and_then(|v| v.as_u64()).unwrap_or(0);
+    data[field] = serde_json::json!(current + 1);
+
+    if let Err(e) = std::fs::write(&path, serde_json::to_string_pretty(&data)?) {
+        return Err(anyhow::anyhow!("写入失败: {}", e));
+    }
+
+    let new_val = current + 1;
+    let label = match field {
+        "exploration_sessions" => "探索",
+        "deep_inquiry_sessions" => "深度思考",
+        _ => field,
+    };
+    println!("已标记: {} +1 (本周共 {} 次)", label, new_val);
+    Ok(())
+}
+
 fn save_analysis_snapshot(exploration: f64, delegation: f64, expert: f64) {
     let Some(home) = dirs::home_dir() else { return };
     let path = home.join(".refine").join("last-analysis.json");
