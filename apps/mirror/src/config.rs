@@ -58,18 +58,10 @@ impl Default for Targets {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MirrorConfig {
     pub targets: Targets,
-}
-
-impl Default for MirrorConfig {
-    fn default() -> Self {
-        Self {
-            targets: Targets::default(),
-        }
-    }
 }
 
 /// ~/.mirror/ 目录路径

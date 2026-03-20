@@ -2,12 +2,16 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "mirror")]
-#[command(about = "认知镜像 — 从 AI 编程会话中提取认知指纹", long_about = None)]
+#[command(about = "Mirror — cognitive growth tracker for AI-assisted development")]
 #[command(version)]
 pub struct Cli {
-    /// 数据库路径（默认使用与 refine 相同的统一路径）
+    /// Database path (defaults to shared refine path)
     #[arg(long)]
     pub db: Option<String>,
+
+    /// Display language: en or zh (default: en)
+    #[arg(long, default_value = "en")]
+    pub lang: String,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -15,12 +19,12 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// 计算 3 层信号灯 + 9 个子指标 + 张力分析
+    /// Compute 3-layer signal lights + 9 indicators + tension analysis
     Score,
-    /// 一行简报（适合加到 .zshrc）
+    /// One-line briefing (add to .zshrc)
     Motd,
-    /// 完整 ASCII 仪表盘
+    /// Full ASCII dashboard
     Dashboard,
-    /// 本周 vs 上周差量分析
+    /// Weekly delta analysis (requires LLM)
     Weekly,
 }

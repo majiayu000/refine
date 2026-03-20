@@ -1,4 +1,5 @@
 use crate::config::{ensure_mirror_dir, mirror_dir};
+use crate::lang::t;
 use crate::score::{self, LayerScore, ScoreResult, Signal};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -12,8 +13,14 @@ use std::sync::Arc;
 const MAX_RETRIES: usize = 5;
 const RETRY_BASE_DELAY_SECS: u64 = 10;
 
-const SYSTEM_PROMPT: &str = "你是认知成长分析师。基于开发者本周 vs 上周的编程会话数据变化，\
-生成差量报告。使用中文。用第二人称。";
+fn system_prompt() -> &'static str {
+    t!(
+        "You are a cognitive growth analyst. Based on the developer's weekly session data changes, \
+         generate a delta report. Use English. Address the developer as 'you'.",
+        "你是认知成长分析师。基于开发者本周 vs 上周的编程会话数据变化，\
+         生成差量报告。使用中文。用第二人称。"
+    )
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WeeklyRecord {
@@ -46,14 +53,30 @@ pub async fn handle_weekly(
     let last_week = filter_by_time_range(&observations, two_weeks_ago, week_ago);
 
     if this_week.is_empty() {
-        println!("本周暂无观测数据，无法生成周报。");
+        println!(
+            "{}",
+            t!(
+                "No observations this week.",
+                "本周暂无观测数据，无法生成周报。"
+            )
+        );
         return Ok(());
     }
 
     println!(
-        "本周 {} 条 / 上周 {} 条观测数据\n",
-        this_week.len(),
-        last_week.len()
+        "{}\n",
+        t!(
+            format!(
+                "This week {} / Last week {} observations",
+                this_week.len(),
+                last_week.len()
+            ),
+            format!(
+                "本周 {} 条 / 上周 {} 条观测数据",
+                this_week.len(),
+                last_week.len()
+            )
+        )
     );
 
     let config = crate::config::load();
@@ -69,7 +92,7 @@ pub async fn handle_weekly(
 
     let prev_record = load_last_weekly_record();
     let prompt = build_weekly_prompt(&this_score, last_score.as_ref(), prev_record.as_ref());
-    let report = llm_with_retry(&llm, &prompt, SYSTEM_PROMPT).await?;
+    let report = llm_with_retry(&llm, &prompt, system_prompt()).await?;
 
     println!("{}", report);
 
@@ -94,11 +117,11 @@ fn format_layer(layer: &LayerScore) -> String {
     let indicators: Vec<String> = layer
         .indicators
         .iter()
-        .map(|i| format!("{}={:.1}", i.name, i.actual))
+        .map(|i| format!("{}={:.1}", score::indicator_display(&i.name), i.actual))
         .collect();
     format!(
         "{}[{}]: {}",
-        layer.name,
+        score::layer_display(&layer.name),
         signal_str(&layer.signal),
         indicators.join(", ")
     )
@@ -118,16 +141,23 @@ pub fn build_weekly_prompt(
     prev_record: Option<&WeeklyRecord>,
 ) -> String {
     let mut parts = Vec::new();
-    parts.push("## 本周信号灯".to_string());
+    parts.push(t!("## This Week Signal Lights", "## 本周信号灯").to_string());
     for layer in &this.layers {
         parts.push(format!("- {}", format_layer(layer)));
     }
     if let Some(tension) = &this.tension {
-        parts.push(format!("\n张力: {}", tension));
+        parts.push(format!(
+            "\n{}: {}",
+            t!("Tension", "张力"),
+            tension
+        ));
     }
 
     if let Some(last) = last {
-        parts.push("\n## 上周信号灯".to_string());
+        parts.push(format!(
+            "\n{}",
+            t!("## Last Week Signal Lights", "## 上周信号灯")
+        ));
         for layer in &last.layers {
             parts.push(format!("- {}", format_layer(layer)));
         }
@@ -135,17 +165,38 @@ pub fn build_weekly_prompt(
 
     if let Some(record) = prev_record {
         if !record.suggestions.is_empty() {
-            parts.push("\n## 上周建议".to_string());
+            parts.push(format!(
+                "\n{}",
+                t!("## Last Week Suggestions", "## 上周建议")
+            ));
             for s in &record.suggestions {
                 parts.push(format!("- {}", s));
             }
         }
     }
 
-    parts.push("\n## 要求".to_string());
-    parts.push("1. 各维度变化分析（对比本周 vs 上周信号灯和子指标）".to_string());
-    parts.push("2. 上周建议执行情况评估（如有上周建议）".to_string());
-    parts.push("3. 下周 1-2 条具体建议".to_string());
+    parts.push(format!("\n{}", t!("## Requirements", "## 要求")));
+    parts.push(
+        t!(
+            "1. Dimension change analysis (compare this vs last week signals and indicators)",
+            "1. 各维度变化分析（对比本周 vs 上周信号灯和子指标）"
+        )
+        .to_string(),
+    );
+    parts.push(
+        t!(
+            "2. Evaluate last week's suggestion execution (if applicable)",
+            "2. 上周建议执行情况评估（如有上周建议）"
+        )
+        .to_string(),
+    );
+    parts.push(
+        t!(
+            "3. 1-2 specific suggestions for next week",
+            "3. 下周 1-2 条具体建议"
+        )
+        .to_string(),
+    );
     parts.join("\n")
 }
 
@@ -155,7 +206,7 @@ fn load_last_weekly_record() -> Option<WeeklyRecord> {
     let reader = std::io::BufReader::new(file);
     reader
         .lines()
-        .filter_map(|l| l.ok())
+        .map_while(|l| l.ok())
         .filter_map(|l| serde_json::from_str::<WeeklyRecord>(&l).ok())
         .last()
 }
@@ -198,8 +249,17 @@ async fn save_to_document(doc_repo: &Arc<dyn DocumentRepository>, report: &str) 
         "mirror-weekly://{}",
         doc.created_at().to_rfc3339()
     ));
-    doc_repo.save(&doc).await.context("保存周报失败")?;
-    println!("\n周报已保存 (ID: {})", doc.id());
+    doc_repo
+        .save(&doc)
+        .await
+        .context("Failed to save weekly report")?;
+    println!(
+        "\n{}",
+        t!(
+            format!("Weekly report saved (ID: {})", doc.id()),
+            format!("周报已保存 (ID: {})", doc.id())
+        )
+    );
     Ok(())
 }
 
@@ -226,17 +286,18 @@ async fn llm_with_retry(
                 }
                 let delay = RETRY_BASE_DELAY_SECS * (1 << attempt);
                 eprintln!(
-                    "  重试 ({}/{}) 等待 {}s...",
-                    attempt + 1,
-                    MAX_RETRIES,
-                    delay
+                    "  {}",
+                    t!(
+                        format!("Retry ({}/{}) waiting {}s...", attempt + 1, MAX_RETRIES, delay),
+                        format!("重试 ({}/{}) 等待 {}s...", attempt + 1, MAX_RETRIES, delay)
+                    )
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
             }
         }
     }
     Err(anyhow::anyhow!(
-        "LLM 调用失败 ({}次重试): {}",
+        "LLM call failed ({} retries): {}",
         MAX_RETRIES,
         last_err
     ))
@@ -291,17 +352,17 @@ mod tests {
         let score = ScoreResult {
             layers: [
                 LayerScore {
-                    name: "认知深度".into(),
+                    name: "depth".into(),
                     signal: Signal::Green,
                     indicators: Vec::new(),
                 },
                 LayerScore {
-                    name: "战略广度".into(),
+                    name: "breadth".into(),
                     signal: Signal::Yellow,
                     indicators: Vec::new(),
                 },
                 LayerScore {
-                    name: "协作效能".into(),
+                    name: "collaboration".into(),
                     signal: Signal::Red,
                     indicators: Vec::new(),
                 },
@@ -311,10 +372,10 @@ mod tests {
         };
 
         let prompt = build_weekly_prompt(&score, None, None);
-        assert!(prompt.contains("本周信号灯"));
-        assert!(prompt.contains("认知深度"));
+        assert!(prompt.contains("This Week Signal Lights"));
+        assert!(prompt.contains("Depth"));
         assert!(prompt.contains("green"));
-        assert!(prompt.contains("张力"));
-        assert!(prompt.contains("各维度变化分析"));
+        assert!(prompt.contains("Tension"));
+        assert!(prompt.contains("Dimension change analysis"));
     }
 }

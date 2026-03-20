@@ -1,4 +1,5 @@
 use crate::config::{ensure_mirror_dir, mirror_dir, Targets};
+use crate::lang::t;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use refine_core::knowledge::ItemRepository;
@@ -7,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 
-const DECISION_KEYWORDS: &[&str] = &["因为", "因", "原因", "选择", "采用"];
+const DECISION_KEYWORDS: &[&str] = &[
+    "因为", "因", "原因", "选择", "采用",
+    "because", "reason", "chose", "chosen", "adopted", "selected",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Signal {
@@ -48,7 +52,7 @@ pub struct ScoreResult {
     pub timestamp: DateTime<Utc>,
 }
 
-/// 从高到低: Green > Yellow > Red
+/// Green > Yellow > Red
 fn worst(signals: &[Signal]) -> Signal {
     if signals.contains(&Signal::Red) {
         Signal::Red
@@ -59,7 +63,7 @@ fn worst(signals: &[Signal]) -> Signal {
     }
 }
 
-// ── 层1 认知深度 ──
+// ── Layer 1: Depth ──
 
 fn dreyfus_weighted(stats: &GlobalStats) -> f64 {
     let weights: &[(&str, f64)] = &[
@@ -100,13 +104,10 @@ fn decision_quality_rate(cluster: &ClusterResult) -> f64 {
 fn depth_output_ratio(stats: &GlobalStats) -> f64 {
     let deep_total = *stats.collaboration_modes.get("deep_inquiry").unwrap_or(&0);
     let deleg_total = *stats.collaboration_modes.get("delegation").unwrap_or(&0);
-    let expert_count = *stats.cognitive_levels.get("expert").unwrap_or(&0);
-    // deep_inquiry 中 expert 占比 vs delegation 中 expert 占比
-    // 近似：用全局 expert / (deep_inquiry + delegation) 的加权
-    // 简化实现：expert 在 deep_inquiry 多说明好
     if deep_total + deleg_total == 0 {
         return 0.0;
     }
+    let expert_count = *stats.cognitive_levels.get("expert").unwrap_or(&0);
     let deep_expert_rate = if deep_total == 0 {
         0.0
     } else {
@@ -148,19 +149,19 @@ fn layer1(cluster: &ClusterResult, t: &Targets) -> LayerScore {
     };
 
     let indicators = vec![
-        Indicator { name: "Dreyfus".into(), actual: dw, target: format!(">{}", t.dreyfus_green), signal: sig_dw },
-        Indicator { name: "决策质量".into(), actual: dq * 100.0, target: format!(">{}%", (t.decision_quality_green * 100.0) as u32), signal: sig_dq },
-        Indicator { name: "深度产出比".into(), actual: dor * 100.0, target: format!(">{}%", (t.depth_output_green * 100.0) as u32), signal: sig_dor },
+        Indicator { name: "dreyfus".into(), actual: dw, target: format!(">{}", t.dreyfus_green), signal: sig_dw },
+        Indicator { name: "decision_quality".into(), actual: dq * 100.0, target: format!(">{}%", (t.decision_quality_green * 100.0) as u32), signal: sig_dq },
+        Indicator { name: "depth_output".into(), actual: dor * 100.0, target: format!(">{}%", (t.depth_output_green * 100.0) as u32), signal: sig_dor },
     ];
 
     LayerScore {
-        name: "认知深度".into(),
+        name: "depth".into(),
         signal: worst(&[sig_dw, sig_dq, sig_dor]),
         indicators,
     }
 }
 
-// ── 层2 战略广度 ──
+// ── Layer 2: Breadth ──
 
 fn layer2(cluster: &ClusterResult, t: &Targets) -> LayerScore {
     let collab_total: usize = cluster.global_stats.collaboration_modes.values().sum();
@@ -196,19 +197,19 @@ fn layer2(cluster: &ClusterResult, t: &Targets) -> LayerScore {
     };
 
     let indicators = vec![
-        Indicator { name: "探索率".into(), actual: exploration_rate * 100.0, target: format!(">{}%", (t.exploration_green * 100.0) as u32), signal: sig_exp },
-        Indicator { name: "深耕率".into(), actual: deep_rate * 100.0, target: format!("{}-{}%", (t.deep_invest_green_lo * 100.0) as u32, (t.deep_invest_green_hi * 100.0) as u32), signal: sig_deep },
-        Indicator { name: "碎片化".into(), actual: frag_rate * 100.0, target: format!("<{}%", (t.fragmentation_green * 100.0) as u32), signal: sig_frag },
+        Indicator { name: "exploration".into(), actual: exploration_rate * 100.0, target: format!(">{}%", (t.exploration_green * 100.0) as u32), signal: sig_exp },
+        Indicator { name: "deep_invest".into(), actual: deep_rate * 100.0, target: format!("{}-{}%", (t.deep_invest_green_lo * 100.0) as u32, (t.deep_invest_green_hi * 100.0) as u32), signal: sig_deep },
+        Indicator { name: "fragmentation".into(), actual: frag_rate * 100.0, target: format!("<{}%", (t.fragmentation_green * 100.0) as u32), signal: sig_frag },
     ];
 
     LayerScore {
-        name: "战略广度".into(),
+        name: "breadth".into(),
         signal: worst(&[sig_exp, sig_deep, sig_frag]),
         indicators,
     }
 }
 
-// ── 层3 协作效能 ──
+// ── Layer 3: Collaboration ──
 
 fn layer3(cluster: &ClusterResult, t: &Targets) -> LayerScore {
     let collab_total: usize = cluster.global_stats.collaboration_modes.values().sum();
@@ -247,32 +248,73 @@ fn layer3(cluster: &ClusterResult, t: &Targets) -> LayerScore {
 
     let indicators = vec![
         Indicator { name: "delegation".into(), actual: delegation_rate * 100.0, target: format!("<{}%", (t.delegation_green * 100.0) as u32), signal: sig_del },
-        Indicator { name: "模式多样性".into(), actual: mode_count as f64, target: format!(">={}", t.mode_diversity_green), signal: sig_div },
-        Indicator { name: "bug/决策".into(), actual: bug_dec_ratio, target: format!("<{}", t.bug_decision_green), signal: sig_bug },
+        Indicator { name: "mode_diversity".into(), actual: mode_count as f64, target: format!(">={}", t.mode_diversity_green), signal: sig_div },
+        Indicator { name: "bug_decision".into(), actual: bug_dec_ratio, target: format!("<{}", t.bug_decision_green), signal: sig_bug },
     ];
 
     LayerScore {
-        name: "协作效能".into(),
+        name: "collaboration".into(),
         signal: worst(&[sig_del, sig_div, sig_bug]),
         indicators,
     }
 }
 
-// ── 张力分析 ──
+// ── Tension analysis ──
 
 fn analyze_tension(layers: &[LayerScore; 3]) -> Option<String> {
     let s = [layers[0].signal, layers[1].signal, layers[2].signal];
     match s {
-        [Signal::Green, Signal::Red, _] => Some("层1绿+层2红 → 深耕但视野收窄，开一个新方向的探索 session".into()),
-        [_, Signal::Green, Signal::Red] => Some("层2绿+层3红 → 探索多但 delegation 过高，探索时用 pair 模式而非委托".into()),
-        [Signal::Red, _, Signal::Green] => Some("层1红+层3绿 → 协作顺畅但认知没提升，你在舒适区，挑战更难的问题".into()),
-        [Signal::Green, Signal::Green, Signal::Green] => Some("全绿 → 健康成长，考虑提升基线标准".into()),
-        [Signal::Red, Signal::Red, Signal::Red] => Some("全红 → 需要重新规划，建议运行 refine insights --prescription".into()),
+        [Signal::Green, Signal::Red, _] => Some(t!(
+            "L1+L2 tension: deep but narrowing — try an exploration session in a new direction",
+            "层1绿+层2红 → 深耕但视野收窄，开一个新方向的探索 session"
+        ).into()),
+        [_, Signal::Green, Signal::Red] => Some(t!(
+            "L2+L3 tension: exploring but over-delegating — try pair mode instead",
+            "层2绿+层3红 → 探索多但 delegation 过高，探索时用 pair 模式而非委托"
+        ).into()),
+        [Signal::Red, _, Signal::Green] => Some(t!(
+            "L1+L3 tension: smooth collaboration but no cognitive growth — challenge yourself",
+            "层1红+层3绿 → 协作顺畅但认知没提升，你在舒适区，挑战更难的问题"
+        ).into()),
+        [Signal::Green, Signal::Green, Signal::Green] => Some(t!(
+            "All green — healthy growth, consider raising your baseline",
+            "全绿 → 健康成长，考虑提升基线标准"
+        ).into()),
+        [Signal::Red, Signal::Red, Signal::Red] => Some(t!(
+            "All red — time to replan, run refine insights --prescription",
+            "全红 → 需要重新规划，建议运行 refine insights --prescription"
+        ).into()),
         _ => None,
     }
 }
 
-// ── 计算入口 ──
+// ── Display helpers ──
+
+pub fn layer_display(key: &str) -> &'static str {
+    match key {
+        "depth" => t!("Depth", "认知深度"),
+        "breadth" => t!("Breadth", "战略广度"),
+        "collaboration" => t!("Collaboration", "协作效能"),
+        _ => "unknown",
+    }
+}
+
+pub fn indicator_display(key: &str) -> &'static str {
+    match key {
+        "dreyfus" => "Dreyfus",
+        "decision_quality" => t!("Decision Quality", "决策质量"),
+        "depth_output" => t!("Depth Output", "深度产出比"),
+        "exploration" => t!("Exploration", "探索率"),
+        "deep_invest" => t!("Deep Invest", "深耕率"),
+        "fragmentation" => t!("Fragmentation", "碎片化"),
+        "delegation" => "delegation",
+        "mode_diversity" => t!("Mode Diversity", "模式多样性"),
+        "bug_decision" => "bug/decision",
+        _ => "unknown",
+    }
+}
+
+// ── Compute entry ──
 
 pub fn compute(cluster: &ClusterResult, targets: &Targets) -> ScoreResult {
     let l1 = layer1(cluster, targets);
@@ -286,7 +328,7 @@ pub fn compute(cluster: &ClusterResult, targets: &Targets) -> ScoreResult {
     }
 }
 
-// ── 持久化 ──
+// ── Persistence ──
 
 pub fn persist_score(result: &ScoreResult) -> Result<()> {
     let dir = ensure_mirror_dir()?;
@@ -309,40 +351,43 @@ pub fn load_recent_scores(n: usize) -> Result<Vec<ScoreResult>> {
     let reader = std::io::BufReader::new(file);
     let all: Vec<ScoreResult> = reader
         .lines()
-        .filter_map(|line| line.ok())
+        .map_while(|line| line.ok())
         .filter_map(|line| serde_json::from_str(&line).ok())
         .collect();
     let start = all.len().saturating_sub(n);
     Ok(all[start..].to_vec())
 }
 
-// ── 输出 ──
+// ── Output ──
 
 fn print_score(result: &ScoreResult) {
-    println!("Mirror 认知镜像\n");
+    println!("{}\n", t!("Mirror Cognitive Snapshot", "Mirror 认知镜像"));
     for layer in &result.layers {
         let details: Vec<String> = layer
             .indicators
             .iter()
             .map(|i| {
                 let mark = if i.signal == Signal::Green { "✓" } else { "✗" };
-                if i.name == "模式多样性" {
-                    format!("{} {}种 {}", i.name, i.actual as usize, mark)
-                } else if i.name == "bug/决策" {
-                    format!("{} {:.2} {}", i.name, i.actual, mark)
-                } else if i.name == "Dreyfus" {
-                    format!("{} {:.1} {}", i.name, i.actual, mark)
-                } else {
-                    format!("{} {:.0}% {}", i.name, i.actual, mark)
+                let name = indicator_display(&i.name);
+                match i.name.as_str() {
+                    "mode_diversity" => format!("{} {} {}", name, i.actual as usize, mark),
+                    "bug_decision" => format!("{} {:.2} {}", name, i.actual, mark),
+                    "dreyfus" => format!("{} {:.1} {}", name, i.actual, mark),
+                    _ => format!("{} {:.0}% {}", name, i.actual, mark),
                 }
             })
             .collect();
-        println!("  {:<8} {}  {}", layer.name, layer.signal, details.join(" | "));
+        println!(
+            "  {:<12} {}  {}",
+            layer_display(&layer.name),
+            layer.signal,
+            details.join(" | ")
+        );
     }
-    if let Some(ref t) = result.tension {
-        println!("\n  张力: {}", t);
+    if let Some(ref tension) = result.tension {
+        println!("\n  {}{}", t!("Tension: ", "张力: "), tension);
     }
-    println!("  基线: 默认阈值");
+    println!("  {}", t!("Baseline: default thresholds", "基线: 默认阈值"));
 }
 
 // ── CLI handler ──
@@ -452,7 +497,7 @@ mod tests {
             ],
         );
         let result = compute(&cluster, &t);
-        // Dreyfus = 5.0 → 绿
+        // Dreyfus = 5.0 → green
         assert_eq!(result.layers[0].indicators[0].signal, Signal::Green);
     }
 
@@ -462,7 +507,7 @@ mod tests {
         let cluster = make_cluster(
             {
                 let mut m = HashMap::new();
-                m.insert("novice".into(), 10); // dreyfus = 1.0 → 红
+                m.insert("novice".into(), 10); // dreyfus = 1.0 → red
                 m
             },
             {
@@ -476,7 +521,7 @@ mod tests {
             vec![("proj-a", 5, vec!["选择 X 因为 Y"])],
         );
         let result = compute(&cluster, &t);
-        // 层1 dreyfus=1.0 红, 所以层1 = 红
+        // layer1 dreyfus=1.0 red, so layer1 = red
         assert_eq!(result.layers[0].signal, Signal::Red);
     }
 
@@ -492,18 +537,18 @@ mod tests {
             signal: Signal::Red,
             indicators: Vec::new(),
         };
-        // 层1绿 + 层2红
+        // L1 green + L2 red
         let tension = analyze_tension(&[green_layer.clone(), red_layer.clone(), green_layer.clone()]);
         assert!(tension.is_some());
-        assert!(tension.as_ref().unwrap().contains("视野收窄"));
+        assert!(tension.unwrap_or_default().contains("narrowing"));
 
-        // 全绿
+        // All green
         let tension = analyze_tension(&[green_layer.clone(), green_layer.clone(), green_layer.clone()]);
-        assert!(tension.as_ref().unwrap().contains("健康成长"));
+        assert!(tension.unwrap_or_default().contains("healthy"));
 
-        // 全红
+        // All red
         let tension = analyze_tension(&[red_layer.clone(), red_layer.clone(), red_layer.clone()]);
-        assert!(tension.as_ref().unwrap().contains("重新规划"));
+        assert!(tension.unwrap_or_default().contains("replan"));
     }
 
     #[test]

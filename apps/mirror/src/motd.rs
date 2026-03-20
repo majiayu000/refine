@@ -1,5 +1,6 @@
 use crate::config::{ensure_mirror_dir, mirror_dir};
-use crate::score::{load_recent_scores, ScoreResult, Signal};
+use crate::lang::{self, Lang, t};
+use crate::score::{indicator_display, load_recent_scores, ScoreResult, Signal};
 use anyhow::Result;
 use chrono::{Datelike, Utc};
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,13 @@ use std::io::Write;
 #[derive(Debug, Serialize, Deserialize)]
 struct Tip {
     dimension: String,
+    #[serde(default = "default_lang_en")]
+    lang: String,
     text: String,
+}
+
+fn default_lang_en() -> String {
+    "en".into()
 }
 
 fn signal_emoji(s: Signal) -> &'static str {
@@ -30,7 +37,7 @@ fn trend_arrow(current: f64, previous: f64) -> &'static str {
     }
 }
 
-/// Signal 的严重程度：Red=0, Yellow=1, Green=2（越小越差）
+/// Signal severity: Red=0, Yellow=1, Green=2 (lower is worse)
 fn signal_severity(s: Signal) -> u8 {
     match s {
         Signal::Red => 0,
@@ -39,29 +46,49 @@ fn signal_severity(s: Signal) -> u8 {
     }
 }
 
-/// 找到最弱层的最差指标名称
-fn weakest_indicator(score: &ScoreResult) -> (String, String, f64) {
+/// Find the weakest indicator in the weakest layer
+fn weakest_indicator(score: &ScoreResult) -> Option<(String, String, f64)> {
     let weakest_layer = score
         .layers
         .iter()
-        .min_by_key(|l| signal_severity(l.signal))
-        .unwrap();
+        .min_by_key(|l| signal_severity(l.signal))?;
     let weakest_ind = weakest_layer
         .indicators
         .iter()
-        .min_by_key(|i| signal_severity(i.signal))
-        .unwrap();
+        .min_by_key(|i| signal_severity(i.signal))?;
     let dim = match weakest_layer.name.as_str() {
-        "认知深度" => "depth",
-        "战略广度" => "breadth",
-        "协作效能" => "collaboration",
+        "depth" => "depth",
+        "breadth" => "breadth",
+        "collaboration" => "collaboration",
         _ => "general",
     };
-    (dim.to_string(), weakest_ind.name.clone(), weakest_ind.actual)
+    Some((dim.to_string(), weakest_ind.name.clone(), weakest_ind.actual))
 }
 
 fn default_tips() -> Vec<Tip> {
-    let raw = vec![
+    let raw_en: Vec<(&str, &str)> = vec![
+        ("depth", "Before asking AI for a solution, write down your 3 predictions first"),
+        ("depth", "Try completing today's core task without checking docs"),
+        ("depth", "Ask AI to find 3 counterexamples for your approach"),
+        ("depth", "Draw the data flow diagram before writing code"),
+        ("depth", "Explain the module you're writing to yourself using the Feynman method"),
+        ("breadth", "Explore a crate you've been curious about but never used"),
+        ("breadth", "Pick an old project and refactor a module with a fresh approach"),
+        ("breadth", "Spend 30 minutes reading an open source project you've never touched"),
+        ("breadth", "Try solving today's small problem in a different language"),
+        ("breadth", "Split today's task into exploration and execution phases"),
+        ("collaboration", "Use pair mode instead of delegation for the next task"),
+        ("collaboration", "Let AI describe the problem first, then you write the solution"),
+        ("collaboration", "Hand-write today's first task, then compare with AI's approach"),
+        ("collaboration", "Let AI review your code instead of writing it for you"),
+        ("collaboration", "Give AI tighter constraints and see how it adapts"),
+        ("general", "Review yesterday's session and find one decision you'd improve"),
+        ("general", "Is the project you spent the most time on worth continued investment?"),
+        ("general", "When stuck, question your underlying assumptions first"),
+        ("general", "Spend 5 minutes writing down the hypothesis you most want to test today"),
+        ("general", "Before debugging, predict the root cause first, then verify"),
+    ];
+    let raw_zh: Vec<(&str, &str)> = vec![
         ("depth", "下次让 AI 给方案前先写下你的 3 个预测"),
         ("depth", "今天尝试不查文档完成核心任务"),
         ("depth", "让 AI 给你的方案找 3 个反例"),
@@ -83,12 +110,23 @@ fn default_tips() -> Vec<Tip> {
         ("general", "花 5 分钟写下今天最想验证的一个假设"),
         ("general", "下次 debug 前先预测 root cause 再验证"),
     ];
-    raw.into_iter()
-        .map(|(d, t)| Tip {
+
+    let mut tips = Vec::with_capacity(raw_en.len() + raw_zh.len());
+    for (d, text) in raw_en {
+        tips.push(Tip {
             dimension: d.to_string(),
-            text: t.to_string(),
-        })
-        .collect()
+            lang: "en".into(),
+            text: text.to_string(),
+        });
+    }
+    for (d, text) in raw_zh {
+        tips.push(Tip {
+            dimension: d.to_string(),
+            lang: "zh".into(),
+            text: text.to_string(),
+        });
+    }
+    tips
 }
 
 fn ensure_tips() -> Result<Vec<Tip>> {
@@ -106,27 +144,53 @@ fn ensure_tips() -> Result<Vec<Tip>> {
 }
 
 fn select_tip(tips: &[Tip], dimension: &str) -> String {
-    let matched: Vec<&Tip> = tips.iter().filter(|t| t.dimension == dimension).collect();
-    if matched.is_empty() {
-        let general: Vec<&Tip> = tips.iter().filter(|t| t.dimension == "general").collect();
-        if general.is_empty() {
-            return "保持好奇心".to_string();
-        }
+    let lang_str = match lang::lang() {
+        Lang::En => "en",
+        Lang::Zh => "zh",
+    };
+    let matched: Vec<&Tip> = tips
+        .iter()
+        .filter(|t| t.dimension == dimension && t.lang == lang_str)
+        .collect();
+    if !matched.is_empty() {
+        let day = Utc::now().ordinal() as usize;
+        return matched[day % matched.len()].text.clone();
+    }
+    // fallback: general tips in same language
+    let general: Vec<&Tip> = tips
+        .iter()
+        .filter(|t| t.dimension == "general" && t.lang == lang_str)
+        .collect();
+    if !general.is_empty() {
         let day = Utc::now().ordinal() as usize;
         return general[day % general.len()].text.clone();
     }
-    let day = Utc::now().ordinal() as usize;
-    matched[day % matched.len()].text.clone()
+    // last fallback: any matching dimension
+    let any: Vec<&Tip> = tips.iter().filter(|t| t.dimension == dimension).collect();
+    if !any.is_empty() {
+        let day = Utc::now().ordinal() as usize;
+        return any[day % any.len()].text.clone();
+    }
+    t!("Stay curious", "保持好奇心").to_string()
 }
 
 pub fn handle_motd() -> Result<()> {
     let scores = load_recent_scores(2)?;
     if scores.is_empty() {
-        println!("🪞 暂无数据，运行 mirror score 生成首次评分");
+        println!(
+            "🪞 {}",
+            t!(
+                "No data yet. Run `mirror score` first",
+                "暂无数据，运行 mirror score 生成首次评分"
+            )
+        );
         return Ok(());
     }
 
-    let current = scores.last().unwrap();
+    let current = match scores.last() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
     let previous = if scores.len() >= 2 {
         Some(&scores[scores.len() - 2])
     } else {
@@ -137,35 +201,44 @@ pub fn handle_motd() -> Result<()> {
     let breadth_e = signal_emoji(current.layers[1].signal);
     let collab_e = signal_emoji(current.layers[2].signal);
 
-    let (dim, ind_name, ind_val) = weakest_indicator(current);
+    let (dim, ind_name, ind_val) = match weakest_indicator(current) {
+        Some(v) => v,
+        None => return Ok(()),
+    };
 
     let trend = if let Some(prev) = previous {
-        let (_, prev_ind_name, prev_val) = weakest_indicator(prev);
-        if prev_ind_name == ind_name {
-            trend_arrow(ind_val, prev_val)
-        } else {
-            "→"
+        match weakest_indicator(prev) {
+            Some((_, ref prev_ind_name, prev_val)) if *prev_ind_name == ind_name => {
+                trend_arrow(ind_val, prev_val)
+            }
+            _ => "→",
         }
     } else {
         "→"
     };
 
-    let val_str = if ind_name == "模式多样性" {
-        format!("{}", ind_val as usize)
-    } else if ind_name == "bug/决策" {
-        format!("{:.2}", ind_val)
-    } else if ind_name == "Dreyfus" {
-        format!("{:.1}", ind_val)
-    } else {
-        format!("{:.0}%", ind_val)
+    let val_str = match ind_name.as_str() {
+        "mode_diversity" => format!("{}", ind_val as usize),
+        "bug_decision" => format!("{:.2}", ind_val),
+        "dreyfus" => format!("{:.1}", ind_val),
+        _ => format!("{:.0}%", ind_val),
     };
 
     let tips = ensure_tips()?;
     let tip = select_tip(&tips, &dim);
 
     println!(
-        "🪞 深度{} 广度{} 协作{} | {} {}{} {}",
-        depth_e, breadth_e, collab_e, ind_name, val_str, trend, tip
+        "🪞 {d}{de} {b}{be} {c}{ce} | {ind} {val}{trend} {tip}",
+        d = t!("Depth", "深度"),
+        de = depth_e,
+        b = t!("Breadth", "广度"),
+        be = breadth_e,
+        c = t!("Collab", "协作"),
+        ce = collab_e,
+        ind = indicator_display(&ind_name),
+        val = val_str,
+        trend = trend,
+        tip = tip,
     );
     Ok(())
 }
@@ -177,7 +250,7 @@ mod tests {
     use chrono::Utc;
 
     fn make_score(sigs: [Signal; 3], indicators: Vec<Vec<Indicator>>) -> ScoreResult {
-        let names = ["认知深度", "战略广度", "协作效能"];
+        let names = ["depth", "breadth", "collaboration"];
         ScoreResult {
             layers: std::array::from_fn(|i| LayerScore {
                 name: names[i].to_string(),
@@ -199,11 +272,11 @@ mod tests {
     #[test]
     fn test_select_tip_matches_weakest() {
         let tips = vec![
-            Tip { dimension: "depth".into(), text: "depth tip 1".into() },
-            Tip { dimension: "breadth".into(), text: "breadth tip 1".into() },
-            Tip { dimension: "collaboration".into(), text: "collab tip 1".into() },
+            Tip { dimension: "depth".into(), lang: "en".into(), text: "depth tip 1".into() },
+            Tip { dimension: "breadth".into(), lang: "en".into(), text: "breadth tip 1".into() },
+            Tip { dimension: "collaboration".into(), lang: "en".into(), text: "collab tip 1".into() },
         ];
-        // depth 维度只有一个 tip，所以一定匹配
+        // depth dimension has only one en tip, so it always matches
         let result = select_tip(&tips, "depth");
         assert_eq!(result, "depth tip 1");
 
@@ -213,11 +286,9 @@ mod tests {
 
     #[test]
     fn test_motd_no_data() {
-        // load_recent_scores 从文件读，不存在返回空
-        // 这里测试 handle_motd 逻辑：空分数时的分支
+        // load_recent_scores reads from file, returns empty if not found
         let scores: Vec<ScoreResult> = vec![];
         assert!(scores.is_empty());
-        // 验证空路径不会 panic
     }
 
     #[test]
@@ -226,13 +297,13 @@ mod tests {
             [Signal::Green, Signal::Red, Signal::Yellow],
             vec![
                 vec![Indicator {
-                    name: "Dreyfus".into(),
+                    name: "dreyfus".into(),
                     actual: 4.0,
                     target: ">3.5".into(),
                     signal: Signal::Green,
                 }],
                 vec![Indicator {
-                    name: "探索率".into(),
+                    name: "exploration".into(),
                     actual: 5.0,
                     target: ">15%".into(),
                     signal: Signal::Red,
@@ -245,9 +316,11 @@ mod tests {
                 }],
             ],
         );
-        let (dim, name, val) = weakest_indicator(&score);
+        let result = weakest_indicator(&score);
+        assert!(result.is_some());
+        let (dim, name, val) = result.unwrap_or_default();
         assert_eq!(dim, "breadth");
-        assert_eq!(name, "探索率");
+        assert_eq!(name, "exploration");
         assert!((val - 5.0).abs() < f64::EPSILON);
     }
 }
