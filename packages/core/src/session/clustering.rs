@@ -176,8 +176,10 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
 }
 
 fn extract_project_from_tags(tags: &[&str]) -> Option<String> {
+    // Pick the longest non-META tag (most specific path)
     tags.iter()
-        .find(|t| !META_TAGS.contains(t))
+        .filter(|t| !META_TAGS.contains(t))
+        .max_by_key(|t| t.len())
         .map(|s| normalize_project_name(s))
 }
 

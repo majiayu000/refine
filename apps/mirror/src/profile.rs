@@ -4,8 +4,9 @@ use crate::score::{self, layer_display, Signal};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use refine_core::infra::LlmClient;
-use refine_core::knowledge::{Document, DocumentRepository, ItemRepository};
+use refine_core::knowledge::{Document, DocumentRepository, Item, ItemRepository, ItemType};
 use refine_core::session::{cluster_observations, ClusterResult};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 struct ProjectStat {
@@ -30,7 +31,7 @@ struct ProfileData {
     score_summary: String,
 }
 
-fn extract_profile_data(cluster: &ClusterResult, score_summary: &str) -> ProfileData {
+fn extract_profile_data(cluster: &ClusterResult, score_summary: &str, items: &[Item]) -> ProfileData {
     let total_sessions = cluster.global_stats.total_sessions;
     let total_projects = cluster.projects.len();
 
@@ -73,20 +74,11 @@ fn extract_profile_data(cluster: &ClusterResult, score_summary: &str) -> Profile
     stats.sort_by(|a, b| b.sessions.cmp(&a.sessions));
     stats.truncate(10);
 
-    // Session complexity: approximate from project-level data
-    let mut doc_obs_count: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    for p in cluster.projects.values() {
-        let obs_per_project = p.summary_excerpts.len()
-            + p.decision_titles.len()
-            + p.bugfix_titles.len();
-        if p.session_count > 0 {
-            let avg = obs_per_project / p.session_count;
-            for _ in 0..p.session_count {
-                *doc_obs_count
-                    .entry(format!("{}_{}", p.project_name, doc_obs_count.len()))
-                    .or_insert(0) = avg;
-            }
+    // Session complexity: count observations per document_id
+    let mut doc_obs_count: HashMap<String, usize> = HashMap::new();
+    for item in items.iter().filter(|i| i.item_type() == ItemType::Observation) {
+        if let Some(doc_id) = item.document_id() {
+            *doc_obs_count.entry(doc_id.as_str().to_string()).or_insert(0) += 1;
         }
     }
 
@@ -247,7 +239,7 @@ pub async fn handle_profile(
     let score_result = score::compute(&cluster, &config.targets);
     let score_summary = format_score_summary(&score_result);
 
-    let data = extract_profile_data(&cluster, &score_summary);
+    let data = extract_profile_data(&cluster, &score_summary, &items);
     let prompt = build_profile_prompt(&data);
 
     println!(
@@ -363,7 +355,7 @@ mod tests {
     #[test]
     fn test_extract_profile_data() {
         let cluster = make_cluster();
-        let data = extract_profile_data(&cluster, "Depth G, Breadth Y, Collaboration R");
+        let data = extract_profile_data(&cluster, "Depth G, Breadth Y, Collaboration R", &[]);
 
         assert_eq!(data.total_sessions, 70);
         assert_eq!(data.total_projects, 2);
@@ -385,7 +377,7 @@ mod tests {
     #[test]
     fn test_build_profile_prompt() {
         let cluster = make_cluster();
-        let data = extract_profile_data(&cluster, "Depth G, Breadth Y");
+        let data = extract_profile_data(&cluster, "Depth G, Breadth Y", &[]);
         let prompt = build_profile_prompt(&data);
 
         assert!(prompt.contains("70 sessions across 2 projects"));
