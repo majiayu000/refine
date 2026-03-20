@@ -16,7 +16,7 @@ pub struct FilterConfig {
 impl Default for FilterConfig {
     fn default() -> Self {
         Self {
-            min_user_messages: 2,
+            min_user_messages: 1,
             min_char_count: 500,
         }
     }
