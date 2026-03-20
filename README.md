@@ -4,7 +4,7 @@
 
 Extract knowledge from AI conversations (Claude Code, Codex, ChatGPT), get proactive recommendations when you need them.
 
-[中文文档](#中文文档)
+[中文文档](./README.zh-CN.md)
 
 ## Features
 
@@ -167,60 +167,3 @@ refine/
 
 MIT
 
----
-
-## 中文文档
-
-> 智能知识复用引擎 — 让每一次 AI 对话都成为可复用的资产
-
-从 AI 对话中自动提炼知识，在需要时主动推荐。支持 Claude Code、Codex、ChatGPT 等对话来源。
-
-### 核心功能
-
-- **智能提炼** — 从 AI 对话中提取知识卡片、技能、代码片段
-- **全文搜索** — SQLite FTS5 驱动的中英混合搜索
-- **文档管理** — 原文存储 + 关联知识追溯
-- **Session Insights** — 从 Claude Code / Codex 会话中提取认知洞察，追踪成长
-- **成长追踪** — 终端 motd + CLI 仪表盘 + Claude Code statusline
-- **多端支持** — CLI / 桌面应用 / 浏览器插件 / API 服务
-
-### 快速开始
-
-```bash
-# 安装
-cargo install --path apps/cli
-
-# 配置 LLM（.env 文件，支持 OpenAI 兼容 API）
-cat > .env << 'EOF'
-REFINE_OPENAI_API_KEY=your_key
-REFINE_OPENAI_BASE_URL=https://api.openai.com
-REFINE_OPENAI_MODEL=gpt-4o
-EOF
-
-# 导入会话
-refine ingest-sessions
-
-# 生成认知报告
-refine insights --prescription
-
-# 查看成长仪表盘
-refine growth
-```
-
-### CLI 命令
-
-```bash
-# Session Insights（认知分析）
-refine ingest-sessions                  # 导入全部会话（增量，自动跳过已处理的）
-refine insights --prescription          # 生成含处方的完整报告
-refine growth                           # 认知仪表盘
-refine explore                          # 标记一次探索 session
-refine deep-inquiry                     # 标记一次深度思考 session
-
-# 知识管理
-refine extract --stdin                  # 从标准输入提炼知识
-refine search "query"                   # 搜索知识
-refine list                             # 列出所有知识
-refine show <id>                        # 查看详情
-refine docs                             # 列出会话文档
-```
