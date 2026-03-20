@@ -98,6 +98,9 @@ pub async fn handle_growth(store: Arc<SqliteStore>) -> Result<()> {
     println!("{}", row_metric("expert率", expert_rate, ">15%", expert_rate > 15.0));
     println!("{}", border_mid());
 
+    // 保存分析快照供 motd 使用
+    save_analysis_snapshot(exploration_rate, delegation_rate, expert_rate);
+
     match week_data {
         Some(wk) => {
             println!("{}", row_left("本周"));
@@ -113,6 +116,18 @@ pub async fn handle_growth(store: Arc<SqliteStore>) -> Result<()> {
     println!("{}", border_bot());
 
     Ok(())
+}
+
+fn save_analysis_snapshot(exploration: f64, delegation: f64, expert: f64) {
+    let Some(home) = dirs::home_dir() else { return };
+    let path = home.join(".refine").join("last-analysis.json");
+    let json = format!(
+        r#"{{"exploration_rate":"{:.1}","delegation_rate":"{:.1}","expert_rate":"{:.1}","date":"today"}}"#,
+        exploration, delegation, expert,
+    );
+    if let Err(e) = std::fs::write(path, json) {
+        eprintln!("保存分析快照失败: {}", e);
+    }
 }
 
 fn load_week_tracker() -> Option<WeekTracker> {
