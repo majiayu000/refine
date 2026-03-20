@@ -62,6 +62,17 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
         .filter(|i| i.item_type() == ItemType::Observation)
         .collect();
 
+    // Phase 0: Build doc_id → project mapping from summary items (they have project tags)
+    let mut doc_project_map: HashMap<String, String> = HashMap::new();
+    for item in &observations {
+        if let Some(doc_id) = item.document_id() {
+            let tags: Vec<&str> = item.tags().iter().map(|t| t.as_str()).collect();
+            if let Some(name) = extract_project_from_tags(&tags) {
+                doc_project_map.entry(doc_id.as_str().to_string()).or_insert(name);
+            }
+        }
+    }
+
     let mut projects: HashMap<String, ProjectCluster> = HashMap::new();
     let mut untagged_count = 0usize;
     let mut global_cognitive: HashMap<String, usize> = HashMap::new();
@@ -74,7 +85,11 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
 
     for item in &observations {
         let tags: Vec<&str> = item.tags().iter().map(|t| t.as_str()).collect();
-        let project = extract_project_from_tags(&tags);
+        // Try own tags first, then inherit from session's summary item
+        let project = extract_project_from_tags(&tags).or_else(|| {
+            item.document_id()
+                .and_then(|doc_id| doc_project_map.get(doc_id.as_str()).cloned())
+        });
 
         let project_name = match project {
             Some(name) => name,
@@ -176,22 +191,22 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
 }
 
 fn extract_project_from_tags(tags: &[&str]) -> Option<String> {
-    // Pick the longest non-META tag (most specific path)
+    // Try all non-META tags, pick the one that normalizes to the most specific name
     tags.iter()
         .filter(|t| !META_TAGS.contains(t))
-        .max_by_key(|t| t.len())
-        .map(|s| normalize_project_name(s))
+        .filter_map(|s| normalize_project_name(s))
+        .max_by_key(|s| s.len())
 }
 
-pub fn normalize_project_name(raw: &str) -> String {
+pub fn normalize_project_name(raw: &str) -> Option<String> {
     let segments: Vec<&str> = raw
         .split('-')
         .filter(|s| !s.is_empty() && !GENERIC_PATH_SEGMENTS.contains(s))
         .collect();
     match segments.len() {
-        0 => raw.to_string(),
-        1 => segments[0].to_string(),
-        _ => segments.join("-"),
+        0 => None,
+        1 => Some(segments[0].to_string()),
+        _ => Some(segments.join("-")),
     }
 }
 
@@ -241,10 +256,13 @@ mod tests {
 
     #[test]
     fn normalize_project_name_extracts_meaningful_segments() {
-        assert_eq!(normalize_project_name("-users-lifcc-desktop-code-ai-tools-refine"), "refine");
-        assert_eq!(normalize_project_name("-users-lifcc-desktop-code-ai-gateway-litellm-rs"), "gateway-litellm-rs");
-        assert_eq!(normalize_project_name("-users-lifcc-desktop-code-work-life-xhh"), "xhh");
-        assert_eq!(normalize_project_name("-users-lifcc--claude-mem-observer-sessions"), "claude-mem-observer-sessions");
+        assert_eq!(normalize_project_name("-users-lifcc-desktop-code-ai-tools-refine"), Some("refine".into()));
+        assert_eq!(normalize_project_name("-users-lifcc-desktop-code-ai-gateway-litellm-rs"), Some("gateway-litellm-rs".into()));
+        assert_eq!(normalize_project_name("-users-lifcc-desktop-code-work-life-xhh"), Some("xhh".into()));
+        assert_eq!(normalize_project_name("-users-lifcc--claude-mem-observer-sessions"), Some("claude-mem-observer-sessions".into()));
+        // Pure generic paths return None
+        assert_eq!(normalize_project_name("-users-lifcc-desktop-code"), None);
+        assert_eq!(normalize_project_name("-users-lifcc-desktop-code-work-life"), None);
     }
 
     #[test]
