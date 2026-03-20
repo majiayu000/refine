@@ -392,13 +392,27 @@ fn print_score(result: &ScoreResult) {
 
 // ── CLI handler ──
 
-pub async fn handle_score(repo: Arc<dyn ItemRepository>) -> Result<()> {
+pub async fn handle_score(
+    repo: Arc<dyn ItemRepository>,
+    llm: Option<Arc<dyn refine_core::infra::LlmClient>>,
+) -> Result<()> {
     let items = repo.find_all().await.map_err(|e| anyhow::anyhow!("{}", e))?;
     let cluster = cluster_observations(&items);
     let config = crate::config::load();
     let result = compute(&cluster, &config.targets);
     persist_score(&result)?;
     print_score(&result);
+
+    if let Some(llm) = llm {
+        match crate::advice::generate_and_cache(&result, &llm).await {
+            Ok(advice) => println!(
+                "\n  {} {}",
+                t!("Advice:", "建议:"),
+                advice
+            ),
+            Err(e) => tracing::debug!("advice generation skipped: {}", e),
+        }
+    }
     Ok(())
 }
 

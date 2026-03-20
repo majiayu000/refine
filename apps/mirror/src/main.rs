@@ -1,3 +1,4 @@
+mod advice;
 mod cli;
 mod config;
 mod dashboard;
@@ -40,7 +41,10 @@ async fn main() -> Result<()> {
     );
 
     match cli.command {
-        Commands::Score => score::handle_score(store).await,
+        Commands::Score => {
+            let llm = build_llm_client_from_env();
+            score::handle_score(store, llm).await
+        }
         Commands::Motd => motd::handle_motd(),
         Commands::Dashboard => dashboard::handle_dashboard(store).await,
         Commands::Weekly => {

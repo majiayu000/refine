@@ -1,6 +1,6 @@
 use crate::config::{ensure_mirror_dir, mirror_dir};
 use crate::lang::{self, Lang, t};
-use crate::score::{indicator_display, load_recent_scores, ScoreResult, Signal};
+use crate::score::{load_recent_scores, ScoreResult, Signal};
 use anyhow::Result;
 use chrono::{Datelike, Utc};
 use serde::{Deserialize, Serialize};
@@ -201,43 +201,27 @@ pub fn handle_motd() -> Result<()> {
     let breadth_e = signal_emoji(current.layers[1].signal);
     let collab_e = signal_emoji(current.layers[2].signal);
 
-    let (dim, ind_name, ind_val) = match weakest_indicator(current) {
-        Some(v) => v,
-        None => return Ok(()),
-    };
+    let dim = weakest_indicator(current)
+        .map(|(d, _, _)| d)
+        .unwrap_or_else(|| "general".to_string());
 
-    let trend = if let Some(prev) = previous {
-        match weakest_indicator(prev) {
-            Some((_, ref prev_ind_name, prev_val)) if *prev_ind_name == ind_name => {
-                trend_arrow(ind_val, prev_val)
-            }
-            _ => "→",
+    // Prefer LLM-generated advice if cached, fallback to static tips
+    let tip = match crate::advice::load_cached() {
+        Some(cached) => cached.advice,
+        None => {
+            let tips = ensure_tips()?;
+            select_tip(&tips, &dim)
         }
-    } else {
-        "→"
     };
-
-    let val_str = match ind_name.as_str() {
-        "mode_diversity" => format!("{}", ind_val as usize),
-        "bug_decision" => format!("{:.2}", ind_val),
-        "dreyfus" => format!("{:.1}", ind_val),
-        _ => format!("{:.0}%", ind_val),
-    };
-
-    let tips = ensure_tips()?;
-    let tip = select_tip(&tips, &dim);
 
     println!(
-        "🪞 {d}{de} {b}{be} {c}{ce} | {ind} {val}{trend} {tip}",
+        "🪞 {d}{de} {b}{be} {c}{ce} | {tip}",
         d = t!("Depth", "深度"),
         de = depth_e,
         b = t!("Breadth", "广度"),
         be = breadth_e,
         c = t!("Collab", "协作"),
         ce = collab_e,
-        ind = indicator_display(&ind_name),
-        val = val_str,
-        trend = trend,
         tip = tip,
     );
     Ok(())
