@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use refine_core::knowledge::ItemRepository;
 use refine_core::session::cluster_observations;
 use std::sync::Arc;
+use unicode_width::UnicodeWidthChar;
 
 const COGNITIVE: &[(&str, &str)] = &[
     ("expert", "expert"),
@@ -146,7 +147,7 @@ fn truncate(s: &str, max_w: usize) -> String {
     let mut w = 0;
     let mut end = s.len();
     for (i, c) in s.char_indices() {
-        let cw = if is_wide(c) { 2 } else { 1 };
+        let cw = c.width().unwrap_or(0);
         if w + cw > max_w {
             end = i;
             break;
@@ -214,7 +215,7 @@ fn border_bot(w: usize) -> String {
     format!("\u{255A}{}\u{255D}", "\u{2550}".repeat(w - 2))
 }
 
-/// Display width that ignores ANSI escape sequences
+/// Display width using unicode-width, skipping ANSI escape sequences
 fn display_width(s: &str) -> usize {
     let mut w = 0;
     let mut in_esc = false;
@@ -229,23 +230,9 @@ fn display_width(s: &str) -> usize {
             }
             continue;
         }
-        w += if is_wide(c) { 2 } else { 1 };
+        w += c.width().unwrap_or(0);
     }
     w
-}
-
-fn is_wide(c: char) -> bool {
-    matches!(
-        c,
-        '\u{2500}'..='\u{259F}'
-            | '\u{2600}'..='\u{27BF}'
-            | '\u{4E00}'..='\u{9FFF}'
-            | '\u{3000}'..='\u{303F}'
-            | '\u{FF00}'..='\u{FFEF}'
-            | '\u{2E80}'..='\u{2EFF}'
-            | '\u{3400}'..='\u{4DBF}'
-            | '\u{F900}'..='\u{FAFF}'
-    )
 }
 
 #[cfg(test)]
