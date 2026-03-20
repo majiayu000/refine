@@ -1,5 +1,9 @@
 # Refine
 
+[![CI](https://github.com/majiayu000/refine/actions/workflows/ci.yml/badge.svg)](https://github.com/majiayu000/refine/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+
 > Smart knowledge reuse engine — turn every AI conversation into a reusable asset
 
 Extract knowledge from AI conversations (Claude Code, Codex, ChatGPT), get proactive recommendations when you need them.
