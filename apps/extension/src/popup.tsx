@@ -264,6 +264,49 @@ function LinkIcon({ className }: IconProps) {
   )
 }
 
+function CheckIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M5 12l5 5L20 7"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function DatabaseIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <ellipse cx="12" cy="5" rx="8" ry="3" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" stroke="currentColor" strokeWidth="1.8" />
+    </svg>
+  )
+}
+
+function HistoryIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M3 3v5h5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M12 7v5l4 2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function GearIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
 export default function Popup() {
   const [stats, setStats] = useState<Stats>({ totalItems: 0, todayExtracted: 0 })
   const [remoteTotalItems, setRemoteTotalItems] = useState<number | null>(null)
@@ -294,7 +337,7 @@ export default function Popup() {
     return cloudHealthy ? 'tone-ok' : 'tone-off'
   })()
 
-  const syncCardToneClass = syncStatus.failed > 0 ? 'status-card-error' : cloudHealthy ? 'status-card-ok' : ''
+  const syncCardToneClass = syncStatus.failed > 0 ? 'sync-card-error' : cloudHealthy ? 'sync-card-ok' : ''
 
   const syncCloudStatus = async () => {
     try {
@@ -432,6 +475,9 @@ export default function Popup() {
 
   return (
     <div className="popup-shell">
+      <div className="orb orb-primary" />
+      <div className="orb orb-tertiary" />
+
       <header className="popup-header">
         <div className="brand-wrap">
           <div className="brand-icon-wrap">
@@ -443,91 +489,139 @@ export default function Popup() {
           </div>
         </div>
         <span className="brand-badge">EXT</span>
+        <div className="header-line" />
       </header>
 
-      <section className="stats-grid">
-        <article className="stats-card stats-card-brand">
-          <div className="stats-card-top">
-            <span className="stats-icon-box">
-              <StackIcon className="stats-icon" />
-            </span>
-            <span className="stats-meta">{totalSourceText}</span>
+      <main className="popup-main">
+        <section className="stats-grid">
+          <article className="stats-card stats-card-brand">
+            <div className="stats-card-top">
+              <StackIcon className="stats-top-icon" />
+              <span className="stats-top-label">TOTAL</span>
+            </div>
+            <p className="stats-value">{displayedTotalItems}</p>
+            <div className="stats-card-bottom">
+              <CloudIcon className="stats-bottom-icon" />
+              <span className="stats-bottom-text">{totalSourceText}</span>
+            </div>
+          </article>
+
+          <article className="stats-card stats-card-accent">
+            <div className="stats-card-top">
+              <BoltIcon className="stats-top-icon" />
+              <span className="stats-top-label">TODAY</span>
+            </div>
+            <p className="stats-value">{stats.todayExtracted}</p>
+            <div className="stats-card-bottom">
+              <SparkIcon className="stats-bottom-icon" />
+              <span className="stats-bottom-text">今日提炼</span>
+            </div>
+          </article>
+        </section>
+
+        <section className={`sync-card ${syncCardToneClass}`}>
+          <div className="sync-header">
+            <div className="sync-header-left">
+              <div className={`sync-dot ${syncStateToneClass}`} />
+              <span className="sync-title">
+                <CloudIcon className="sync-title-icon" />
+                {syncStateText}
+              </span>
+            </div>
+            <span className="sync-meta">已发送 {syncStatus.sent}，队列 {queueSize}</span>
           </div>
-          <p className="stats-value">{displayedTotalItems}</p>
-          <p className="stats-label">知识总数</p>
-        </article>
+          {quota && (
+            <div className="sync-quota">
+              <div className="sync-quota-header">
+                <span>配额使用</span>
+                <span>
+                  {typeof quota.limit === 'number'
+                    ? `${quota.used} / ${quota.limit}`
+                    : `${quota.used} / ∞`}
+                </span>
+              </div>
+              <div className="sync-quota-track">
+                <div
+                  className="sync-quota-fill"
+                  style={{
+                    width: `${quota.limit ? Math.min((quota.used / quota.limit) * 100, 100) : 5}%`,
+                  }}
+                />
+              </div>
+              {quota.exceeded && <p className="sync-quota-warn">配额已超限</p>}
+            </div>
+          )}
+          {syncStatus.lastError && <p className="sync-error">{syncStatus.lastError}</p>}
+        </section>
 
-        <article className="stats-card stats-card-green">
-          <div className="stats-card-top">
-            <span className="stats-icon-box stats-icon-box-green">
-              <SparkIcon className="stats-icon" />
-            </span>
-            <span className="stats-meta">今日更新</span>
+        <section className="onboarding-card">
+          <div className="onboarding-head">
+            <h3 className="onboarding-title">首日任务流</h3>
+            <span className="onboarding-count">{onboardingDoneCount}/3</span>
           </div>
-          <p className="stats-value stats-value-green">{stats.todayExtracted}</p>
-          <p className="stats-label">今日提炼</p>
-        </article>
-      </section>
+          <div className="onboarding-track" aria-hidden="true">
+            <div className="onboarding-fill" style={{ width: `${onboardingProgressPercent}%` }} />
+          </div>
+          <ul className="onboarding-list">
+            <li className={`onboarding-item ${onboarding.extracted ? 'is-done' : ''}`}>
+              <div className={`onboarding-check ${onboarding.extracted ? 'is-checked' : ''}`}>
+                {onboarding.extracted && <CheckIcon className="onboarding-check-icon" />}
+              </div>
+              <span>提取 1 条对话</span>
+            </li>
+            <li className={`onboarding-item ${onboarding.searched ? 'is-done' : ''}`}>
+              <div className={`onboarding-check ${onboarding.searched ? 'is-checked' : ''}`}>
+                {onboarding.searched && <CheckIcon className="onboarding-check-icon" />}
+              </div>
+              <span>搜索/触发推荐 1 次</span>
+            </li>
+            <li className={`onboarding-item ${onboarding.reused ? 'is-done' : ''}`}>
+              <div className={`onboarding-check ${onboarding.reused ? 'is-checked' : ''}`}>
+                {onboarding.reused && <CheckIcon className="onboarding-check-icon" />}
+              </div>
+              <span>复制或插入并复用 1 次</span>
+            </li>
+          </ul>
+        </section>
 
-      <section className={`status-card ${syncCardToneClass}`}>
-        <div className={`status-dot ${syncStateToneClass}`} />
-        <div className="status-content">
-          <p className="status-title">
-            <CloudIcon className="status-icon" />
-            {syncStateText}
-          </p>
-          <p className="status-detail">已发送 {syncStatus.sent} 条，队列 {queueSize} 条</p>
-          {quota ? (
-            <p className={`status-detail ${quota.exceeded ? 'status-upgrade' : ''}`}>
-              配额{' '}
-              {typeof quota.limit === 'number'
-                ? `${quota.used}/${quota.limit}`
-                : `${quota.used}/无限制`}
-              {quota.exceeded ? '（已超限）' : ''}
-            </p>
-          ) : null}
-          {syncStatus.lastError ? <p className="status-error">{syncStatus.lastError}</p> : null}
-        </div>
-      </section>
+        <section className="actions">
+          <button onClick={handleExtract} className="action-btn action-btn-primary">
+            <BoltIcon className="action-icon" />
+            提取当前对话
+          </button>
+          <button onClick={handleForceSync} className="action-btn action-btn-secondary">
+            <RotateIcon className="action-icon" />
+            立即同步队列
+          </button>
+        </section>
 
-      <section className="onboarding-card">
-        <div className="onboarding-head">
-          <p className="onboarding-title">首日任务流</p>
-          <span className="onboarding-progress">{onboardingDoneCount}/3</span>
-        </div>
-        <div className="onboarding-progress-track" aria-hidden="true">
-          <div
-            className="onboarding-progress-fill"
-            style={{ width: `${onboardingProgressPercent}%` }}
-          />
-        </div>
-        <p className={`onboarding-item ${onboarding.extracted ? 'is-done' : ''}`}>1. 提取 1 条对话</p>
-        <p className={`onboarding-item ${onboarding.searched ? 'is-done' : ''}`}>2. 搜索/触发推荐 1 次</p>
-        <p className={`onboarding-item ${onboarding.reused ? 'is-done' : ''}`}>3. 复制或插入并复用 1 次</p>
-      </section>
-
-      <section className="actions">
-        <button onClick={handleExtract} className="action-btn action-btn-primary">
-          <BoltIcon className="action-icon" />
-          提取当前对话
-        </button>
-        <button onClick={handleForceSync} className="action-btn action-btn-secondary">
-          <RotateIcon className="action-icon" />
-          立即同步队列
-        </button>
-      </section>
-
-      {extractMessage && (
-        <div className={`message-box ${extractMessageLevel === 'ok' ? 'message-success' : 'message-error'}`}>
-          {extractMessage}
-        </div>
-      )}
+        {extractMessage && (
+          <div className={`message-box ${extractMessageLevel === 'ok' ? 'message-success' : 'message-error'}`}>
+            {extractMessage}
+          </div>
+        )}
+      </main>
 
       <footer className="popup-footer">
         <LinkIcon className="footer-icon" />
         <span>Cloud API:</span>
         <code className="footer-api">{syncStatus.apiBase || '(未配置)'}</code>
       </footer>
+
+      <nav className="bottom-nav">
+        <button className="bottom-nav-item is-active" type="button">
+          <DatabaseIcon className="bottom-nav-icon" />
+        </button>
+        <button className="bottom-nav-item" type="button" onClick={() => { setExtractMessage('功能开发中'); setExtractMessageLevel('error') }}>
+          <BoltIcon className="bottom-nav-icon" />
+        </button>
+        <button className="bottom-nav-item" type="button" onClick={() => { setExtractMessage('功能开发中'); setExtractMessageLevel('error') }}>
+          <HistoryIcon className="bottom-nav-icon" />
+        </button>
+        <button className="bottom-nav-item" type="button" onClick={() => { setExtractMessage('功能开发中'); setExtractMessageLevel('error') }}>
+          <GearIcon className="bottom-nav-icon" />
+        </button>
+      </nav>
     </div>
   )
 }
