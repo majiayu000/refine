@@ -100,4 +100,6 @@ pub enum Commands {
         #[arg(short, long, default_value = "10")]
         limit: usize,
     },
+    /// 认知成长仪表盘
+    Growth,
 }

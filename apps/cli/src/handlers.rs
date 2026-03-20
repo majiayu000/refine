@@ -77,6 +77,7 @@ pub async fn run(
         Commands::Docs { limit } => handle_docs(limit, store).await,
         Commands::DocShow { id } => handle_doc_show(&id, store).await,
         Commands::DocSearch { query, limit } => handle_doc_search(&query, limit, store).await,
+        Commands::Growth => crate::growth::handle_growth(store).await,
     }
 }
 
