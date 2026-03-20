@@ -6,17 +6,26 @@ use refine_core::session::cluster_observations;
 use std::sync::Arc;
 
 const COGNITIVE: &[(&str, &str)] = &[
-    ("expert", "expert"), ("proficient", "proficient"), ("competent", "competent"),
-    ("adv_begin", "advanced_beginner"), ("novice", "novice"),
+    ("expert", "expert"),
+    ("proficient", "proficient"),
+    ("competent", "competent"),
+    ("adv_begin", "advanced_beginner"),
+    ("novice", "novice"),
 ];
 const COLLAB: &[(&str, &str)] = &[
-    ("delegation", "delegation"), ("deep_inq", "deep_inquiry"),
-    ("exploration", "exploration"), ("review", "review"),
-    ("pair_prog", "pair_programming"), ("teaching", "teaching"),
+    ("delegation", "delegation"),
+    ("deep_inq", "deep_inquiry"),
+    ("exploration", "exploration"),
+    ("review", "review"),
+    ("pair_prog", "pair_programming"),
+    ("teaching", "teaching"),
     ("debugging", "debugging"),
 ];
 const BAR_W: usize = 10;
-const BOX_W: usize = 56;
+
+fn box_w() -> usize {
+    76
+}
 
 pub async fn handle_dashboard(repo: Arc<dyn ItemRepository>) -> Result<()> {
     let items = repo.find_all().await.map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -39,61 +48,57 @@ pub async fn handle_dashboard(repo: Arc<dyn ItemRepository>) -> Result<()> {
     let stats = &cluster.global_stats;
     let cog_total: usize = stats.cognitive_levels.values().sum();
     let collab_total: usize = stats.collaboration_modes.values().sum();
+    let w = box_w();
 
-    println!("{}", border_top());
-    println!(
-        "{}",
-        row_center(t!("Mirror Cognitive Dashboard", "Mirror 认知仪表盘"))
-    );
-    println!("{}", border_mid());
+    p(&border_top(w));
+    p(&row_center(t!("Mirror Cognitive Dashboard", "Mirror 认知仪表盘"), w));
+    p(&border_mid(w));
 
+    let pad: usize = t!(14, 10);
     for layer in &result.layers {
         let details: Vec<String> = layer.indicators.iter().map(format_indicator).collect();
         let line = format!(
-            " {:<12} {}  {}",
+            " {:<pad$} {}  {}",
             score::layer_display(&layer.name),
             layer.signal,
-            details.join(" | ")
+            details.join(" | "),
+            pad = pad
         );
-        println!("{}", padded_row(&line));
+        p(&padded_row(&line, w));
     }
-    println!("{}", border_mid());
+    p(&border_mid(w));
 
-    match result.tension {
-        Some(ref tension) => println!(
-            "{}",
-            padded_row(&format!("{}{}", t!(" Tension: ", " 张力: "), tension))
-        ),
-        None => println!(
-            "{}",
-            padded_row(t!(
-                " Tension: no obvious conflict",
-                " 张力: 无明显维度冲突"
-            ))
-        ),
-    }
-    println!("{}", border_mid());
+    let tension_text = match result.tension {
+        Some(ref t) => format!("{}{}", t!("Tension: ", "张力: "), t),
+        None => t!("Tension: no obvious conflict", "张力: 无明显维度冲突").to_string(),
+    };
+    p(&padded_row(&format!(" {}", truncate(&tension_text, w - 4)), w));
+    p(&border_mid(w));
 
-    println!(
-        "{}",
-        padded_row(t!(" Cognitive Level Distribution", " 认知水平分布"))
-    );
+    p(&padded_row(
+        t!(" Cognitive Level Distribution", " 认知水平分布"),
+        w,
+    ));
     for (label, key) in COGNITIVE {
         let n = stats.cognitive_levels.get(*key).copied().unwrap_or(0);
-        println!("{}", row_bar(label, n, cog_total));
+        p(&row_bar(label, n, cog_total, w));
     }
-    println!("{}", border_mid());
+    p(&border_mid(w));
 
-    println!("{}", padded_row(t!(" Collaboration Modes", " 协作模式")));
+    p(&padded_row(t!(" Collaboration Modes", " 协作模式"), w));
     for (label, key) in COLLAB {
         let n = stats.collaboration_modes.get(*key).copied().unwrap_or(0);
-        println!("{}", row_bar(label, n, collab_total));
+        p(&row_bar(label, n, collab_total, w));
     }
-    println!("{}", border_mid());
+    p(&border_mid(w));
 
-    print_trend(&result)?;
-    println!("{}", border_bot());
+    print_trend(&result, w)?;
+    p(&border_bot(w));
     Ok(())
+}
+
+fn p(s: &str) {
+    println!("{s}");
 }
 
 fn format_indicator(ind: &score::Indicator) -> String {
@@ -106,15 +111,12 @@ fn format_indicator(ind: &score::Indicator) -> String {
     }
 }
 
-fn print_trend(current: &ScoreResult) -> Result<()> {
-    let mut history = score::load_recent_scores(6)?;
+fn print_trend(current: &ScoreResult, w: usize) -> Result<()> {
+    let mut history = score::load_recent_scores(5)?;
     if history.is_empty() {
         history.push(current.clone());
     }
-    println!(
-        "{}",
-        padded_row(t!(" Recent Score Trend", " 最近评分趋势"))
-    );
+    p(&padded_row(t!(" Recent Score Trend", " 最近评分趋势"), w));
     let entries: Vec<String> = history
         .iter()
         .map(|s| {
@@ -128,7 +130,7 @@ fn print_trend(current: &ScoreResult) -> Result<()> {
             format!("{} {}", date, lights)
         })
         .collect();
-    println!("{}", padded_row(&format!("  {}", entries.join("  "))));
+    p(&padded_row(&format!("  {}", entries.join("  ")), w));
     Ok(())
 }
 
@@ -140,41 +142,61 @@ fn signal_ansi(s: Signal) -> &'static str {
     }
 }
 
+fn truncate(s: &str, max_w: usize) -> String {
+    let mut w = 0;
+    let mut end = s.len();
+    for (i, c) in s.char_indices() {
+        let cw = if is_wide(c) { 2 } else { 1 };
+        if w + cw > max_w {
+            end = i;
+            break;
+        }
+        w += cw;
+    }
+    if end < s.len() {
+        format!("{}…", &s[..end])
+    } else {
+        s.to_string()
+    }
+}
+
 // ── Box drawing ──
 
-fn row_bar(label: &str, count: usize, total: usize) -> String {
-    let ratio = if total == 0 { 0.0 } else { count as f64 / total as f64 };
+fn row_bar(label: &str, count: usize, total: usize, w: usize) -> String {
+    let ratio = if total == 0 {
+        0.0
+    } else {
+        count as f64 / total as f64
+    };
     let filled = (ratio * BAR_W as f64).round() as usize;
     let bar = format!(
         "{}{}",
         "\u{2588}".repeat(filled),
         "\u{2591}".repeat(BAR_W.saturating_sub(filled)),
     );
-    padded_row(&format!(
-        "  {:<11} {} {:>5.1}% ({:>3})",
-        label,
-        bar,
-        ratio * 100.0,
-        count
-    ))
-}
-
-fn row_center(text: &str) -> String {
-    let tw = display_width(text);
-    let inner = BOX_W.saturating_sub(2);
-    let left = inner.saturating_sub(tw) / 2;
-    let right = inner.saturating_sub(tw).saturating_sub(left);
-    format!(
-        "\u{2551}{}{}{}\u{2551}",
-        " ".repeat(left),
-        text,
-        " ".repeat(right)
+    padded_row(
+        &format!(
+            "  {:<11} {} {:>5.1}% ({:>3})",
+            label,
+            bar,
+            ratio * 100.0,
+            count
+        ),
+        w,
     )
 }
 
-fn padded_row(content: &str) -> String {
+fn row_center(text: &str, w: usize) -> String {
+    let tw = display_width(text);
+    let inner = w.saturating_sub(2);
+    let left = inner.saturating_sub(tw) / 2;
+    let right = inner.saturating_sub(tw).saturating_sub(left);
+    format!("\u{2551}{}{}{}\u{2551}", " ".repeat(left), text, " ".repeat(right))
+}
+
+fn padded_row(content: &str, w: usize) -> String {
     let cw = display_width(content);
-    let inner = BOX_W.saturating_sub(2);
+    let inner = w.saturating_sub(2);
     format!(
         "\u{2551}{}{}\u{2551}",
         content,
@@ -182,18 +204,34 @@ fn padded_row(content: &str) -> String {
     )
 }
 
-fn border_top() -> String {
-    format!("\u{2554}{}\u{2557}", "\u{2550}".repeat(BOX_W - 2))
+fn border_top(w: usize) -> String {
+    format!("\u{2554}{}\u{2557}", "\u{2550}".repeat(w - 2))
 }
-fn border_mid() -> String {
-    format!("\u{2560}{}\u{2563}", "\u{2550}".repeat(BOX_W - 2))
+fn border_mid(w: usize) -> String {
+    format!("\u{2560}{}\u{2563}", "\u{2550}".repeat(w - 2))
 }
-fn border_bot() -> String {
-    format!("\u{255A}{}\u{255D}", "\u{2550}".repeat(BOX_W - 2))
+fn border_bot(w: usize) -> String {
+    format!("\u{255A}{}\u{255D}", "\u{2550}".repeat(w - 2))
 }
 
+/// Display width that ignores ANSI escape sequences
 fn display_width(s: &str) -> usize {
-    s.chars().map(|c| if is_wide(c) { 2 } else { 1 }).sum()
+    let mut w = 0;
+    let mut in_esc = false;
+    for c in s.chars() {
+        if c == '\x1b' {
+            in_esc = true;
+            continue;
+        }
+        if in_esc {
+            if c.is_ascii_alphabetic() {
+                in_esc = false;
+            }
+            continue;
+        }
+        w += if is_wide(c) { 2 } else { 1 };
+    }
+    w
 }
 
 fn is_wide(c: char) -> bool {
@@ -217,14 +255,14 @@ mod tests {
     #[test]
     fn test_padded_row_no_panic() {
         let long = "x".repeat(200);
-        let row = padded_row(&long);
+        let row = padded_row(&long, 76);
         assert!(row.starts_with('\u{2551}'));
         assert!(row.ends_with('\u{2551}'));
     }
 
     #[test]
     fn test_row_bar_zero_total() {
-        let row = row_bar("test", 0, 0);
+        let row = row_bar("test", 0, 0, 76);
         assert!(row.contains("0.0%"));
     }
 
@@ -236,11 +274,24 @@ mod tests {
     }
 
     #[test]
+    fn test_display_width_skips_ansi() {
+        assert_eq!(display_width("\x1b[32m●\x1b[0m"), 1);
+        assert_eq!(display_width("ab\x1b[31mcd\x1b[0mef"), 6);
+    }
+
+    #[test]
     fn test_border_widths_consistent() {
-        let top = border_top();
-        let mid = border_mid();
-        let bot = border_bot();
+        let w = 76;
+        let top = border_top(w);
+        let mid = border_mid(w);
+        let bot = border_bot(w);
         assert_eq!(display_width(&top), display_width(&mid));
         assert_eq!(display_width(&mid), display_width(&bot));
+    }
+
+    #[test]
+    fn test_truncate() {
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("hello world", 5), "hello…");
     }
 }
