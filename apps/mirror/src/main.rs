@@ -4,6 +4,7 @@ mod config;
 mod dashboard;
 mod lang;
 mod motd;
+mod profile;
 mod score;
 mod weekly;
 
@@ -54,6 +55,14 @@ async fn main() -> Result<()> {
                 )
             })?;
             weekly::handle_weekly(store.clone(), store, llm).await
+        }
+        Commands::Profile => {
+            let llm = build_llm_client_from_env().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "profile requires LLM. Set REFINE_ANTHROPIC_API_KEY or REFINE_OPENAI_API_KEY"
+                )
+            })?;
+            profile::handle_profile(store.clone(), store, llm).await
         }
     }
 }

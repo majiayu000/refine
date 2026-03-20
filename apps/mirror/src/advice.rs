@@ -96,6 +96,16 @@ fn build_prompt(score: &ScoreResult) -> String {
         ));
     }
 
+    // Append profile context if available
+    let profile_path = crate::config::mirror_dir().join("profile-summary.txt");
+    if let Ok(summary) = std::fs::read_to_string(&profile_path) {
+        lines.push(format!(
+            "\n{}\n{}",
+            t!("Profile context:", "画像上下文:"),
+            summary
+        ));
+    }
+
     lines.push(format!(
         "\n{}",
         t!(

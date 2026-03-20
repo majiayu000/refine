@@ -27,4 +27,6 @@ pub enum Commands {
     Dashboard,
     /// Weekly delta analysis (requires LLM)
     Weekly,
+    /// Generate cognitive portrait narrative (requires LLM)
+    Profile,
 }
