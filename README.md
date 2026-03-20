@@ -1,107 +1,152 @@
 # Refine
 
-> 智能知识复用引擎 - 让每一次 AI 对话都成为可复用的资产
+> 从 AI 编程会话中提取认知洞察，追踪成长，对抗胜任力陷阱
 
-从 ChatGPT、Claude 等 AI 对话中自动提炼知识，在需要时主动推荐。
+分析你的 Claude Code / Codex 聊天记录，提取技术决策、bug 模式、协作方式等维度的结构化观测，生成认知成长报告。
 
 ## 核心功能
 
-- **自动采集** - 浏览器插件一键保存 AI 对话
-- **智能提炼** - 自动生成知识卡片、技能、代码片段
-- **主动推荐** - 问问题时自动匹配相关历史知识
-- **可执行技能** - Prompt 模板化，填参即用
-- **本地优先** - 数据存储在本地，隐私安全
+- **会话导入** — 扫描 Claude Code / Codex 的 JSONL 会话文件，LLM 提取 12 维度 facet
+- **认知报告** — 10 路并发分析，按项目聚类，生成 Dreyfus/Bloom/双环学习等维度的报告
+- **成长追踪** — 终端 motd + CLI 仪表盘 + Claude Code statusline，持续可见
+- **知识提炼** — 从 AI 对话中提取知识卡片、技能、代码片段（原有功能）
 
 ## 快速开始
 
-### 安装依赖
-
 ```bash
-# Rust
-cargo build --workspace
+# 安装
+cargo install --path apps/cli
 
-# 前端
-cd apps/desktop/ui && bun install
-cd apps/extension && bun install
+# 配置 LLM（.env 文件，支持 OpenAI 兼容 API）
+cat > .env << 'EOF'
+REFINE_OPENAI_API_KEY=your_key
+REFINE_OPENAI_BASE_URL=https://api.openai.com
+REFINE_OPENAI_MODEL=gpt-4o
+EOF
 
-# 配置 LLM（提炼功能必需，二选一）
-export REFINE_ANTHROPIC_API_KEY=your_key
-export REFINE_ANTHROPIC_MODEL=claude-opus-4-6
-# Anthropic 兼容网关可选（例如 Yunyi）
-# export REFINE_ANTHROPIC_BASE_URL=https://yunyi.cfd/claude
-# 或
-export REFINE_OPENAI_API_KEY=your_key
+# 导入会话（扫描 ~/.claude/projects/ 和 ~/.codex/sessions/）
+refine ingest-sessions
 
-# 配置浏览器扩展 API（可选，默认 http://localhost:8787）
-# 默认会连接本机 8787（可由桌面端本地 API 或 refine-server 提供）
-export PLASMO_PUBLIC_REFINE_API_BASE=http://localhost:8787
+# 生成认知报告
+refine insights --prescription
+
+# 查看成长仪表盘
+refine growth
 ```
 
-### 运行
+## CLI 命令
+
+### Session Insights（认知分析）
 
 ```bash
-# CLI
-cargo run --package refine-cli -- --help
+refine ingest-sessions                  # 导入全部会话（增量，自动跳过已处理的）
+refine ingest-sessions --source claude  # 只导入 Claude Code
+refine ingest-sessions --limit 100      # 限制数量
+refine ingest-sessions --dry-run        # 预览，不调 LLM
 
-# 桌面应用
-cd apps/desktop/src-tauri && cargo tauri dev
-# 启动后会暴露本地 API: http://localhost:8787
-# (可用 REFINE_DESKTOP_API_PORT 覆盖端口)
+refine insights                         # 生成 L1-L3 报告
+refine insights --prescription          # 含 L4 成长处方
 
-# 浏览器扩展
-cd apps/extension && bun dev
-
-# 云端服务（独立部署或不使用桌面端时）
-cargo run --package refine-server
+refine growth                           # 认知仪表盘
+refine explore                          # 标记一次探索 session
+refine deep-inquiry                     # 标记一次深度思考 session
 ```
 
-### Claude Code 选择性导入
-
-不想把所有 Claude Code 聊天都入库时，使用选择性导入脚本：
+### 知识管理
 
 ```bash
-# 1) 查看最近会话候选
-scripts/import_claude_code.sh list --limit 10
-
-# 2) 仅导入指定会话（session id 或 jsonl 文件路径）
-scripts/import_claude_code.sh import --session <session-id>
-
-# 3) 按 marker 批量导入（例如你在聊天里约定 #refine）
-scripts/import_claude_code.sh import --marker "#refine" --since-days 7
+refine extract --stdin                  # 从标准输入提炼知识
+refine search "query"                   # 搜索知识
+refine list                             # 列出所有知识
+refine list --type observation          # 列出认知观测
+refine show <id>                        # 查看详情
+refine docs                             # 列出会话文档
+refine doc-show <id>                    # 查看会话/报告详情
 ```
 
-默认不会全量导入；如果确实要全量，需显式加 `--all`。
+## 认知仪表盘
+
+`refine growth` 输出：
+
+```
+╔══════════════════════════════════════════════════════╗
+║                    认知成长仪表盘                    ║
+╠══════════════════════════════════════════════════════╣
+║ 总会话: 824  总观测: 9740                            ║
+╠══════════════════════════════════════════════════════╣
+║ 认知水平分布                                         ║
+║  expert      █░░░░░░░░░  11.5% ( 95)                ║
+║  proficient  ███░░░░░░░  34.1% (281)                ║
+║  competent   ████░░░░░░  39.8% (328)                ║
+╠══════════════════════════════════════════════════════╣
+║ 协作模式                                             ║
+║  delegation  █████░░░░░  45.5% (375)                ║
+║  deep_inq    ██░░░░░░░░  18.8% (155)                ║
+║  exploration ██░░░░░░░░  16.5% (136)                ║
+╠══════════════════════════════════════════════════════╣
+║ 关键指标                                             ║
+║  探索率           16.5%  目标: >15%   ✓              ║
+║  delegation    45.5%  目标: <40%   ✗                 ║
+║  expert率       11.5%  目标: >15%   ✗                ║
+╚══════════════════════════════════════════════════════╝
+```
+
+## 架构
+
+```
+Claude Code / Codex 会话文件 (.jsonl)
+    │
+    ▼ refine ingest-sessions
+    解析 → 过滤 → 12 维度 facet 提取 → SQLite
+    （3 路并发，断点续传，指数退避重试）
+    │
+    ▼ refine insights
+    本地聚类（按项目分组）→ 10 路并发 LLM 分析 → 合并报告
+    │
+    ▼ 三层持续追踪
+    终端 motd | refine growth | Claude Code statusline
+```
+
+### 提取的 12 个维度
+
+| 维度 | 说明 |
+|------|------|
+| decisions | 技术决策与取舍理由 |
+| bugs_fixed | bug 根因 + 修复方案 |
+| patterns | 可复用的代码模式 |
+| friction | AI 犯错、卡住、方向错误 |
+| project_progress | 推进了什么 |
+| questions | 提出的问题（反映知识边界）|
+| knowledge_gained | 新学到的东西 |
+| tools_discovered | 发现的新工具/库 |
+| architecture | 架构设计与数据流 |
+| code_artifacts | 关键代码产出 |
+| cognitive_level | novice → expert（Dreyfus）|
+| collaboration_mode | delegation / exploration / deep_inquiry / ... |
 
 ## 项目结构
 
 ```
 refine/
-├── packages/
-│   └── core/             # Rust 核心库
-│       └── src/
-│           ├── knowledge/    # 知识管理
-│           ├── refinement/   # 知识提炼
-│           ├── search/       # 搜索引擎
-│           └── infra/        # 基础设施
+├── packages/core/src/
+│   ├── knowledge/       # 知识管理（Item, Document, Repository）
+│   ├── refinement/      # 知识提炼（Conversation, Extractor）
+│   ├── session/         # 会话分析
+│   │   ├── discovery.rs     # 会话文件发现
+│   │   ├── parser.rs        # JSONL 解析（Claude Code + Codex）
+│   │   ├── facets.rs        # 12 维度 facet 提取
+│   │   ├── clustering.rs    # 本地聚类（按项目分组）
+│   │   ├── analysis_routes.rs # 10 路 LLM 分析任务
+│   │   └── report.rs        # 报告合并
+│   ├── search/          # 搜索引擎（FTS5）
+│   └── infra/           # 基础设施（SQLite, LLM 客户端）
 ├── apps/
-│   ├── cli/              # CLI 工具
-│   ├── desktop/          # Tauri 桌面应用
-│   │   ├── src-tauri/    # Rust 后端
-│   │   └── ui/           # React 前端
-│   ├── extension/        # 浏览器插件 (Plasmo)
-│   └── server/           # 云端 API 服务 (Rust/Axum)
-└── docs/                 # 文档
-```
-
-## CLI 命令
-
-```bash
-refine extract --stdin    # 从标准输入提取对话
-refine search "query"     # 搜索知识
-refine list               # 列出所有知识
-refine show <id>          # 查看详情
-refine delete <id>        # 删除知识
-refine add --title "..." --summary "..."  # 添加知识
+│   ├── cli/             # CLI 工具（refine 命令）
+│   ├── server/          # API 服务（Axum）
+│   └── desktop/         # 桌面应用（Tauri）
+└── scripts/
+    ├── weekly-insights.sh    # 每日自动分析（launchd）
+    └── reset-weekly-tracker.sh # 周计数器重置
 ```
 
 ## 技术栈
@@ -109,48 +154,10 @@ refine add --title "..." --summary "..."  # 添加知识
 | 层 | 技术 |
 |----|------|
 | 核心库 | Rust |
-| 桌面应用 | Tauri 2.0 (Rust + React) |
-| 浏览器插件 | Plasmo (React + TypeScript) |
 | 数据库 | SQLite + FTS5 |
-| 前端 | React 18 + Zustand + Tailwind CSS |
-
-## 文档
-
-### 产品
-
-| 文档 | 说明 |
-|-----|------|
-| [项目总览](./docs/00_OVERVIEW.md) | 项目概述和导航 |
-| [PRD](./docs/01_PRD.md) | 产品需求文档 |
-| [用户研究](./docs/02_USER_RESEARCH.md) | 用户画像和痛点 |
-| [优先级排序](./docs/03_RICE_PRIORITIZATION.md) | RICE 功能优先级 |
-| [竞品分析](./docs/04_COMPETITIVE_ANALYSIS.md) | 市场竞争分析 |
-| [GTM 策略](./docs/05_GTM_STRATEGY.md) | 上市策略 |
-
-### 设计
-
-| 文档 | 说明 |
-|-----|------|
-| [设计系统](./docs/06_DESIGN_SYSTEM.md) | UI 设计 Tokens 和组件 |
-
-### 技术
-
-| 文档 | 说明 |
-|-----|------|
-| [Rust 规范](./docs/07_RUST_GUIDELINES.md) | Rust 编码规范 |
-| [React 规范](./docs/08_REACT_GUIDELINES.md) | React 最佳实践 |
-| [架构设计](./docs/09_ARCHITECTURE.md) | 模块化架构 |
-| [架构升级 V2](./docs/09_ARCHITECTURE_V2.md) | Modular Monolith + Hexagonal 迁移方案 |
-| [数据模型](./docs/10_DATA_MODEL.md) | 数据类型定义 |
-| [API 规格](./docs/11_API_SPEC.md) | Tauri/HTTP API |
-| [测试策略](./docs/12_TESTING.md) | 测试规范 |
-
-## 开发路线
-
-- **Q1**: MVP - 核心引擎 + 桌面应用 ✅
-- **Q2**: v1.0 - 浏览器插件 + 技能系统 (进行中)
-- **Q3**: v1.1 - 自动推荐 + CLI
-- **Q4**: v1.2 - 云同步 + 技能市场
+| LLM | OpenAI 兼容 API（支持自定义 base_url）|
+| 桌面应用 | Tauri 2.0 |
+| 浏览器插件 | Plasmo |
 
 ## License
 
