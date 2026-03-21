@@ -57,25 +57,37 @@ fn discover_claude_code(home: &Path, results: &mut Vec<DiscoveredSession>) {
         }
         let project_name = extract_project_name(&project_dir);
 
-        let files = match std::fs::read_dir(&project_dir) {
-            Ok(f) => f,
-            Err(_) => continue,
-        };
+        // Scan project dir and one level of subdirectories (session UUID dirs)
+        let mut dirs_to_scan = vec![project_dir.clone()];
+        if let Ok(sub_entries) = std::fs::read_dir(&project_dir) {
+            for sub in sub_entries.flatten() {
+                let sub_path = sub.path();
+                if sub_path.is_dir() && !sub_path.ends_with("subagents") {
+                    dirs_to_scan.push(sub_path);
+                }
+            }
+        }
 
-        for file in files.flatten() {
-            let path = file.path();
-            if !is_session_jsonl(&path) {
-                continue;
+        for scan_dir in &dirs_to_scan {
+            let files = match std::fs::read_dir(scan_dir) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+
+            for file in files.flatten() {
+                let path = file.path();
+                if !is_session_jsonl(&path) {
+                    continue;
+                }
+                if is_subagent_file(&path) {
+                    continue;
+                }
+                results.push(DiscoveredSession {
+                    path,
+                    source: SessionSource::ClaudeCode,
+                    project: Some(project_name.clone()),
+                });
             }
-            // 跳过 subagent 文件
-            if is_subagent_file(&path) {
-                continue;
-            }
-            results.push(DiscoveredSession {
-                path,
-                source: SessionSource::ClaudeCode,
-                project: Some(project_name.clone()),
-            });
         }
     }
 }
