@@ -1,10 +1,11 @@
 use crate::config::{ensure_mirror_dir, mirror_dir};
+use crate::document_save::{save_report_to_document, SaveDocumentOptions};
 use crate::lang::t;
 use crate::score::{self, LayerScore, ScoreResult};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use refine_core::infra::LlmClient;
-use refine_core::knowledge::{Document, DocumentRepository, Item, ItemRepository, ItemType};
+use refine_core::knowledge::{DocumentRepository, Item, ItemRepository, ItemType};
 use refine_core::session::cluster_observations;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
@@ -130,7 +131,24 @@ pub async fn handle_weekly(
 
     let suggestions = extract_suggestions(&report);
     save_weekly_record(&this_score, suggestions)?;
-    save_to_document(&doc_repo, &report).await?;
+    let doc_id = save_report_to_document(
+        &doc_repo,
+        &report,
+        SaveDocumentOptions {
+            source: "mirror-weekly",
+            title_prefix: "Mirror Weekly",
+            url_scheme: "mirror-weekly",
+            save_error_context: "Failed to save weekly report",
+        },
+    )
+    .await?;
+    println!(
+        "\n{}",
+        t!(
+            format!("Weekly report saved (ID: {})", doc_id),
+            format!("周报已保存 (ID: {})", doc_id)
+        )
+    );
 
     Ok(())
 }
@@ -421,28 +439,6 @@ fn write_weekly_history_lines_atomically(path: &Path, lines: &[String]) -> Resul
     }
 
     write_result
-}
-
-async fn save_to_document(doc_repo: &Arc<dyn DocumentRepository>, report: &str) -> Result<()> {
-    let mut doc = Document::new("mirror-weekly", report);
-    let title = format!("Mirror Weekly {}", doc.created_at().format("%Y-%m-%d"));
-    doc.set_title(&title);
-    doc.set_url(&format!(
-        "mirror-weekly://{}",
-        doc.created_at().to_rfc3339()
-    ));
-    doc_repo
-        .save(&doc)
-        .await
-        .context("Failed to save weekly report")?;
-    println!(
-        "\n{}",
-        t!(
-            format!("Weekly report saved (ID: {})", doc.id()),
-            format!("周报已保存 (ID: {})", doc.id())
-        )
-    );
-    Ok(())
 }
 
 async fn llm_with_retry(client: &Arc<dyn LlmClient>, prompt: &str, system: &str) -> Result<String> {
