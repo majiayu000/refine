@@ -42,12 +42,12 @@ async fn main() -> Result<()> {
     );
 
     match cli.command {
-        Commands::Score => {
+        Commands::Score { since } => {
             let llm = build_llm_client_from_env();
-            score::handle_score(store, llm).await
+            score::handle_score(store, llm, since).await
         }
         Commands::Motd => motd::handle_motd(),
-        Commands::Dashboard => dashboard::handle_dashboard(store).await,
+        Commands::Dashboard { since } => dashboard::handle_dashboard(store, since).await,
         Commands::Weekly => {
             let llm = build_llm_client_from_env().ok_or_else(|| {
                 anyhow::anyhow!(

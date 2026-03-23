@@ -20,11 +20,19 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Compute 3-layer signal lights + 9 indicators + tension analysis
-    Score,
+    Score {
+        /// Filter observations since date (YYYY-MM-DD), default: all
+        #[arg(long)]
+        since: Option<String>,
+    },
     /// One-line briefing (add to .zshrc)
     Motd,
     /// Full ASCII dashboard
-    Dashboard,
+    Dashboard {
+        /// Filter observations since date (YYYY-MM-DD), default: all
+        #[arg(long)]
+        since: Option<String>,
+    },
     /// Weekly delta analysis (requires LLM)
     Weekly,
     /// Generate cognitive portrait narrative (requires LLM)

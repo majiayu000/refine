@@ -22,6 +22,9 @@ pub struct Targets {
     pub deep_invest_yellow_hi: f64,
     pub fragmentation_green: f64,
     pub fragmentation_yellow: f64,
+    // 层1 知识获取率
+    pub knowledge_green: f64,
+    pub knowledge_yellow: f64,
     // 层3 协作效能
     pub delegation_green: f64,
     pub delegation_yellow: f64,
@@ -29,6 +32,8 @@ pub struct Targets {
     pub mode_diversity_yellow: usize,
     pub bug_decision_green: f64,
     pub bug_decision_yellow: f64,
+    pub friction_green: f64,
+    pub friction_yellow: f64,
 }
 
 impl Default for Targets {
@@ -40,6 +45,8 @@ impl Default for Targets {
             decision_quality_yellow: 0.40,
             depth_output_green: 0.10,
             depth_output_yellow: 0.0,
+            knowledge_green: 0.5,
+            knowledge_yellow: 0.2,
             exploration_green: 0.15,
             exploration_yellow: 0.08,
             deep_invest_green_lo: 0.15,
@@ -54,6 +61,8 @@ impl Default for Targets {
             mode_diversity_yellow: 2,
             bug_decision_green: 0.60,
             bug_decision_yellow: 0.80,
+            friction_green: 1.0,
+            friction_yellow: 2.0,
         }
     }
 }

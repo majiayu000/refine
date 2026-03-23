@@ -28,8 +28,12 @@ fn box_w() -> usize {
     76
 }
 
-pub async fn handle_dashboard(repo: Arc<dyn ItemRepository>) -> Result<()> {
-    let items = repo.find_all().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+pub async fn handle_dashboard(
+    repo: Arc<dyn ItemRepository>,
+    since: Option<String>,
+) -> Result<()> {
+    let all_items = repo.find_all().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+    let items = score::filter_since(all_items, &since)?;
     if items.is_empty() {
         println!(
             "{}",
