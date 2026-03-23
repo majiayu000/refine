@@ -24,4 +24,5 @@ unicode-width = "0.2"
 fs2 = "0.4"
 
 [dev-dependencies]
+async-trait.workspace = true
 tempfile = "3"

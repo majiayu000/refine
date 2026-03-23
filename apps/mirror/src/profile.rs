@@ -1,6 +1,7 @@
 use crate::config::ensure_mirror_dir;
 use crate::document_save::{save_report_to_document, SaveDocumentOptions};
 use crate::lang::t;
+use crate::llm_retry::llm_with_retry;
 use crate::score::{self, layer_display, Signal};
 use anyhow::Result;
 use refine_core::infra::LlmClient;
@@ -239,8 +240,7 @@ pub async fn handle_profile(
         t!("Generating cognitive profile...", "正在生成认知画像...")
     );
 
-    let narrative = llm
-        .complete(&prompt, Some(system_prompt()))
+    let narrative = llm_with_retry(&llm, &prompt, system_prompt())
         .await
         .map_err(|e| anyhow::anyhow!("LLM profile generation failed: {}", e))?;
 
