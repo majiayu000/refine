@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::io::IsTerminal;
 
 use super::indicators::format_indicator_value;
 
@@ -26,15 +27,35 @@ impl Signal {
             Signal::Red => "🔴",
         }
     }
+
+    pub const fn ansi_dot(self) -> &'static str {
+        match self {
+            Signal::Green => "\x1b[32m●\x1b[0m",
+            Signal::Yellow => "\x1b[33m●\x1b[0m",
+            Signal::Red => "\x1b[31m●\x1b[0m",
+        }
+    }
+
+    pub const fn plain_dot(self) -> &'static str {
+        self.emoji()
+    }
+
+    pub const fn render(self, ansi: bool) -> &'static str {
+        if ansi {
+            self.ansi_dot()
+        } else {
+            self.plain_dot()
+        }
+    }
+
+    fn supports_ansi_on_stdout() -> bool {
+        std::io::stdout().is_terminal()
+    }
 }
 
 impl std::fmt::Display for Signal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Signal::Green => write!(f, "\x1b[32m●\x1b[0m"),
-            Signal::Yellow => write!(f, "\x1b[33m●\x1b[0m"),
-            Signal::Red => write!(f, "\x1b[31m●\x1b[0m"),
-        }
+        f.write_str(self.render(Self::supports_ansi_on_stdout()))
     }
 }
 
