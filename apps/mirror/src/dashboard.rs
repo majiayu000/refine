@@ -1,5 +1,5 @@
 use crate::lang::t;
-use crate::score::{self, ScoreResult, Signal};
+use crate::score::{self, ScoreResult};
 use anyhow::{Context, Result};
 use refine_core::knowledge::ItemRepository;
 use refine_core::session::cluster_observations;
@@ -28,11 +28,11 @@ fn box_w() -> usize {
     76
 }
 
-pub async fn handle_dashboard(
-    repo: Arc<dyn ItemRepository>,
-    since: Option<String>,
-) -> Result<()> {
-    let all_items = repo.find_all().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+pub async fn handle_dashboard(repo: Arc<dyn ItemRepository>, since: Option<String>) -> Result<()> {
+    let all_items = repo
+        .find_all()
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
     let items = score::filter_since(all_items, &since)?;
     if items.is_empty() {
         println!(
@@ -56,7 +56,10 @@ pub async fn handle_dashboard(
     let w = box_w();
 
     p(&border_top(w));
-    p(&row_center(t!("Mirror Cognitive Dashboard", "Mirror 认知仪表盘"), w));
+    p(&row_center(
+        t!("Mirror Cognitive Dashboard", "Mirror 认知仪表盘"),
+        w,
+    ));
     p(&border_mid(w));
 
     let pad: usize = t!(14, 10);
@@ -77,7 +80,10 @@ pub async fn handle_dashboard(
         Some(ref t) => format!("{}{}", t!("Tension: ", "张力: "), t),
         None => t!("Tension: no obvious conflict", "张力: 无明显维度冲突").to_string(),
     };
-    p(&padded_row(&format!(" {}", truncate(&tension_text, w - 4)), w));
+    p(&padded_row(
+        &format!(" {}", truncate(&tension_text, w - 4)),
+        w,
+    ));
     p(&border_mid(w));
 
     p(&padded_row(
@@ -107,7 +113,11 @@ fn p(s: &str) {
 }
 
 fn format_indicator(ind: &score::Indicator) -> String {
-    format!("{} {}", score::indicator_display(&ind.name), ind.display_value())
+    format!(
+        "{} {}",
+        score::indicator_display(&ind.name),
+        ind.display_value()
+    )
 }
 
 fn print_trend(current: &ScoreResult, w: usize) -> Result<()> {
@@ -123,7 +133,7 @@ fn print_trend(current: &ScoreResult, w: usize) -> Result<()> {
             let lights: String = s
                 .layers
                 .iter()
-                .map(|l| signal_ansi(l.signal))
+                .map(|l| l.signal.to_string())
                 .collect::<Vec<_>>()
                 .join("");
             format!("{} {}", date, lights)
@@ -131,14 +141,6 @@ fn print_trend(current: &ScoreResult, w: usize) -> Result<()> {
         .collect();
     p(&padded_row(&format!("  {}", entries.join("  ")), w));
     Ok(())
-}
-
-fn signal_ansi(s: Signal) -> &'static str {
-    match s {
-        Signal::Green => "\x1b[32m●\x1b[0m",
-        Signal::Yellow => "\x1b[33m●\x1b[0m",
-        Signal::Red => "\x1b[31m●\x1b[0m",
-    }
 }
 
 fn truncate(s: &str, max_w: usize) -> String {
@@ -190,7 +192,12 @@ fn row_center(text: &str, w: usize) -> String {
     let inner = w.saturating_sub(2);
     let left = inner.saturating_sub(tw) / 2;
     let right = inner.saturating_sub(tw).saturating_sub(left);
-    format!("\u{2551}{}{}{}\u{2551}", " ".repeat(left), text, " ".repeat(right))
+    format!(
+        "\u{2551}{}{}{}\u{2551}",
+        " ".repeat(left),
+        text,
+        " ".repeat(right)
+    )
 }
 
 fn padded_row(content: &str, w: usize) -> String {
