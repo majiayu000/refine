@@ -96,7 +96,8 @@ pub async fn handle_weekly(
 
     println!("{}", report);
 
-    save_weekly_record(&this_score)?;
+    let suggestions = extract_suggestions(&report);
+    save_weekly_record(&this_score, suggestions)?;
     save_to_document(&doc_repo, &report).await?;
 
     Ok(())
@@ -211,7 +212,52 @@ fn load_last_weekly_record() -> Option<WeeklyRecord> {
         .last()
 }
 
-fn save_weekly_record(score: &ScoreResult) -> Result<()> {
+fn extract_suggestions(report: &str) -> Vec<String> {
+    let lines: Vec<&str> = report.lines().collect();
+    let mut suggestions = Vec::new();
+    let mut in_suggestion_section = false;
+
+    for line in &lines {
+        let trimmed = line.trim();
+        // Detect suggestion section headers (Chinese and English)
+        if trimmed.contains("建议")
+            || trimmed.to_lowercase().contains("suggestion")
+            || trimmed.to_lowercase().contains("next week")
+            || trimmed.contains("下周")
+        {
+            if trimmed.starts_with('#') || trimmed.starts_with("**") {
+                in_suggestion_section = true;
+                continue;
+            }
+        }
+        // New section header ends suggestion section
+        if in_suggestion_section
+            && (trimmed.starts_with('#') || trimmed.starts_with("**"))
+            && !trimmed.contains("建议")
+            && !trimmed.to_lowercase().contains("suggestion")
+        {
+            in_suggestion_section = false;
+        }
+        // Extract numbered or bulleted list items in suggestion section
+        if in_suggestion_section && !trimmed.is_empty() {
+            let is_list_item = trimmed.starts_with('-')
+                || trimmed.starts_with('*')
+                || trimmed.chars().next().map_or(false, |c| c.is_ascii_digit());
+            if is_list_item {
+                // Strip leading bullet/number markers
+                let content = trimmed
+                    .trim_start_matches(|c: char| c == '-' || c == '*' || c.is_ascii_digit() || c == '.' || c == ')')
+                    .trim();
+                if !content.is_empty() {
+                    suggestions.push(content.to_string());
+                }
+            }
+        }
+    }
+    suggestions
+}
+
+fn save_weekly_record(score: &ScoreResult, suggestions: Vec<String>) -> Result<()> {
     let dir = ensure_mirror_dir()?;
     let path = dir.join("weekly-history.jsonl");
     let record = WeeklyRecord {
@@ -230,7 +276,7 @@ fn save_weekly_record(score: &ScoreResult) -> Result<()> {
                 signal: signal_str(&score.layers[2].signal).to_string(),
             },
         ],
-        suggestions: Vec::new(),
+        suggestions,
     };
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -377,5 +423,47 @@ mod tests {
         assert!(prompt.contains("green"));
         assert!(prompt.contains("Tension"));
         assert!(prompt.contains("Dimension change analysis"));
+    }
+
+    #[test]
+    fn test_extract_suggestions_chinese() {
+        let report = "\
+## 各维度变化分析
+深度指标从黄灯转绿灯，进步明显。
+
+## 下周建议
+1. 每天至少做一次深度 code review
+2. 尝试用 Rust 重写核心模块
+";
+        let suggestions = extract_suggestions(report);
+        assert_eq!(suggestions.len(), 2);
+        assert!(suggestions[0].contains("code review"));
+        assert!(suggestions[1].contains("Rust"));
+    }
+
+    #[test]
+    fn test_extract_suggestions_english() {
+        let report = "\
+## Dimension Analysis
+Depth improved from yellow to green.
+
+## Suggestions for Next Week
+- Focus on writing more tests
+- Try pair programming sessions
+";
+        let suggestions = extract_suggestions(report);
+        assert_eq!(suggestions.len(), 2);
+        assert!(suggestions[0].contains("tests"));
+        assert!(suggestions[1].contains("pair programming"));
+    }
+
+    #[test]
+    fn test_extract_suggestions_empty_when_no_section() {
+        let report = "\
+## Analysis
+Everything looks good. No changes needed.
+";
+        let suggestions = extract_suggestions(report);
+        assert!(suggestions.is_empty());
     }
 }

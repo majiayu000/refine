@@ -26,23 +26,26 @@ fn signal_emoji(s: Signal) -> &'static str {
     }
 }
 
-fn trend_arrow(current: f64, previous: f64) -> &'static str {
-    let diff = current - previous;
-    if diff > 0.01 {
-        "↑"
-    } else if diff < -0.01 {
-        "↓"
-    } else {
-        "→"
-    }
-}
-
 /// Signal severity: Red=0, Yellow=1, Green=2 (lower is worse)
 fn signal_severity(s: Signal) -> u8 {
     match s {
         Signal::Red => 0,
         Signal::Yellow => 1,
         Signal::Green => 2,
+    }
+}
+
+/// Compare current vs previous signal and return a trend arrow.
+/// Returns "↑" if improved, "↓" if degraded, "" if unchanged.
+fn trend_signal(current: Signal, previous: Signal) -> &'static str {
+    let curr = signal_severity(current);
+    let prev = signal_severity(previous);
+    if curr > prev {
+        "↑"
+    } else if curr < prev {
+        "↓"
+    } else {
+        ""
     }
 }
 
@@ -201,6 +204,17 @@ pub fn handle_motd() -> Result<()> {
     let breadth_e = signal_emoji(current.layers[1].signal);
     let collab_e = signal_emoji(current.layers[2].signal);
 
+    // Trend arrows: compare current vs previous signals
+    let depth_t = previous
+        .map(|p| trend_signal(current.layers[0].signal, p.layers[0].signal))
+        .unwrap_or("");
+    let breadth_t = previous
+        .map(|p| trend_signal(current.layers[1].signal, p.layers[1].signal))
+        .unwrap_or("");
+    let collab_t = previous
+        .map(|p| trend_signal(current.layers[2].signal, p.layers[2].signal))
+        .unwrap_or("");
+
     let dim = weakest_indicator(current)
         .map(|(d, _, _)| d)
         .unwrap_or_else(|| "general".to_string());
@@ -214,15 +228,30 @@ pub fn handle_motd() -> Result<()> {
         }
     };
 
+    // Check data freshness: warn if latest score is older than 48 hours
+    let age = Utc::now() - current.timestamp;
+    let stale_suffix = if age.num_hours() > 48 {
+        format!(
+            " {} mirror score",
+            t!("⚠️ Data is stale, run", "⚠️ 数据已过期，运行")
+        )
+    } else {
+        String::new()
+    };
+
     println!(
-        "🪞 {d}{de} {b}{be} {c}{ce} | {tip}",
+        "🪞 {d}{de}{dt} {b}{be}{bt} {c}{ce}{ct} | {tip}{stale}",
         d = t!("Depth", "深度"),
         de = depth_e,
+        dt = depth_t,
         b = t!("Breadth", "广度"),
         be = breadth_e,
+        bt = breadth_t,
         c = t!("Collab", "协作"),
         ce = collab_e,
+        ct = collab_t,
         tip = tip,
+        stale = stale_suffix,
     );
     Ok(())
 }
@@ -251,6 +280,21 @@ mod tests {
         assert_eq!(signal_emoji(Signal::Green), "🟢");
         assert_eq!(signal_emoji(Signal::Yellow), "🟡");
         assert_eq!(signal_emoji(Signal::Red), "🔴");
+    }
+
+    #[test]
+    fn test_trend_signal() {
+        // Improved: Yellow -> Green
+        assert_eq!(trend_signal(Signal::Green, Signal::Yellow), "↑");
+        // Degraded: Green -> Yellow
+        assert_eq!(trend_signal(Signal::Yellow, Signal::Green), "↓");
+        // Unchanged
+        assert_eq!(trend_signal(Signal::Green, Signal::Green), "");
+        assert_eq!(trend_signal(Signal::Red, Signal::Red), "");
+        // Big improvement: Red -> Green
+        assert_eq!(trend_signal(Signal::Green, Signal::Red), "↑");
+        // Big degradation: Green -> Red
+        assert_eq!(trend_signal(Signal::Red, Signal::Green), "↓");
     }
 
     #[test]
@@ -306,5 +350,14 @@ mod tests {
         assert_eq!(dim, "breadth");
         assert_eq!(name, "exploration");
         assert!((val - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_stale_data_detection() {
+        let age_hours_50 = chrono::Duration::hours(50);
+        assert!(age_hours_50.num_hours() > 48);
+
+        let age_hours_24 = chrono::Duration::hours(24);
+        assert!(age_hours_24.num_hours() <= 48);
     }
 }
