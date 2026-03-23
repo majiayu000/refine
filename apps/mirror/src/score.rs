@@ -121,11 +121,29 @@ pub struct PersonalBaseline {
 /// Extract a named indicator's actual value from a ScoreResult.
 /// Returns None if the indicator is not found.
 fn extract_indicator(result: &ScoreResult, name: &str) -> Option<f64> {
+    fn canonical_indicator_name(raw: &str) -> &str {
+        match raw {
+            // Legacy localized/label names in historical snapshots.
+            "决策质量" | "Decision Quality" => "decision_quality",
+            "深度产出比" | "Depth Output" => "depth_output",
+            "探索率" | "探索占比" | "Exploration" => "exploration",
+            "深耕率" | "深挖率" | "深挖占比" | "Deep Invest" => "deep_invest",
+            "碎片化" | "Fragmentation" => "fragmentation",
+            "委派率" | "委派比" | "delegation" | "Delegation" => "delegation",
+            "模式多样性" | "Mode Diversity" => "mode_diversity",
+            "bug/决策" | "Bug/Decision" | "bug/decision" => "bug_decision",
+            "知识获取" | "Knowledge" => "knowledge_rate",
+            "摩擦密度" | "Friction" => "friction_density",
+            "Dreyfus" => "dreyfus",
+            _ => raw,
+        }
+    }
+
     result
         .layers
         .iter()
         .flat_map(|l| &l.indicators)
-        .find(|i| i.name == name)
+        .find(|i| canonical_indicator_name(&i.name) == name)
         .map(|i| i.actual)
 }
 
@@ -139,14 +157,19 @@ pub fn compute_personal_baseline(history: &[ScoreResult]) -> Option<PersonalBase
         return None;
     }
 
-    let n = recent.len() as f64;
-
     let avg = |name: &str| -> f64 {
-        let sum: f64 = recent
+        let (sum, count) = recent
             .iter()
             .filter_map(|s| extract_indicator(s, name))
-            .sum();
-        sum / n
+            .fold((0.0, 0usize), |(sum, count), value| {
+                (sum + value, count + 1)
+            });
+
+        if count == 0 {
+            0.0
+        } else {
+            sum / count as f64
+        }
     };
 
     Some(PersonalBaseline {
@@ -1105,6 +1128,43 @@ mod tests {
         }
     }
 
+    fn rename_indicator(result: &mut ScoreResult, from: &str, to: &str) {
+        for layer in &mut result.layers {
+            for indicator in &mut layer.indicators {
+                if indicator.name == from {
+                    indicator.name = to.to_string();
+                }
+            }
+        }
+    }
+
+    fn remove_indicator(result: &mut ScoreResult, name: &str) {
+        for layer in &mut result.layers {
+            layer.indicators.retain(|indicator| indicator.name != name);
+        }
+    }
+
+    fn convert_to_legacy_schema(result: &mut ScoreResult) {
+        // Historical snapshots stored localized indicator names in some versions.
+        let aliases = [
+            ("decision_quality", "决策质量"),
+            ("depth_output", "深度产出比"),
+            ("exploration", "探索率"),
+            ("deep_invest", "深挖率"),
+            ("fragmentation", "碎片化"),
+            ("delegation", "委派率"),
+            ("mode_diversity", "模式多样性"),
+            ("bug_decision", "bug/决策"),
+        ];
+        for (from, to) in aliases {
+            rename_indicator(result, from, to);
+        }
+
+        // knowledge_rate / friction_density did not exist in older snapshots.
+        remove_indicator(result, "knowledge_rate");
+        remove_indicator(result, "friction_density");
+    }
+
     #[test]
     fn test_dreyfus_weighted_calculation() {
         let mut cog = HashMap::new();
@@ -1388,6 +1448,68 @@ mod tests {
         assert!(
             baseline.is_none(),
             "should return None when all data is outside 28-day window"
+        );
+    }
+
+    #[test]
+    fn test_personal_baseline_mixed_legacy_schema_repro() {
+        let now = Utc::now();
+        let mut history = Vec::new();
+
+        for i in 0..7 {
+            let mut legacy = make_score_result(
+                4.0,
+                80.0,
+                20.0,
+                0.0,
+                30.0,
+                25.0,
+                10.0,
+                15.0,
+                5.0,
+                0.10,
+                0.0,
+                now - Duration::days(i),
+            );
+            convert_to_legacy_schema(&mut legacy);
+            history.push(legacy);
+        }
+
+        for i in 7..10 {
+            history.push(make_score_result(
+                4.0,
+                80.0,
+                20.0,
+                0.9,
+                30.0,
+                25.0,
+                10.0,
+                15.0,
+                5.0,
+                0.10,
+                0.7,
+                now - Duration::days(i),
+            ));
+        }
+
+        let bl = compute_personal_baseline(&history)
+            .expect("baseline should be produced with 10 recent entries");
+
+        // Expected baseline should be stable despite mixed history schema.
+        assert!(
+            (bl.decision_quality_avg - 80.0).abs() < f64::EPSILON,
+            "mixed-schema decision_quality should stay at 80.0, got {}",
+            bl.decision_quality_avg
+        );
+        assert!(
+            (bl.knowledge_rate_avg - 0.9).abs() < f64::EPSILON,
+            "missing legacy entries should not dilute knowledge_rate avg, got {}",
+            bl.knowledge_rate_avg
+        );
+        assert!(
+            (bl.friction_density_avg - 0.7).abs() < f64::EPSILON,
+            "missing legacy entries should not dilute friction_density avg, got {}",
+            bl.friction_density_avg
         );
     }
 
