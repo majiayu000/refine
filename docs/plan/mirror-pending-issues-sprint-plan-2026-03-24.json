@@ -1,0 +1,42 @@
+{
+  "tasks": [
+    {
+      "issue": 13,
+      "depends_on": []
+    },
+    {
+      "issue": 9,
+      "depends_on": []
+    }
+  ],
+  "skip": [
+    {
+      "issue": 12,
+      "reason": "already fixed: growth-tracker path resolves from runtime db path with legacy fallback"
+    },
+    {
+      "issue": 11,
+      "reason": "already fixed: weekly/profile/advice share llm_with_retry from llm_retry.rs"
+    },
+    {
+      "issue": 10,
+      "reason": "already fixed: weekly/profile use shared document_save helper"
+    },
+    {
+      "issue": 8,
+      "reason": "already fixed: weekly-history.jsonl rotation implemented with 52-entry cap"
+    },
+    {
+      "issue": 6,
+      "reason": "already fixed: serde(default) present on ScoreResult and WeeklyRecord"
+    },
+    {
+      "issue": 4,
+      "reason": "already fixed: Signal as_str/emoji/Display centralized and reused"
+    },
+    {
+      "issue": 3,
+      "reason": "already fixed: score module split into submodules"
+    }
+  ]
+}
