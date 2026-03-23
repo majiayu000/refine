@@ -2,6 +2,7 @@ use crate::config::{ensure_mirror_dir, mirror_dir, Targets};
 use crate::lang::t;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
+use fs2::FileExt;
 use refine_core::knowledge::{Item, ItemRepository};
 use refine_core::session::{cluster_observations, ClusterResult, GlobalStats};
 use serde::{Deserialize, Serialize};
@@ -737,19 +738,34 @@ static PERSIST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 pub fn persist_score(result: &ScoreResult) -> Result<()> {
     let dir = ensure_mirror_dir()?;
     let path = dir.join("scores.jsonl");
+    let lock_path = dir.join("scores.jsonl.lock");
     let new_line = serde_json::to_string(result)?;
 
+    // Intra-process serialisation.
     let mutex = PERSIST_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = mutex.lock().map_err(|_| anyhow::anyhow!("persist_score: lock poisoned"))?;
 
-    // Read existing lines
+    // Cross-process serialisation: acquire an exclusive flock on the lock file
+    // before touching scores.jsonl.  Both the read and the rename happen while
+    // this lock is held, so no other process can interleave its own
+    // read-modify-write and silently drop entries.
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("persist_score: open lock file {}", lock_path.display()))?;
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("persist_score: acquire lock {}", lock_path.display()))?;
+
+    // Read existing lines (while lock is held).
     let existing = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e.into()),
     };
 
-    // Build updated line list in memory, then rotate
+    // Build updated line list in memory, then rotate.
     let mut lines: Vec<&str> = existing.lines().collect();
     lines.push(&new_line);
     if lines.len() > 365 {
@@ -758,9 +774,7 @@ pub fn persist_score(result: &ScoreResult) -> Result<()> {
     }
     let content = lines.join("\n") + "\n";
 
-    // Atomic write: unique temp file → rename.
-    // Using PID + nanoseconds makes the temp path unique per process and per
-    // call, so concurrent processes cannot clobber each other's temp file.
+    // Atomic write: unique temp file → rename (still inside the flock).
     let tmp = path.with_file_name(format!(
         "scores.jsonl.{}.{}.tmp",
         std::process::id(),
@@ -772,6 +786,7 @@ pub fn persist_score(result: &ScoreResult) -> Result<()> {
     std::fs::write(&tmp, &content)?;
     std::fs::rename(&tmp, &path)?;
 
+    // flock is released when lock_file is dropped here.
     Ok(())
 }
 
