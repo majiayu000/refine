@@ -5,6 +5,7 @@ use super::persistence::persist_score_to_path;
 use crate::config::Targets;
 use refine_core::session::{ClusterResult, GlobalStats, ProjectCluster};
 use std::collections::{HashMap, HashSet};
+use std::io::IsTerminal;
 use std::sync::{Arc, Barrier};
 
 fn make_cluster(
@@ -251,7 +252,17 @@ fn test_signal_conversions_are_canonical() {
     for (signal, plain, emoji, ansi) in cases {
         assert_eq!(signal.as_str(), plain);
         assert_eq!(signal.emoji(), emoji);
-        assert_eq!(signal.to_string(), ansi);
+        assert_eq!(signal.ansi_dot(), ansi);
+        assert_eq!(signal.plain_dot(), emoji);
+        assert_eq!(signal.render(true), ansi);
+        assert_eq!(signal.render(false), emoji);
+
+        let expected_display = if std::io::stdout().is_terminal() {
+            ansi
+        } else {
+            emoji
+        };
+        assert_eq!(signal.to_string(), expected_display);
     }
 }
 
