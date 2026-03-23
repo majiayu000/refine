@@ -87,11 +87,21 @@ pub fn ensure_mirror_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// 加载配置，不存在则用默认值
+/// 加载配置，不存在则用默认值；解析失败时警告并使用默认值
 pub fn load() -> MirrorConfig {
     let path = mirror_dir().join("config.toml");
     match std::fs::read_to_string(&path) {
-        Ok(content) => toml::from_str(&content).unwrap_or_default(),
+        Ok(content) => match toml::from_str(&content) {
+            Ok(config) => config,
+            Err(e) => {
+                eprintln!(
+                    "[mirror] 警告: {} 解析失败，使用默认配置。错误: {}",
+                    path.display(),
+                    e
+                );
+                MirrorConfig::default()
+            }
+        },
         Err(_) => MirrorConfig::default(),
     }
 }
@@ -113,6 +123,14 @@ mod tests {
     fn load_missing_file_returns_default() {
         let config = load();
         assert!((config.targets.dreyfus_green - 3.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn invalid_toml_falls_back_to_default() {
+        let bad_toml = "[targets]\ndreyfus_green = \"not_a_number\"";
+        let result: Result<MirrorConfig, _> = toml::from_str(bad_toml);
+        assert!(result.is_err(), "invalid TOML should produce a parse error");
+        // load() would warn + return default in this case
     }
 
     #[test]
