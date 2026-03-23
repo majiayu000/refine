@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::indicators::format_indicator_value;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Signal {
     Green,
@@ -46,13 +48,7 @@ pub struct Indicator {
 
 impl Indicator {
     pub fn display_value(&self) -> String {
-        match self.name.as_str() {
-            "mode_diversity" => format!("{}", self.actual as usize),
-            "bug_decision" => format!("{:.2}", self.actual),
-            "dreyfus" => format!("{:.1}", self.actual),
-            "knowledge_rate" | "friction_density" => format!("{:.1}", self.actual),
-            _ => format!("{:.0}%", self.actual),
-        }
+        format_indicator_value(&self.name, self.actual)
     }
 }
 

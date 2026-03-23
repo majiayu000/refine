@@ -1,6 +1,7 @@
 mod baseline;
 mod compute;
 mod display;
+mod indicators;
 mod persistence;
 mod types;
 

@@ -1,5 +1,6 @@
 use crate::lang::t;
 
+use super::indicators::indicator_display_name;
 use super::types::{ScoreResult, Signal};
 
 // ── Display helpers ──
@@ -14,20 +15,7 @@ pub fn layer_display(key: &str) -> &'static str {
 }
 
 pub fn indicator_display(key: &str) -> &'static str {
-    match key {
-        "dreyfus" => "Dreyfus",
-        "decision_quality" => t!("Decision Quality", "决策质量"),
-        "depth_output" => t!("Depth Output", "深度产出比"),
-        "exploration" => t!("Exploration", "探索率"),
-        "deep_invest" => t!("Deep Invest", "深耕率"),
-        "fragmentation" => t!("Fragmentation", "碎片化"),
-        "delegation" => "delegation",
-        "mode_diversity" => t!("Mode Diversity", "模式多样性"),
-        "bug_decision" => "bug/decision",
-        "knowledge_rate" => t!("Knowledge", "知识获取"),
-        "friction_density" => t!("Friction", "摩擦密度"),
-        _ => "unknown",
-    }
+    indicator_display_name(key)
 }
 
 // ── Output ──
