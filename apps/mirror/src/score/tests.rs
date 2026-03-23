@@ -1091,3 +1091,38 @@ fn test_layer3_has_4_indicators() {
     assert_eq!(l3.indicators.len(), 4);
     assert_eq!(l3.indicators[3].name, "friction_density");
 }
+
+#[test]
+fn growth_tracker_path_from_db_uses_db_parent_dir() {
+    let db_path = std::path::Path::new("/tmp/custom/refine.db");
+    let tracker_path = growth_tracker_path_from_db(db_path);
+    assert_eq!(
+        tracker_path,
+        std::path::PathBuf::from("/tmp/custom/growth-tracker.json")
+    );
+}
+
+#[test]
+fn choose_growth_tracker_path_prefers_primary_when_present() {
+    let dir = tempfile::tempdir().unwrap();
+    let primary = dir.path().join("growth-tracker.json");
+    let legacy = dir.path().join("legacy").join("growth-tracker.json");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&primary, r#"{"pending_ingest": 8}"#).unwrap();
+    std::fs::write(&legacy, r#"{"pending_ingest": 3}"#).unwrap();
+
+    let chosen = choose_growth_tracker_path(primary.clone(), Some(legacy));
+    assert_eq!(chosen, primary);
+}
+
+#[test]
+fn choose_growth_tracker_path_falls_back_to_legacy_when_primary_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let primary = dir.path().join("db").join("growth-tracker.json");
+    let legacy = dir.path().join(".refine").join("growth-tracker.json");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, r#"{"pending_ingest": 5}"#).unwrap();
+
+    let chosen = choose_growth_tracker_path(primary, Some(legacy.clone()));
+    assert_eq!(chosen, legacy);
+}
