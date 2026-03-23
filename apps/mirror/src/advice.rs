@@ -9,6 +9,8 @@ use std::sync::Arc;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CachedAdvice {
     pub advice: String,
+    #[serde(default)]
+    pub short: String,
     pub generated_at: DateTime<Utc>,
 }
 
@@ -24,10 +26,11 @@ pub fn load_cached() -> Option<CachedAdvice> {
     }
 }
 
-fn save_cached(advice: &str) -> Result<()> {
+fn save_cached(advice: &str, short: &str) -> Result<()> {
     let dir = crate::config::ensure_mirror_dir()?;
     let cached = CachedAdvice {
         advice: advice.to_string(),
+        short: short.to_string(),
         generated_at: Utc::now(),
     };
     let json = serde_json::to_string_pretty(&cached)?;
@@ -109,10 +112,12 @@ fn build_prompt(score: &ScoreResult) -> String {
     lines.push(format!(
         "\n{}",
         t!(
-            "Give ONE specific, actionable suggestion for the next coding session. \
-             Reference the actual numbers. Max 2 sentences. No fluff.",
-            "给出一条具体可执行的建议，针对下一次编码会话。\
-             引用实际数字。最多 2 句话。不要空话。"
+            "Respond in this exact JSON format (no markdown):\n\
+             {\"short\": \"<8 words max, one actionable verb phrase>\", \"full\": \"<1-2 sentences with actual numbers>\"}\n\
+             Example: {\"short\": \"Write 3 design decisions before coding\", \"full\": \"Your Decision Quality is 41%...\"}",
+            "用这个 JSON 格式回复（不要 markdown）：\n\
+             {\"short\": \"<最多10个字，一个动作短语>\", \"full\": \"<1-2句话，引用实际数字>\"}\n\
+             示例：{\"short\": \"开工前写3个设计决策\", \"full\": \"你的决策质量只有41%...\"}"
         )
     ));
     lines.join("\n")
@@ -136,7 +141,19 @@ pub async fn generate_and_cache(
         .complete(&prompt, Some(system_prompt()))
         .await
         .map_err(|e| anyhow::anyhow!("LLM advice generation failed: {}", e))?;
-    let advice = response.trim().to_string();
-    save_cached(&advice)?;
-    Ok(advice)
+    let raw = response.trim().to_string();
+
+    // Parse JSON response: {"short": "...", "full": "..."}
+    let (short, full) = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) {
+        let s = parsed.get("short").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let f = parsed.get("full").and_then(|v| v.as_str()).unwrap_or(&raw).to_string();
+        (s, f)
+    } else {
+        // Fallback: LLM didn't return JSON, use first 15 chars as short
+        let s: String = raw.chars().take(15).collect();
+        (s, raw.clone())
+    };
+
+    save_cached(&full, &short)?;
+    Ok(full)
 }
