@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 const MAX_RETRIES: usize = 5;
 const RETRY_BASE_DELAY_SECS: u64 = 10;
+const WEEKLY_HISTORY_LIMIT: usize = 52;
 
 fn system_prompt() -> &'static str {
     t!(
@@ -331,13 +332,95 @@ fn save_weekly_record(score: &ScoreResult, suggestions: Vec<String>) -> Result<(
         ],
         suggestions,
     };
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
-    let line = serde_json::to_string(&record)?;
-    writeln!(file, "{}", line)?;
-    Ok(())
+    persist_weekly_record_to_path(&path, &record)
+}
+
+fn persist_weekly_record_to_path(path: &Path, record: &WeeklyRecord) -> Result<()> {
+    let mut lines: Vec<String> = match std::fs::read_to_string(path) {
+        Ok(content) => content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "failed to read weekly history {}: {}",
+                path.display(),
+                e
+            ));
+        }
+    };
+
+    lines.push(serde_json::to_string(record)?);
+    if lines.len() > WEEKLY_HISTORY_LIMIT {
+        let trim = lines.len() - WEEKLY_HISTORY_LIMIT;
+        lines.drain(0..trim);
+    }
+
+    write_weekly_history_lines_atomically(path, &lines)
+}
+
+fn write_weekly_history_lines_atomically(path: &Path, lines: &[String]) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "weekly history path has no parent directory: {}",
+            path.display()
+        )
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("weekly-history.jsonl");
+    let nonce = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    let temp_path = parent.join(format!(
+        ".{}.tmp-{}-{}",
+        file_name,
+        std::process::id(),
+        nonce
+    ));
+
+    let write_result = (|| -> Result<()> {
+        let mut temp_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .with_context(|| {
+                format!(
+                    "failed to create temp weekly history file {}",
+                    temp_path.display()
+                )
+            })?;
+
+        for line in lines {
+            writeln!(temp_file, "{}", line)?;
+        }
+        temp_file.sync_all().with_context(|| {
+            format!(
+                "failed to fsync temp weekly history file {}",
+                temp_path.display()
+            )
+        })?;
+
+        std::fs::rename(&temp_path, path).with_context(|| {
+            format!(
+                "failed to atomically replace weekly history {}",
+                path.display()
+            )
+        })?;
+
+        if let Ok(dir_file) = std::fs::File::open(parent) {
+            let _ = dir_file.sync_all();
+        }
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    write_result
 }
 
 async fn save_to_document(doc_repo: &Arc<dyn DocumentRepository>, report: &str) -> Result<()> {
@@ -408,6 +491,27 @@ mod tests {
     use super::*;
     use crate::score::Signal;
     use refine_core::knowledge::{ItemId, RestoreParams, Tag};
+
+    fn make_weekly_record(seed: usize) -> WeeklyRecord {
+        WeeklyRecord {
+            week_end: Utc::now() + Duration::weeks(seed as i64),
+            scores: [
+                LayerSignal {
+                    name: "depth".into(),
+                    signal: "green".into(),
+                },
+                LayerSignal {
+                    name: "breadth".into(),
+                    signal: "yellow".into(),
+                },
+                LayerSignal {
+                    name: "collaboration".into(),
+                    signal: "red".into(),
+                },
+            ],
+            suggestions: vec![format!("suggestion-{}", seed)],
+        }
+    }
 
     fn make_item_at(time: DateTime<Utc>, idx: usize) -> Item {
         Item::restore(RestoreParams {
@@ -599,5 +703,30 @@ Everything looks good. No changes needed.
             .expect("expected record from legacy line");
         assert!(record.suggestions.is_empty());
         assert_eq!(record.scores[0].name, "depth");
+    }
+
+    #[test]
+    fn test_save_weekly_record_caps_history_at_52() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weekly-history.jsonl");
+
+        for i in 0..53 {
+            let record = make_weekly_record(i);
+            persist_weekly_record_to_path(&path, &record).unwrap();
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        assert_eq!(lines.len(), 52);
+
+        let records: Vec<WeeklyRecord> = lines
+            .into_iter()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.first().unwrap().suggestions, vec!["suggestion-1"]);
+        assert_eq!(records.last().unwrap().suggestions, vec!["suggestion-52"]);
     }
 }
