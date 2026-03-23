@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Score { since } => {
             let llm = build_llm_client_from_env();
-            score::handle_score(store, llm, since).await
+            score::handle_score(store, llm, since, &db_path).await
         }
         Commands::Motd => motd::handle_motd(),
         Commands::Dashboard { since } => dashboard::handle_dashboard(store, since).await,

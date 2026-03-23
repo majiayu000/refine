@@ -12,6 +12,7 @@ use anyhow::Result;
 use chrono::{DateTime, NaiveDate, Utc};
 use refine_core::knowledge::{Item, ItemRepository};
 use refine_core::session::cluster_observations;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use baseline::compute_personal_baseline;
@@ -58,6 +59,7 @@ pub async fn handle_score(
     repo: Arc<dyn ItemRepository>,
     llm: Option<Arc<dyn refine_core::infra::LlmClient>>,
     since: Option<String>,
+    db_path: &Path,
 ) -> Result<()> {
     let all_items = repo
         .find_all()
@@ -98,10 +100,7 @@ pub async fn handle_score(
     }
 
     // Check for pending ingest from growth-tracker
-    let tracker_path = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".refine")
-        .join("growth-tracker.json");
+    let tracker_path = resolve_growth_tracker_path(db_path);
     if let Ok(content) = std::fs::read_to_string(&tracker_path) {
         if let Ok(tracker) = serde_json::from_str::<serde_json::Value>(&content) {
             let pending = tracker
@@ -129,4 +128,29 @@ pub async fn handle_score(
         }
     }
     Ok(())
+}
+
+fn resolve_growth_tracker_path(db_path: &Path) -> PathBuf {
+    let primary = growth_tracker_path_from_db(db_path);
+    let legacy = dirs::home_dir().map(|home| home.join(".refine").join("growth-tracker.json"));
+    choose_growth_tracker_path(primary, legacy)
+}
+
+fn growth_tracker_path_from_db(db_path: &Path) -> PathBuf {
+    db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("growth-tracker.json")
+}
+
+fn choose_growth_tracker_path(primary: PathBuf, legacy: Option<PathBuf>) -> PathBuf {
+    if primary.exists() {
+        return primary;
+    }
+    if let Some(legacy_path) = legacy {
+        if legacy_path.exists() {
+            return legacy_path;
+        }
+    }
+    primary
 }
