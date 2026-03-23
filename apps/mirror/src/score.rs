@@ -138,14 +138,13 @@ pub fn compute_personal_baseline(history: &[ScoreResult]) -> Option<PersonalBase
         return None;
     }
 
-    let n = recent.len() as f64;
-
     let avg = |name: &str| -> f64 {
-        let sum: f64 = recent
-            .iter()
-            .filter_map(|s| extract_indicator(s, name))
-            .sum();
-        sum / n
+        let values: Vec<f64> = recent.iter().filter_map(|s| extract_indicator(s, name)).collect();
+        let count = values.len() as f64;
+        if count == 0.0 {
+            return 0.0;
+        }
+        values.iter().sum::<f64>() / count
     };
 
     Some(PersonalBaseline {
@@ -1044,6 +1043,68 @@ mod tests {
 
         let baseline = compute_personal_baseline(&history);
         assert!(baseline.is_none(), "should return None when all data is outside 28-day window");
+    }
+
+    #[test]
+    fn test_personal_baseline_mixed_schema() {
+        // Regression: old schema entries lack knowledge_rate/friction_density.
+        // avg must divide by match count, not total entry count.
+        let now = Utc::now();
+
+        // 7 new-schema entries: knowledge_rate=0.6, friction_density=1.2
+        let new_schema: Vec<ScoreResult> = (0..7)
+            .map(|i| {
+                make_score_result(3.0, 50.0, 10.0, 0.6, 20.0, 25.0, 15.0, 30.0, 4.0, 0.20, 1.2, now - Duration::days(i))
+            })
+            .collect();
+
+        // 3 old-schema entries: no knowledge_rate or friction_density
+        let old_schema: Vec<ScoreResult> = (7..10)
+            .map(|i| ScoreResult {
+                layers: [
+                    LayerScore {
+                        name: "depth".into(),
+                        signal: Signal::Yellow,
+                        indicators: vec![
+                            Indicator { name: "dreyfus".into(), actual: 3.0, target: String::new(), signal: Signal::Yellow },
+                            Indicator { name: "decision_quality".into(), actual: 50.0, target: String::new(), signal: Signal::Yellow },
+                            Indicator { name: "depth_output".into(), actual: 10.0, target: String::new(), signal: Signal::Yellow },
+                        ],
+                    },
+                    LayerScore {
+                        name: "breadth".into(),
+                        signal: Signal::Yellow,
+                        indicators: vec![
+                            Indicator { name: "exploration".into(), actual: 20.0, target: String::new(), signal: Signal::Yellow },
+                            Indicator { name: "deep_invest".into(), actual: 25.0, target: String::new(), signal: Signal::Yellow },
+                            Indicator { name: "fragmentation".into(), actual: 15.0, target: String::new(), signal: Signal::Yellow },
+                        ],
+                    },
+                    LayerScore {
+                        name: "collaboration".into(),
+                        signal: Signal::Yellow,
+                        indicators: vec![
+                            Indicator { name: "delegation".into(), actual: 30.0, target: String::new(), signal: Signal::Yellow },
+                            Indicator { name: "mode_diversity".into(), actual: 4.0, target: String::new(), signal: Signal::Yellow },
+                            Indicator { name: "bug_decision".into(), actual: 0.20, target: String::new(), signal: Signal::Yellow },
+                        ],
+                    },
+                ],
+                tension: None,
+                timestamp: now - Duration::days(i),
+            })
+            .collect();
+
+        let history: Vec<ScoreResult> = new_schema.into_iter().chain(old_schema).collect();
+        let baseline = compute_personal_baseline(&history);
+        assert!(baseline.is_some(), "should produce baseline with 10 mixed-schema entries");
+        let Some(baseline) = baseline else { return; };
+
+        // Must be 0.6 (avg of 7 matches), not 0.42 (0.6*7/10 with old divisor bug)
+        assert!((baseline.knowledge_rate_avg - 0.6).abs() < f64::EPSILON,
+            "knowledge_rate_avg should be 0.6, got {}", baseline.knowledge_rate_avg);
+        assert!((baseline.friction_density_avg - 1.2).abs() < f64::EPSILON,
+            "friction_density_avg should be 1.2, got {}", baseline.friction_density_avg);
     }
 
     #[test]

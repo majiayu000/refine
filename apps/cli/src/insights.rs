@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use refine_core::infra::LlmClient;
 use refine_core::knowledge::{Document, DocumentRepository, ItemRepository, ItemType};
 use refine_core::session::{
-    build_final_prompt, cluster_observations, merge_route_results, plan_routes,
-    RouteResult, INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
+    build_final_prompt, cluster_observations, merge_route_results, plan_routes, RouteResult,
+    INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +16,7 @@ const MAX_RETRIES: usize = 5;
 const RETRY_BASE_DELAY_SECS: u64 = 10;
 
 pub struct InsightsOptions {
+    #[allow(dead_code)]
     pub period: Option<usize>,
     pub with_prescription: bool,
 }
@@ -93,7 +94,10 @@ pub async fn handle_insights(
         }
     }
 
-    println!("\n{} 路分析完成，合并生成最终报告...\n", route_results.len());
+    println!(
+        "\n{} 路分析完成，合并生成最终报告...\n",
+        route_results.len()
+    );
 
     // Step 4: 合并 + 最终报告
     let combined = merge_route_results(&route_results);
@@ -120,11 +124,7 @@ pub async fn handle_insights(
     Ok(())
 }
 
-async fn llm_with_retry(
-    client: &Arc<dyn LlmClient>,
-    prompt: &str,
-    system: &str,
-) -> Result<String> {
+async fn llm_with_retry(client: &Arc<dyn LlmClient>, prompt: &str, system: &str) -> Result<String> {
     let mut last_err = String::new();
     for attempt in 0..MAX_RETRIES {
         match client.complete(prompt, Some(system)).await {
@@ -153,5 +153,9 @@ async fn llm_with_retry(
             }
         }
     }
-    Err(anyhow::anyhow!("LLM 调用失败 ({}次重试): {}", MAX_RETRIES, last_err))
+    Err(anyhow::anyhow!(
+        "LLM 调用失败 ({}次重试): {}",
+        MAX_RETRIES,
+        last_err
+    ))
 }

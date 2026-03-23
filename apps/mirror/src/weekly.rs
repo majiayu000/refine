@@ -147,11 +147,7 @@ pub fn build_weekly_prompt(
         parts.push(format!("- {}", format_layer(layer)));
     }
     if let Some(tension) = &this.tension {
-        parts.push(format!(
-            "\n{}: {}",
-            t!("Tension", "张力"),
-            tension
-        ));
+        parts.push(format!("\n{}: {}", t!("Tension", "张力"), tension));
     }
 
     if let Some(last) = last {
@@ -220,15 +216,14 @@ fn extract_suggestions(report: &str) -> Vec<String> {
     for line in &lines {
         let trimmed = line.trim();
         // Detect suggestion section headers (Chinese and English)
-        if trimmed.contains("建议")
+        if (trimmed.contains("建议")
             || trimmed.to_lowercase().contains("suggestion")
             || trimmed.to_lowercase().contains("next week")
-            || trimmed.contains("下周")
+            || trimmed.contains("下周"))
+            && (trimmed.starts_with('#') || trimmed.starts_with("**"))
         {
-            if trimmed.starts_with('#') || trimmed.starts_with("**") {
-                in_suggestion_section = true;
-                continue;
-            }
+            in_suggestion_section = true;
+            continue;
         }
         // New section header ends suggestion section
         if in_suggestion_section
@@ -242,11 +237,13 @@ fn extract_suggestions(report: &str) -> Vec<String> {
         if in_suggestion_section && !trimmed.is_empty() {
             let is_list_item = trimmed.starts_with('-')
                 || trimmed.starts_with('*')
-                || trimmed.chars().next().map_or(false, |c| c.is_ascii_digit());
+                || trimmed.chars().next().is_some_and(|c| c.is_ascii_digit());
             if is_list_item {
                 // Strip leading bullet/number markers
                 let content = trimmed
-                    .trim_start_matches(|c: char| c == '-' || c == '*' || c.is_ascii_digit() || c == '.' || c == ')')
+                    .trim_start_matches(|c: char| {
+                        c == '-' || c == '*' || c.is_ascii_digit() || c == '.' || c == ')'
+                    })
                     .trim();
                 if !content.is_empty() {
                     suggestions.push(content.to_string());
@@ -309,11 +306,7 @@ async fn save_to_document(doc_repo: &Arc<dyn DocumentRepository>, report: &str) 
     Ok(())
 }
 
-async fn llm_with_retry(
-    client: &Arc<dyn LlmClient>,
-    prompt: &str,
-    system: &str,
-) -> Result<String> {
+async fn llm_with_retry(client: &Arc<dyn LlmClient>, prompt: &str, system: &str) -> Result<String> {
     let mut last_err = String::new();
     for attempt in 0..MAX_RETRIES {
         match client.complete(prompt, Some(system)).await {
@@ -334,7 +327,12 @@ async fn llm_with_retry(
                 eprintln!(
                     "  {}",
                     t!(
-                        format!("Retry ({}/{}) waiting {}s...", attempt + 1, MAX_RETRIES, delay),
+                        format!(
+                            "Retry ({}/{}) waiting {}s...",
+                            attempt + 1,
+                            MAX_RETRIES,
+                            delay
+                        ),
                         format!("重试 ({}/{}) 等待 {}s...", attempt + 1, MAX_RETRIES, delay)
                     )
                 );

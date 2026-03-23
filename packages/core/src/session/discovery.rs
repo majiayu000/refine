@@ -32,10 +32,16 @@ pub fn discover_sessions_in(
 ) -> Vec<DiscoveredSession> {
     let mut results = Vec::new();
 
-    if source_filter.as_ref().map_or(true, |s| *s == SessionSource::ClaudeCode) {
+    if source_filter
+        .as_ref()
+        .map_or(true, |s| *s == SessionSource::ClaudeCode)
+    {
         discover_claude_code(home, &mut results);
     }
-    if source_filter.as_ref().map_or(true, |s| *s == SessionSource::Codex) {
+    if source_filter
+        .as_ref()
+        .map_or(true, |s| *s == SessionSource::Codex)
+    {
         discover_codex(home, &mut results);
     }
 
@@ -97,11 +103,7 @@ fn discover_codex(home: &Path, results: &mut Vec<DiscoveredSession>) {
     walk_jsonl_recursive(&sessions_dir, SessionSource::Codex, results);
 }
 
-fn walk_jsonl_recursive(
-    dir: &Path,
-    source: SessionSource,
-    results: &mut Vec<DiscoveredSession>,
-) {
+fn walk_jsonl_recursive(dir: &Path, source: SessionSource, results: &mut Vec<DiscoveredSession>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -111,7 +113,7 @@ fn walk_jsonl_recursive(
         let path = entry.path();
         if path.is_dir() {
             // 跳过 subagents 目录
-            if path.file_name().map_or(false, |n| n == "subagents") {
+            if path.file_name().is_some_and(|n| n == "subagents") {
                 continue;
             }
             walk_jsonl_recursive(&path, source.clone(), results);
@@ -126,13 +128,13 @@ fn walk_jsonl_recursive(
 }
 
 fn is_session_jsonl(path: &Path) -> bool {
-    path.extension().map_or(false, |ext| ext == "jsonl")
+    path.extension().is_some_and(|ext| ext == "jsonl")
 }
 
 fn is_subagent_file(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
-        .map_or(false, |name| name.starts_with("agent-"))
+        .is_some_and(|name| name.starts_with("agent-"))
 }
 
 /// 从路径提取项目名（最后一个目录组件）
