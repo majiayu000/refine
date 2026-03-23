@@ -7,6 +7,7 @@ use refine_core::session::{cluster_observations, ClusterResult, GlobalStats};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 use std::sync::Arc;
+use tracing::warn;
 
 /// Filter items to only those created since the given date string (YYYY-MM-DD).
 /// If `since` is None, returns all items unchanged.
@@ -565,13 +566,23 @@ pub fn load_recent_scores(n: usize) -> Result<Vec<ScoreResult>> {
     let path = mirror_dir().join("scores.jsonl");
     let file = match std::fs::File::open(&path) {
         Ok(f) => f,
-        Err(_) => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            warn!("failed to open scores.jsonl: {}", e);
+            return Ok(Vec::new());
+        }
     };
     let reader = std::io::BufReader::new(file);
     let all: Vec<ScoreResult> = reader
         .lines()
         .map_while(|line| line.ok())
-        .filter_map(|line| serde_json::from_str(&line).ok())
+        .filter_map(|line| match serde_json::from_str(&line) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                warn!("failed to parse score record: {}", e);
+                None
+            }
+        })
         .collect();
     let start = all.len().saturating_sub(n);
     Ok(all[start..].to_vec())

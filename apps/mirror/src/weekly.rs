@@ -9,6 +9,7 @@ use refine_core::session::cluster_observations;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 use std::sync::Arc;
+use tracing::warn;
 
 const MAX_RETRIES: usize = 5;
 const RETRY_BASE_DELAY_SECS: u64 = 10;
@@ -147,11 +148,7 @@ pub fn build_weekly_prompt(
         parts.push(format!("- {}", format_layer(layer)));
     }
     if let Some(tension) = &this.tension {
-        parts.push(format!(
-            "\n{}: {}",
-            t!("Tension", "张力"),
-            tension
-        ));
+        parts.push(format!("\n{}: {}", t!("Tension", "张力"), tension));
     }
 
     if let Some(last) = last {
@@ -203,12 +200,25 @@ pub fn build_weekly_prompt(
 
 fn load_last_weekly_record() -> Option<WeeklyRecord> {
     let path = mirror_dir().join("weekly-history.jsonl");
-    let file = std::fs::File::open(&path).ok()?;
+    let file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            warn!("failed to open weekly-history.jsonl: {}", e);
+            return None;
+        }
+    };
     let reader = std::io::BufReader::new(file);
     reader
         .lines()
         .map_while(|l| l.ok())
-        .filter_map(|l| serde_json::from_str::<WeeklyRecord>(&l).ok())
+        .filter_map(|l| match serde_json::from_str::<WeeklyRecord>(&l) {
+            Ok(record) => Some(record),
+            Err(e) => {
+                warn!("failed to parse weekly record: {}", e);
+                None
+            }
+        })
         .last()
 }
 
@@ -246,7 +256,9 @@ fn extract_suggestions(report: &str) -> Vec<String> {
             if is_list_item {
                 // Strip leading bullet/number markers
                 let content = trimmed
-                    .trim_start_matches(|c: char| c == '-' || c == '*' || c.is_ascii_digit() || c == '.' || c == ')')
+                    .trim_start_matches(|c: char| {
+                        c == '-' || c == '*' || c.is_ascii_digit() || c == '.' || c == ')'
+                    })
                     .trim();
                 if !content.is_empty() {
                     suggestions.push(content.to_string());
@@ -309,11 +321,7 @@ async fn save_to_document(doc_repo: &Arc<dyn DocumentRepository>, report: &str) 
     Ok(())
 }
 
-async fn llm_with_retry(
-    client: &Arc<dyn LlmClient>,
-    prompt: &str,
-    system: &str,
-) -> Result<String> {
+async fn llm_with_retry(client: &Arc<dyn LlmClient>, prompt: &str, system: &str) -> Result<String> {
     let mut last_err = String::new();
     for attempt in 0..MAX_RETRIES {
         match client.complete(prompt, Some(system)).await {
@@ -334,7 +342,12 @@ async fn llm_with_retry(
                 eprintln!(
                     "  {}",
                     t!(
-                        format!("Retry ({}/{}) waiting {}s...", attempt + 1, MAX_RETRIES, delay),
+                        format!(
+                            "Retry ({}/{}) waiting {}s...",
+                            attempt + 1,
+                            MAX_RETRIES,
+                            delay
+                        ),
                         format!("重试 ({}/{}) 等待 {}s...", attempt + 1, MAX_RETRIES, delay)
                     )
                 );
