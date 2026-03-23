@@ -7,7 +7,7 @@ use refine_core::session::{cluster_observations, ClusterResult, GlobalStats};
 use serde::{Deserialize, Serialize};
 use std::io::BufRead;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Filter items to only those created since the given date string (YYYY-MM-DD).
 /// If `since` is None, returns all items unchanged.
@@ -729,10 +729,18 @@ pub fn compute(cluster: &ClusterResult, targets: &Targets) -> ScoreResult {
 
 // ── Persistence ──
 
+/// Process-level mutex so that concurrent `persist_score` calls within the
+/// same process are serialised: only one caller holds the lock while it
+/// reads, modifies, and atomically renames the JSONL file.
+static PERSIST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
 pub fn persist_score(result: &ScoreResult) -> Result<()> {
     let dir = ensure_mirror_dir()?;
     let path = dir.join("scores.jsonl");
     let new_line = serde_json::to_string(result)?;
+
+    let mutex = PERSIST_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = mutex.lock().map_err(|_| anyhow::anyhow!("persist_score: lock poisoned"))?;
 
     // Read existing lines
     let existing = match std::fs::read_to_string(&path) {
@@ -750,8 +758,17 @@ pub fn persist_score(result: &ScoreResult) -> Result<()> {
     }
     let content = lines.join("\n") + "\n";
 
-    // Atomic write: temp file → rename
-    let tmp = path.with_extension("jsonl.tmp");
+    // Atomic write: unique temp file → rename.
+    // Using PID + nanoseconds makes the temp path unique per process and per
+    // call, so concurrent processes cannot clobber each other's temp file.
+    let tmp = path.with_file_name(format!(
+        "scores.jsonl.{}.{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos()
+    ));
     std::fs::write(&tmp, &content)?;
     std::fs::rename(&tmp, &path)?;
 
