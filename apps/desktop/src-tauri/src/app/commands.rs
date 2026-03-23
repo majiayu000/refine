@@ -26,7 +26,7 @@ pub async fn get_items(
 
     let total = state
         .store
-        .count_items(item_type_filter.clone())
+        .count_items(item_type_filter)
         .await
         .map_err(|e| e.to_string())?;
     let items = state

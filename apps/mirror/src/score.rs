@@ -1,11 +1,12 @@
 use crate::config::{ensure_mirror_dir, mirror_dir, Targets};
 use crate::lang::t;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use refine_core::knowledge::{Item, ItemRepository};
 use refine_core::session::{cluster_observations, ClusterResult, GlobalStats};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
+use std::path::Path;
 use std::sync::Arc;
 
 /// Filter items to only those created since the given date string (YYYY-MM-DD).
@@ -752,16 +753,45 @@ pub fn persist_score(result: &ScoreResult) -> Result<()> {
 
 pub fn load_recent_scores(n: usize) -> Result<Vec<ScoreResult>> {
     let path = mirror_dir().join("scores.jsonl");
-    let file = match std::fs::File::open(&path) {
+    load_recent_scores_from_path(&path, n)
+}
+
+fn load_recent_scores_from_path(path: &Path, n: usize) -> Result<Vec<ScoreResult>> {
+    let file = match std::fs::File::open(path) {
         Ok(f) => f,
-        Err(_) => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "failed to open score history {}: {}",
+                path.display(),
+                e
+            ));
+        }
     };
     let reader = std::io::BufReader::new(file);
-    let all: Vec<ScoreResult> = reader
-        .lines()
-        .map_while(|line| line.ok())
-        .filter_map(|line| serde_json::from_str(&line).ok())
-        .collect();
+    let mut all = Vec::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line_no = idx + 1;
+        let line = line.with_context(|| {
+            format!(
+                "failed to read line {} from score history {}",
+                line_no,
+                path.display()
+            )
+        })?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parsed = serde_json::from_str::<ScoreResult>(line).with_context(|| {
+            format!(
+                "failed to parse JSON on line {} in score history {}",
+                line_no,
+                path.display()
+            )
+        })?;
+        all.push(parsed);
+    }
     let start = all.len().saturating_sub(n);
     Ok(all[start..].to_vec())
 }
@@ -945,6 +975,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn make_cluster_with_data(
         cognitive: HashMap<String, usize>,
         collab: HashMap<String, usize>,
@@ -990,6 +1021,7 @@ mod tests {
     }
 
     /// Build a ScoreResult with known indicator values for baseline testing.
+    #[allow(clippy::too_many_arguments)]
     fn make_score_result(
         dreyfus: f64,
         decision_quality: f64,
@@ -1276,15 +1308,44 @@ mod tests {
         drop(file);
 
         // load
-        let reader = std::io::BufReader::new(std::fs::File::open(&path).unwrap());
-        let loaded: Vec<ScoreResult> = reader
-            .lines()
-            .filter_map(|l| l.ok())
-            .filter_map(|l| serde_json::from_str(&l).ok())
-            .collect();
+        let loaded = load_recent_scores_from_path(&path, 10).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].layers[0].signal, Signal::Green);
         assert_eq!(loaded[0].tension.as_deref(), Some("test tension"));
+    }
+
+    #[test]
+    fn test_load_recent_scores_reports_invalid_jsonl_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scores.jsonl");
+        let valid = ScoreResult {
+            layers: [
+                LayerScore {
+                    name: "L1".into(),
+                    signal: Signal::Green,
+                    indicators: Vec::new(),
+                },
+                LayerScore {
+                    name: "L2".into(),
+                    signal: Signal::Yellow,
+                    indicators: Vec::new(),
+                },
+                LayerScore {
+                    name: "L3".into(),
+                    signal: Signal::Red,
+                    indicators: Vec::new(),
+                },
+            ],
+            tension: None,
+            timestamp: Utc::now(),
+        };
+        let valid_line = serde_json::to_string(&valid).unwrap();
+        std::fs::write(&path, format!("{}\n{{\"bad\":\n", valid_line)).unwrap();
+
+        let err = load_recent_scores_from_path(&path, 10).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("line 2"));
+        assert!(msg.contains("score history"));
     }
 
     #[test]

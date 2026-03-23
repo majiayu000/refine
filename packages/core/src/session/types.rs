@@ -37,21 +37,11 @@ pub struct SessionMessage {
 }
 
 /// 会话元数据
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SessionMeta {
     pub project: Option<String>,
     pub model: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
-}
-
-impl Default for SessionMeta {
-    fn default() -> Self {
-        Self {
-            project: None,
-            model: None,
-            started_at: None,
-        }
-    }
 }
 
 /// 统一会话结构

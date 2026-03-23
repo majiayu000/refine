@@ -1,9 +1,10 @@
 use crate::lang::t;
 use crate::score::{indicator_display, layer_display, ScoreResult, Signal};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use refine_core::infra::LlmClient;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -14,15 +15,30 @@ pub struct CachedAdvice {
     pub generated_at: DateTime<Utc>,
 }
 
-pub fn load_cached() -> Option<CachedAdvice> {
+pub fn load_cached() -> Result<Option<CachedAdvice>> {
     let path = crate::config::mirror_dir().join("advice.json");
-    let content = std::fs::read_to_string(&path).ok()?;
-    let cached: CachedAdvice = serde_json::from_str(&content).ok()?;
+    load_cached_from_path(&path)
+}
+
+fn load_cached_from_path(path: &Path) -> Result<Option<CachedAdvice>> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "failed to read advice cache {}: {}",
+                path.display(),
+                e
+            ));
+        }
+    };
+    let cached: CachedAdvice = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse advice cache JSON {}", path.display()))?;
     let age = Utc::now() - cached.generated_at;
     if age.num_hours() < 72 {
-        Some(cached)
+        Ok(Some(cached))
     } else {
-        None
+        Ok(None)
     }
 }
 
@@ -124,10 +140,7 @@ fn system_prompt() -> &'static str {
 }
 
 /// Generate advice via LLM (single attempt, best-effort) and cache result
-pub async fn generate_and_cache(
-    score: &ScoreResult,
-    llm: &Arc<dyn LlmClient>,
-) -> Result<String> {
+pub async fn generate_and_cache(score: &ScoreResult, llm: &Arc<dyn LlmClient>) -> Result<String> {
     let prompt = build_prompt(score);
     let response = llm
         .complete(&prompt, Some(system_prompt()))
@@ -137,8 +150,16 @@ pub async fn generate_and_cache(
 
     // Parse JSON response: {"short": "...", "full": "..."}
     let (short, full) = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) {
-        let s = parsed.get("short").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let f = parsed.get("full").and_then(|v| v.as_str()).unwrap_or(&raw).to_string();
+        let s = parsed
+            .get("short")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let f = parsed
+            .get("full")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&raw)
+            .to_string();
         (s, f)
     } else {
         // Fallback: LLM didn't return JSON, use first 15 chars as short
@@ -148,4 +169,52 @@ pub async fn generate_and_cache(
 
     save_cached(&full, &short)?;
     Ok(full)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    #[test]
+    fn test_load_cached_reports_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("advice.json");
+        std::fs::write(&path, "{\"advice\":").unwrap();
+
+        let err = load_cached_from_path(&path).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("failed to parse advice cache JSON"));
+    }
+
+    #[test]
+    fn test_load_cached_returns_none_for_stale_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("advice.json");
+        let cached = CachedAdvice {
+            advice: "stale".into(),
+            short: "stale".into(),
+            generated_at: Utc::now() - Duration::hours(80),
+        };
+        std::fs::write(&path, serde_json::to_string(&cached).unwrap()).unwrap();
+
+        let loaded = load_cached_from_path(&path).unwrap();
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn test_load_cached_returns_fresh_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("advice.json");
+        let cached = CachedAdvice {
+            advice: "fresh".into(),
+            short: "fresh".into(),
+            generated_at: Utc::now() - Duration::hours(2),
+        };
+        std::fs::write(&path, serde_json::to_string(&cached).unwrap()).unwrap();
+
+        let loaded = load_cached_from_path(&path).unwrap();
+        assert_eq!(loaded.unwrap().advice, "fresh");
+    }
 }

@@ -1,5 +1,5 @@
 use crate::config::{ensure_mirror_dir, mirror_dir};
-use crate::lang::{self, Lang, t};
+use crate::lang::{self, t, Lang};
 use crate::score::{load_recent_scores, ScoreResult, Signal};
 use anyhow::Result;
 use chrono::{Datelike, Utc};
@@ -65,31 +65,92 @@ fn weakest_indicator(score: &ScoreResult) -> Option<(String, String, f64)> {
         "collaboration" => "collaboration",
         _ => "general",
     };
-    Some((dim.to_string(), weakest_ind.name.clone(), weakest_ind.actual))
+    Some((
+        dim.to_string(),
+        weakest_ind.name.clone(),
+        weakest_ind.actual,
+    ))
 }
 
 fn default_tips() -> Vec<Tip> {
     let raw_en: Vec<(&str, &str)> = vec![
-        ("depth", "Before asking AI for a solution, write down your 3 predictions first"),
-        ("depth", "Try completing today's core task without checking docs"),
-        ("depth", "Ask AI to find 3 counterexamples for your approach"),
+        (
+            "depth",
+            "Before asking AI for a solution, write down your 3 predictions first",
+        ),
+        (
+            "depth",
+            "Try completing today's core task without checking docs",
+        ),
+        (
+            "depth",
+            "Ask AI to find 3 counterexamples for your approach",
+        ),
         ("depth", "Draw the data flow diagram before writing code"),
-        ("depth", "Explain the module you're writing to yourself using the Feynman method"),
-        ("breadth", "Explore a crate you've been curious about but never used"),
-        ("breadth", "Pick an old project and refactor a module with a fresh approach"),
-        ("breadth", "Spend 30 minutes reading an open source project you've never touched"),
-        ("breadth", "Try solving today's small problem in a different language"),
-        ("breadth", "Split today's task into exploration and execution phases"),
-        ("collaboration", "Use pair mode instead of delegation for the next task"),
-        ("collaboration", "Let AI describe the problem first, then you write the solution"),
-        ("collaboration", "Hand-write today's first task, then compare with AI's approach"),
-        ("collaboration", "Let AI review your code instead of writing it for you"),
-        ("collaboration", "Give AI tighter constraints and see how it adapts"),
-        ("general", "Review yesterday's session and find one decision you'd improve"),
-        ("general", "Is the project you spent the most time on worth continued investment?"),
-        ("general", "When stuck, question your underlying assumptions first"),
-        ("general", "Spend 5 minutes writing down the hypothesis you most want to test today"),
-        ("general", "Before debugging, predict the root cause first, then verify"),
+        (
+            "depth",
+            "Explain the module you're writing to yourself using the Feynman method",
+        ),
+        (
+            "breadth",
+            "Explore a crate you've been curious about but never used",
+        ),
+        (
+            "breadth",
+            "Pick an old project and refactor a module with a fresh approach",
+        ),
+        (
+            "breadth",
+            "Spend 30 minutes reading an open source project you've never touched",
+        ),
+        (
+            "breadth",
+            "Try solving today's small problem in a different language",
+        ),
+        (
+            "breadth",
+            "Split today's task into exploration and execution phases",
+        ),
+        (
+            "collaboration",
+            "Use pair mode instead of delegation for the next task",
+        ),
+        (
+            "collaboration",
+            "Let AI describe the problem first, then you write the solution",
+        ),
+        (
+            "collaboration",
+            "Hand-write today's first task, then compare with AI's approach",
+        ),
+        (
+            "collaboration",
+            "Let AI review your code instead of writing it for you",
+        ),
+        (
+            "collaboration",
+            "Give AI tighter constraints and see how it adapts",
+        ),
+        (
+            "general",
+            "Review yesterday's session and find one decision you'd improve",
+        ),
+        (
+            "general",
+            "Is the project you spent the most time on worth continued investment?",
+        ),
+        (
+            "general",
+            "When stuck, question your underlying assumptions first",
+        ),
+        (
+            "general",
+            "Spend 5 minutes writing down the hypothesis you most want to test today",
+        ),
+        (
+            "general",
+            "Before debugging, predict the root cause first, then verify",
+        ),
     ];
     let raw_zh: Vec<(&str, &str)> = vec![
         ("depth", "下次让 AI 给方案前先写下你的 3 个预测"),
@@ -221,8 +282,13 @@ pub fn handle_motd() -> Result<()> {
 
     // Prefer LLM-generated advice if cached, fallback to static tips
     let tip = match crate::advice::load_cached() {
-        Some(cached) => cached.advice,
-        None => {
+        Ok(Some(cached)) => cached.advice,
+        Err(e) => {
+            tracing::warn!("failed to load cached advice: {}", e);
+            let tips = ensure_tips()?;
+            select_tip(&tips, &dim)
+        }
+        Ok(None) => {
             let tips = ensure_tips()?;
             select_tip(&tips, &dim)
         }
@@ -300,9 +366,21 @@ mod tests {
     #[test]
     fn test_select_tip_matches_weakest() {
         let tips = vec![
-            Tip { dimension: "depth".into(), lang: "en".into(), text: "depth tip 1".into() },
-            Tip { dimension: "breadth".into(), lang: "en".into(), text: "breadth tip 1".into() },
-            Tip { dimension: "collaboration".into(), lang: "en".into(), text: "collab tip 1".into() },
+            Tip {
+                dimension: "depth".into(),
+                lang: "en".into(),
+                text: "depth tip 1".into(),
+            },
+            Tip {
+                dimension: "breadth".into(),
+                lang: "en".into(),
+                text: "breadth tip 1".into(),
+            },
+            Tip {
+                dimension: "collaboration".into(),
+                lang: "en".into(),
+                text: "collab tip 1".into(),
+            },
         ];
         // depth dimension has only one en tip, so it always matches
         let result = select_tip(&tips, "depth");

@@ -8,6 +8,7 @@ use refine_core::knowledge::{Document, DocumentRepository, Item, ItemRepository,
 use refine_core::session::cluster_observations;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
+use std::path::Path;
 use std::sync::Arc;
 
 const MAX_RETRIES: usize = 5;
@@ -90,7 +91,13 @@ pub async fn handle_weekly(
         None
     };
 
-    let prev_record = load_last_weekly_record();
+    let prev_record = match load_last_weekly_record() {
+        Ok(record) => record,
+        Err(e) => {
+            tracing::warn!("failed to load weekly history: {}", e);
+            None
+        }
+    };
     let prompt = build_weekly_prompt(&this_score, last_score.as_ref(), prev_record.as_ref());
     let report = llm_with_retry(&llm, &prompt, system_prompt()).await?;
 
@@ -147,11 +154,7 @@ pub fn build_weekly_prompt(
         parts.push(format!("- {}", format_layer(layer)));
     }
     if let Some(tension) = &this.tension {
-        parts.push(format!(
-            "\n{}: {}",
-            t!("Tension", "张力"),
-            tension
-        ));
+        parts.push(format!("\n{}: {}", t!("Tension", "张力"), tension));
     }
 
     if let Some(last) = last {
@@ -201,15 +204,48 @@ pub fn build_weekly_prompt(
     parts.join("\n")
 }
 
-fn load_last_weekly_record() -> Option<WeeklyRecord> {
+fn load_last_weekly_record() -> Result<Option<WeeklyRecord>> {
     let path = mirror_dir().join("weekly-history.jsonl");
-    let file = std::fs::File::open(&path).ok()?;
+    load_last_weekly_record_from_path(&path)
+}
+
+fn load_last_weekly_record_from_path(path: &Path) -> Result<Option<WeeklyRecord>> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "failed to open weekly history {}: {}",
+                path.display(),
+                e
+            ));
+        }
+    };
     let reader = std::io::BufReader::new(file);
-    reader
-        .lines()
-        .map_while(|l| l.ok())
-        .filter_map(|l| serde_json::from_str::<WeeklyRecord>(&l).ok())
-        .last()
+    let mut last = None;
+    for (idx, line) in reader.lines().enumerate() {
+        let line_no = idx + 1;
+        let line = line.with_context(|| {
+            format!(
+                "failed to read line {} from weekly history {}",
+                line_no,
+                path.display()
+            )
+        })?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let record = serde_json::from_str::<WeeklyRecord>(line).with_context(|| {
+            format!(
+                "failed to parse JSON on line {} in weekly history {}",
+                line_no,
+                path.display()
+            )
+        })?;
+        last = Some(record);
+    }
+    Ok(last)
 }
 
 fn extract_suggestions(report: &str) -> Vec<String> {
@@ -219,22 +255,21 @@ fn extract_suggestions(report: &str) -> Vec<String> {
 
     for line in &lines {
         let trimmed = line.trim();
+        let lowered = trimmed.to_lowercase();
         // Detect suggestion section headers (Chinese and English)
-        if trimmed.contains("建议")
-            || trimmed.to_lowercase().contains("suggestion")
-            || trimmed.to_lowercase().contains("next week")
-            || trimmed.contains("下周")
-        {
-            if trimmed.starts_with('#') || trimmed.starts_with("**") {
-                in_suggestion_section = true;
-                continue;
-            }
+        let looks_like_suggestion_header = trimmed.contains("建议")
+            || lowered.contains("suggestion")
+            || lowered.contains("next week")
+            || trimmed.contains("下周");
+        if looks_like_suggestion_header && (trimmed.starts_with('#') || trimmed.starts_with("**")) {
+            in_suggestion_section = true;
+            continue;
         }
         // New section header ends suggestion section
         if in_suggestion_section
             && (trimmed.starts_with('#') || trimmed.starts_with("**"))
             && !trimmed.contains("建议")
-            && !trimmed.to_lowercase().contains("suggestion")
+            && !lowered.contains("suggestion")
         {
             in_suggestion_section = false;
         }
@@ -242,11 +277,13 @@ fn extract_suggestions(report: &str) -> Vec<String> {
         if in_suggestion_section && !trimmed.is_empty() {
             let is_list_item = trimmed.starts_with('-')
                 || trimmed.starts_with('*')
-                || trimmed.chars().next().map_or(false, |c| c.is_ascii_digit());
+                || trimmed.chars().next().is_some_and(|c| c.is_ascii_digit());
             if is_list_item {
                 // Strip leading bullet/number markers
                 let content = trimmed
-                    .trim_start_matches(|c: char| c == '-' || c == '*' || c.is_ascii_digit() || c == '.' || c == ')')
+                    .trim_start_matches(|c: char| {
+                        c == '-' || c == '*' || c.is_ascii_digit() || c == '.' || c == ')'
+                    })
                     .trim();
                 if !content.is_empty() {
                     suggestions.push(content.to_string());
@@ -309,11 +346,7 @@ async fn save_to_document(doc_repo: &Arc<dyn DocumentRepository>, report: &str) 
     Ok(())
 }
 
-async fn llm_with_retry(
-    client: &Arc<dyn LlmClient>,
-    prompt: &str,
-    system: &str,
-) -> Result<String> {
+async fn llm_with_retry(client: &Arc<dyn LlmClient>, prompt: &str, system: &str) -> Result<String> {
     let mut last_err = String::new();
     for attempt in 0..MAX_RETRIES {
         match client.complete(prompt, Some(system)).await {
@@ -334,7 +367,12 @@ async fn llm_with_retry(
                 eprintln!(
                     "  {}",
                     t!(
-                        format!("Retry ({}/{}) waiting {}s...", attempt + 1, MAX_RETRIES, delay),
+                        format!(
+                            "Retry ({}/{}) waiting {}s...",
+                            attempt + 1,
+                            MAX_RETRIES,
+                            delay
+                        ),
                         format!("重试 ({}/{}) 等待 {}s...", attempt + 1, MAX_RETRIES, delay)
                     )
                 );
@@ -465,5 +503,67 @@ Everything looks good. No changes needed.
 ";
         let suggestions = extract_suggestions(report);
         assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn test_load_last_weekly_record_reports_invalid_jsonl_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weekly-history.jsonl");
+        std::fs::write(&path, "{\"week_end\":\n").unwrap();
+
+        let err = load_last_weekly_record_from_path(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("line 1"));
+        assert!(msg.contains("weekly history"));
+    }
+
+    #[test]
+    fn test_load_last_weekly_record_returns_last_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weekly-history.jsonl");
+
+        let first = WeeklyRecord {
+            week_end: Utc::now() - Duration::days(7),
+            scores: [
+                LayerSignal {
+                    name: "depth".into(),
+                    signal: "green".into(),
+                },
+                LayerSignal {
+                    name: "breadth".into(),
+                    signal: "yellow".into(),
+                },
+                LayerSignal {
+                    name: "collaboration".into(),
+                    signal: "red".into(),
+                },
+            ],
+            suggestions: vec!["first".into()],
+        };
+        let second = WeeklyRecord {
+            week_end: Utc::now(),
+            scores: [
+                LayerSignal {
+                    name: "depth".into(),
+                    signal: "yellow".into(),
+                },
+                LayerSignal {
+                    name: "breadth".into(),
+                    signal: "yellow".into(),
+                },
+                LayerSignal {
+                    name: "collaboration".into(),
+                    signal: "yellow".into(),
+                },
+            ],
+            suggestions: vec!["second".into()],
+        };
+        let first_line = serde_json::to_string(&first).unwrap();
+        let second_line = serde_json::to_string(&second).unwrap();
+        std::fs::write(&path, format!("{}\n{}\n", first_line, second_line)).unwrap();
+
+        let last = load_last_weekly_record_from_path(&path).unwrap();
+        assert!(last.is_some());
+        assert_eq!(last.unwrap().suggestions, vec!["second".to_string()]);
     }
 }
