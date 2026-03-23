@@ -1,11 +1,12 @@
 use crate::config::{ensure_mirror_dir, mirror_dir, Targets};
 use crate::lang::t;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use refine_core::knowledge::{Item, ItemRepository};
 use refine_core::session::{cluster_observations, ClusterResult, GlobalStats};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
+use std::path::Path;
 use std::sync::Arc;
 
 /// Filter items to only those created since the given date string (YYYY-MM-DD).
@@ -20,12 +21,15 @@ pub fn filter_since(items: Vec<Item>, since: &Option<String>) -> Result<Vec<Item
         .and_hms_opt(0, 0, 0)
         .ok_or_else(|| anyhow::anyhow!("invalid date"))?
         .and_utc();
-    Ok(items.into_iter().filter(|i| i.created_at() >= cutoff).collect())
+    Ok(items
+        .into_iter()
+        .filter(|i| i.created_at() >= cutoff)
+        .collect())
 }
 
 const DECISION_KEYWORDS: &[&str] = &[
-    "因为", "因", "原因", "选择", "采用",
-    "because", "reason", "chose", "chosen", "adopted", "selected",
+    "因为", "因", "原因", "选择", "采用", "because", "reason", "chose", "chosen", "adopted",
+    "selected",
 ];
 
 /// Minimum number of historical scores to activate personal baseline
@@ -129,10 +133,7 @@ fn extract_indicator(result: &ScoreResult, name: &str) -> Option<f64> {
 /// Returns None if fewer than BASELINE_MIN_ENTRIES scores exist in that window.
 pub fn compute_personal_baseline(history: &[ScoreResult]) -> Option<PersonalBaseline> {
     let cutoff = Utc::now() - Duration::days(BASELINE_WINDOW_DAYS);
-    let recent: Vec<&ScoreResult> = history
-        .iter()
-        .filter(|s| s.timestamp >= cutoff)
-        .collect();
+    let recent: Vec<&ScoreResult> = history.iter().filter(|s| s.timestamp >= cutoff).collect();
 
     if recent.len() < BASELINE_MIN_ENTRIES {
         return None;
@@ -201,24 +202,71 @@ struct IndicatorMeta {
 /// Apply personal baseline to override signals on a ScoreResult (in-place).
 fn apply_personal_baseline(result: &mut ScoreResult, baseline: &PersonalBaseline) {
     let metas = [
-        IndicatorMeta { name: "dreyfus", baseline_value: baseline.dreyfus_avg, higher_is_better: true },
-        IndicatorMeta { name: "decision_quality", baseline_value: baseline.decision_quality_avg, higher_is_better: true },
-        IndicatorMeta { name: "depth_output", baseline_value: baseline.depth_output_avg, higher_is_better: true },
-        IndicatorMeta { name: "exploration", baseline_value: baseline.exploration_avg, higher_is_better: true },
-        IndicatorMeta { name: "deep_invest", baseline_value: baseline.deep_invest_avg, higher_is_better: true },
-        IndicatorMeta { name: "fragmentation", baseline_value: baseline.fragmentation_avg, higher_is_better: false },
-        IndicatorMeta { name: "delegation", baseline_value: baseline.delegation_avg, higher_is_better: false },
-        IndicatorMeta { name: "mode_diversity", baseline_value: baseline.mode_diversity_avg, higher_is_better: true },
-        IndicatorMeta { name: "bug_decision", baseline_value: baseline.bug_decision_avg, higher_is_better: false },
-        IndicatorMeta { name: "knowledge_rate", baseline_value: baseline.knowledge_rate_avg, higher_is_better: true },
-        IndicatorMeta { name: "friction_density", baseline_value: baseline.friction_density_avg, higher_is_better: false },
+        IndicatorMeta {
+            name: "dreyfus",
+            baseline_value: baseline.dreyfus_avg,
+            higher_is_better: true,
+        },
+        IndicatorMeta {
+            name: "decision_quality",
+            baseline_value: baseline.decision_quality_avg,
+            higher_is_better: true,
+        },
+        IndicatorMeta {
+            name: "depth_output",
+            baseline_value: baseline.depth_output_avg,
+            higher_is_better: true,
+        },
+        IndicatorMeta {
+            name: "exploration",
+            baseline_value: baseline.exploration_avg,
+            higher_is_better: true,
+        },
+        IndicatorMeta {
+            name: "deep_invest",
+            baseline_value: baseline.deep_invest_avg,
+            higher_is_better: true,
+        },
+        IndicatorMeta {
+            name: "fragmentation",
+            baseline_value: baseline.fragmentation_avg,
+            higher_is_better: false,
+        },
+        IndicatorMeta {
+            name: "delegation",
+            baseline_value: baseline.delegation_avg,
+            higher_is_better: false,
+        },
+        IndicatorMeta {
+            name: "mode_diversity",
+            baseline_value: baseline.mode_diversity_avg,
+            higher_is_better: true,
+        },
+        IndicatorMeta {
+            name: "bug_decision",
+            baseline_value: baseline.bug_decision_avg,
+            higher_is_better: false,
+        },
+        IndicatorMeta {
+            name: "knowledge_rate",
+            baseline_value: baseline.knowledge_rate_avg,
+            higher_is_better: true,
+        },
+        IndicatorMeta {
+            name: "friction_density",
+            baseline_value: baseline.friction_density_avg,
+            higher_is_better: false,
+        },
     ];
 
     for layer in &mut result.layers {
         for indicator in &mut layer.indicators {
             if let Some(meta) = metas.iter().find(|m| m.name == indicator.name) {
-                indicator.signal =
-                    signal_from_personal(indicator.actual, meta.baseline_value, meta.higher_is_better);
+                indicator.signal = signal_from_personal(
+                    indicator.actual,
+                    meta.baseline_value,
+                    meta.higher_is_better,
+                );
             }
         }
         // Recalculate layer signal as worst of its indicators
@@ -247,7 +295,11 @@ fn dreyfus_weighted(stats: &GlobalStats) -> f64 {
         sum += n as f64 * w;
         count += n;
     }
-    if count == 0 { 0.0 } else { sum / count as f64 }
+    if count == 0 {
+        0.0
+    } else {
+        sum / count as f64
+    }
 }
 
 fn decision_quality_rate(cluster: &ClusterResult) -> f64 {
@@ -295,7 +347,11 @@ fn knowledge_rate(cluster: &ClusterResult) -> f64 {
         .map(|p| p.knowledge_gained.len())
         .sum();
     let total_sessions = cluster.global_stats.total_sessions;
-    if total_sessions == 0 { 0.0 } else { total_knowledge as f64 / total_sessions as f64 }
+    if total_sessions == 0 {
+        0.0
+    } else {
+        total_knowledge as f64 / total_sessions as f64
+    }
 }
 
 fn layer1(cluster: &ClusterResult, t: &Targets) -> LayerScore {
@@ -334,10 +390,30 @@ fn layer1(cluster: &ClusterResult, t: &Targets) -> LayerScore {
     };
 
     let indicators = vec![
-        Indicator { name: "dreyfus".into(), actual: dw, target: format!(">{}", t.dreyfus_green), signal: sig_dw },
-        Indicator { name: "decision_quality".into(), actual: dq * 100.0, target: format!(">{}%", (t.decision_quality_green * 100.0) as u32), signal: sig_dq },
-        Indicator { name: "depth_output".into(), actual: dor * 100.0, target: format!(">{}%", (t.depth_output_green * 100.0) as u32), signal: sig_dor },
-        Indicator { name: "knowledge_rate".into(), actual: kr, target: format!(">{:.1}", t.knowledge_green), signal: sig_kr },
+        Indicator {
+            name: "dreyfus".into(),
+            actual: dw,
+            target: format!(">{}", t.dreyfus_green),
+            signal: sig_dw,
+        },
+        Indicator {
+            name: "decision_quality".into(),
+            actual: dq * 100.0,
+            target: format!(">{}%", (t.decision_quality_green * 100.0) as u32),
+            signal: sig_dq,
+        },
+        Indicator {
+            name: "depth_output".into(),
+            actual: dor * 100.0,
+            target: format!(">{}%", (t.depth_output_green * 100.0) as u32),
+            signal: sig_dor,
+        },
+        Indicator {
+            name: "knowledge_rate".into(),
+            actual: kr,
+            target: format!(">{:.1}", t.knowledge_green),
+            signal: sig_kr,
+        },
     ];
 
     LayerScore {
@@ -351,14 +427,38 @@ fn layer1(cluster: &ClusterResult, t: &Targets) -> LayerScore {
 
 fn layer2(cluster: &ClusterResult, t: &Targets) -> LayerScore {
     let collab_total: usize = cluster.global_stats.collaboration_modes.values().sum();
-    let exploration = *cluster.global_stats.collaboration_modes.get("exploration").unwrap_or(&0);
-    let exploration_rate = if collab_total == 0 { 0.0 } else { exploration as f64 / collab_total as f64 };
+    let exploration = *cluster
+        .global_stats
+        .collaboration_modes
+        .get("exploration")
+        .unwrap_or(&0);
+    let exploration_rate = if collab_total == 0 {
+        0.0
+    } else {
+        exploration as f64 / collab_total as f64
+    };
 
     let total_projects = cluster.projects.len();
-    let deep_projects = cluster.projects.values().filter(|p| p.session_count >= 20).count();
-    let frag_projects = cluster.projects.values().filter(|p| p.session_count == 1).count();
-    let deep_rate = if total_projects == 0 { 0.0 } else { deep_projects as f64 / total_projects as f64 };
-    let frag_rate = if total_projects == 0 { 0.0 } else { frag_projects as f64 / total_projects as f64 };
+    let deep_projects = cluster
+        .projects
+        .values()
+        .filter(|p| p.session_count >= 20)
+        .count();
+    let frag_projects = cluster
+        .projects
+        .values()
+        .filter(|p| p.session_count == 1)
+        .count();
+    let deep_rate = if total_projects == 0 {
+        0.0
+    } else {
+        deep_projects as f64 / total_projects as f64
+    };
+    let frag_rate = if total_projects == 0 {
+        0.0
+    } else {
+        frag_projects as f64 / total_projects as f64
+    };
 
     let sig_exp = if exploration_rate > t.exploration_green {
         Signal::Green
@@ -383,9 +483,28 @@ fn layer2(cluster: &ClusterResult, t: &Targets) -> LayerScore {
     };
 
     let indicators = vec![
-        Indicator { name: "exploration".into(), actual: exploration_rate * 100.0, target: format!(">{}%", (t.exploration_green * 100.0) as u32), signal: sig_exp },
-        Indicator { name: "deep_invest".into(), actual: deep_rate * 100.0, target: format!("{}-{}%", (t.deep_invest_green_lo * 100.0) as u32, (t.deep_invest_green_hi * 100.0) as u32), signal: sig_deep },
-        Indicator { name: "fragmentation".into(), actual: frag_rate * 100.0, target: format!("<{}%", (t.fragmentation_green * 100.0) as u32), signal: sig_frag },
+        Indicator {
+            name: "exploration".into(),
+            actual: exploration_rate * 100.0,
+            target: format!(">{}%", (t.exploration_green * 100.0) as u32),
+            signal: sig_exp,
+        },
+        Indicator {
+            name: "deep_invest".into(),
+            actual: deep_rate * 100.0,
+            target: format!(
+                "{}-{}%",
+                (t.deep_invest_green_lo * 100.0) as u32,
+                (t.deep_invest_green_hi * 100.0) as u32
+            ),
+            signal: sig_deep,
+        },
+        Indicator {
+            name: "fragmentation".into(),
+            actual: frag_rate * 100.0,
+            target: format!("<{}%", (t.fragmentation_green * 100.0) as u32),
+            signal: sig_frag,
+        },
     ];
 
     LayerScore {
@@ -398,21 +517,34 @@ fn layer2(cluster: &ClusterResult, t: &Targets) -> LayerScore {
 // ── Layer 3: Collaboration ──
 
 fn friction_density(cluster: &ClusterResult) -> f64 {
-    let total_frictions: usize = cluster
-        .projects
-        .values()
-        .map(|p| p.frictions.len())
-        .sum();
+    let total_frictions: usize = cluster.projects.values().map(|p| p.frictions.len()).sum();
     let total_sessions = cluster.global_stats.total_sessions;
-    if total_sessions == 0 { 0.0 } else { total_frictions as f64 / total_sessions as f64 }
+    if total_sessions == 0 {
+        0.0
+    } else {
+        total_frictions as f64 / total_sessions as f64
+    }
 }
 
 fn layer3(cluster: &ClusterResult, t: &Targets) -> LayerScore {
     let collab_total: usize = cluster.global_stats.collaboration_modes.values().sum();
-    let delegation = *cluster.global_stats.collaboration_modes.get("delegation").unwrap_or(&0);
-    let delegation_rate = if collab_total == 0 { 0.0 } else { delegation as f64 / collab_total as f64 };
+    let delegation = *cluster
+        .global_stats
+        .collaboration_modes
+        .get("delegation")
+        .unwrap_or(&0);
+    let delegation_rate = if collab_total == 0 {
+        0.0
+    } else {
+        delegation as f64 / collab_total as f64
+    };
 
-    let mode_count = cluster.global_stats.collaboration_modes.values().filter(|&&v| v > 0).count();
+    let mode_count = cluster
+        .global_stats
+        .collaboration_modes
+        .values()
+        .filter(|&&v| v > 0)
+        .count();
 
     let bug_dec_ratio = if cluster.global_stats.total_decisions == 0 {
         0.0
@@ -453,10 +585,30 @@ fn layer3(cluster: &ClusterResult, t: &Targets) -> LayerScore {
     };
 
     let indicators = vec![
-        Indicator { name: "delegation".into(), actual: delegation_rate * 100.0, target: format!("<{}%", (t.delegation_green * 100.0) as u32), signal: sig_del },
-        Indicator { name: "mode_diversity".into(), actual: mode_count as f64, target: format!(">={}", t.mode_diversity_green), signal: sig_div },
-        Indicator { name: "bug_decision".into(), actual: bug_dec_ratio, target: format!("<{}", t.bug_decision_green), signal: sig_bug },
-        Indicator { name: "friction_density".into(), actual: fd, target: format!("<{:.1}", t.friction_green), signal: sig_fd },
+        Indicator {
+            name: "delegation".into(),
+            actual: delegation_rate * 100.0,
+            target: format!("<{}%", (t.delegation_green * 100.0) as u32),
+            signal: sig_del,
+        },
+        Indicator {
+            name: "mode_diversity".into(),
+            actual: mode_count as f64,
+            target: format!(">={}", t.mode_diversity_green),
+            signal: sig_div,
+        },
+        Indicator {
+            name: "bug_decision".into(),
+            actual: bug_dec_ratio,
+            target: format!("<{}", t.bug_decision_green),
+            signal: sig_bug,
+        },
+        Indicator {
+            name: "friction_density".into(),
+            actual: fd,
+            target: format!("<{:.1}", t.friction_green),
+            signal: sig_fd,
+        },
     ];
 
     LayerScore {
@@ -471,26 +623,41 @@ fn layer3(cluster: &ClusterResult, t: &Targets) -> LayerScore {
 fn analyze_tension(layers: &[LayerScore; 3]) -> Option<String> {
     let s = [layers[0].signal, layers[1].signal, layers[2].signal];
     match s {
-        [Signal::Green, Signal::Red, _] => Some(t!(
-            "L1+L2 tension: deep but narrowing — try an exploration session in a new direction",
-            "层1绿+层2红 → 深耕但视野收窄，开一个新方向的探索 session"
-        ).into()),
-        [_, Signal::Green, Signal::Red] => Some(t!(
-            "L2+L3 tension: exploring but over-delegating — try pair mode instead",
-            "层2绿+层3红 → 探索多但 delegation 过高，探索时用 pair 模式而非委托"
-        ).into()),
-        [Signal::Red, _, Signal::Green] => Some(t!(
-            "L1+L3 tension: smooth collaboration but no cognitive growth — challenge yourself",
-            "层1红+层3绿 → 协作顺畅但认知没提升，你在舒适区，挑战更难的问题"
-        ).into()),
-        [Signal::Green, Signal::Green, Signal::Green] => Some(t!(
-            "All green — healthy growth, consider raising your baseline",
-            "全绿 → 健康成长，考虑提升基线标准"
-        ).into()),
-        [Signal::Red, Signal::Red, Signal::Red] => Some(t!(
-            "All red — time to replan, run refine insights --prescription",
-            "全红 → 需要重新规划，建议运行 refine insights --prescription"
-        ).into()),
+        [Signal::Green, Signal::Red, _] => Some(
+            t!(
+                "L1+L2 tension: deep but narrowing — try an exploration session in a new direction",
+                "层1绿+层2红 → 深耕但视野收窄，开一个新方向的探索 session"
+            )
+            .into(),
+        ),
+        [_, Signal::Green, Signal::Red] => Some(
+            t!(
+                "L2+L3 tension: exploring but over-delegating — try pair mode instead",
+                "层2绿+层3红 → 探索多但 delegation 过高，探索时用 pair 模式而非委托"
+            )
+            .into(),
+        ),
+        [Signal::Red, _, Signal::Green] => Some(
+            t!(
+                "L1+L3 tension: smooth collaboration but no cognitive growth — challenge yourself",
+                "层1红+层3绿 → 协作顺畅但认知没提升，你在舒适区，挑战更难的问题"
+            )
+            .into(),
+        ),
+        [Signal::Green, Signal::Green, Signal::Green] => Some(
+            t!(
+                "All green — healthy growth, consider raising your baseline",
+                "全绿 → 健康成长，考虑提升基线标准"
+            )
+            .into(),
+        ),
+        [Signal::Red, Signal::Red, Signal::Red] => Some(
+            t!(
+                "All red — time to replan, run refine insights --prescription",
+                "全红 → 需要重新规划，建议运行 refine insights --prescription"
+            )
+            .into(),
+        ),
         _ => None,
     }
 }
@@ -563,16 +730,45 @@ pub fn persist_score(result: &ScoreResult) -> Result<()> {
 
 pub fn load_recent_scores(n: usize) -> Result<Vec<ScoreResult>> {
     let path = mirror_dir().join("scores.jsonl");
-    let file = match std::fs::File::open(&path) {
+    load_recent_scores_from_path(&path, n)
+}
+
+fn load_recent_scores_from_path(path: &Path, n: usize) -> Result<Vec<ScoreResult>> {
+    let file = match std::fs::File::open(path) {
         Ok(f) => f,
-        Err(_) => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "failed to open score history {}: {}",
+                path.display(),
+                e
+            ));
+        }
     };
     let reader = std::io::BufReader::new(file);
-    let all: Vec<ScoreResult> = reader
-        .lines()
-        .map_while(|line| line.ok())
-        .filter_map(|line| serde_json::from_str(&line).ok())
-        .collect();
+    let mut all = Vec::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line_no = idx + 1;
+        let line = line.with_context(|| {
+            format!(
+                "failed to read line {} from score history {}",
+                line_no,
+                path.display()
+            )
+        })?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parsed = serde_json::from_str::<ScoreResult>(line).with_context(|| {
+            format!(
+                "failed to parse JSON on line {} in score history {}",
+                line_no,
+                path.display()
+            )
+        })?;
+        all.push(parsed);
+    }
     let start = all.len().saturating_sub(n);
     Ok(all[start..].to_vec())
 }
@@ -586,8 +782,17 @@ fn print_score(result: &ScoreResult, using_personal: bool) {
             .indicators
             .iter()
             .map(|i| {
-                let mark = if i.signal == Signal::Green { "✓" } else { "✗" };
-                format!("{} {} {}", indicator_display(&i.name), i.display_value(), mark)
+                let mark = if i.signal == Signal::Green {
+                    "✓"
+                } else {
+                    "✗"
+                };
+                format!(
+                    "{} {} {}",
+                    indicator_display(&i.name),
+                    i.display_value(),
+                    mark
+                )
             })
             .collect();
         println!(
@@ -601,15 +806,21 @@ fn print_score(result: &ScoreResult, using_personal: bool) {
         println!("\n  {}{}", t!("Tension: ", "张力: "), tension);
     }
     if using_personal {
-        println!("  {}", t!(
-            "Baseline: personal (4-week rolling avg)",
-            "基线: 个人(4周均值)"
-        ));
+        println!(
+            "  {}",
+            t!(
+                "Baseline: personal (4-week rolling avg)",
+                "基线: 个人(4周均值)"
+            )
+        );
     } else {
-        println!("  {}", t!(
-            "Baseline: default thresholds (insufficient data for personal baseline)",
-            "基线: 默认阈值(数据不足4周)"
-        ));
+        println!(
+            "  {}",
+            t!(
+                "Baseline: default thresholds (insufficient data for personal baseline)",
+                "基线: 默认阈值(数据不足4周)"
+            )
+        );
     }
 }
 
@@ -620,7 +831,10 @@ pub async fn handle_score(
     llm: Option<Arc<dyn refine_core::infra::LlmClient>>,
     since: Option<String>,
 ) -> Result<()> {
-    let all_items = repo.find_all().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+    let all_items = repo
+        .find_all()
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
     let items = filter_since(all_items, &since)?;
     let cluster = cluster_observations(&items);
     let config = crate::config::load();
@@ -662,7 +876,10 @@ pub async fn handle_score(
         .join("growth-tracker.json");
     if let Ok(content) = std::fs::read_to_string(&tracker_path) {
         if let Ok(tracker) = serde_json::from_str::<serde_json::Value>(&content) {
-            let pending = tracker.get("pending_ingest").and_then(|v| v.as_u64()).unwrap_or(0);
+            let pending = tracker
+                .get("pending_ingest")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             if pending > 3 {
                 println!(
                     "  ⚠️ {} {} {}",
@@ -679,11 +896,7 @@ pub async fn handle_score(
 
     if let Some(llm) = llm {
         match crate::advice::generate_and_cache(&result, &llm).await {
-            Ok(advice) => println!(
-                "\n  {} {}",
-                t!("Advice:", "建议:"),
-                advice
-            ),
+            Ok(advice) => println!("\n  {} {}", t!("Advice:", "建议:"), advice),
             Err(e) => tracing::debug!("advice generation skipped: {}", e),
         }
     }
@@ -804,29 +1017,84 @@ mod tests {
                     name: "depth".into(),
                     signal: Signal::Yellow,
                     indicators: vec![
-                        Indicator { name: "dreyfus".into(), actual: dreyfus, target: String::new(), signal: Signal::Yellow },
-                        Indicator { name: "decision_quality".into(), actual: decision_quality, target: String::new(), signal: Signal::Yellow },
-                        Indicator { name: "depth_output".into(), actual: depth_output, target: String::new(), signal: Signal::Yellow },
-                        Indicator { name: "knowledge_rate".into(), actual: knowledge_rate_val, target: String::new(), signal: Signal::Yellow },
+                        Indicator {
+                            name: "dreyfus".into(),
+                            actual: dreyfus,
+                            target: String::new(),
+                            signal: Signal::Yellow,
+                        },
+                        Indicator {
+                            name: "decision_quality".into(),
+                            actual: decision_quality,
+                            target: String::new(),
+                            signal: Signal::Yellow,
+                        },
+                        Indicator {
+                            name: "depth_output".into(),
+                            actual: depth_output,
+                            target: String::new(),
+                            signal: Signal::Yellow,
+                        },
+                        Indicator {
+                            name: "knowledge_rate".into(),
+                            actual: knowledge_rate_val,
+                            target: String::new(),
+                            signal: Signal::Yellow,
+                        },
                     ],
                 },
                 LayerScore {
                     name: "breadth".into(),
                     signal: Signal::Yellow,
                     indicators: vec![
-                        Indicator { name: "exploration".into(), actual: exploration, target: String::new(), signal: Signal::Yellow },
-                        Indicator { name: "deep_invest".into(), actual: deep_invest, target: String::new(), signal: Signal::Yellow },
-                        Indicator { name: "fragmentation".into(), actual: fragmentation, target: String::new(), signal: Signal::Yellow },
+                        Indicator {
+                            name: "exploration".into(),
+                            actual: exploration,
+                            target: String::new(),
+                            signal: Signal::Yellow,
+                        },
+                        Indicator {
+                            name: "deep_invest".into(),
+                            actual: deep_invest,
+                            target: String::new(),
+                            signal: Signal::Yellow,
+                        },
+                        Indicator {
+                            name: "fragmentation".into(),
+                            actual: fragmentation,
+                            target: String::new(),
+                            signal: Signal::Yellow,
+                        },
                     ],
                 },
                 LayerScore {
                     name: "collaboration".into(),
                     signal: Signal::Yellow,
                     indicators: vec![
-                        Indicator { name: "delegation".into(), actual: delegation, target: String::new(), signal: Signal::Yellow },
-                        Indicator { name: "mode_diversity".into(), actual: mode_diversity, target: String::new(), signal: Signal::Yellow },
-                        Indicator { name: "bug_decision".into(), actual: bug_decision, target: String::new(), signal: Signal::Yellow },
-                        Indicator { name: "friction_density".into(), actual: friction_density_val, target: String::new(), signal: Signal::Yellow },
+                        Indicator {
+                            name: "delegation".into(),
+                            actual: delegation,
+                            target: String::new(),
+                            signal: Signal::Yellow,
+                        },
+                        Indicator {
+                            name: "mode_diversity".into(),
+                            actual: mode_diversity,
+                            target: String::new(),
+                            signal: Signal::Yellow,
+                        },
+                        Indicator {
+                            name: "bug_decision".into(),
+                            actual: bug_decision,
+                            target: String::new(),
+                            signal: Signal::Yellow,
+                        },
+                        Indicator {
+                            name: "friction_density".into(),
+                            actual: friction_density_val,
+                            target: String::new(),
+                            signal: Signal::Yellow,
+                        },
                     ],
                 },
             ],
@@ -922,12 +1190,17 @@ mod tests {
             indicators: Vec::new(),
         };
         // L1 green + L2 red
-        let tension = analyze_tension(&[green_layer.clone(), red_layer.clone(), green_layer.clone()]);
+        let tension =
+            analyze_tension(&[green_layer.clone(), red_layer.clone(), green_layer.clone()]);
         assert!(tension.is_some());
         assert!(tension.unwrap_or_default().contains("narrowing"));
 
         // All green
-        let tension = analyze_tension(&[green_layer.clone(), green_layer.clone(), green_layer.clone()]);
+        let tension = analyze_tension(&[
+            green_layer.clone(),
+            green_layer.clone(),
+            green_layer.clone(),
+        ]);
         assert!(tension.unwrap_or_default().contains("healthy"));
 
         // All red
@@ -942,9 +1215,21 @@ mod tests {
 
         let result = ScoreResult {
             layers: [
-                LayerScore { name: "L1".into(), signal: Signal::Green, indicators: Vec::new() },
-                LayerScore { name: "L2".into(), signal: Signal::Yellow, indicators: Vec::new() },
-                LayerScore { name: "L3".into(), signal: Signal::Red, indicators: Vec::new() },
+                LayerScore {
+                    name: "L1".into(),
+                    signal: Signal::Green,
+                    indicators: Vec::new(),
+                },
+                LayerScore {
+                    name: "L2".into(),
+                    signal: Signal::Yellow,
+                    indicators: Vec::new(),
+                },
+                LayerScore {
+                    name: "L3".into(),
+                    signal: Signal::Red,
+                    indicators: Vec::new(),
+                },
             ],
             tension: Some("test tension".into()),
             timestamp: Utc::now(),
@@ -961,15 +1246,44 @@ mod tests {
         drop(file);
 
         // load
-        let reader = std::io::BufReader::new(std::fs::File::open(&path).unwrap());
-        let loaded: Vec<ScoreResult> = reader
-            .lines()
-            .filter_map(|l| l.ok())
-            .filter_map(|l| serde_json::from_str(&l).ok())
-            .collect();
+        let loaded = load_recent_scores_from_path(&path, 10).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].layers[0].signal, Signal::Green);
         assert_eq!(loaded[0].tension.as_deref(), Some("test tension"));
+    }
+
+    #[test]
+    fn test_load_recent_scores_reports_invalid_jsonl_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scores.jsonl");
+        let valid = ScoreResult {
+            layers: [
+                LayerScore {
+                    name: "L1".into(),
+                    signal: Signal::Green,
+                    indicators: Vec::new(),
+                },
+                LayerScore {
+                    name: "L2".into(),
+                    signal: Signal::Yellow,
+                    indicators: Vec::new(),
+                },
+                LayerScore {
+                    name: "L3".into(),
+                    signal: Signal::Red,
+                    indicators: Vec::new(),
+                },
+            ],
+            tension: None,
+            timestamp: Utc::now(),
+        };
+        let valid_line = serde_json::to_string(&valid).unwrap();
+        std::fs::write(&path, format!("{}\n{{\"bad\":\n", valid_line)).unwrap();
+
+        let err = load_recent_scores_from_path(&path, 10).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("line 2"));
+        assert!(msg.contains("score history"));
     }
 
     #[test]
@@ -996,7 +1310,10 @@ mod tests {
             .collect();
 
         let baseline = compute_personal_baseline(&history);
-        assert!(baseline.is_some(), "should produce baseline with 10 entries");
+        assert!(
+            baseline.is_some(),
+            "should produce baseline with 10 entries"
+        );
 
         let bl = baseline.unwrap();
         assert!((bl.dreyfus_avg - 3.5).abs() < f64::EPSILON);
@@ -1019,14 +1336,27 @@ mod tests {
         let history: Vec<ScoreResult> = (0..5)
             .map(|i| {
                 make_score_result(
-                    3.5, 60.0, 10.0, 0.5, 20.0, 25.0, 15.0, 30.0, 4.0, 0.20, 0.8,
+                    3.5,
+                    60.0,
+                    10.0,
+                    0.5,
+                    20.0,
+                    25.0,
+                    15.0,
+                    30.0,
+                    4.0,
+                    0.20,
+                    0.8,
                     now - Duration::days(i),
                 )
             })
             .collect();
 
         let baseline = compute_personal_baseline(&history);
-        assert!(baseline.is_none(), "should return None with fewer than 7 entries");
+        assert!(
+            baseline.is_none(),
+            "should return None with fewer than 7 entries"
+        );
     }
 
     #[test]
@@ -1036,14 +1366,27 @@ mod tests {
         let history: Vec<ScoreResult> = (0..10)
             .map(|i| {
                 make_score_result(
-                    3.5, 60.0, 10.0, 0.5, 20.0, 25.0, 15.0, 30.0, 4.0, 0.20, 0.8,
+                    3.5,
+                    60.0,
+                    10.0,
+                    0.5,
+                    20.0,
+                    25.0,
+                    15.0,
+                    30.0,
+                    4.0,
+                    0.20,
+                    0.8,
                     now - Duration::days(30 + i),
                 )
             })
             .collect();
 
         let baseline = compute_personal_baseline(&history);
-        assert!(baseline.is_none(), "should return None when all data is outside 28-day window");
+        assert!(
+            baseline.is_none(),
+            "should return None when all data is outside 28-day window"
+        );
     }
 
     #[test]
@@ -1080,10 +1423,10 @@ mod tests {
             depth_output_avg: 10.0,
             exploration_avg: 20.0,
             deep_invest_avg: 25.0,
-            fragmentation_avg: 15.0,  // lower is better
-            delegation_avg: 30.0,     // lower is better
+            fragmentation_avg: 15.0, // lower is better
+            delegation_avg: 30.0,    // lower is better
             mode_diversity_avg: 4.0,
-            bug_decision_avg: 0.20,   // lower is better
+            bug_decision_avg: 0.20, // lower is better
             knowledge_rate_avg: 0.5,
             friction_density_avg: 1.0, // lower is better
         };
@@ -1181,14 +1524,30 @@ mod tests {
             0,
             0,
             vec![
-                ("proj-a", 5, vec![], vec![], vec!["learned Rust", "learned SQL", "learned async"]),
-                ("proj-b", 5, vec![], vec![], vec!["learned Docker", "learned K8s", "learned Nix"]),
+                (
+                    "proj-a",
+                    5,
+                    vec![],
+                    vec![],
+                    vec!["learned Rust", "learned SQL", "learned async"],
+                ),
+                (
+                    "proj-b",
+                    5,
+                    vec![],
+                    vec![],
+                    vec!["learned Docker", "learned K8s", "learned Nix"],
+                ),
             ],
         );
         let kr = knowledge_rate(&cluster);
         assert!((kr - 0.6).abs() < f64::EPSILON);
         let l1 = layer1(&cluster, &t);
-        let kr_ind = l1.indicators.iter().find(|i| i.name == "knowledge_rate").unwrap();
+        let kr_ind = l1
+            .indicators
+            .iter()
+            .find(|i| i.name == "knowledge_rate")
+            .unwrap();
         assert_eq!(kr_ind.signal, Signal::Green);
     }
 
@@ -1209,7 +1568,11 @@ mod tests {
         let kr = knowledge_rate(&cluster);
         assert!((kr - 0.1).abs() < f64::EPSILON);
         let l1 = layer1(&cluster, &t);
-        let kr_ind = l1.indicators.iter().find(|i| i.name == "knowledge_rate").unwrap();
+        let kr_ind = l1
+            .indicators
+            .iter()
+            .find(|i| i.name == "knowledge_rate")
+            .unwrap();
         assert_eq!(kr_ind.signal, Signal::Red);
     }
 
@@ -1230,14 +1593,30 @@ mod tests {
             10,
             2,
             vec![
-                ("proj-a", 5, vec![], vec!["slow build", "confusing API"], vec![]),
-                ("proj-b", 5, vec![], vec!["flaky test", "bad docs", "timeout"], vec![]),
+                (
+                    "proj-a",
+                    5,
+                    vec![],
+                    vec!["slow build", "confusing API"],
+                    vec![],
+                ),
+                (
+                    "proj-b",
+                    5,
+                    vec![],
+                    vec!["flaky test", "bad docs", "timeout"],
+                    vec![],
+                ),
             ],
         );
         let fd = friction_density(&cluster);
         assert!((fd - 0.5).abs() < f64::EPSILON);
         let l3 = layer3(&cluster, &t);
-        let fd_ind = l3.indicators.iter().find(|i| i.name == "friction_density").unwrap();
+        let fd_ind = l3
+            .indicators
+            .iter()
+            .find(|i| i.name == "friction_density")
+            .unwrap();
         assert_eq!(fd_ind.signal, Signal::Green);
     }
 
@@ -1258,14 +1637,35 @@ mod tests {
             10,
             2,
             vec![
-                ("proj-a", 5, vec![], vec!["f1","f2","f3","f4","f5","f6","f7","f8","f9","f10","f11","f12","f13"], vec![]),
-                ("proj-b", 5, vec![], vec!["f1","f2","f3","f4","f5","f6","f7","f8","f9","f10","f11","f12"], vec![]),
+                (
+                    "proj-a",
+                    5,
+                    vec![],
+                    vec![
+                        "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+                        "f13",
+                    ],
+                    vec![],
+                ),
+                (
+                    "proj-b",
+                    5,
+                    vec![],
+                    vec![
+                        "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+                    ],
+                    vec![],
+                ),
             ],
         );
         let fd = friction_density(&cluster);
         assert!(fd > 2.0);
         let l3 = layer3(&cluster, &t);
-        let fd_ind = l3.indicators.iter().find(|i| i.name == "friction_density").unwrap();
+        let fd_ind = l3
+            .indicators
+            .iter()
+            .find(|i| i.name == "friction_density")
+            .unwrap();
         assert_eq!(fd_ind.signal, Signal::Red);
     }
 
@@ -1273,7 +1673,10 @@ mod tests {
     fn test_layer1_has_4_indicators() {
         let t = Targets::default();
         let cluster = make_cluster(
-            HashMap::new(), HashMap::new(), 0, 0,
+            HashMap::new(),
+            HashMap::new(),
+            0,
+            0,
             vec![("proj-a", 5, vec![])],
         );
         let l1 = layer1(&cluster, &t);
@@ -1285,7 +1688,10 @@ mod tests {
     fn test_layer3_has_4_indicators() {
         let t = Targets::default();
         let cluster = make_cluster(
-            HashMap::new(), HashMap::new(), 0, 0,
+            HashMap::new(),
+            HashMap::new(),
+            0,
+            0,
             vec![("proj-a", 5, vec![])],
         );
         let l3 = layer3(&cluster, &t);
