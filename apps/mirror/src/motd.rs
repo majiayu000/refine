@@ -18,14 +18,6 @@ fn default_lang_en() -> String {
     "en".into()
 }
 
-fn signal_emoji(s: Signal) -> &'static str {
-    match s {
-        Signal::Green => "🟢",
-        Signal::Yellow => "🟡",
-        Signal::Red => "🔴",
-    }
-}
-
 /// Signal severity: Red=0, Yellow=1, Green=2 (lower is worse)
 fn signal_severity(s: Signal) -> u8 {
     match s {
@@ -261,9 +253,9 @@ pub fn handle_motd() -> Result<()> {
         None
     };
 
-    let depth_e = signal_emoji(current.layers[0].signal);
-    let breadth_e = signal_emoji(current.layers[1].signal);
-    let collab_e = signal_emoji(current.layers[2].signal);
+    let depth_e = current.layers[0].signal.emoji();
+    let breadth_e = current.layers[1].signal.emoji();
+    let collab_e = current.layers[2].signal.emoji();
 
     // Trend arrows: compare current vs previous signals
     let depth_t = previous
@@ -342,10 +334,10 @@ mod tests {
     }
 
     #[test]
-    fn test_signal_emoji() {
-        assert_eq!(signal_emoji(Signal::Green), "🟢");
-        assert_eq!(signal_emoji(Signal::Yellow), "🟡");
-        assert_eq!(signal_emoji(Signal::Red), "🔴");
+    fn test_signal_emoji_method() {
+        assert_eq!(Signal::Green.emoji(), "🟢");
+        assert_eq!(Signal::Yellow.emoji(), "🟡");
+        assert_eq!(Signal::Red.emoji(), "🔴");
     }
 
     #[test]

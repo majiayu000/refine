@@ -1,6 +1,6 @@
 use crate::config::{ensure_mirror_dir, mirror_dir};
 use crate::lang::t;
-use crate::score::{self, LayerScore, ScoreResult, Signal};
+use crate::score::{self, LayerScore, ScoreResult};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use refine_core::infra::LlmClient;
@@ -130,17 +130,9 @@ fn format_layer(layer: &LayerScore) -> String {
     format!(
         "{}[{}]: {}",
         score::layer_display(&layer.name),
-        signal_str(&layer.signal),
+        layer.signal.as_str(),
         indicators.join(", ")
     )
-}
-
-fn signal_str(s: &Signal) -> &'static str {
-    match s {
-        Signal::Green => "green",
-        Signal::Yellow => "yellow",
-        Signal::Red => "red",
-    }
 }
 
 pub fn build_weekly_prompt(
@@ -302,15 +294,15 @@ fn save_weekly_record(score: &ScoreResult, suggestions: Vec<String>) -> Result<(
         scores: [
             LayerSignal {
                 name: score.layers[0].name.clone(),
-                signal: signal_str(&score.layers[0].signal).to_string(),
+                signal: score.layers[0].signal.as_str().to_string(),
             },
             LayerSignal {
                 name: score.layers[1].name.clone(),
-                signal: signal_str(&score.layers[1].signal).to_string(),
+                signal: score.layers[1].signal.as_str().to_string(),
             },
             LayerSignal {
                 name: score.layers[2].name.clone(),
-                signal: signal_str(&score.layers[2].signal).to_string(),
+                signal: score.layers[2].signal.as_str().to_string(),
             },
         ],
         suggestions,
@@ -390,6 +382,7 @@ async fn llm_with_retry(client: &Arc<dyn LlmClient>, prompt: &str, system: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::score::Signal;
     use refine_core::knowledge::{ItemId, RestoreParams, Tag};
 
     fn make_item_at(time: DateTime<Utc>, idx: usize) -> Item {

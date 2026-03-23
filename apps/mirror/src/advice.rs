@@ -54,14 +54,6 @@ fn save_cached(advice: &str, short: &str) -> Result<()> {
     Ok(())
 }
 
-fn signal_label(s: Signal) -> &'static str {
-    match s {
-        Signal::Green => "green",
-        Signal::Yellow => "yellow",
-        Signal::Red => "red",
-    }
-}
-
 fn build_prompt(score: &ScoreResult) -> String {
     let mut lines = Vec::new();
     lines.push(t!("Current metrics:", "当前指标:").to_string());
@@ -74,7 +66,7 @@ fn build_prompt(score: &ScoreResult) -> String {
         lines.push(format!(
             "- {} [{}]: {}",
             layer_display(&layer.name),
-            signal_label(layer.signal),
+            layer.signal.as_str(),
             inds.join(", ")
         ));
     }

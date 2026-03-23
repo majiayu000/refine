@@ -45,6 +45,24 @@ pub enum Signal {
     Red,
 }
 
+impl Signal {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Signal::Green => "green",
+            Signal::Yellow => "yellow",
+            Signal::Red => "red",
+        }
+    }
+
+    pub const fn emoji(self) -> &'static str {
+        match self {
+            Signal::Green => "🟢",
+            Signal::Yellow => "🟡",
+            Signal::Red => "🔴",
+        }
+    }
+}
+
 impl std::fmt::Display for Signal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1163,6 +1181,21 @@ mod tests {
         // knowledge_rate / friction_density did not exist in older snapshots.
         remove_indicator(result, "knowledge_rate");
         remove_indicator(result, "friction_density");
+    }
+
+    #[test]
+    fn test_signal_conversions_are_canonical() {
+        let cases = [
+            (Signal::Green, "green", "🟢", "\x1b[32m●\x1b[0m"),
+            (Signal::Yellow, "yellow", "🟡", "\x1b[33m●\x1b[0m"),
+            (Signal::Red, "red", "🔴", "\x1b[31m●\x1b[0m"),
+        ];
+
+        for (signal, plain, emoji, ansi) in cases {
+            assert_eq!(signal.as_str(), plain);
+            assert_eq!(signal.emoji(), emoji);
+            assert_eq!(signal.to_string(), ansi);
+        }
     }
 
     #[test]
