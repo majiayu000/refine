@@ -103,13 +103,7 @@ fn p(s: &str) {
 }
 
 fn format_indicator(ind: &score::Indicator) -> String {
-    let name = score::indicator_display(&ind.name);
-    match ind.name.as_str() {
-        "mode_diversity" => format!("{} {}", name, ind.actual as usize),
-        "bug_decision" => format!("{} {:.2}", name, ind.actual),
-        "dreyfus" => format!("{} {:.1}", name, ind.actual),
-        _ => format!("{} {:.0}%", name, ind.actual),
-    }
+    format!("{} {}", score::indicator_display(&ind.name), ind.display_value())
 }
 
 fn print_trend(current: &ScoreResult, w: usize) -> Result<()> {

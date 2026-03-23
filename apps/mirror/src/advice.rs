@@ -19,7 +19,7 @@ pub fn load_cached() -> Option<CachedAdvice> {
     let content = std::fs::read_to_string(&path).ok()?;
     let cached: CachedAdvice = serde_json::from_str(&content).ok()?;
     let age = Utc::now() - cached.generated_at;
-    if age.num_hours() < 24 {
+    if age.num_hours() < 72 {
         Some(cached)
     } else {
         None
@@ -53,15 +53,7 @@ fn build_prompt(score: &ScoreResult) -> String {
         let inds: Vec<String> = layer
             .indicators
             .iter()
-            .map(|i| {
-                let name = indicator_display(&i.name);
-                match i.name.as_str() {
-                    "mode_diversity" => format!("{} {}", name, i.actual as usize),
-                    "bug_decision" => format!("{} {:.2}", name, i.actual),
-                    "dreyfus" => format!("{} {:.1}", name, i.actual),
-                    _ => format!("{} {:.0}%", name, i.actual),
-                }
-            })
+            .map(|i| format!("{} {}", indicator_display(&i.name), i.display_value()))
             .collect();
         lines.push(format!(
             "- {} [{}]: {}",

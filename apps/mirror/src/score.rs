@@ -38,6 +38,17 @@ pub struct Indicator {
     pub signal: Signal,
 }
 
+impl Indicator {
+    pub fn display_value(&self) -> String {
+        match self.name.as_str() {
+            "mode_diversity" => format!("{}", self.actual as usize),
+            "bug_decision" => format!("{:.2}", self.actual),
+            "dreyfus" => format!("{:.1}", self.actual),
+            _ => format!("{:.0}%", self.actual),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerScore {
     pub name: String,
@@ -333,12 +344,22 @@ pub fn compute(cluster: &ClusterResult, targets: &Targets) -> ScoreResult {
 pub fn persist_score(result: &ScoreResult) -> Result<()> {
     let dir = ensure_mirror_dir()?;
     let path = dir.join("scores.jsonl");
+    let line = serde_json::to_string(result)?;
+
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)?;
-    let line = serde_json::to_string(result)?;
     writeln!(file, "{}", line)?;
+    drop(file);
+
+    // Rotate: keep last 365 entries
+    let content = std::fs::read_to_string(&path)?;
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() > 365 {
+        let keep = &lines[lines.len() - 365..];
+        std::fs::write(&path, keep.join("\n") + "\n")?;
+    }
     Ok(())
 }
 
@@ -368,13 +389,7 @@ fn print_score(result: &ScoreResult) {
             .iter()
             .map(|i| {
                 let mark = if i.signal == Signal::Green { "✓" } else { "✗" };
-                let name = indicator_display(&i.name);
-                match i.name.as_str() {
-                    "mode_diversity" => format!("{} {} {}", name, i.actual as usize, mark),
-                    "bug_decision" => format!("{} {:.2} {}", name, i.actual, mark),
-                    "dreyfus" => format!("{} {:.1} {}", name, i.actual, mark),
-                    _ => format!("{} {:.0}% {}", name, i.actual, mark),
-                }
+                format!("{} {} {}", indicator_display(&i.name), i.display_value(), mark)
             })
             .collect();
         println!(
@@ -402,6 +417,23 @@ pub async fn handle_score(
     let result = compute(&cluster, &config.targets);
     persist_score(&result)?;
     print_score(&result);
+
+    // Data time range
+    if !items.is_empty() {
+        let (min_t, max_t) = items.iter().fold(
+            (DateTime::<Utc>::MAX_UTC, DateTime::<Utc>::MIN_UTC),
+            |(min, max), item| {
+                let t = item.created_at();
+                (if t < min { t } else { min }, if t > max { t } else { max })
+            },
+        );
+        println!(
+            "  {} {} ~ {}",
+            t!("Data range:", "数据范围:"),
+            min_t.format("%Y-%m-%d"),
+            max_t.format("%Y-%m-%d"),
+        );
+    }
 
     if let Some(llm) = llm {
         match crate::advice::generate_and_cache(&result, &llm).await {
