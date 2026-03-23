@@ -15,6 +15,7 @@ const LLM_CONCURRENCY: usize = 10;
 const MAX_RETRIES: usize = 5;
 const RETRY_BASE_DELAY_SECS: u64 = 10;
 
+#[allow(dead_code)]
 pub struct InsightsOptions {
     pub period: Option<usize>,
     pub with_prescription: bool,

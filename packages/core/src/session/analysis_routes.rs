@@ -60,20 +60,29 @@ fn build_project_overview(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
     let stats = &cluster.global_stats;
     let mut ctx = format!(
         "总会话: {}, 总决策: {}, 总Bug修复: {}, 项目数: {}\n\n",
-        stats.total_sessions, stats.total_decisions, stats.total_bugfixes,
+        stats.total_sessions,
+        stats.total_decisions,
+        stats.total_bugfixes,
         stats.project_ranking.len()
     );
 
     for (name, count) in stats.project_ranking.iter().take(15) {
         if let Some(p) = cluster.projects.get(name) {
-            ctx.push_str(&format!("## {} ({} sessions, {} decisions, {} bugs)\n",
-                name, count, p.decision_titles.len(), p.bugfix_titles.len()));
+            ctx.push_str(&format!(
+                "## {} ({} sessions, {} decisions, {} bugs)\n",
+                name,
+                count,
+                p.decision_titles.len(),
+                p.bugfix_titles.len()
+            ));
             for excerpt in p.summary_excerpts.iter().take(3) {
                 ctx.push_str(&format!("{}\n", excerpt));
             }
             ctx.push('\n');
         }
-        if ctx.len() > MAX_ROUTE_CONTEXT { break; }
+        if ctx.len() > MAX_ROUTE_CONTEXT {
+            break;
+        }
     }
 
     AnalysisRoute {
@@ -90,7 +99,9 @@ fn build_project_overview(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
 小项目合并为综述。用"你在 xx 中做了 xx"的第二人称。
 
 ## 数据
-{}"#, truncate(&ctx, MAX_ROUTE_CONTEXT)),
+{}"#,
+            truncate(&ctx, MAX_ROUTE_CONTEXT)
+        ),
     }
 }
 
@@ -98,14 +109,22 @@ fn build_decision_patterns(id: usize, cluster: &ClusterResult) -> AnalysisRoute 
     let mut ctx = String::new();
     for (name, _) in cluster.global_stats.project_ranking.iter().take(12) {
         if let Some(p) = cluster.projects.get(name) {
-            if p.decision_titles.is_empty() { continue; }
-            ctx.push_str(&format!("## {} ({} decisions)\n", name, p.decision_titles.len()));
+            if p.decision_titles.is_empty() {
+                continue;
+            }
+            ctx.push_str(&format!(
+                "## {} ({} decisions)\n",
+                name,
+                p.decision_titles.len()
+            ));
             for d in p.decision_titles.iter().take(25) {
                 ctx.push_str(&format!("- {}\n", d));
             }
             ctx.push('\n');
         }
-        if ctx.len() > MAX_ROUTE_CONTEXT { break; }
+        if ctx.len() > MAX_ROUTE_CONTEXT {
+            break;
+        }
     }
 
     AnalysisRoute {
@@ -121,7 +140,9 @@ fn build_decision_patterns(id: usize, cluster: &ClusterResult) -> AnalysisRoute 
 4. 每个模式引用 3-5 个具体决策作为证据
 
 ## 数据
-{}"#, truncate(&ctx, MAX_ROUTE_CONTEXT)),
+{}"#,
+            truncate(&ctx, MAX_ROUTE_CONTEXT)
+        ),
     }
 }
 
@@ -129,9 +150,15 @@ fn build_bug_patterns(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
     let mut ctx = String::new();
     for (name, _) in cluster.global_stats.project_ranking.iter().take(12) {
         if let Some(p) = cluster.projects.get(name) {
-            if p.bugfix_titles.is_empty() && p.frictions.is_empty() { continue; }
-            ctx.push_str(&format!("## {} ({} bugs, {} frictions)\n",
-                name, p.bugfix_titles.len(), p.frictions.len()));
+            if p.bugfix_titles.is_empty() && p.frictions.is_empty() {
+                continue;
+            }
+            ctx.push_str(&format!(
+                "## {} ({} bugs, {} frictions)\n",
+                name,
+                p.bugfix_titles.len(),
+                p.frictions.len()
+            ));
             for b in p.bugfix_titles.iter().take(20) {
                 ctx.push_str(&format!("- [bug] {}\n", b));
             }
@@ -140,7 +167,9 @@ fn build_bug_patterns(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
             }
             ctx.push('\n');
         }
-        if ctx.len() > MAX_ROUTE_CONTEXT { break; }
+        if ctx.len() > MAX_ROUTE_CONTEXT {
+            break;
+        }
     }
 
     AnalysisRoute {
@@ -157,13 +186,15 @@ fn build_bug_patterns(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
 5. 建议可复制到 CLAUDE.md 的预防规则
 
 ## 数据
-{}"#, truncate(&ctx, MAX_ROUTE_CONTEXT)),
+{}"#,
+            truncate(&ctx, MAX_ROUTE_CONTEXT)
+        ),
     }
 }
 
 fn build_cognitive_evolution(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
     let stats = &cluster.global_stats;
-    let mut ctx = format!("全局认知水平分布:\n");
+    let mut ctx = "全局认知水平分布:\n".to_string();
     let mut levels: Vec<_> = stats.cognitive_levels.iter().collect();
     levels.sort_by(|a, b| b.1.cmp(a.1));
     for (level, count) in &levels {
@@ -173,7 +204,9 @@ fn build_cognitive_evolution(id: usize, cluster: &ClusterResult) -> AnalysisRout
     ctx.push_str("\n按项目认知水平:\n");
     for (name, _) in stats.project_ranking.iter().take(10) {
         if let Some(p) = cluster.projects.get(name) {
-            if p.cognitive_levels.is_empty() { continue; }
+            if p.cognitive_levels.is_empty() {
+                continue;
+            }
             ctx.push_str(&format!("  {}: {:?}\n", name, p.cognitive_levels));
         }
     }
@@ -185,7 +218,9 @@ fn build_cognitive_evolution(id: usize, cluster: &ClusterResult) -> AnalysisRout
                 ctx.push_str(&format!("- [{}] {}\n", name, k));
             }
         }
-        if ctx.len() > MAX_ROUTE_CONTEXT { break; }
+        if ctx.len() > MAX_ROUTE_CONTEXT {
+            break;
+        }
     }
 
     AnalysisRoute {
@@ -202,7 +237,9 @@ fn build_cognitive_evolution(id: usize, cluster: &ClusterResult) -> AnalysisRout
 5. 各项目的认知水平差异说明什么
 
 ## 数据
-{}"#, truncate(&ctx, MAX_ROUTE_CONTEXT)),
+{}"#,
+            truncate(&ctx, MAX_ROUTE_CONTEXT)
+        ),
     }
 }
 
@@ -222,7 +259,9 @@ fn build_tech_radar(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
                 ctx.push_str(&format!("- [{}] {}\n", name, a));
             }
         }
-        if ctx.len() > MAX_ROUTE_CONTEXT { break; }
+        if ctx.len() > MAX_ROUTE_CONTEXT {
+            break;
+        }
     }
 
     AnalysisRoute {
@@ -241,13 +280,15 @@ fn build_tech_radar(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
 3. 分析技术栈的广度和深度
 
 ## 数据
-{}"#, truncate(&ctx, MAX_ROUTE_CONTEXT)),
+{}"#,
+            truncate(&ctx, MAX_ROUTE_CONTEXT)
+        ),
     }
 }
 
 fn build_ai_collaboration(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
     let stats = &cluster.global_stats;
-    let mut ctx = format!("全局协作模式分布:\n");
+    let mut ctx = "全局协作模式分布:\n".to_string();
     let mut modes: Vec<_> = stats.collaboration_modes.iter().collect();
     modes.sort_by(|a, b| b.1.cmp(a.1));
     for (mode, count) in &modes {
@@ -261,7 +302,9 @@ fn build_ai_collaboration(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
                 ctx.push_str(&format!("- [{}] {}\n", name, f));
             }
         }
-        if ctx.len() > MAX_ROUTE_CONTEXT { break; }
+        if ctx.len() > MAX_ROUTE_CONTEXT {
+            break;
+        }
     }
 
     AnalysisRoute {
@@ -277,22 +320,35 @@ fn build_ai_collaboration(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
 4. 给出 3-5 条可操作的 AI 协作优化建议
 
 ## 数据
-{}"#, truncate(&ctx, MAX_ROUTE_CONTEXT)),
+{}"#,
+            truncate(&ctx, MAX_ROUTE_CONTEXT)
+        ),
     }
 }
 
 fn build_workflow_patterns(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
     let stats = &cluster.global_stats;
-    let mut ctx = format!("项目活跃度排名:\n");
+    let mut ctx = "项目活跃度排名:\n".to_string();
     for (name, count) in stats.project_ranking.iter().take(20) {
         ctx.push_str(&format!("  {}: {} sessions\n", name, count));
     }
     ctx.push_str(&format!("\n总项目数: {}\n", stats.project_ranking.len()));
 
-    let big = stats.project_ranking.iter().filter(|(_, c)| *c >= 10).count();
-    let medium = stats.project_ranking.iter().filter(|(_, c)| *c >= 3 && *c < 10).count();
+    let big = stats
+        .project_ranking
+        .iter()
+        .filter(|(_, c)| *c >= 10)
+        .count();
+    let medium = stats
+        .project_ranking
+        .iter()
+        .filter(|(_, c)| *c >= 3 && *c < 10)
+        .count();
     let small = stats.project_ranking.iter().filter(|(_, c)| *c < 3).count();
-    ctx.push_str(&format!("大项目(>=10): {}, 中项目(3-9): {}, 小项目(<3): {}\n", big, medium, small));
+    ctx.push_str(&format!(
+        "大项目(>=10): {}, 中项目(3-9): {}, 小项目(<3): {}\n",
+        big, medium, small
+    ));
 
     AnalysisRoute {
         id,
@@ -307,15 +363,19 @@ fn build_workflow_patterns(id: usize, cluster: &ClusterResult) -> AnalysisRoute 
 4. 深度工作: 哪些项目有持续深入
 
 ## 数据
-{}"#, truncate(&ctx, MAX_ROUTE_CONTEXT)),
+{}"#,
+            truncate(&ctx, MAX_ROUTE_CONTEXT)
+        ),
     }
 }
 
 fn build_project_deep_dive(id: usize, project: &ProjectCluster) -> AnalysisRoute {
     let mut ctx = format!(
         "项目: {} ({} sessions, {} decisions, {} bugs)\n\n",
-        project.project_name, project.session_count,
-        project.decision_titles.len(), project.bugfix_titles.len()
+        project.project_name,
+        project.session_count,
+        project.decision_titles.len(),
+        project.bugfix_titles.len()
     );
 
     ctx.push_str("会话摘要:\n");
@@ -354,7 +414,10 @@ fn build_project_deep_dive(id: usize, project: &ProjectCluster) -> AnalysisRoute
 5. 改进建议
 
 ## 数据
-{}"#, project.project_name, truncate(&ctx, MAX_ROUTE_CONTEXT)),
+{}"#,
+            project.project_name,
+            truncate(&ctx, MAX_ROUTE_CONTEXT)
+        ),
     }
 }
 
@@ -362,14 +425,18 @@ fn build_knowledge_network(id: usize, cluster: &ClusterResult) -> AnalysisRoute 
     let mut ctx = String::new();
     for (name, _) in cluster.global_stats.project_ranking.iter().take(15) {
         if let Some(p) = cluster.projects.get(name) {
-            if p.knowledge_gained.is_empty() { continue; }
+            if p.knowledge_gained.is_empty() {
+                continue;
+            }
             ctx.push_str(&format!("## {} 知识获取\n", name));
             for k in p.knowledge_gained.iter().take(10) {
                 ctx.push_str(&format!("- {}\n", k));
             }
             ctx.push('\n');
         }
-        if ctx.len() > MAX_ROUTE_CONTEXT { break; }
+        if ctx.len() > MAX_ROUTE_CONTEXT {
+            break;
+        }
     }
 
     AnalysisRoute {
@@ -385,7 +452,9 @@ fn build_knowledge_network(id: usize, cluster: &ClusterResult) -> AnalysisRoute 
 4. 学习深度评估
 
 ## 数据
-{}"#, truncate(&ctx, MAX_ROUTE_CONTEXT)),
+{}"#,
+            truncate(&ctx, MAX_ROUTE_CONTEXT)
+        ),
     }
 }
 
@@ -393,14 +462,18 @@ fn build_friction_deep_dive(id: usize, cluster: &ClusterResult) -> AnalysisRoute
     let mut ctx = String::new();
     for (name, _) in cluster.global_stats.project_ranking.iter().take(15) {
         if let Some(p) = cluster.projects.get(name) {
-            if p.frictions.is_empty() { continue; }
+            if p.frictions.is_empty() {
+                continue;
+            }
             ctx.push_str(&format!("## {} 阻力\n", name));
             for f in &p.frictions {
                 ctx.push_str(&format!("- {}\n", f));
             }
             ctx.push('\n');
         }
-        if ctx.len() > MAX_ROUTE_CONTEXT { break; }
+        if ctx.len() > MAX_ROUTE_CONTEXT {
+            break;
+        }
     }
 
     AnalysisRoute {
@@ -416,7 +489,9 @@ fn build_friction_deep_dive(id: usize, cluster: &ClusterResult) -> AnalysisRoute
 4. 给出 5 条可操作的预防建议
 
 ## 数据
-{}"#, truncate(&ctx, MAX_ROUTE_CONTEXT)),
+{}"#,
+            truncate(&ctx, MAX_ROUTE_CONTEXT)
+        ),
     }
 }
 

@@ -187,7 +187,7 @@ fn find_current_section(content: &str, target_line: &str) -> Option<String> {
 /// 格式化 L1-L3 报告为可读文本
 pub fn format_report(report: &AggregationReport) -> String {
     let mut out = String::new();
-    out.push_str(&format!("=== Session Insights 报告 ===\n"));
+    out.push_str("=== Session Insights 报告 ===\n");
     out.push_str(&format!("分析会话数: {}\n\n", report.total_sessions));
 
     // L1

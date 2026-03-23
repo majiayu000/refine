@@ -952,6 +952,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn make_cluster_with_data(
         cognitive: HashMap<String, usize>,
         collab: HashMap<String, usize>,
@@ -997,6 +998,7 @@ mod tests {
     }
 
     /// Build a ScoreResult with known indicator values for baseline testing.
+    #[allow(clippy::too_many_arguments)]
     fn make_score_result(
         dreyfus: f64,
         decision_quality: f64,
