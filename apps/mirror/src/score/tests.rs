@@ -435,6 +435,20 @@ fn test_load_recent_scores_reports_invalid_jsonl_line() {
 }
 
 #[test]
+fn test_load_recent_scores_accepts_legacy_missing_timestamp() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scores.jsonl");
+
+    let legacy_line = r#"{"layers":[{"name":"L1","signal":"Green","indicators":[]},{"name":"L2","signal":"Yellow","indicators":[]},{"name":"L3","signal":"Red","indicators":[]}],"tension":"legacy tension"}"#;
+    std::fs::write(&path, format!("{}\n", legacy_line)).unwrap();
+
+    let loaded = load_recent_scores_from_path(&path, 10).unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].tension.as_deref(), Some("legacy tension"));
+    assert_eq!(loaded[0].timestamp, DateTime::<Utc>::UNIX_EPOCH);
+}
+
+#[test]
 fn test_personal_baseline_calculation() {
     let now = Utc::now();
     // Build 10 historical scores within the last 28 days

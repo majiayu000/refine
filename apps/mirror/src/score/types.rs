@@ -64,10 +64,41 @@ pub struct LayerScore {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ScoreResult {
     pub layers: [LayerScore; 3],
     pub tension: Option<String>,
     pub timestamp: DateTime<Utc>,
+}
+
+impl Default for ScoreResult {
+    fn default() -> Self {
+        Self {
+            layers: default_layers(),
+            tension: None,
+            timestamp: DateTime::<Utc>::UNIX_EPOCH,
+        }
+    }
+}
+
+fn default_layers() -> [LayerScore; 3] {
+    [
+        LayerScore {
+            name: "depth".to_string(),
+            signal: Signal::Yellow,
+            indicators: Vec::new(),
+        },
+        LayerScore {
+            name: "breadth".to_string(),
+            signal: Signal::Yellow,
+            indicators: Vec::new(),
+        },
+        LayerScore {
+            name: "collaboration".to_string(),
+            signal: Signal::Yellow,
+            indicators: Vec::new(),
+        },
+    ]
 }
 
 /// Green > Yellow > Red

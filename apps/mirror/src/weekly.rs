@@ -24,10 +24,34 @@ fn system_prompt() -> &'static str {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WeeklyRecord {
     pub week_end: DateTime<Utc>,
     pub scores: [LayerSignal; 3],
     pub suggestions: Vec<String>,
+}
+
+impl Default for WeeklyRecord {
+    fn default() -> Self {
+        Self {
+            week_end: DateTime::<Utc>::UNIX_EPOCH,
+            scores: [
+                LayerSignal {
+                    name: "depth".to_string(),
+                    signal: "yellow".to_string(),
+                },
+                LayerSignal {
+                    name: "breadth".to_string(),
+                    signal: "yellow".to_string(),
+                },
+                LayerSignal {
+                    name: "collaboration".to_string(),
+                    signal: "yellow".to_string(),
+                },
+            ],
+            suggestions: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -558,5 +582,22 @@ Everything looks good. No changes needed.
         let last = load_last_weekly_record_from_path(&path).unwrap();
         assert!(last.is_some());
         assert_eq!(last.unwrap().suggestions, vec!["second".to_string()]);
+    }
+
+    #[test]
+    fn test_load_last_weekly_record_accepts_legacy_missing_suggestions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weekly-history.jsonl");
+        let legacy_line = format!(
+            "{{\"week_end\":\"{}\",\"scores\":[{{\"name\":\"depth\",\"signal\":\"green\"}},{{\"name\":\"breadth\",\"signal\":\"yellow\"}},{{\"name\":\"collaboration\",\"signal\":\"red\"}}]}}",
+            Utc::now().to_rfc3339()
+        );
+        std::fs::write(&path, format!("{}\n", legacy_line)).unwrap();
+
+        let record = load_last_weekly_record_from_path(&path)
+            .unwrap()
+            .expect("expected record from legacy line");
+        assert!(record.suggestions.is_empty());
+        assert_eq!(record.scores[0].name, "depth");
     }
 }
