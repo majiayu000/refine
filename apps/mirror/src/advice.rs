@@ -1,4 +1,5 @@
 use crate::lang::t;
+use crate::llm_retry::llm_with_retry;
 use crate::score::{indicator_display, layer_display, ScoreResult, Signal};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -134,8 +135,7 @@ fn system_prompt() -> &'static str {
 /// Generate advice via LLM (single attempt, best-effort) and cache result
 pub async fn generate_and_cache(score: &ScoreResult, llm: &Arc<dyn LlmClient>) -> Result<String> {
     let prompt = build_prompt(score);
-    let response = llm
-        .complete(&prompt, Some(system_prompt()))
+    let response = llm_with_retry(llm, &prompt, system_prompt())
         .await
         .map_err(|e| anyhow::anyhow!("LLM advice generation failed: {}", e))?;
     let raw = response.trim().to_string();

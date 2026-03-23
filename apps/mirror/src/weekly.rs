@@ -1,6 +1,7 @@
 use crate::config::{ensure_mirror_dir, mirror_dir};
 use crate::document_save::{save_report_to_document, SaveDocumentOptions};
 use crate::lang::t;
+use crate::llm_retry::llm_with_retry;
 use crate::score::{self, LayerScore, ScoreResult};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -12,8 +13,6 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-const MAX_RETRIES: usize = 5;
-const RETRY_BASE_DELAY_SECS: u64 = 10;
 const WEEKLY_HISTORY_LIMIT: usize = 52;
 
 fn system_prompt() -> &'static str {
@@ -439,47 +438,6 @@ fn write_weekly_history_lines_atomically(path: &Path, lines: &[String]) -> Resul
     }
 
     write_result
-}
-
-async fn llm_with_retry(client: &Arc<dyn LlmClient>, prompt: &str, system: &str) -> Result<String> {
-    let mut last_err = String::new();
-    for attempt in 0..MAX_RETRIES {
-        match client.complete(prompt, Some(system)).await {
-            Ok(response) => return Ok(response),
-            Err(e) => {
-                last_err = e.to_string();
-                let is_retryable = last_err.contains("cooldown")
-                    || last_err.contains("service_busy")
-                    || last_err.contains("rate")
-                    || last_err.contains("429")
-                    || last_err.contains("Upstream")
-                    || last_err.contains("timeout")
-                    || last_err.contains("empty response");
-                if !is_retryable || attempt == MAX_RETRIES - 1 {
-                    break;
-                }
-                let delay = RETRY_BASE_DELAY_SECS * (1 << attempt);
-                eprintln!(
-                    "  {}",
-                    t!(
-                        format!(
-                            "Retry ({}/{}) waiting {}s...",
-                            attempt + 1,
-                            MAX_RETRIES,
-                            delay
-                        ),
-                        format!("重试 ({}/{}) 等待 {}s...", attempt + 1, MAX_RETRIES, delay)
-                    )
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-            }
-        }
-    }
-    Err(anyhow::anyhow!(
-        "LLM call failed ({} retries): {}",
-        MAX_RETRIES,
-        last_err
-    ))
 }
 
 #[cfg(test)]
