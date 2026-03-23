@@ -2,6 +2,7 @@ mod advice;
 mod cli;
 mod config;
 mod dashboard;
+mod document_save;
 mod lang;
 mod motd;
 mod profile;
@@ -37,9 +38,7 @@ async fn main() -> Result<()> {
     };
     ensure_db_dir(&db_path).map_err(|e| anyhow::anyhow!(e))?;
 
-    let store = Arc::new(
-        SqliteStore::open(&db_path).context("Failed to open database")?,
-    );
+    let store = Arc::new(SqliteStore::open(&db_path).context("Failed to open database")?);
 
     match cli.command {
         Commands::Score { since } => {

@@ -1,10 +1,10 @@
 use crate::config::ensure_mirror_dir;
+use crate::document_save::{save_report_to_document, SaveDocumentOptions};
 use crate::lang::t;
 use crate::score::{self, layer_display, Signal};
-use anyhow::{Context, Result};
-use chrono::Utc;
+use anyhow::Result;
 use refine_core::infra::LlmClient;
-use refine_core::knowledge::{Document, DocumentRepository, Item, ItemRepository, ItemType};
+use refine_core::knowledge::{DocumentRepository, Item, ItemRepository, ItemType};
 use refine_core::session::{cluster_observations, ClusterResult};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,7 +31,11 @@ struct ProfileData {
     score_summary: String,
 }
 
-fn extract_profile_data(cluster: &ClusterResult, score_summary: &str, items: &[Item]) -> ProfileData {
+fn extract_profile_data(
+    cluster: &ClusterResult,
+    score_summary: &str,
+    items: &[Item],
+) -> ProfileData {
     let total_sessions = cluster.global_stats.total_sessions;
     let total_projects = cluster.projects.len();
 
@@ -76,9 +80,14 @@ fn extract_profile_data(cluster: &ClusterResult, score_summary: &str, items: &[I
 
     // Session complexity: count observations per document_id
     let mut doc_obs_count: HashMap<String, usize> = HashMap::new();
-    for item in items.iter().filter(|i| i.item_type() == ItemType::Observation) {
+    for item in items
+        .iter()
+        .filter(|i| i.item_type() == ItemType::Observation)
+    {
         if let Some(doc_id) = item.document_id() {
-            *doc_obs_count.entry(doc_id.as_str().to_string()).or_insert(0) += 1;
+            *doc_obs_count
+                .entry(doc_id.as_str().to_string())
+                .or_insert(0) += 1;
         }
     }
 
@@ -202,23 +211,6 @@ fn save_profile_summary(data: &ProfileData) -> Result<()> {
     Ok(())
 }
 
-async fn save_to_document(doc_repo: &Arc<dyn DocumentRepository>, report: &str) -> Result<()> {
-    let mut doc = Document::new("mirror-profile", report);
-    let title = format!("Mirror Profile {}", Utc::now().format("%Y-%m-%d"));
-    doc.set_title(&title);
-    doc.set_url(&format!("mirror-profile://{}", Utc::now().to_rfc3339()));
-    doc_repo
-        .save(&doc)
-        .await
-        .context("Failed to save profile")?;
-    println!(
-        "\n{} (ID: {})",
-        t!("Profile saved", "画像已保存"),
-        doc.id()
-    );
-    Ok(())
-}
-
 pub async fn handle_profile(
     item_repo: Arc<dyn ItemRepository>,
     doc_repo: Arc<dyn DocumentRepository>,
@@ -255,7 +247,18 @@ pub async fn handle_profile(
     println!("{}", narrative);
 
     save_profile_summary(&data)?;
-    save_to_document(&doc_repo, &narrative).await?;
+    let doc_id = save_report_to_document(
+        &doc_repo,
+        &narrative,
+        SaveDocumentOptions {
+            source: "mirror-profile",
+            title_prefix: "Mirror Profile",
+            url_scheme: "mirror-profile",
+            save_error_context: "Failed to save profile",
+        },
+    )
+    .await?;
+    println!("\n{} (ID: {})", t!("Profile saved", "画像已保存"), doc_id);
     Ok(())
 }
 
@@ -343,10 +346,7 @@ mod tests {
                     m
                 },
                 tool_frequency: HashMap::new(),
-                project_ranking: vec![
-                    ("proj-a".to_string(), 50),
-                    ("proj-b".to_string(), 20),
-                ],
+                project_ranking: vec![("proj-a".to_string(), 50), ("proj-b".to_string(), 20)],
             },
             untagged_count: 0,
         }
