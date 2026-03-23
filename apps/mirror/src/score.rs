@@ -2,6 +2,7 @@ use crate::config::{ensure_mirror_dir, mirror_dir, Targets};
 use crate::lang::t;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
+use fs2::FileExt;
 use refine_core::knowledge::{Item, ItemRepository};
 use refine_core::session::{cluster_observations, ClusterResult, GlobalStats};
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,8 @@ const BASELINE_MIN_ENTRIES: usize = 7;
 
 /// Sliding window size in days
 const BASELINE_WINDOW_DAYS: i64 = 28;
+
+const SCORE_HISTORY_LIMIT: usize = 365;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Signal {
@@ -750,23 +753,110 @@ pub fn compute(cluster: &ClusterResult, targets: &Targets) -> ScoreResult {
 pub fn persist_score(result: &ScoreResult) -> Result<()> {
     let dir = ensure_mirror_dir()?;
     let path = dir.join("scores.jsonl");
-    let line = serde_json::to_string(result)?;
+    persist_score_to_path(&path, result)
+}
 
-    let mut file = std::fs::OpenOptions::new()
+fn persist_score_to_path(path: &Path, result: &ScoreResult) -> Result<()> {
+    let lock_path = path.with_extension("lock");
+    let lock_file = std::fs::OpenOptions::new()
         .create(true)
-        .append(true)
-        .open(&path)?;
-    writeln!(file, "{}", line)?;
-    drop(file);
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open score lock {}", lock_path.display()))?;
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("failed to acquire score lock {}", lock_path.display()))?;
 
-    // Rotate: keep last 365 entries
-    let content = std::fs::read_to_string(&path)?;
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.len() > 365 {
-        let keep = &lines[lines.len() - 365..];
-        std::fs::write(&path, keep.join("\n") + "\n")?;
-    }
+    let write_result = persist_score_to_path_locked(path, result);
+    let unlock_result = lock_file
+        .unlock()
+        .with_context(|| format!("failed to release score lock {}", lock_path.display()));
+
+    write_result?;
+    unlock_result?;
     Ok(())
+}
+
+fn persist_score_to_path_locked(path: &Path, result: &ScoreResult) -> Result<()> {
+    let mut lines: Vec<String> = match std::fs::read_to_string(path) {
+        Ok(content) => content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "failed to read score history {}: {}",
+                path.display(),
+                e
+            ));
+        }
+    };
+
+    lines.push(serde_json::to_string(result)?);
+    if lines.len() > SCORE_HISTORY_LIMIT {
+        let trim = lines.len() - SCORE_HISTORY_LIMIT;
+        lines.drain(0..trim);
+    }
+
+    write_lines_atomically(path, &lines)
+}
+
+fn write_lines_atomically(path: &Path, lines: &[String]) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "score history path has no parent directory: {}",
+            path.display()
+        )
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("scores.jsonl");
+    let nonce = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    let temp_path = parent.join(format!(
+        ".{}.tmp-{}-{}",
+        file_name,
+        std::process::id(),
+        nonce
+    ));
+
+    let write_result = (|| -> Result<()> {
+        let mut temp_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .with_context(|| format!("failed to create temp score file {}", temp_path.display()))?;
+
+        for line in lines {
+            writeln!(temp_file, "{}", line)?;
+        }
+        temp_file
+            .sync_all()
+            .with_context(|| format!("failed to fsync temp score file {}", temp_path.display()))?;
+
+        std::fs::rename(&temp_path, path).with_context(|| {
+            format!(
+                "failed to atomically replace score history {}",
+                path.display()
+            )
+        })?;
+
+        if let Ok(dir_file) = std::fs::File::open(parent) {
+            let _ = dir_file.sync_all();
+        }
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    write_result
 }
 
 pub fn load_recent_scores(n: usize) -> Result<Vec<ScoreResult>> {
@@ -948,7 +1038,8 @@ pub async fn handle_score(
 mod tests {
     use super::*;
     use refine_core::session::{ClusterResult, GlobalStats, ProjectCluster};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{Arc, Barrier};
 
     fn make_cluster(
         cognitive: HashMap<String, usize>,
@@ -1330,21 +1421,113 @@ mod tests {
             timestamp: Utc::now(),
         };
 
-        // persist
-        let line = serde_json::to_string(&result).unwrap();
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .unwrap();
-        writeln!(file, "{}", line).unwrap();
-        drop(file);
+        persist_score_to_path(&path, &result).unwrap();
 
-        // load
         let loaded = load_recent_scores_from_path(&path, 10).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].layers[0].signal, Signal::Green);
         assert_eq!(loaded[0].tension.as_deref(), Some("test tension"));
+    }
+
+    #[test]
+    fn test_persist_score_rotates_to_latest_365_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scores.jsonl");
+
+        for idx in 0..370 {
+            let mut result = make_score_result(
+                3.5,
+                60.0,
+                10.0,
+                0.5,
+                20.0,
+                25.0,
+                15.0,
+                30.0,
+                4.0,
+                0.2,
+                0.8,
+                Utc::now() + Duration::seconds(idx),
+            );
+            result.tension = Some(format!("entry-{}", idx));
+            persist_score_to_path(&path, &result).unwrap();
+        }
+
+        let loaded = load_recent_scores_from_path(&path, 400).unwrap();
+        assert_eq!(loaded.len(), SCORE_HISTORY_LIMIT);
+        assert_eq!(loaded[0].tension.as_deref(), Some("entry-5"));
+        assert_eq!(
+            loaded.last().and_then(|s| s.tension.as_deref()),
+            Some("entry-369")
+        );
+    }
+
+    #[test]
+    fn test_persist_score_concurrent_writes_preserve_all_new_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scores.jsonl");
+
+        for idx in 0..SCORE_HISTORY_LIMIT {
+            let mut seed = make_score_result(
+                3.5,
+                60.0,
+                10.0,
+                0.5,
+                20.0,
+                25.0,
+                15.0,
+                30.0,
+                4.0,
+                0.2,
+                0.8,
+                Utc::now() - Duration::days(100) + Duration::seconds(idx as i64),
+            );
+            seed.tension = Some(format!("seed-{}", idx));
+            persist_score_to_path(&path, &seed).unwrap();
+        }
+
+        let writer_count = 12usize;
+        let barrier = Arc::new(Barrier::new(writer_count));
+        let mut handles = Vec::new();
+
+        for idx in 0..writer_count {
+            let barrier = Arc::clone(&barrier);
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut result = make_score_result(
+                    3.5,
+                    60.0,
+                    10.0,
+                    0.5,
+                    20.0,
+                    25.0,
+                    15.0,
+                    30.0,
+                    4.0,
+                    0.2,
+                    0.8,
+                    Utc::now() + Duration::seconds(idx as i64),
+                );
+                result.tension = Some(format!("writer-{}", idx));
+                barrier.wait();
+                persist_score_to_path(&path, &result).unwrap();
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let loaded = load_recent_scores_from_path(&path, 400).unwrap();
+        assert_eq!(loaded.len(), SCORE_HISTORY_LIMIT);
+        let seen: HashSet<_> = loaded
+            .into_iter()
+            .filter_map(|score| score.tension)
+            .collect();
+        for idx in 0..writer_count {
+            let key = format!("writer-{}", idx);
+            assert!(seen.contains(&key), "missing {}", key);
+        }
     }
 
     #[test]
