@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// 各层目标阈值
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,8 +90,22 @@ pub fn ensure_mirror_dir() -> Result<PathBuf> {
 /// 加载配置，不存在则用默认值
 pub fn load() -> MirrorConfig {
     let path = mirror_dir().join("config.toml");
-    match std::fs::read_to_string(&path) {
-        Ok(content) => toml::from_str(&content).unwrap_or_default(),
+    load_from_path(&path)
+}
+
+fn load_from_path(path: &Path) -> MirrorConfig {
+    match std::fs::read_to_string(path) {
+        Ok(content) => match toml::from_str(&content) {
+            Ok(config) => config,
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "failed to parse mirror config, falling back to defaults"
+                );
+                MirrorConfig::default()
+            }
+        },
         Err(_) => MirrorConfig::default(),
     }
 }
@@ -99,6 +113,33 @@ pub fn load() -> MirrorConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+    use tempfile::tempdir;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> MakeWriter<'a> for SharedWriter {
+        type Writer = SharedGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedGuard(self.0.clone())
+        }
+    }
+
+    struct SharedGuard(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedGuard {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn default_targets_match_spec() {
@@ -111,7 +152,9 @@ mod tests {
 
     #[test]
     fn load_missing_file_returns_default() {
-        let config = load();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("missing.toml");
+        let config = load_from_path(&path);
         assert!((config.targets.dreyfus_green - 3.5).abs() < f64::EPSILON);
     }
 
@@ -125,5 +168,27 @@ dreyfus_green = 4.0
         assert!((config.targets.dreyfus_green - 4.0).abs() < f64::EPSILON);
         // 未指定字段使用默认值
         assert!((config.targets.dreyfus_yellow - 2.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn load_invalid_file_warns_and_returns_default() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[targets\ninvalid = 1\n").unwrap();
+
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .with_writer(SharedWriter(output.clone()))
+            .finish();
+
+        let config = tracing::subscriber::with_default(subscriber, || load_from_path(&path));
+        assert!((config.targets.dreyfus_green - 3.5).abs() < f64::EPSILON);
+
+        let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(logs.contains("failed to parse mirror config"));
+        assert!(logs.contains("config.toml"));
     }
 }
