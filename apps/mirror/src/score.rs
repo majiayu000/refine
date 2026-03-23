@@ -733,14 +733,29 @@ pub fn load_recent_scores(n: usize) -> Result<Vec<ScoreResult>> {
     let path = mirror_dir().join("scores.jsonl");
     let file = match std::fs::File::open(&path) {
         Ok(f) => f,
-        Err(_) => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            tracing::warn!("load_recent_scores: failed to open {:?}: {}", path, e);
+            return Ok(Vec::new());
+        }
     };
     let reader = std::io::BufReader::new(file);
-    let all: Vec<ScoreResult> = reader
-        .lines()
-        .map_while(|line| line.ok())
-        .filter_map(|line| serde_json::from_str(&line).ok())
-        .collect();
+    let mut all: Vec<ScoreResult> = Vec::new();
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!("load_recent_scores: IO error reading line: {}", e);
+                break;
+            }
+        };
+        match serde_json::from_str::<ScoreResult>(&line) {
+            Ok(score) => all.push(score),
+            Err(e) => {
+                tracing::warn!("load_recent_scores: JSON parse error: {}", e);
+            }
+        }
+    }
     let start = all.len().saturating_sub(n);
     Ok(all[start..].to_vec())
 }

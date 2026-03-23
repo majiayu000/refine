@@ -199,13 +199,32 @@ pub fn build_weekly_prompt(
 
 fn load_last_weekly_record() -> Option<WeeklyRecord> {
     let path = mirror_dir().join("weekly-history.jsonl");
-    let file = std::fs::File::open(&path).ok()?;
+    let file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::warn!("load_last_weekly_record: failed to open {:?}: {}", path, e);
+            return None;
+        }
+    };
     let reader = std::io::BufReader::new(file);
-    reader
-        .lines()
-        .map_while(|l| l.ok())
-        .filter_map(|l| serde_json::from_str::<WeeklyRecord>(&l).ok())
-        .last()
+    let mut last: Option<WeeklyRecord> = None;
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!("load_last_weekly_record: IO error reading line: {}", e);
+                break;
+            }
+        };
+        match serde_json::from_str::<WeeklyRecord>(&line) {
+            Ok(rec) => last = Some(rec),
+            Err(e) => {
+                tracing::warn!("load_last_weekly_record: JSON parse error: {}", e);
+            }
+        }
+    }
+    last
 }
 
 fn extract_suggestions(report: &str) -> Vec<String> {

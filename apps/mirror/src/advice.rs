@@ -16,8 +16,21 @@ pub struct CachedAdvice {
 
 pub fn load_cached() -> Option<CachedAdvice> {
     let path = crate::config::mirror_dir().join("advice.json");
-    let content = std::fs::read_to_string(&path).ok()?;
-    let cached: CachedAdvice = serde_json::from_str(&content).ok()?;
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::warn!("load_cached: failed to read {:?}: {}", path, e);
+            return None;
+        }
+    };
+    let cached: CachedAdvice = match serde_json::from_str(&content) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("load_cached: JSON parse error in {:?}: {}", path, e);
+            return None;
+        }
+    };
     let age = Utc::now() - cached.generated_at;
     if age.num_hours() < 72 {
         Some(cached)
@@ -124,10 +137,7 @@ fn system_prompt() -> &'static str {
 }
 
 /// Generate advice via LLM (single attempt, best-effort) and cache result
-pub async fn generate_and_cache(
-    score: &ScoreResult,
-    llm: &Arc<dyn LlmClient>,
-) -> Result<String> {
+pub async fn generate_and_cache(score: &ScoreResult, llm: &Arc<dyn LlmClient>) -> Result<String> {
     let prompt = build_prompt(score);
     let response = llm
         .complete(&prompt, Some(system_prompt()))
@@ -137,8 +147,16 @@ pub async fn generate_and_cache(
 
     // Parse JSON response: {"short": "...", "full": "..."}
     let (short, full) = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) {
-        let s = parsed.get("short").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let f = parsed.get("full").and_then(|v| v.as_str()).unwrap_or(&raw).to_string();
+        let s = parsed
+            .get("short")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let f = parsed
+            .get("full")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&raw)
+            .to_string();
         (s, f)
     } else {
         // Fallback: LLM didn't return JSON, use first 15 chars as short
