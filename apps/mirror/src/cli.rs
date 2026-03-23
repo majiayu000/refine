@@ -10,7 +10,7 @@ pub struct Cli {
     pub db: Option<String>,
 
     /// Display language: en or zh (default: en)
-    #[arg(long, default_value = "en")]
+    #[arg(long, default_value = "zh")]
     pub lang: String,
 
     #[command(subcommand)]
