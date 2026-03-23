@@ -573,17 +573,91 @@ fn test_personal_baseline_calculation() {
     );
 
     let bl = baseline.unwrap();
-    assert!((bl.dreyfus_avg - 3.5).abs() < f64::EPSILON);
-    assert!((bl.decision_quality_avg - 60.0).abs() < f64::EPSILON);
-    assert!((bl.depth_output_avg - 10.0).abs() < f64::EPSILON);
-    assert!((bl.exploration_avg - 20.0).abs() < f64::EPSILON);
-    assert!((bl.deep_invest_avg - 25.0).abs() < f64::EPSILON);
-    assert!((bl.fragmentation_avg - 15.0).abs() < f64::EPSILON);
-    assert!((bl.delegation_avg - 30.0).abs() < f64::EPSILON);
-    assert!((bl.mode_diversity_avg - 4.0).abs() < f64::EPSILON);
-    assert!((bl.bug_decision_avg - 0.20).abs() < f64::EPSILON);
-    assert!((bl.knowledge_rate_avg - 0.5).abs() < f64::EPSILON);
-    assert!((bl.friction_density_avg - 0.8).abs() < f64::EPSILON);
+    assert!((bl.average("dreyfus").unwrap() - 3.5).abs() < f64::EPSILON);
+    assert!((bl.average("decision_quality").unwrap() - 60.0).abs() < f64::EPSILON);
+    assert!((bl.average("depth_output").unwrap() - 10.0).abs() < f64::EPSILON);
+    assert!((bl.average("exploration").unwrap() - 20.0).abs() < f64::EPSILON);
+    assert!((bl.average("deep_invest").unwrap() - 25.0).abs() < f64::EPSILON);
+    assert!((bl.average("fragmentation").unwrap() - 15.0).abs() < f64::EPSILON);
+    assert!((bl.average("delegation").unwrap() - 30.0).abs() < f64::EPSILON);
+    assert!((bl.average("mode_diversity").unwrap() - 4.0).abs() < f64::EPSILON);
+    assert!((bl.average("bug_decision").unwrap() - 0.20).abs() < f64::EPSILON);
+    assert!((bl.average("knowledge_rate").unwrap() - 0.5).abs() < f64::EPSILON);
+    assert!((bl.average("friction_density").unwrap() - 0.8).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_computed_indicators_have_registry_backed_metadata() {
+    let t = Targets::default();
+    let now = Utc::now();
+    let score = compute(
+        &make_cluster_with_data(
+            {
+                let mut m = HashMap::new();
+                m.insert("expert".into(), 3);
+                m.insert("proficient".into(), 2);
+                m
+            },
+            {
+                let mut m = HashMap::new();
+                m.insert("exploration".into(), 12);
+                m.insert("delegation".into(), 8);
+                m.insert("pair_programming".into(), 4);
+                m.insert("review".into(), 3);
+                m.insert("deep_inquiry".into(), 6);
+                m
+            },
+            16,
+            5,
+            vec![
+                (
+                    "proj-a",
+                    6,
+                    vec!["because caching helps", "采用 sqlite"],
+                    vec!["slow ci", "flaky test"],
+                    vec!["learned retry policy", "learned tracing"],
+                ),
+                (
+                    "proj-b",
+                    4,
+                    vec!["选择 rust"],
+                    vec!["timeout"],
+                    vec!["learned batching"],
+                ),
+            ],
+        ),
+        &t,
+    );
+
+    let history: Vec<ScoreResult> = (0..7)
+        .map(|i| {
+            let mut entry = score.clone();
+            entry.timestamp = now - Duration::days(i);
+            entry
+        })
+        .collect();
+    let baseline = compute_personal_baseline(&history).expect("baseline should exist");
+
+    for layer in &score.layers {
+        for indicator in &layer.indicators {
+            assert_ne!(
+                indicator_display(&indicator.name),
+                "unknown",
+                "indicator {} missing display metadata",
+                indicator.name
+            );
+            assert!(
+                !indicator.display_value().is_empty(),
+                "indicator {} missing format metadata",
+                indicator.name
+            );
+            assert!(
+                baseline.average(&indicator.name).is_some(),
+                "indicator {} missing baseline metadata",
+                indicator.name
+            );
+        }
+    }
 }
 
 #[test]
@@ -692,19 +766,19 @@ fn test_personal_baseline_mixed_legacy_schema_repro() {
 
     // Expected baseline should be stable despite mixed history schema.
     assert!(
-        (bl.decision_quality_avg - 80.0).abs() < f64::EPSILON,
+        (bl.average("decision_quality").unwrap() - 80.0).abs() < f64::EPSILON,
         "mixed-schema decision_quality should stay at 80.0, got {}",
-        bl.decision_quality_avg
+        bl.average("decision_quality").unwrap()
     );
     assert!(
-        (bl.knowledge_rate_avg - 0.9).abs() < f64::EPSILON,
+        (bl.average("knowledge_rate").unwrap() - 0.9).abs() < f64::EPSILON,
         "missing legacy entries should not dilute knowledge_rate avg, got {}",
-        bl.knowledge_rate_avg
+        bl.average("knowledge_rate").unwrap()
     );
     assert!(
-        (bl.friction_density_avg - 0.7).abs() < f64::EPSILON,
+        (bl.average("friction_density").unwrap() - 0.7).abs() < f64::EPSILON,
         "missing legacy entries should not dilute friction_density avg, got {}",
-        bl.friction_density_avg
+        bl.average("friction_density").unwrap()
     );
 }
 
@@ -736,19 +810,19 @@ fn test_apply_personal_baseline() {
     let now = Utc::now();
 
     // Baseline averages
-    let baseline = PersonalBaseline {
-        dreyfus_avg: 3.0,
-        decision_quality_avg: 50.0,
-        depth_output_avg: 10.0,
-        exploration_avg: 20.0,
-        deep_invest_avg: 25.0,
-        fragmentation_avg: 15.0, // lower is better
-        delegation_avg: 30.0,    // lower is better
-        mode_diversity_avg: 4.0,
-        bug_decision_avg: 0.20, // lower is better
-        knowledge_rate_avg: 0.5,
-        friction_density_avg: 1.0, // lower is better
-    };
+    let baseline = PersonalBaseline::from_averages(&[
+        ("dreyfus", 3.0),
+        ("decision_quality", 50.0),
+        ("depth_output", 10.0),
+        ("exploration", 20.0),
+        ("deep_invest", 25.0),
+        ("fragmentation", 15.0), // lower is better
+        ("delegation", 30.0),    // lower is better
+        ("mode_diversity", 4.0),
+        ("bug_decision", 0.20), // lower is better
+        ("knowledge_rate", 0.5),
+        ("friction_density", 1.0), // lower is better
+    ]);
 
     // Current score: all significantly above baseline
     let mut result = make_score_result(
@@ -787,19 +861,19 @@ fn test_apply_personal_baseline() {
 fn test_apply_personal_baseline_regression() {
     let now = Utc::now();
 
-    let baseline = PersonalBaseline {
-        dreyfus_avg: 4.0,
-        decision_quality_avg: 70.0,
-        depth_output_avg: 15.0,
-        exploration_avg: 25.0,
-        deep_invest_avg: 30.0,
-        fragmentation_avg: 10.0,
-        delegation_avg: 20.0,
-        mode_diversity_avg: 5.0,
-        bug_decision_avg: 0.15,
-        knowledge_rate_avg: 0.8,
-        friction_density_avg: 0.5,
-    };
+    let baseline = PersonalBaseline::from_averages(&[
+        ("dreyfus", 4.0),
+        ("decision_quality", 70.0),
+        ("depth_output", 15.0),
+        ("exploration", 25.0),
+        ("deep_invest", 30.0),
+        ("fragmentation", 10.0),
+        ("delegation", 20.0),
+        ("mode_diversity", 5.0),
+        ("bug_decision", 0.15),
+        ("knowledge_rate", 0.8),
+        ("friction_density", 0.5),
+    ]);
 
     // Current: all significantly worse than baseline
     let mut result = make_score_result(
