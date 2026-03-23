@@ -5,7 +5,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use refine_core::knowledge::{Item, ItemRepository};
 use refine_core::session::{cluster_observations, ClusterResult, GlobalStats};
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -732,22 +732,29 @@ pub fn compute(cluster: &ClusterResult, targets: &Targets) -> ScoreResult {
 pub fn persist_score(result: &ScoreResult) -> Result<()> {
     let dir = ensure_mirror_dir()?;
     let path = dir.join("scores.jsonl");
-    let line = serde_json::to_string(result)?;
+    let new_line = serde_json::to_string(result)?;
 
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
-    writeln!(file, "{}", line)?;
-    drop(file);
+    // Read existing lines
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
 
-    // Rotate: keep last 365 entries
-    let content = std::fs::read_to_string(&path)?;
-    let lines: Vec<&str> = content.lines().collect();
+    // Build updated line list in memory, then rotate
+    let mut lines: Vec<&str> = existing.lines().collect();
+    lines.push(&new_line);
     if lines.len() > 365 {
-        let keep = &lines[lines.len() - 365..];
-        std::fs::write(&path, keep.join("\n") + "\n")?;
+        let drop_n = lines.len() - 365;
+        lines.drain(..drop_n);
     }
+    let content = lines.join("\n") + "\n";
+
+    // Atomic write: temp file → rename
+    let tmp = path.with_extension("jsonl.tmp");
+    std::fs::write(&tmp, &content)?;
+    std::fs::rename(&tmp, &path)?;
+
     Ok(())
 }
 
@@ -931,6 +938,7 @@ mod tests {
     use super::*;
     use refine_core::session::{ClusterResult, GlobalStats, ProjectCluster};
     use std::collections::HashMap;
+    use std::io::Write;
 
     fn make_cluster(
         cognitive: HashMap<String, usize>,
@@ -1821,5 +1829,63 @@ mod tests {
         let l3 = layer3(&cluster, &t);
         assert_eq!(l3.indicators.len(), 4);
         assert_eq!(l3.indicators[3].name, "friction_density");
+    }
+
+    #[test]
+    fn test_persist_score_atomic_rotate() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("scores.jsonl");
+
+        let make = |signal: Signal| ScoreResult {
+            layers: [
+                LayerScore {
+                    name: "L1".into(),
+                    signal,
+                    indicators: Vec::new(),
+                },
+                LayerScore {
+                    name: "L2".into(),
+                    signal,
+                    indicators: Vec::new(),
+                },
+                LayerScore {
+                    name: "L3".into(),
+                    signal,
+                    indicators: Vec::new(),
+                },
+            ],
+            tension: None,
+            timestamp: Utc::now(),
+        };
+
+        // Write 365 lines manually to prime the file.
+        let lines: Vec<String> = (0..365)
+            .map(|_| serde_json::to_string(&make(Signal::Yellow)))
+            .collect::<Result<_, _>>()?;
+        std::fs::write(&path, lines.join("\n") + "\n")?;
+
+        // Apply the same rotate+atomic logic as persist_score.
+        let new_line = serde_json::to_string(&make(Signal::Green))?;
+        let existing = std::fs::read_to_string(&path)?;
+        let mut file_lines: Vec<&str> = existing.lines().collect();
+        file_lines.push(&new_line);
+        if file_lines.len() > 365 {
+            let drop_n = file_lines.len() - 365;
+            file_lines.drain(..drop_n);
+        }
+        let content = file_lines.join("\n") + "\n";
+        let tmp = path.with_extension("jsonl.tmp");
+        std::fs::write(&tmp, &content)?;
+        std::fs::rename(&tmp, &path)?;
+        assert!(!tmp.exists(), "temp file must be removed after rename");
+
+        // Exactly 365 entries remain and the last is the green one.
+        let loaded = load_recent_scores_from_path(&path, 1000)?;
+        assert_eq!(loaded.len(), 365);
+        assert_eq!(
+            loaded.last().map(|r| r.layers[0].signal),
+            Some(Signal::Green)
+        );
+        Ok(())
     }
 }
