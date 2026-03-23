@@ -18,3 +18,4 @@ dirs = "5"
 dotenvy = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
+chrono.workspace = true

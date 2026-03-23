@@ -220,15 +220,14 @@ fn extract_suggestions(report: &str) -> Vec<String> {
     for line in &lines {
         let trimmed = line.trim();
         // Detect suggestion section headers (Chinese and English)
-        if trimmed.contains("建议")
+        if (trimmed.contains("建议")
             || trimmed.to_lowercase().contains("suggestion")
             || trimmed.to_lowercase().contains("next week")
-            || trimmed.contains("下周")
+            || trimmed.contains("下周"))
+            && (trimmed.starts_with('#') || trimmed.starts_with("**"))
         {
-            if trimmed.starts_with('#') || trimmed.starts_with("**") {
-                in_suggestion_section = true;
-                continue;
-            }
+            in_suggestion_section = true;
+            continue;
         }
         // New section header ends suggestion section
         if in_suggestion_section
@@ -242,7 +241,7 @@ fn extract_suggestions(report: &str) -> Vec<String> {
         if in_suggestion_section && !trimmed.is_empty() {
             let is_list_item = trimmed.starts_with('-')
                 || trimmed.starts_with('*')
-                || trimmed.chars().next().map_or(false, |c| c.is_ascii_digit());
+                || trimmed.chars().next().is_some_and(|c| c.is_ascii_digit());
             if is_list_item {
                 // Strip leading bullet/number markers
                 let content = trimmed

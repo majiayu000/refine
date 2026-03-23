@@ -163,7 +163,7 @@ fn build_bug_patterns(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
 
 fn build_cognitive_evolution(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
     let stats = &cluster.global_stats;
-    let mut ctx = format!("全局认知水平分布:\n");
+    let mut ctx = "全局认知水平分布:\n".to_string();
     let mut levels: Vec<_> = stats.cognitive_levels.iter().collect();
     levels.sort_by(|a, b| b.1.cmp(a.1));
     for (level, count) in &levels {
@@ -247,7 +247,7 @@ fn build_tech_radar(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
 
 fn build_ai_collaboration(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
     let stats = &cluster.global_stats;
-    let mut ctx = format!("全局协作模式分布:\n");
+    let mut ctx = "全局协作模式分布:\n".to_string();
     let mut modes: Vec<_> = stats.collaboration_modes.iter().collect();
     modes.sort_by(|a, b| b.1.cmp(a.1));
     for (mode, count) in &modes {
@@ -283,7 +283,7 @@ fn build_ai_collaboration(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
 
 fn build_workflow_patterns(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
     let stats = &cluster.global_stats;
-    let mut ctx = format!("项目活跃度排名:\n");
+    let mut ctx = "项目活跃度排名:\n".to_string();
     for (name, count) in stats.project_ranking.iter().take(20) {
         ctx.push_str(&format!("  {}: {} sessions\n", name, count));
     }

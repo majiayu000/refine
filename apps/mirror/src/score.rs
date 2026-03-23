@@ -739,6 +739,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn make_cluster_with_data(
         cognitive: HashMap<String, usize>,
         collab: HashMap<String, usize>,
@@ -784,6 +785,7 @@ mod tests {
     }
 
     /// Build a ScoreResult with known indicator values for baseline testing.
+    #[allow(clippy::too_many_arguments)]
     fn make_score_result(
         dreyfus: f64,
         decision_quality: f64,
@@ -964,7 +966,7 @@ mod tests {
         let reader = std::io::BufReader::new(std::fs::File::open(&path).unwrap());
         let loaded: Vec<ScoreResult> = reader
             .lines()
-            .filter_map(|l| l.ok())
+            .map_while(|l| l.ok())
             .filter_map(|l| serde_json::from_str(&l).ok())
             .collect();
         assert_eq!(loaded.len(), 1);

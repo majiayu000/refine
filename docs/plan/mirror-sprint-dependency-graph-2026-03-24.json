@@ -1,0 +1,18 @@
+{
+  "tasks": [
+    {"issue": 1, "depends_on": []},
+    {"issue": 2, "depends_on": []},
+    {"issue": 5, "depends_on": []},
+    {"issue": 7, "depends_on": []},
+    {"issue": 3, "depends_on": [1, 2, 5]},
+    {"issue": 4, "depends_on": [3]},
+    {"issue": 6, "depends_on": [3]},
+    {"issue": 8, "depends_on": [2, 6]},
+    {"issue": 10, "depends_on": [8]},
+    {"issue": 11, "depends_on": [10]},
+    {"issue": 9, "depends_on": [3, 7]},
+    {"issue": 12, "depends_on": [3]},
+    {"issue": 13, "depends_on": [4]}
+  ],
+  "skip": []
+}
