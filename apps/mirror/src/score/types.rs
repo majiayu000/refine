@@ -48,7 +48,10 @@ impl Signal {
         }
     }
 
-    fn supports_ansi_on_stdout() -> bool {
+    pub fn supports_ansi_on_stdout() -> bool {
+        if std::env::var_os("NO_COLOR").is_some() {
+            return false;
+        }
         std::io::stdout().is_terminal()
     }
 }

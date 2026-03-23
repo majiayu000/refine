@@ -5,7 +5,6 @@ use super::persistence::persist_score_to_path;
 use crate::config::Targets;
 use refine_core::session::{ClusterResult, GlobalStats, ProjectCluster};
 use std::collections::{HashMap, HashSet};
-use std::io::IsTerminal;
 use std::sync::{Arc, Barrier};
 
 fn make_cluster(
@@ -257,12 +256,36 @@ fn test_signal_conversions_are_canonical() {
         assert_eq!(signal.render(true), ansi);
         assert_eq!(signal.render(false), emoji);
 
-        let expected_display = if std::io::stdout().is_terminal() {
+        let expected_display = if Signal::supports_ansi_on_stdout() {
             ansi
         } else {
             emoji
         };
         assert_eq!(signal.to_string(), expected_display);
+    }
+}
+
+#[test]
+fn test_no_color_env_disables_ansi() {
+    // When NO_COLOR is set, supports_ansi_on_stdout must return false
+    // regardless of whether stdout is a terminal.
+    let prev = std::env::var_os("NO_COLOR");
+    std::env::set_var("NO_COLOR", "1");
+    assert!(
+        !Signal::supports_ansi_on_stdout(),
+        "NO_COLOR set: expected ANSI disabled"
+    );
+    for signal in [Signal::Green, Signal::Yellow, Signal::Red] {
+        assert_eq!(
+            signal.to_string(),
+            signal.plain_dot(),
+            "NO_COLOR set: Display must use plain_dot"
+        );
+    }
+    // Restore environment
+    match prev {
+        Some(v) => std::env::set_var("NO_COLOR", v),
+        None => std::env::remove_var("NO_COLOR"),
     }
 }
 
