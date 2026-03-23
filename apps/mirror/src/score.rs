@@ -655,6 +655,28 @@ pub async fn handle_score(
         );
     }
 
+    // Check for pending ingest from growth-tracker
+    let tracker_path = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".refine")
+        .join("growth-tracker.json");
+    if let Ok(content) = std::fs::read_to_string(&tracker_path) {
+        if let Ok(tracker) = serde_json::from_str::<serde_json::Value>(&content) {
+            let pending = tracker.get("pending_ingest").and_then(|v| v.as_u64()).unwrap_or(0);
+            if pending > 3 {
+                println!(
+                    "  ⚠️ {} {} {}",
+                    t!("There are", "有"),
+                    pending,
+                    t!(
+                        "sessions not yet analyzed. Run: refine ingest-sessions",
+                        "个 session 未分析。运行: refine ingest-sessions"
+                    )
+                );
+            }
+        }
+    }
+
     if let Some(llm) = llm {
         match crate::advice::generate_and_cache(&result, &llm).await {
             Ok(advice) => println!(
