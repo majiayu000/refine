@@ -43,37 +43,7 @@ if [[ ! -f "$TRACKER_FILE" ]]; then
 }' > "$TRACKER_FILE"
 fi
 
-# ── Phase A: mtime filter ─────────────────────────────────────────────────────
-
-last_scan_ts=$(jq -r '.last_scan_ts // ""' "$TRACKER_FILE")
-
-# Build reference file for find -newer
-REF_FILE=$(mktemp /tmp/session-tagger-ref.XXXXXX)
-trap 'rm -f "$REF_FILE"' EXIT
-
-if [[ -z "$last_scan_ts" ]]; then
-  # First run: touch to epoch so all files match
-  touch -t 197001010000 "$REF_FILE"
-else
-  # touch -d accepts ISO 8601 on both GNU and macOS (with coreutils)
-  if touch -d "$last_scan_ts" "$REF_FILE" 2>/dev/null; then
-    : # success
-  else
-    # macOS BSD touch: convert to format it understands via date
-    ts_local=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last_scan_ts" "+%Y%m%d%H%M.%S" 2>/dev/null || date -d "$last_scan_ts" "+%Y%m%d%H%M.%S")
-    touch -t "$ts_local" "$REF_FILE"
-  fi
-fi
-
-# Collect candidate files
-if [[ ! -d "$SESSIONS_DIR" ]]; then
-  # Nothing to scan; just update timestamp
-  mapfile -t candidates < <(true)
-else
-  mapfile -t candidates < <(find "$SESSIONS_DIR" -name "*.jsonl" -newer "$REF_FILE" 2>/dev/null || true)
-fi
-
-# ── Phase B: classify ─────────────────────────────────────────────────────────
+# ── Classify ──────────────────────────────────────────────────────────────────
 
 classify_session() {
   local file="$1"
@@ -121,28 +91,72 @@ classify_session() {
   echo "uncategorized"
 }
 
-delta_exploration=0
-delta_deep=0
-delta_delegation=0
-delta_total=0
+# ── Scan + classify + update (runs entirely inside the lock) ──────────────────
+#
+# All three phases are inside the lock so that:
+#   • Two concurrent runs cannot claim the same file window (fixes race / double-count).
+#   • now_ts is captured BEFORE candidate enumeration so files written during
+#     classification are not skipped permanently — they land after now_ts and
+#     will be picked up by the next run (fixes watermark gap).
 
-for f in "${candidates[@]}"; do
-  [[ -f "$f" ]] || continue
-  # Guard against malformed JSONL — classify never fails the script
-  tag=$(classify_session "$f" 2>/dev/null || echo "uncategorized")
-  case "$tag" in
-    exploration)  (( delta_exploration++ )) ;;
-    deep_inquiry) (( delta_deep++ )) ;;
-    delegation)   (( delta_delegation++ )) ;;
-  esac
-  (( delta_total++ ))
-done
+do_scan_and_update() {
+  # Phase A: read watermark and enumerate candidates ──────────────────────────
 
-# ── Phase C: atomic tracker update ───────────────────────────────────────────
+  local last_scan_ts
+  last_scan_ts=$(jq -r '.last_scan_ts // ""' "$TRACKER_FILE")
 
-now_ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  # Capture now_ts before enumerating so files created between enumeration and
+  # update are guaranteed to appear in the next run's window.
+  local now_ts
+  now_ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
-do_update() {
+  local ref_file
+  ref_file=$(mktemp /tmp/session-tagger-ref.XXXXXX)
+
+  if [[ -z "$last_scan_ts" ]]; then
+    # First run: touch to epoch so all files match
+    touch -t 197001010000 "$ref_file"
+  else
+    # touch -d accepts ISO 8601 on both GNU and macOS (with coreutils)
+    if ! touch -d "$last_scan_ts" "$ref_file" 2>/dev/null; then
+      # macOS BSD touch: convert to format it understands via date
+      local ts_local
+      ts_local=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last_scan_ts" "+%Y%m%d%H%M.%S" 2>/dev/null || \
+                 date -d "$last_scan_ts" "+%Y%m%d%H%M.%S")
+      touch -t "$ts_local" "$ref_file"
+    fi
+  fi
+
+  # Collect candidates — use while+read+print0 instead of mapfile for bash 3.2
+  # compatibility (mapfile is a bash 4+ builtin absent on macOS default shell).
+  local candidates=()
+  if [[ -d "$SESSIONS_DIR" ]]; then
+    while IFS= read -r -d '' f; do
+      candidates+=("$f")
+    done < <(find "$SESSIONS_DIR" -name "*.jsonl" -newer "$ref_file" -print0 2>/dev/null)
+  fi
+
+  rm -f "$ref_file"
+
+  # Phase B: classify ─────────────────────────────────────────────────────────
+
+  local delta_exploration=0 delta_deep=0 delta_delegation=0 delta_total=0
+  local f tag
+  for f in "${candidates[@]+"${candidates[@]}"}"; do
+    [[ -f "$f" ]] || continue
+    tag=$(classify_session "$f" 2>/dev/null || echo "uncategorized")
+    case "$tag" in
+      exploration)  delta_exploration=$(( delta_exploration + 1 )) ;;
+      deep_inquiry) delta_deep=$(( delta_deep + 1 )) ;;
+      delegation)   delta_delegation=$(( delta_delegation + 1 )) ;;
+    esac
+    # Use $(( )) assignment — never returns non-zero, safe under set -e
+    delta_total=$(( delta_total + 1 ))
+  done
+
+  # Phase C: atomic tracker update ────────────────────────────────────────────
+  # Write now_ts (pre-scan timestamp) as the new watermark.
+
   jq -c \
     --arg ts "$now_ts" \
     --argjson de "$delta_exploration" \
@@ -157,16 +171,18 @@ do_update() {
     "$TRACKER_FILE" > "${TRACKER_FILE}.tmp" && mv "${TRACKER_FILE}.tmp" "$TRACKER_FILE"
 }
 
+# ── Lock and run ──────────────────────────────────────────────────────────────
+
 if command -v flock &>/dev/null; then
   (
     flock -x 9
-    do_update
+    do_scan_and_update
   ) 9>"$LOCK_FILE"
 else
   # Fallback: mkdir-based lock (atomic on POSIX)
   if mkdir "$LOCK_DIR" 2>/dev/null; then
     trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
-    do_update
+    do_scan_and_update
     rmdir "$LOCK_DIR" 2>/dev/null || true
   else
     # Another instance holds the lock; skip this run (next run will re-scan)
