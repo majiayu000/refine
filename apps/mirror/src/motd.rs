@@ -333,6 +333,38 @@ fn weekly_reminder() -> Option<String> {
     weekly_reminder_from_path(&mirror_dir().join("last-weekly.md"))
 }
 
+/// Strip ANSI/VT escape sequences and non-printable control characters from `s`.
+/// This prevents terminal escape injection when LLM-generated content is displayed
+/// in a MOTD context.
+fn strip_ansi_escapes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek() {
+                Some(&'[') => {
+                    chars.next(); // consume '['
+                    // consume parameter/intermediate bytes until final byte (0x40–0x7E)
+                    for inner in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&inner) {
+                            break;
+                        }
+                    }
+                }
+                Some(_) => {
+                    chars.next(); // consume the single char after ESC
+                }
+                None => {}
+            }
+        } else if c.is_control() && c != '\t' {
+            // drop other control chars (BEL, BS, etc.)
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 fn weekly_reminder_from_path(path: &std::path::Path) -> Option<String> {
     if !path.exists() {
         return None;
@@ -352,12 +384,16 @@ fn weekly_reminder_from_path(path: &std::path::Path) -> Option<String> {
     }
 
     // Cap I/O at 500 bytes — the report can be large but we only need the first line.
+    // Use read_to_end + from_utf8_lossy so that a multibyte UTF-8 character (e.g. CJK)
+    // that straddles the 500-byte boundary is replaced with U+FFFD instead of causing
+    // an InvalidData error that would silently drop the Monday reminder.
     let file = std::fs::File::open(path).ok()?;
-    let mut content = String::new();
+    let mut bytes = Vec::new();
     std::io::BufReader::new(file)
         .take(500)
-        .read_to_string(&mut content)
+        .read_to_end(&mut bytes)
         .ok()?;
+    let content = String::from_utf8_lossy(&bytes);
 
     let first_line = content
         .lines()
@@ -366,6 +402,10 @@ fn weekly_reminder_from_path(path: &std::path::Path) -> Option<String> {
         .next()?
         .trim()
         .to_string();
+
+    // Strip ANSI escape sequences and non-printable control characters from the
+    // LLM-generated content before it reaches the terminal (terminal escape injection).
+    let first_line = strip_ansi_escapes(&first_line);
 
     Some(format!("📋 Weekly: {}", first_line))
 }
@@ -507,6 +547,43 @@ mod tests {
             assert!(s.contains("Weekly"));
         }
         Ok(())
+    }
+
+    #[test]
+    fn test_weekly_reminder_cjk_at_byte_boundary() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("last-weekly.md");
+        // Each CJK character is 3 UTF-8 bytes; 167 chars = 501 bytes, so the
+        // 500-byte cap splits the last character. Must not return None.
+        let cjk_line: String = "本".repeat(167);
+        std::fs::write(&path, format!("{}\n", cjk_line))?;
+        let result = weekly_reminder_from_path(&path);
+        assert!(result.is_some(), "CJK content at byte boundary must not return None");
+        Ok(())
+    }
+
+    #[test]
+    fn test_weekly_reminder_strips_ansi_escapes() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("last-weekly.md");
+        std::fs::write(&path, "\x1b[1;31mImportant\x1b[0m reminder\n")?;
+        let result = weekly_reminder_from_path(&path);
+        let s = match result {
+            Some(v) => v,
+            None => return Err("fresh file with ANSI content must yield Some".into()),
+        };
+        assert!(!s.contains('\x1b'), "ANSI escape sequences must be stripped");
+        assert!(s.contains("Important"), "visible text must be preserved");
+        Ok(())
+    }
+
+    #[test]
+    fn test_strip_ansi_escapes() {
+        assert_eq!(strip_ansi_escapes("\x1b[1;31mhello\x1b[0m"), "hello");
+        assert_eq!(strip_ansi_escapes("plain text"), "plain text");
+        assert_eq!(strip_ansi_escapes("\x1b[mred\x1b[0m"), "red");
+        // BEL and other control chars stripped; tab preserved
+        assert_eq!(strip_ansi_escapes("a\x07b\tc"), "ab\tc");
     }
 
     #[test]
