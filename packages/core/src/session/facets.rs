@@ -104,10 +104,12 @@ pub fn parse_facet_response(response: &str) -> Result<FacetResponse, String> {
         }
     }
 
-    Err(format!(
-        "无法解析 facet 响应: {}",
-        &trimmed[..trimmed.len().min(200)]
-    ))
+    let preview = trimmed
+        .char_indices()
+        .find(|&(i, _)| i >= 200)
+        .map(|(i, _)| &trimmed[..i])
+        .unwrap_or(trimmed);
+    Err(format!("无法解析 facet 响应: {}", preview))
 }
 
 fn extract_json_from_fence(text: &str) -> Option<String> {
