@@ -128,6 +128,14 @@ pub async fn handle_weekly(
 
     println!("{}", report);
 
+    // Save the full report as the sentinel file for the MOTD weekly reminder.
+    // The MOTD reads this on Mondays to show a one-line reminder.
+    // Note: if daily-refresh.sh also runs `mirror weekly` on Sundays, this call
+    // is idempotent — the file is simply overwritten with the latest report.
+    if let Err(e) = save_last_weekly_md(&report) {
+        tracing::warn!("failed to save last-weekly.md: {}", e);
+    }
+
     let suggestions = extract_suggestions(&report);
     save_weekly_record(&this_score, suggestions)?;
     let doc_id = save_report_to_document(
@@ -326,6 +334,16 @@ fn extract_suggestions(report: &str) -> Vec<String> {
         }
     }
     suggestions
+}
+
+fn save_last_weekly_md(report: &str) -> Result<()> {
+    let dir = ensure_mirror_dir()?;
+    save_last_weekly_md_to_path(report, &dir.join("last-weekly.md"))
+}
+
+fn save_last_weekly_md_to_path(report: &str, path: &Path) -> Result<()> {
+    std::fs::write(path, report)
+        .with_context(|| format!("failed to write last weekly report to {}", path.display()))
 }
 
 fn save_weekly_record(score: &ScoreResult, suggestions: Vec<String>) -> Result<()> {
@@ -682,5 +700,16 @@ Everything looks good. No changes needed.
             .collect();
         assert_eq!(records.first().unwrap().suggestions, vec!["suggestion-1"]);
         assert_eq!(records.last().unwrap().suggestions, vec!["suggestion-52"]);
+    }
+
+    #[test]
+    fn test_save_last_weekly_md_roundtrip() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(|e| anyhow::anyhow!(e))?;
+        let path = dir.path().join("last-weekly.md");
+        let report = "# Weekly Report\n\n- Focus on testing\n- Write more docs\n";
+        save_last_weekly_md_to_path(report, &path)?;
+        let content = std::fs::read_to_string(&path)?;
+        assert_eq!(content, report);
+        Ok(())
     }
 }
