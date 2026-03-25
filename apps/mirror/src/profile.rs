@@ -202,6 +202,9 @@ fn build_profile_prompt(data: &ProfileData, cluster: &ClusterResult) -> String {
                 block.push(format!("  代码产出: {}", artifacts.join(" / ")));
             }
             let block_str = block.join("\n");
+            if facet_chars_used + block_str.len() > FACET_BUDGET_CHARS {
+                break;
+            }
             facet_chars_used += block_str.len();
             lines.push(block_str);
         }
