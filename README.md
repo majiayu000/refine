@@ -8,205 +8,167 @@
 
 <p align="center"><strong>Re + Fine — improve continuously, conversation by conversation.</strong></p>
 
-<p align="center">Sync and organize knowledge from ChatGPT, Claude, Gemini, Grok, Claude Code, and Codex conversations.</p>
+<p align="center">Sync knowledge from AI conversations. Track cognitive growth from coding sessions.</p>
 
 <p align="center"><a href="./README.zh-CN.md">中文文档</a></p>
 
-## Features
+## What It Does
 
-- **Cross-Platform Knowledge Sync (Primary)** — Capture and sync conversation knowledge from ChatGPT, Claude, Gemini, Grok, Claude Code, and Codex
-- **Conversation Storage & Traceability** — Store raw conversation documents and link extracted items back to source
-- **Knowledge Extraction (Optional Layer)** — Auto-extract knowledge cards, skills, and code snippets from synced conversations
-- **Full-Text Search** — SQLite FTS5 powered, supports mixed CJK/Latin search
-- **Session Insights & Growth (Optional Layer)** — Analyze Claude Code / Codex sessions for cognitive growth patterns
-- **Multi-Platform Access** — Browser Extension / API Server / CLI / Desktop (Tauri)
-
-## What Refine Is Mainly For
-
-- **Main workflow**: sync chat knowledge across AI platforms into one knowledge base
-- **Then**: search, extract, recommend, and analyze on top of synced data
-
-## Documentation
-
-- [Usage Guide](./docs/USAGE.md)
-- [Project Overview](./docs/00_OVERVIEW.md)
-- [Server Guide](./apps/server/README.md)
-- [API Spec](./docs/11_API_SPEC.md)
-- [Claude Hook Ingestion Design](./docs/13_CLAUDE_HOOK_INGESTION.md)
-
-## Extension Preview
-
-![Refine Browser Extension Dashboard](docs/images/extension-dashboard.png)
+1. **Knowledge Sync** — Capture conversations from ChatGPT, Claude, Gemini, Grok, Claude Code, Codex into one searchable knowledge base
+2. **Session Analysis** — Extract 12 cognitive dimensions from AI coding sessions (decisions, bugs, patterns, friction, knowledge gained, etc.)
+3. **Cognitive Tracking (Mirror)** — 3-layer signal lights, personal baseline, LLM-powered advice, trend tracking
 
 ## Quick Start
 
-CLI-first local workflow:
-
 ```bash
-# Install
-cargo install --path apps/cli
+# Install both tools
+cargo install --path apps/cli      # refine
+cargo install --path apps/mirror   # mirror
 
-# Configure LLM (.env file, supports any OpenAI-compatible API)
+# Configure LLM (.env file)
 cat > .env << 'EOF'
 REFINE_OPENAI_API_KEY=your_key
 REFINE_OPENAI_BASE_URL=https://api.openai.com
-REFINE_OPENAI_MODEL=gpt-5.2
+REFINE_OPENAI_MODEL=gpt-4o
 EOF
 
-# Ingest your AI coding sessions
+# Import your AI coding sessions
 refine ingest-sessions
 
-# Generate cognitive insights report
-refine insights --prescription
-
-# View growth dashboard
-refine growth
+# See your cognitive snapshot
+mirror score
 ```
 
-## Browser Extension (Plasmo)
+## Mirror — Cognitive Growth Tracker
+
+Mirror extracts cognitive fingerprints from your AI coding sessions and tracks growth over time.
+
+### Daily Usage
 
 ```bash
-# 1) Start local Refine server (default: http://localhost:8787)
-cargo run --package refine-server
-
-# 2) Run extension in another terminal
-cd apps/extension
-bun install
-bun run dev
+mirror score                        # 3-layer signal lights + LLM advice
+mirror motd                         # One-line briefing (add to .zshrc)
+mirror dashboard                    # Full ASCII dashboard
+mirror score --since 2026-03-20     # Filter by date
 ```
 
-Optional custom API endpoint:
+### Periodic Analysis
 
 ```bash
-cd apps/extension
-PLASMO_PUBLIC_REFINE_API_BASE=https://api.refine.so bun run dev
+mirror weekly                       # Weekly delta report (requires LLM)
+mirror profile                      # Cognitive portrait narrative (requires LLM)
+/cognitive-portrait                  # Deep 5-framework analysis (~1000 lines, Claude Code skill)
 ```
 
-Build / package:
+### What Mirror Tracks
+
+**3 Layers × 11 Indicators:**
+
+| Layer | Indicators | What It Measures |
+|-------|-----------|-----------------|
+| **Depth** | Dreyfus level, Decision quality, Depth output, Knowledge rate | Are you thinking at a higher level? |
+| **Breadth** | Exploration rate, Deep invest, Fragmentation | Are you investing wisely across projects? |
+| **Collaboration** | Delegation rate, Mode diversity, Bug/decision ratio, Friction density | Is your AI collaboration healthy? |
+
+**Signal Lights:** 🟢 Green (healthy) / 🟡 Yellow (watch) / 🔴 Red (act now)
+
+**Personal Baseline:** After 4 weeks, signals are relative to your own average, not fixed thresholds.
+
+### Terminal Integration
 
 ```bash
-cd apps/extension
-bun run build
-bun run package
+# Add to .zshrc — shows signal lights every time you open terminal
+[ -x "$(command -v mirror)" ] && mirror motd 2>/dev/null
 ```
 
-## CLI Commands
+**StatusLine** (Claude Code bottom bar):
+```
+本周243 深度🟢 广度🔴 协作🔴 每周开1次新方向探索
+```
 
-### Session Insights
+**SessionStart hook** injects cognitive dashboard + LLM advice into every Claude Code conversation.
+
+### Automation (launchd)
+
+| Schedule | Task | What It Does |
+|----------|------|-------------|
+| Daily 8:00 AM | `scripts/daily-refresh.sh` | `refine ingest-sessions` → `mirror score` |
+| Weekly Mon 9:00 AM | `scripts/weekly-insights.sh` | `refine insights --prescription` (10-way LLM) |
+
+### Configuration
+
+```toml
+# ~/.mirror/config.toml (optional, all have defaults)
+[targets]
+delegation_green = 0.40      # delegation < 40% = green
+exploration_green = 0.15     # exploration > 15% = green
+knowledge_green = 0.5        # knowledge rate > 0.5/session = green
+friction_green = 1.0         # friction < 1.0/session = green
+```
+
+### Data Flow
+
+```
+~/.claude/projects/*.jsonl          ← Claude Code sessions
+    │
+    ▼ refine ingest-sessions        (12-dimension facet extraction via LLM)
+    │
+SQLite (observations, documents)    ← Shared data store
+    │
+    ├─ mirror score/dashboard       (local clustering → signal lights)
+    ├─ mirror motd                  (reads cached scores + LLM advice)
+    ├─ mirror weekly                (delta analysis via LLM)
+    ├─ mirror profile               (cognitive portrait via LLM)
+    └─ /cognitive-portrait          (5-framework deep analysis, Claude Code skill)
+```
+
+## Refine CLI Commands
+
+### Session Analysis
 
 ```bash
-refine ingest-sessions                  # Ingest all sessions (incremental, skips processed)
+refine ingest-sessions                  # Import all sessions (incremental)
 refine ingest-sessions --source claude  # Claude Code only
-refine ingest-sessions --limit 100      # Limit count
 refine ingest-sessions --dry-run        # Preview without LLM calls
-
-refine insights                         # Generate L1-L3 report
-refine insights --prescription          # Include L4 growth prescription
-
-refine growth                           # Cognitive dashboard
-refine explore                          # Tag an exploration session
-refine deep-inquiry                     # Tag a deep thinking session
+refine insights --prescription          # L1-L4 cognitive report
+refine growth                           # Legacy dashboard (use mirror dashboard instead)
 ```
 
 ### Knowledge Management
 
 ```bash
-refine extract --stdin                  # Extract knowledge from stdin
-refine search "query"                   # Search knowledge base
-refine list                             # List all knowledge items
-refine list --type observation          # List cognitive observations
-refine add --title "t" --summary "s" --type knowledge  # Add an item
-refine show <id>                        # View details
-refine delete <id>                      # Delete an item
-refine docs                             # List session documents
-refine doc-show <id>                    # View session/report details
-refine doc-search "query"               # Search raw documents
+refine search "query"              # Search knowledge base
+refine list --type observation     # List cognitive observations
+refine show <id>                   # View item details
+refine docs                        # List session documents
 ```
 
-## Growth Dashboard
+## Extension Preview
 
-`refine growth` output:
+![Refine Browser Extension Dashboard](docs/images/extension-dashboard.png)
 
-```
-╔══════════════════════════════════════════════════════╗
-║               Cognitive Growth Dashboard             ║
-╠══════════════════════════════════════════════════════╣
-║ Sessions: 824  Observations: 9740                    ║
-╠══════════════════════════════════════════════════════╣
-║ Cognitive Level                                      ║
-║  expert      █░░░░░░░░░  11.5% ( 95)                ║
-║  proficient  ███░░░░░░░  34.1% (281)                ║
-║  competent   ████░░░░░░  39.8% (328)                ║
-╠══════════════════════════════════════════════════════╣
-║ Collaboration Mode                                   ║
-║  delegation  █████░░░░░  45.5% (375)                ║
-║  deep_inq    ██░░░░░░░░  18.8% (155)                ║
-║  exploration ██░░░░░░░░  16.5% (136)                ║
-╠══════════════════════════════════════════════════════╣
-║ Key Metrics                                          ║
-║  exploration   16.5%  target: >15%   ✓               ║
-║  delegation    45.5%  target: <40%   ✗               ║
-║  expert rate   11.5%  target: >15%   ✗               ║
-╚══════════════════════════════════════════════════════╝
+## Browser Extension (Plasmo)
+
+```bash
+cargo run --package refine-server  # Start API server
+cd apps/extension && bun install && bun run dev
 ```
 
 ## Architecture
 
 ```
-Claude Code / Codex session files (.jsonl)
-    │
-    ▼ refine ingest-sessions
-    Parse → Filter → 12-dimension facet extraction → SQLite
-    (3-way concurrent, resumable, exponential backoff retry)
-    │
-    ▼ refine insights
-    Local clustering (by project) → 10-way concurrent LLM analysis → Merged report
-    │
-    ▼ 3-layer continuous tracking
-    Terminal motd | refine growth | weekly tracker scripts
-```
-
-### 12 Extracted Dimensions
-
-| Dimension | Description |
-|-----------|-------------|
-| decisions | Technical decisions with rationale |
-| bugs_fixed | Bug root cause + fix approach |
-| patterns | Reusable code patterns |
-| friction | AI mistakes, blockers, misdirections |
-| project_progress | What was accomplished |
-| questions | Questions asked (reflects knowledge boundaries) |
-| knowledge_gained | New things learned |
-| tools_discovered | New tools/libraries discovered |
-| architecture | Architecture design and data flow |
-| code_artifacts | Key code output |
-| cognitive_level | novice → expert (Dreyfus model) |
-| collaboration_mode | delegation / exploration / deep_inquiry / ... |
-
-## Project Structure
-
-```
 refine/
-├── packages/core/src/
-│   ├── knowledge/          # Knowledge management (Item, Document, Repository)
-│   ├── refinement/         # Knowledge extraction (Conversation, Extractor)
-│   ├── session/            # Session analysis
-│   │   ├── discovery.rs        # Session file discovery
-│   │   ├── parser.rs           # JSONL parsing (Claude Code + Codex)
-│   │   ├── facets.rs           # 12-dimension facet extraction
-│   │   ├── clustering.rs       # Local clustering (group by project)
-│   │   ├── analysis_routes.rs  # 10-way LLM analysis routes
-│   │   └── report.rs           # Report merging
-│   ├── search/             # Search engine (FTS5)
-│   └── infra/              # Infrastructure (SQLite, LLM client)
+├── packages/core/          # Shared: SQLite, LLM client, session analysis, knowledge
 ├── apps/
-│   ├── cli/                # CLI tool (refine command)
+│   ├── cli/                # refine command (ingest, insights, search, growth)
+│   ├── mirror/             # mirror command (score, motd, dashboard, weekly, profile)
+│   │   └── src/score/      # Signal light engine (11 indicators, personal baseline)
 │   ├── server/             # API server (Axum)
 │   ├── desktop/            # Desktop app (Tauri)
 │   └── extension/          # Browser extension (Plasmo)
 └── scripts/
-    ├── weekly-insights.sh       # Weekly auto-analysis (launchd/cron)
-    └── reset-weekly-tracker.sh  # Weekly counter reset
+    ├── daily-refresh.sh    # Daily: ingest + mirror score
+    └── weekly-insights.sh  # Weekly: full LLM analysis
 ```
 
 ## Tech Stack
@@ -215,9 +177,10 @@ refine/
 |-------|-----------|
 | Core | Rust |
 | Database | SQLite + FTS5 |
-| LLM | OpenAI-compatible API (custom base_url supported) |
+| LLM | OpenAI-compatible API |
+| Terminal | unicode-width, ANSI (isatty-aware) |
 | Desktop | Tauri 2.0 |
-| Browser Extension | Plasmo |
+| Extension | Plasmo |
 
 ## License
 
