@@ -32,6 +32,9 @@ fn make_cluster(
                 architectures: Vec::new(),
                 knowledge_gained: Vec::new(),
                 patterns: Vec::new(),
+                progress_items: Vec::new(),
+                question_items: Vec::new(),
+                code_artifacts: Vec::new(),
             },
         );
     }
@@ -77,6 +80,9 @@ fn make_cluster_with_data(
                 architectures: Vec::new(),
                 knowledge_gained: knowledge.iter().map(|s| s.to_string()).collect(),
                 patterns: Vec::new(),
+                progress_items: Vec::new(),
+                question_items: Vec::new(),
+                code_artifacts: Vec::new(),
             },
         );
     }

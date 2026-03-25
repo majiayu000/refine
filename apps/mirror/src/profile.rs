@@ -125,7 +125,17 @@ fn extract_profile_data(
     }
 }
 
-fn build_profile_prompt(data: &ProfileData) -> String {
+fn dedup_top(items: &[String], limit: usize) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    items
+        .iter()
+        .filter(|s| seen.insert(s.as_str()))
+        .take(limit)
+        .cloned()
+        .collect()
+}
+
+fn build_profile_prompt(data: &ProfileData, cluster: &ClusterResult) -> String {
     let mut lines = Vec::new();
     lines.push(format!(
         "Total: {} sessions across {} projects",
@@ -156,6 +166,30 @@ fn build_profile_prompt(data: &ProfileData) -> String {
     ));
     lines.push(String::new());
     lines.push(format!("Current signal lights: {}", data.score_summary));
+
+    // Per-project facet dimensions
+    for p in &data.project_stats {
+        if let Some(c) = cluster.projects.get(&p.name) {
+            let progress = dedup_top(&c.progress_items, 5);
+            let questions = dedup_top(&c.question_items, 5);
+            let artifacts = dedup_top(&c.code_artifacts, 10);
+            if progress.is_empty() && questions.is_empty() && artifacts.is_empty() {
+                continue;
+            }
+            lines.push(String::new());
+            lines.push(format!("{}:", p.name));
+            if !progress.is_empty() {
+                lines.push(format!("  进展: {}", progress.join(" / ")));
+            }
+            if !questions.is_empty() {
+                lines.push(format!("  问题: {}", questions.join(" / ")));
+            }
+            if !artifacts.is_empty() {
+                lines.push(format!("  代码产出: {}", artifacts.join(" / ")));
+            }
+        }
+    }
+
     lines.join("\n")
 }
 
@@ -233,7 +267,7 @@ pub async fn handle_profile(
     let score_summary = format_score_summary(&score_result);
 
     let data = extract_profile_data(&cluster, &score_summary, &items);
-    let prompt = build_profile_prompt(&data);
+    let prompt = build_profile_prompt(&data, &cluster);
 
     println!(
         "{}\n",
@@ -294,6 +328,9 @@ mod tests {
                 architectures: Vec::new(),
                 knowledge_gained: Vec::new(),
                 patterns: Vec::new(),
+                progress_items: Vec::new(),
+                question_items: Vec::new(),
+                code_artifacts: Vec::new(),
             },
         );
 
@@ -320,6 +357,9 @@ mod tests {
                 architectures: Vec::new(),
                 knowledge_gained: Vec::new(),
                 patterns: Vec::new(),
+                progress_items: Vec::new(),
+                question_items: Vec::new(),
+                code_artifacts: Vec::new(),
             },
         );
 
@@ -378,11 +418,62 @@ mod tests {
     fn test_build_profile_prompt() {
         let cluster = make_cluster();
         let data = extract_profile_data(&cluster, "Depth G, Breadth Y", &[]);
-        let prompt = build_profile_prompt(&data);
+        let prompt = build_profile_prompt(&data, &cluster);
 
         assert!(prompt.contains("70 sessions across 2 projects"));
         assert!(prompt.contains("proj-a"));
         assert!(prompt.contains("100 decisions vs 50 bugfixes"));
         assert!(prompt.contains("Depth G, Breadth Y"));
+    }
+
+    #[test]
+    fn test_build_profile_prompt_includes_progress() {
+        let mut cluster = make_cluster();
+        cluster
+            .projects
+            .entry("proj-a".to_string())
+            .and_modify(|p| {
+                p.progress_items = vec!["step1".to_string(), "step2".to_string()];
+            });
+
+        let data = extract_profile_data(&cluster, "G", &[]);
+        let prompt = build_profile_prompt(&data, &cluster);
+
+        assert!(prompt.contains("进展:"));
+        assert!(prompt.contains("step1"));
+        assert!(prompt.contains("step2"));
+    }
+
+    #[test]
+    fn test_build_profile_prompt_empty_progress() {
+        let cluster = make_cluster();
+        let data = extract_profile_data(&cluster, "G", &[]);
+        let prompt = build_profile_prompt(&data, &cluster);
+
+        // No facet sections emitted when all are empty
+        assert!(!prompt.contains("进展:"));
+        assert!(!prompt.contains("问题:"));
+        assert!(!prompt.contains("代码产出:"));
+    }
+
+    #[test]
+    fn test_code_artifacts_truncated() {
+        let mut cluster = make_cluster();
+        cluster
+            .projects
+            .entry("proj-a".to_string())
+            .and_modify(|p| {
+                p.code_artifacts = (0..30).map(|i| format!("artifact_{}", i)).collect();
+            });
+
+        let data = extract_profile_data(&cluster, "G", &[]);
+        let prompt = build_profile_prompt(&data, &cluster);
+
+        assert!(prompt.contains("代码产出:"));
+        // At most 10 unique artifacts should appear
+        let artifact_count = (0..30)
+            .filter(|i| prompt.contains(&format!("artifact_{}", i)))
+            .count();
+        assert!(artifact_count <= 10);
     }
 }
