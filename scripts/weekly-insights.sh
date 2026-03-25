@@ -50,7 +50,7 @@ log "Step 3: notification"
 # data remains semantically dead.  We emit an unconditional deprecation warning
 # and omit the stale counters from the notification entirely.
 if [[ -f "$TRACKER_FILE" ]]; then
-  log "WARNING: ${TRACKER_FILE} is a DEPRECATED artifact — refine growth/explore/deep-inquiry commands have been permanently removed and no longer write to this file. All counters are stale regardless of file mtime. Use 'refine mirror score' for current data."
+  log "WARNING: ${TRACKER_FILE} is a DEPRECATED artifact — refine growth/explore/deep-inquiry commands have been permanently removed and no longer write to this file. All counters are stale regardless of file mtime. Use 'mirror score' for current data."
 fi
 osascript -e 'display notification "报告已生成（growth 指标已废弃，请使用 mirror score）" with title "Refine Weekly Insights"' 2>&1 || true
 
