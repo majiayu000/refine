@@ -6,7 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 pub(super) fn save(conn: &Connection, doc: &Document) -> InfraResult<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO documents (id, title, raw_content, source, url, captured_at, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT OR IGNORE INTO documents (id, title, raw_content, source, url, captured_at, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             doc.id().as_str(),
             doc.title(),

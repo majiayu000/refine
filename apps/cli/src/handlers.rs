@@ -32,6 +32,7 @@ pub async fn run(
         Commands::IngestSessions {
             source,
             limit,
+            latest,
             dry_run,
         } => {
             let source_filter = source.as_deref().and_then(parse_session_source);
@@ -46,6 +47,7 @@ pub async fn run(
                 IngestOptions {
                     source: source_filter,
                     limit,
+                    latest,
                     dry_run,
                 },
                 item_store,

@@ -21,6 +21,8 @@ const CONCURRENCY: usize = 3;
 pub struct IngestOptions {
     pub source: Option<SessionSource>,
     pub limit: Option<usize>,
+    /// 按 mtime 降序取最近 N 个会话，与 limit 互斥
+    pub latest: Option<usize>,
     pub dry_run: bool,
 }
 
@@ -42,9 +44,16 @@ pub async fn handle_ingest_sessions(
     doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
-    let discovered = discover_sessions(options.source);
+    let mut discovered = discover_sessions(options.source);
     println!("发现 {} 个会话文件", discovered.len());
 
+    // --latest: sort by mtime descending, keep N most recent
+    if let Some(n) = options.latest {
+        discovered.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+        discovered.truncate(n);
+    }
+
+    // --limit: path-ordered take (only active when latest is None, enforced by clap)
     let sessions_to_process: Vec<_> = match options.limit {
         Some(limit) => discovered.into_iter().take(limit).collect(),
         None => discovered,

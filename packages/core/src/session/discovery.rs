@@ -4,6 +4,8 @@
 
 use super::types::SessionSource;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+use tracing::warn;
 
 /// 发现的会话文件
 #[derive(Debug, Clone)]
@@ -11,6 +13,8 @@ pub struct DiscoveredSession {
     pub path: PathBuf,
     pub source: SessionSource,
     pub project: Option<String>,
+    /// 文件最后修改时间；stat 失败时记录 warn 并回退为 UNIX_EPOCH（不 panic）
+    pub modified_at: SystemTime,
 }
 
 /// 扫描所有会话文件
@@ -88,10 +92,18 @@ fn discover_claude_code(home: &Path, results: &mut Vec<DiscoveredSession>) {
                 if is_subagent_file(&path) {
                     continue;
                 }
+                let modified_at = file
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or_else(|e| {
+                        warn!(path = %path.display(), error = %e, "failed to read mtime; file treated as oldest for --latest");
+                        SystemTime::UNIX_EPOCH
+                    });
                 results.push(DiscoveredSession {
                     path,
                     source: SessionSource::ClaudeCode,
                     project: Some(project_name.clone()),
+                    modified_at,
                 });
             }
         }
@@ -118,10 +130,18 @@ fn walk_jsonl_recursive(dir: &Path, source: SessionSource, results: &mut Vec<Dis
             }
             walk_jsonl_recursive(&path, source.clone(), results);
         } else if is_session_jsonl(&path) && !is_subagent_file(&path) {
+            let modified_at = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or_else(|e| {
+                    warn!(path = %path.display(), error = %e, "failed to read mtime; file treated as oldest for --latest");
+                    SystemTime::UNIX_EPOCH
+                });
             results.push(DiscoveredSession {
                 path,
                 source: source.clone(),
                 project: None,
+                modified_at,
             });
         }
     }
@@ -206,5 +226,93 @@ mod tests {
 
         let all = discover_sessions_in(home, None);
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn modified_at_is_populated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        let project_dir = home.join(".claude/projects/proj");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("sess.jsonl"), "{}").unwrap();
+
+        let results = discover_sessions_in(home, Some(SessionSource::ClaudeCode));
+        assert_eq!(results.len(), 1);
+        // A freshly-created file must have mtime > UNIX_EPOCH
+        assert!(results[0].modified_at > SystemTime::UNIX_EPOCH);
+    }
+
+    #[test]
+    fn latest_returns_most_recent_n() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        let project_dir = home.join(".claude/projects/proj");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        // Create 5 files with explicitly staggered mtimes (1 s apart)
+        let _base = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+        let files = ["a.jsonl", "b.jsonl", "c.jsonl", "d.jsonl", "e.jsonl"];
+        for (i, name) in files.iter().enumerate() {
+            let p = project_dir.join(name);
+            fs::write(&p, "{}").unwrap();
+            let t = filetime::FileTime::from_unix_time(1_700_000_000 + i as i64, 0);
+            filetime::set_file_mtime(&p, t).unwrap();
+        }
+
+        let mut discovered = discover_sessions_in(home, Some(SessionSource::ClaudeCode));
+        assert_eq!(discovered.len(), 5);
+
+        // Simulate --latest 3
+        discovered.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+        discovered.truncate(3);
+
+        // Newest 3 are e, d, c (offsets 4, 3, 2)
+        let names: Vec<&str> = discovered
+            .iter()
+            .map(|s| s.path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["e.jsonl", "d.jsonl", "c.jsonl"]);
+    }
+
+    #[test]
+    fn latest_n_larger_than_total_returns_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        let project_dir = home.join(".claude/projects/proj");
+        fs::create_dir_all(&project_dir).unwrap();
+        for name in &["x.jsonl", "y.jsonl", "z.jsonl"] {
+            fs::write(project_dir.join(name), "{}").unwrap();
+        }
+
+        let mut discovered = discover_sessions_in(home, Some(SessionSource::ClaudeCode));
+        // --latest 100 on 3 files
+        discovered.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+        discovered.truncate(100);
+        assert_eq!(discovered.len(), 3);
+    }
+
+    #[test]
+    fn existing_limit_returns_path_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        let project_dir = home.join(".claude/projects/proj");
+        fs::create_dir_all(&project_dir).unwrap();
+        for name in &["a.jsonl", "b.jsonl", "c.jsonl"] {
+            fs::write(project_dir.join(name), "{}").unwrap();
+        }
+
+        // discover_sessions_in already sorts by path
+        let discovered = discover_sessions_in(home, Some(SessionSource::ClaudeCode));
+        let limited: Vec<_> = discovered.into_iter().take(2).collect();
+        assert_eq!(limited.len(), 2);
+        let names: Vec<&str> = limited
+            .iter()
+            .map(|s| s.path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["a.jsonl", "b.jsonl"]);
     }
 }
