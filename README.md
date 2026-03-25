@@ -78,7 +78,7 @@ mirror profile                      # Cognitive portrait narrative (requires LLM
 
 ```bash
 # Add to .zshrc — shows signal lights every time you open terminal
-[ -x "$(command -v mirror)" ] && mirror motd 2>> ~/.refine/hooks-error.log
+[ -x "$(command -v mirror)" ] && { mkdir -p ~/.refine && mirror motd 2>> ~/.refine/hooks-error.log; }
 ```
 
 **StatusLine** (Claude Code bottom bar):

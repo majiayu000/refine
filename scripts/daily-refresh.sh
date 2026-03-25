@@ -14,16 +14,23 @@ fi
 
 echo "=== $(date) ==="
 
-# 1. Ingest new sessions
+# 1. Ingest new sessions (capture exit code without aborting the script)
 echo "Step 1: ingest-sessions"
-refine ingest-sessions 2>&1
+if refine ingest-sessions 2>&1; then
+  ingest_ok=1
+else
+  ingest_ok=0
+  echo "⚠️  ingest-sessions reported failures; success timestamp will not be updated"
+fi
 
-# 2. Refresh mirror score + LLM advice
+# 2. Refresh mirror score + LLM advice (run regardless of ingest result)
 echo "Step 2: mirror score"
 mirror score 2>&1
 
 echo "Done."
 
-# Write success timestamp for cognitive-reminder staleness check
-mkdir -p ~/.refine
-date -u +%Y-%m-%dT%H:%M:%SZ > ~/.refine/last-refresh-ok
+# Write success timestamp only when ingest had zero failures
+if [ "$ingest_ok" -eq 1 ]; then
+  mkdir -p ~/.refine
+  date -u +%Y-%m-%dT%H:%M:%SZ > ~/.refine/last-refresh-ok
+fi

@@ -182,7 +182,8 @@ pub async fn handle_ingest_sessions(
         processed, skipped_dup, skipped_filter, failed, total_items
     );
     if failed > 0 {
-        println!("提示: 重新运行即可续传失败的会话");
+        eprintln!("提示: 重新运行即可续传失败的会话");
+        return Err(anyhow::anyhow!("{} 个会话提取失败", failed));
     }
 
     Ok(())
