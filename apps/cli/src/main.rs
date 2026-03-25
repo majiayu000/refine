@@ -3,7 +3,6 @@
 //! 知识管理命令行工具
 
 mod cli;
-mod growth;
 mod handlers;
 mod ingest_sessions;
 mod insights;
