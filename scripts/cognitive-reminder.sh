@@ -18,8 +18,9 @@ else
 fi
 
 now=$(date +%s)
-age_hours=$(( (now - mtime) / 3600 ))
+age_seconds=$(( now - mtime ))
 
-if [[ "$age_hours" -gt "$THRESHOLD_HOURS" ]]; then
+if [[ "$age_seconds" -gt $(( THRESHOLD_HOURS * 3600 )) ]]; then
+  age_hours=$(( age_seconds / 3600 ))
   echo "⚠️  [refine] Last daily refresh was ${age_hours}h ago (threshold: ${THRESHOLD_HOURS}h). Check ~/.refine/hooks-error.log or run scripts/daily-refresh.sh manually." >&2
 fi

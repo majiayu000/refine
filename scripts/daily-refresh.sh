@@ -34,3 +34,8 @@ if [ "$ingest_ok" -eq 1 ]; then
   mkdir -p ~/.refine
   date -u +%Y-%m-%dT%H:%M:%SZ > ~/.refine/last-refresh-ok
 fi
+
+# Propagate ingest failure to exit status for launchd/cron health monitoring
+if [ "$ingest_ok" -eq 0 ]; then
+  exit 1
+fi
