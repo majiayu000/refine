@@ -7,8 +7,7 @@ use std::path::Path;
 
 /// 解析 JSONL 文件为 Session
 pub fn parse_session_file(path: &Path, source: SessionSource) -> Result<Session, String> {
-    let content =
-        std::fs::read_to_string(path).map_err(|e| format!("读取文件失败: {}", e))?;
+    let content = std::fs::read_to_string(path).map_err(|e| format!("读取文件失败: {}", e))?;
     parse_session_content(&content, path, source)
 }
 
@@ -81,10 +80,7 @@ fn parse_claude_code_line(
         }
         "system" => {
             // 提取模型信息
-            if let Some(model) = value
-                .pointer("/message/model")
-                .and_then(|v| v.as_str())
-            {
+            if let Some(model) = value.pointer("/message/model").and_then(|v| v.as_str()) {
                 meta.model = Some(model.to_string());
             }
         }
@@ -199,13 +195,13 @@ mod tests {
 
         assert_eq!(session.messages.len(), 2);
         assert_eq!(session.messages[0].role, MessageRole::User);
-        assert_eq!(
-            session.messages[0].content,
-            "How do I write tests in Rust?"
-        );
+        assert_eq!(session.messages[0].content, "How do I write tests in Rust?");
         assert_eq!(session.messages[1].role, MessageRole::Assistant);
         assert_eq!(session.messages[1].content, "Use #[test] attribute.");
-        assert_eq!(session.meta.model.as_deref(), Some("claude-sonnet-4-20250514"));
+        assert_eq!(
+            session.meta.model.as_deref(),
+            Some("claude-sonnet-4-20250514")
+        );
     }
 
     #[test]

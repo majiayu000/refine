@@ -71,7 +71,10 @@ fn maybe_rebuild_fts_index(conn: &Connection) -> InfraResult<bool> {
     }
 
     if conn
-        .execute("INSERT INTO items_fts(items_fts) VALUES('integrity-check')", [])
+        .execute(
+            "INSERT INTO items_fts(items_fts) VALUES('integrity-check')",
+            [],
+        )
         .is_ok()
     {
         return Ok(false);
@@ -79,8 +82,11 @@ fn maybe_rebuild_fts_index(conn: &Connection) -> InfraResult<bool> {
 
     conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')", [])
         .map_err(|e| InfraError::Database(e.to_string()))?;
-    conn.execute("INSERT INTO items_fts(items_fts) VALUES('integrity-check')", [])
-        .map_err(|e| InfraError::Database(e.to_string()))?;
+    conn.execute(
+        "INSERT INTO items_fts(items_fts) VALUES('integrity-check')",
+        [],
+    )
+    .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(true)
 }
 pub(super) fn find_by_id(conn: &Connection, id: &str) -> InfraResult<Option<Item>> {

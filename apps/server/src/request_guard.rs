@@ -47,8 +47,8 @@ pub fn validate_client_contract(headers: &HeaderMap) -> Result<(), Response> {
 #[cfg(test)]
 mod tests {
     use super::{validate_client_contract, CONTRACT_VERSION_HEADER};
-    use refine_core::infra::{is_contract_compatible, normalize_contract_major};
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    use refine_core::infra::{is_contract_compatible, normalize_contract_major};
 
     #[test]
     fn normalize_contract_major_uses_first_segment() {

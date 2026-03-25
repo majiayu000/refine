@@ -405,7 +405,10 @@ fn job_status_from_db(raw: &str) -> JobStatus {
 }
 
 fn collect_event_counts(
-    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<(String, i64)>>,
+    rows: rusqlite::MappedRows<
+        '_,
+        impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<(String, i64)>,
+    >,
 ) -> Result<Vec<(String, usize)>, String> {
     let mut counts = Vec::new();
     for row in rows {
@@ -424,7 +427,10 @@ mod tests {
     use uuid::Uuid;
 
     fn temp_db_path() -> PathBuf {
-        std::env::temp_dir().join(format!("refine-server-persistence-test-{}.db", Uuid::new_v4()))
+        std::env::temp_dir().join(format!(
+            "refine-server-persistence-test-{}.db",
+            Uuid::new_v4()
+        ))
     }
 
     fn cleanup(path: &Path) {
@@ -485,7 +491,10 @@ mod tests {
         let persistence = ServerPersistence::new(path.clone()).expect("persistence init failed");
 
         persistence
-            .insert_event(&build_event("conversation_extracted", "2020-01-01T00:00:00Z"))
+            .insert_event(&build_event(
+                "conversation_extracted",
+                "2020-01-01T00:00:00Z",
+            ))
             .expect("insert old event");
         let recent = now_iso();
         persistence

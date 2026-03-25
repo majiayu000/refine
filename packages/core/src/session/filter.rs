@@ -79,7 +79,11 @@ mod tests {
     #[test]
     fn filter_sessions_removes_low_quality() {
         let config = FilterConfig::default();
-        let sessions = vec![make_session(1, 10), make_session(3, 200), make_session(1, 50)];
+        let sessions = vec![
+            make_session(1, 10),
+            make_session(3, 200),
+            make_session(1, 50),
+        ];
         let filtered = filter_sessions(sessions, &config);
         assert_eq!(filtered.len(), 1);
     }

@@ -1,5 +1,5 @@
-use super::{doc_ops, ops};
 use super::rows::configure_connection;
+use super::{doc_ops, ops};
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{Document, Item, ItemType};
 use rusqlite::Connection;
@@ -219,7 +219,11 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
         SqliteCommand::DocFindById { id, resp } => {
             let _ = resp.send(doc_ops::find_by_id(conn, &id));
         }
-        SqliteCommand::DocFindRecent { offset, limit, resp } => {
+        SqliteCommand::DocFindRecent {
+            offset,
+            limit,
+            resp,
+        } => {
             let _ = resp.send(doc_ops::find_recent(conn, offset, limit));
         }
         SqliteCommand::DocCount { resp } => {
@@ -228,7 +232,12 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
         SqliteCommand::DocDelete { id, resp } => {
             let _ = resp.send(doc_ops::delete(conn, &id));
         }
-        SqliteCommand::DocSearchText { query, offset, limit, resp } => {
+        SqliteCommand::DocSearchText {
+            query,
+            offset,
+            limit,
+            resp,
+        } => {
             let _ = resp.send(doc_ops::search_text(conn, &query, offset, limit));
         }
         SqliteCommand::DocCountTextHits { query, resp } => {

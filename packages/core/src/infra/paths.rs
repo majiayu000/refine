@@ -31,8 +31,13 @@ pub fn resolve_db_path(fallback_keys: &[&str]) -> PathBuf {
 /// Creates parent directories for the given path.
 pub fn ensure_db_dir(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create database directory {}: {}", parent.display(), e))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "failed to create database directory {}: {}",
+                parent.display(),
+                e
+            )
+        })?;
     }
     Ok(())
 }
@@ -71,11 +76,17 @@ mod tests {
         // 2) unified env takes priority over fallback
         std::env::set_var("REFINE_DB_PATH", "/tmp/unified.db");
         std::env::set_var("__REFINE_TEST_A", "/tmp/fallback.db");
-        assert_eq!(resolve_db_path(&["__REFINE_TEST_A"]), PathBuf::from("/tmp/unified.db"));
+        assert_eq!(
+            resolve_db_path(&["__REFINE_TEST_A"]),
+            PathBuf::from("/tmp/unified.db")
+        );
 
         // 3) fallback key used when unified is absent
         std::env::remove_var("REFINE_DB_PATH");
-        assert_eq!(resolve_db_path(&["__REFINE_TEST_A"]), PathBuf::from("/tmp/fallback.db"));
+        assert_eq!(
+            resolve_db_path(&["__REFINE_TEST_A"]),
+            PathBuf::from("/tmp/fallback.db")
+        );
 
         // cleanup
         std::env::remove_var("__REFINE_TEST_A");

@@ -61,14 +61,30 @@ impl Document {
 
     // 查询方法
 
-    pub fn id(&self) -> &DocumentId { &self.id }
-    pub fn title(&self) -> Option<&str> { self.title.as_deref() }
-    pub fn raw_content(&self) -> &str { &self.raw_content }
-    pub fn source(&self) -> &str { &self.source }
-    pub fn url(&self) -> &str { &self.url }
-    pub fn captured_at(&self) -> DateTime<Utc> { self.captured_at }
-    pub fn created_at(&self) -> DateTime<Utc> { self.created_at }
-    pub fn updated_at(&self) -> DateTime<Utc> { self.updated_at }
+    pub fn id(&self) -> &DocumentId {
+        &self.id
+    }
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+    pub fn raw_content(&self) -> &str {
+        &self.raw_content
+    }
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+    pub fn captured_at(&self) -> DateTime<Utc> {
+        self.captured_at
+    }
+    pub fn created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+    pub fn updated_at(&self) -> DateTime<Utc> {
+        self.updated_at
+    }
 
     // 命令方法
 

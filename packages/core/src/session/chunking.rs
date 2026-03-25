@@ -76,8 +76,8 @@ fn build_chunk(messages: &[&SessionMessage]) -> SessionChunk {
 fn role_label_len(role: &MessageRole) -> usize {
     match role {
         MessageRole::User => 6,       // "User: "
-        MessageRole::Assistant => 12,  // "Assistant: "
-        MessageRole::System => 9,      // "System: "
+        MessageRole::Assistant => 12, // "Assistant: "
+        MessageRole::System => 9,     // "System: "
     }
 }
 

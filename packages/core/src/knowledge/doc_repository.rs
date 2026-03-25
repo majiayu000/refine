@@ -14,6 +14,11 @@ pub trait DocumentRepository: Send + Sync {
     async fn count(&self) -> RepoResult<usize>;
     async fn save(&self, doc: &Document) -> RepoResult<()>;
     async fn delete(&self, id: &DocumentId) -> RepoResult<bool>;
-    async fn search_text(&self, query: &str, offset: usize, limit: usize) -> RepoResult<Vec<Document>>;
+    async fn search_text(
+        &self,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> RepoResult<Vec<Document>>;
     async fn count_text_hits(&self, query: &str) -> RepoResult<usize>;
 }
