@@ -20,7 +20,8 @@ LOCK_DIR="${REFINE_DIR}/.growth.lock"
 LAST_SCAN_REF="${REFINE_DIR}/.last_scan_ref"
 SEEN_SESSIONS_FILE="${REFINE_DIR}/.seen_sessions"
 SESSIONS_DIR="${HOME}/.claude/projects"
-MAX_LOCK_AGE=120  # seconds; locks older than this are assumed stale (guards PID reuse)
+MAX_LOCK_AGE=120       # seconds; locks older than this are assumed stale (guards PID reuse)
+MAX_LOCK_WAIT_TAGGER=5 # seconds to wait for lock in no-flock path before giving up
 
 # Tunable classification thresholds
 DELEGATION_KEYWORD_THRESHOLD=8
@@ -219,17 +220,20 @@ else
       date +%s > "${LOCK_DIR}/created"
       return 0
     fi
-    # Lock dir exists — check if holder is still alive.
-    # Never steal the lock from a live process: doing so allows concurrent writes
-    # to growth-tracker.json and .seen_sessions (double-count / overwrite).
-    # PID reuse after a crash is possible but far less likely than a long scan
-    # legitimately exceeding a fixed age threshold.
-    local p
+    # Lock dir exists — check if holder is still alive AND the lock is fresh.
+    # Using only kill -0 is insufficient: after a crash the PID can be reused by
+    # an unrelated live process, causing tagger to silently skip forever.
+    # MAX_LOCK_AGE bounds that window: a lock older than MAX_LOCK_AGE seconds is
+    # treated as stale regardless of whether kill -0 succeeds.
+    local p created_ts now_ts lock_age
     p=$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)
-    if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; then
-      return 1  # live process holds the lock
+    created_ts=$(cat "${LOCK_DIR}/created" 2>/dev/null || echo 0)
+    now_ts=$(date +%s)
+    lock_age=$(( now_ts - created_ts ))
+    if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null && [[ "$lock_age" -lt "$MAX_LOCK_AGE" ]]; then
+      return 1  # live process holds a fresh lock
     fi
-    # Stale lock (process gone or no PID file) — remove and retry once.
+    # Stale lock (process gone, no PID/created file, or age >= MAX_LOCK_AGE) — remove and retry once.
     rm -rf "$LOCK_DIR"
     if mkdir "$LOCK_DIR" 2>/dev/null; then
       echo $$ > "${LOCK_DIR}/pid"
@@ -239,12 +243,21 @@ else
     return 1
   }
 
-  if _try_acquire_lock; then
-    trap 'rm -rf "$LOCK_DIR" 2>/dev/null || true' EXIT
-    do_scan_and_update
-    rm -rf "$LOCK_DIR" 2>/dev/null || true
-  else
-    # Another live instance holds the lock; skip this run (next run will re-scan).
-    exit 0
-  fi
+  # Wait up to MAX_LOCK_WAIT_TAGGER seconds rather than exiting immediately when
+  # the lock is busy.  Exiting right away means sessions written after the
+  # winner's upper_ref cutoff (but before the lock is released) are only captured
+  # by the next hook invocation.  A short wait lets this instance run with its
+  # own upper_ref, closing that gap.
+  waited=0
+  until _try_acquire_lock; do
+    if [[ $waited -ge $MAX_LOCK_WAIT_TAGGER ]]; then
+      # Timed out — next hook invocation will re-scan from current LAST_SCAN_REF.
+      exit 0
+    fi
+    sleep 1
+    waited=$(( waited + 1 ))
+  done
+  trap 'rm -rf "$LOCK_DIR" 2>/dev/null || true' EXIT
+  do_scan_and_update
+  rm -rf "$LOCK_DIR" 2>/dev/null || true
 fi
