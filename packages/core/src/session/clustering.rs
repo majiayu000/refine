@@ -76,17 +76,21 @@ pub struct ClusterResult {
 
 /// 主函数：从全量 observation 生成聚类结果
 pub fn cluster_observations(items: &[Item]) -> ClusterResult {
-    let observations: Vec<&Item> = items
+    // Single filtering pass: compute tags once per item to avoid double allocation.
+    let obs_with_tags: Vec<(&Item, Vec<&str>)> = items
         .iter()
         .filter(|i| i.item_type() == ItemType::Observation)
+        .map(|item| {
+            let tags: Vec<&str> = item.tags().iter().map(|t| t.as_str()).collect();
+            (item, tags)
+        })
         .collect();
 
-    // Phase 0: Build doc_id → project mapping from summary items (they have project tags)
+    // Phase 0: Build doc_id → project mapping (reuses precomputed tags)
     let mut doc_project_map: HashMap<String, String> = HashMap::new();
-    for item in &observations {
+    for (item, tags) in &obs_with_tags {
         if let Some(doc_id) = item.document_id() {
-            let tags: Vec<&str> = item.tags().iter().map(|t| t.as_str()).collect();
-            if let Some(name) = extract_project_from_tags(&tags) {
+            if let Some(name) = extract_project_from_tags(tags) {
                 doc_project_map
                     .entry(doc_id.as_str().to_string())
                     .or_insert(name);
@@ -104,10 +108,9 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
     let mut total_bugfixes = 0usize;
     let mut total_summaries = 0usize;
 
-    for item in &observations {
-        let tags: Vec<&str> = item.tags().iter().map(|t| t.as_str()).collect();
+    for (item, tags) in &obs_with_tags {
         // Try own tags first, then inherit from session's summary item
-        let project = extract_project_from_tags(&tags).or_else(|| {
+        let project = extract_project_from_tags(tags).or_else(|| {
             item.document_id()
                 .and_then(|doc_id| doc_project_map.get(doc_id.as_str()).cloned())
         });
@@ -161,7 +164,7 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
                 .push(format!("【{}】{}", item.title(), excerpt));
 
             // 提取认知水平和协作模式
-            for tag in &tags {
+            for tag in tags {
                 if is_cognitive_level(tag) {
                     *cluster.cognitive_levels.entry(tag.to_string()).or_insert(0) += 1;
                     *global_cognitive.entry(tag.to_string()).or_insert(0) += 1;
