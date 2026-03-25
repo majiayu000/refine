@@ -70,6 +70,11 @@ pub(super) enum SqliteCommand {
         since: DateTime<Utc>,
         resp: oneshot::Sender<InfraResult<Vec<Item>>>,
     },
+    FindByDateRange {
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        resp: oneshot::Sender<InfraResult<Vec<Item>>>,
+    },
     // Document 操作
     DocFindByUrl {
         url: String,
@@ -217,6 +222,9 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
         }
         SqliteCommand::FindSince { since, resp } => {
             let _ = resp.send(ops::find_since(conn, since));
+        }
+        SqliteCommand::FindByDateRange { start, end, resp } => {
+            let _ = resp.send(ops::find_by_date_range(conn, start, end));
         }
         SqliteCommand::DocFindByUrl { url, resp } => {
             let _ = resp.send(doc_ops::find_by_url(conn, &url));

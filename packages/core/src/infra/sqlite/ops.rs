@@ -349,6 +349,25 @@ pub(super) fn find_since(conn: &Connection, since: DateTime<Utc>) -> InfraResult
     rows.map(|r| r.map_err(|e| InfraError::Database(e.to_string())))
         .collect()
 }
+pub(super) fn find_by_date_range(
+    conn: &Connection,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> InfraResult<Vec<Item>> {
+    let mut stmt = conn
+        .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at, document_id, excerpt FROM items WHERE created_at BETWEEN ?1 AND ?2 ORDER BY created_at DESC")
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+
+    let rows = stmt
+        .query_map([start.to_rfc3339(), end.to_rfc3339()], |row| {
+            row_to_item(row).map_err(to_row_err)
+        })
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+
+    rows.map(|r| r.map_err(|e| InfraError::Database(e.to_string())))
+        .collect()
+}
+
 pub(super) fn find_by_document_id(conn: &Connection, document_id: &str) -> InfraResult<Vec<Item>> {
     let mut stmt = conn
         .prepare(
@@ -408,5 +427,62 @@ mod tests {
 
         let rebuilt_again = maybe_rebuild_fts_index(&conn).expect("check fts state again");
         assert!(!rebuilt_again);
+    }
+
+    #[test]
+    fn find_by_date_range_returns_items_in_range() {
+        use super::{find_by_date_range, save};
+        use crate::knowledge::{Item, ItemId, ItemType, RestoreParams};
+        use chrono::{Duration, TimeZone, Utc};
+
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        init_schema(&conn).expect("init schema");
+
+        let base = Utc.with_ymd_and_hms(2026, 1, 10, 0, 0, 0).unwrap();
+
+        let make_item = |days_offset: i64| {
+            let ts = base + Duration::days(days_offset);
+            Item::restore(RestoreParams {
+                id: ItemId::new(),
+                item_type: ItemType::Observation,
+                title: format!("item +{}d", days_offset),
+                summary: String::new(),
+                content: String::new(),
+                tags: vec![],
+                source: None,
+                document_id: None,
+                excerpt: None,
+                created_at: ts,
+                updated_at: ts,
+            })
+            .unwrap()
+        };
+
+        save(&conn, &make_item(-5)).unwrap(); // 2026-01-05 — before range
+        save(&conn, &make_item(0)).unwrap(); // 2026-01-10 — start boundary
+        save(&conn, &make_item(5)).unwrap(); // 2026-01-15 — inside range
+        save(&conn, &make_item(10)).unwrap(); // 2026-01-20 — end boundary
+        save(&conn, &make_item(15)).unwrap(); // 2026-01-25 — after range
+
+        let start = base;
+        let end = base + Duration::days(10);
+        let result = find_by_date_range(&conn, start, end).unwrap();
+
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn find_by_date_range_empty_when_no_items_in_range() {
+        use super::find_by_date_range;
+        use chrono::{Duration, Utc};
+
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        init_schema(&conn).expect("init schema");
+
+        let start = Utc::now() + Duration::days(100);
+        let end = Utc::now() + Duration::days(200);
+        let result = find_by_date_range(&conn, start, end).unwrap();
+
+        assert!(result.is_empty());
     }
 }
