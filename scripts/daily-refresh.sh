@@ -23,3 +23,7 @@ echo "Step 2: mirror score"
 mirror score 2>&1
 
 echo "Done."
+
+# Write success timestamp for cognitive-reminder staleness check
+mkdir -p ~/.refine
+date -u +%Y-%m-%dT%H:%M:%SZ > ~/.refine/last-refresh-ok
