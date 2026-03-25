@@ -10,7 +10,7 @@ pub(super) fn init_schema(conn: &Connection) -> InfraResult<()> {
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     migrate_items_add_document_columns(conn)?;
-    migrate_documents_add_url_index(conn)?;
+    migrate_documents_url_unique(conn)?;
     let _ = maybe_rebuild_fts_index(conn)?;
 
     Ok(())
@@ -32,9 +32,20 @@ fn migrate_items_add_document_columns(conn: &Connection) -> InfraResult<()> {
     Ok(())
 }
 
-fn migrate_documents_add_url_index(conn: &Connection) -> InfraResult<()> {
-    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_documents_url ON documents(url)")
+fn migrate_documents_url_unique(conn: &Connection) -> InfraResult<()> {
+    // Remove duplicate URLs keeping the earliest-inserted row before adding constraint.
+    conn.execute_batch(
+        "DELETE FROM documents WHERE rowid NOT IN (SELECT MIN(rowid) FROM documents GROUP BY url)",
+    )
+    .map_err(|e| InfraError::Database(e.to_string()))?;
+    // Drop old non-unique index (may not exist on fresh databases).
+    conn.execute_batch("DROP INDEX IF EXISTS idx_documents_url")
         .map_err(|e| InfraError::Database(e.to_string()))?;
+    // Create unique index so concurrent inserts of the same URL fail fast.
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_url ON documents(url)",
+    )
+    .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(())
 }
 

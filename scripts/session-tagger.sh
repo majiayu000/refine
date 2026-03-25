@@ -30,5 +30,10 @@ if [[ -f "${ENV_FILE}" ]]; then
   set +a
 fi
 
-# Fire-and-forget: ingest the latest 1 session, do not block the hook
-nohup refine ingest-sessions --latest 1 >> "${LOG_FILE}" 2>&1 &
+LOCK_FILE="${LOG_DIR}/ingest.lock"
+
+# Fire-and-forget: ingest the latest 1 Claude session, do not block the hook.
+# flock -n ensures only one ingest runs at a time; if another is already in
+# progress the new invocation is skipped rather than racing with it.
+nohup flock -n "${LOCK_FILE}" \
+  refine ingest-sessions --latest 1 --source claude >> "${LOG_FILE}" 2>&1 &
