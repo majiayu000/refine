@@ -17,6 +17,7 @@ REFINE_DIR="${HOME}/.refine"
 TRACKER_FILE="${REFINE_DIR}/growth-tracker.json"
 LOCK_FILE="${REFINE_DIR}/.growth-tracker.lock"
 LOCK_DIR="${REFINE_DIR}/.growth.lock"
+LAST_SCAN_REF="${REFINE_DIR}/.last_scan_ref"
 SESSIONS_DIR="${HOME}/.claude/projects"
 
 # Tunable classification thresholds
@@ -94,49 +95,57 @@ classify_session() {
 # ── Scan + classify + update (runs entirely inside the lock) ──────────────────
 #
 # All three phases are inside the lock so that:
-#   • Two concurrent runs cannot claim the same file window (fixes race / double-count).
-#   • now_ts is captured BEFORE candidate enumeration so files written during
-#     classification are not skipped permanently — they land after now_ts and
-#     will be picked up by the next run (fixes watermark gap).
+#   • Two concurrent runs cannot claim the same file window (no race / double-count).
+#   • upper_ref is created BEFORE enumeration, giving an explicit upper bound so
+#     files written during classification fall outside the window and are picked up
+#     by the next run — avoids both over-counting and missed-file gaps.
+#   • LAST_SCAN_REF persists the watermark at sub-second mtime precision so that
+#     files in the same second as the cut-off are never re-selected.
 
 do_scan_and_update() {
-  # Phase A: read watermark and enumerate candidates ──────────────────────────
+  # Create upper-bound ref BEFORE enumeration — its mtime is the exact cut-off.
+  # Any .jsonl whose mtime > upper_ref is excluded from this run and will be
+  # found in the next run (its mtime > LAST_SCAN_REF after we advance it).
+  local upper_ref lower_ref
+  upper_ref=$(mktemp /tmp/session-tagger-upper.XXXXXX)
+  lower_ref=$(mktemp /tmp/session-tagger-lower.XXXXXX)
+  # shellcheck disable=SC2064
+  trap "rm -f '$upper_ref' '$lower_ref'" RETURN
 
-  local last_scan_ts
-  last_scan_ts=$(jq -r '.last_scan_ts // ""' "$TRACKER_FILE")
+  # Phase A: establish lower bound ─────────────────────────────────────────────
 
-  # Capture now_ts before enumerating so files created between enumeration and
-  # update are guaranteed to appear in the next run's window.
-  local now_ts
-  now_ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-
-  local ref_file
-  ref_file=$(mktemp /tmp/session-tagger-ref.XXXXXX)
-
-  if [[ -z "$last_scan_ts" ]]; then
-    # First run: touch to epoch so all files match
-    touch -t 197001010000 "$ref_file"
+  if [[ -f "$LAST_SCAN_REF" ]]; then
+    # Authoritative sub-second watermark: copy its mtime directly to lower_ref.
+    touch -r "$LAST_SCAN_REF" "$lower_ref"
   else
-    # touch -d accepts ISO 8601 on both GNU and macOS (with coreutils)
-    if ! touch -d "$last_scan_ts" "$ref_file" 2>/dev/null; then
-      # macOS BSD touch: convert to format it understands via date
-      local ts_local
-      ts_local=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last_scan_ts" "+%Y%m%d%H%M.%S" 2>/dev/null || \
-                 date -d "$last_scan_ts" "+%Y%m%d%H%M.%S")
-      touch -t "$ts_local" "$ref_file"
+    # Bootstrap: LAST_SCAN_REF absent — derive from JSON timestamp (first run or
+    # migration from an older version of this script that lacked LAST_SCAN_REF).
+    local last_scan_ts
+    last_scan_ts=$(jq -r '.last_scan_ts // ""' "$TRACKER_FILE")
+    if [[ -z "$last_scan_ts" ]]; then
+      # First ever run: epoch so every existing file is scanned.
+      touch -t 197001010000 "$lower_ref"
+    elif ! touch -d "$last_scan_ts" "$lower_ref" 2>/dev/null; then
+      # macOS BSD touch lacks -d. Parse the UTC timestamp and set mtime in UTC
+      # (TZ=UTC on both date and touch prevents a local-timezone offset shift
+      # that would rescan already-counted files — issue #3).
+      local ts_fmt
+      ts_fmt=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last_scan_ts" "+%Y%m%d%H%M.%S" 2>/dev/null || \
+               TZ=UTC date -d "$last_scan_ts" "+%Y%m%d%H%M.%S")
+      TZ=UTC touch -t "$ts_fmt" "$lower_ref"
     fi
   fi
 
-  # Collect candidates — use while+read+print0 instead of mapfile for bash 3.2
-  # compatibility (mapfile is a bash 4+ builtin absent on macOS default shell).
+  # Collect candidates in half-open window (lower_ref, upper_ref].
+  # -not -newer upper_ref closes the upper bound (issue #1 + #2).
+  # while+read+print0 instead of mapfile for bash 3.2 compatibility.
   local candidates=()
   if [[ -d "$SESSIONS_DIR" ]]; then
     while IFS= read -r -d '' f; do
       candidates+=("$f")
-    done < <(find "$SESSIONS_DIR" -name "*.jsonl" -newer "$ref_file" -print0 2>/dev/null)
+    done < <(find "$SESSIONS_DIR" -name "*.jsonl" \
+               -newer "$lower_ref" -not -newer "$upper_ref" -print0 2>/dev/null)
   fi
-
-  rm -f "$ref_file"
 
   # Phase B: classify ─────────────────────────────────────────────────────────
 
@@ -155,7 +164,9 @@ do_scan_and_update() {
   done
 
   # Phase C: atomic tracker update ────────────────────────────────────────────
-  # Write now_ts (pre-scan timestamp) as the new watermark.
+
+  local now_ts
+  now_ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
   jq -c \
     --arg ts "$now_ts" \
@@ -169,6 +180,11 @@ do_scan_and_update() {
      .total_sessions += $dt |
      .last_scan_ts = $ts' \
     "$TRACKER_FILE" > "${TRACKER_FILE}.tmp" && mv "${TRACKER_FILE}.tmp" "$TRACKER_FILE"
+
+  # Advance the sub-second watermark to upper_ref's exact mtime.
+  # Done AFTER the JSON write so a failed write leaves the watermark un-advanced
+  # and candidates are safely re-processed on the next run.
+  touch -r "$upper_ref" "$LAST_SCAN_REF"
 }
 
 # ── Lock and run ──────────────────────────────────────────────────────────────
