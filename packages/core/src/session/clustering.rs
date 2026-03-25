@@ -205,9 +205,7 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
                 .question_items
                 .extend(extract_section_items(content, "问题"));
             cluster.code_artifacts.extend(
-                extract_section_items(content, "代码产出")
-                    .into_iter()
-                    .take(20),
+                extract_section_items_capped(content, "代码产出", 20),
             );
         }
     }
@@ -273,9 +271,16 @@ fn dedup_titles(titles: Vec<String>) -> Vec<String> {
 }
 
 fn extract_section_items(content: &str, section_name: &str) -> Vec<String> {
+    extract_section_items_capped(content, section_name, usize::MAX)
+}
+
+fn extract_section_items_capped(content: &str, section_name: &str, limit: usize) -> Vec<String> {
     let mut in_section = false;
     let mut items = Vec::new();
     for line in content.lines() {
+        if items.len() >= limit {
+            break;
+        }
         let trimmed = line.trim();
         if trimmed.ends_with(':') && !trimmed.starts_with('-') {
             in_section = trimmed.trim_end_matches(':') == section_name;

@@ -125,13 +125,22 @@ fn extract_profile_data(
     }
 }
 
+const ITEM_MAX_CHARS: usize = 120;
+const FACET_BUDGET_CHARS: usize = 4000;
+
 fn dedup_top(items: &[String], limit: usize) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     items
         .iter()
         .filter(|s| seen.insert(s.as_str()))
         .take(limit)
-        .cloned()
+        .map(|s| {
+            if s.chars().count() > ITEM_MAX_CHARS {
+                s.chars().take(ITEM_MAX_CHARS).collect::<String>() + "…"
+            } else {
+                s.clone()
+            }
+        })
         .collect()
 }
 
@@ -167,8 +176,12 @@ fn build_profile_prompt(data: &ProfileData, cluster: &ClusterResult) -> String {
     lines.push(String::new());
     lines.push(format!("Current signal lights: {}", data.score_summary));
 
-    // Per-project facet dimensions
+    // Per-project facet dimensions (total budget capped to avoid LLM context overflow)
+    let mut facet_chars_used: usize = 0;
     for p in &data.project_stats {
+        if facet_chars_used >= FACET_BUDGET_CHARS {
+            break;
+        }
         if let Some(c) = cluster.projects.get(&p.name) {
             let progress = dedup_top(&c.progress_items, 5);
             let questions = dedup_top(&c.question_items, 5);
@@ -176,17 +189,21 @@ fn build_profile_prompt(data: &ProfileData, cluster: &ClusterResult) -> String {
             if progress.is_empty() && questions.is_empty() && artifacts.is_empty() {
                 continue;
             }
-            lines.push(String::new());
-            lines.push(format!("{}:", p.name));
+            let mut block = Vec::new();
+            block.push(String::new());
+            block.push(format!("{}:", p.name));
             if !progress.is_empty() {
-                lines.push(format!("  进展: {}", progress.join(" / ")));
+                block.push(format!("  进展: {}", progress.join(" / ")));
             }
             if !questions.is_empty() {
-                lines.push(format!("  问题: {}", questions.join(" / ")));
+                block.push(format!("  问题: {}", questions.join(" / ")));
             }
             if !artifacts.is_empty() {
-                lines.push(format!("  代码产出: {}", artifacts.join(" / ")));
+                block.push(format!("  代码产出: {}", artifacts.join(" / ")));
             }
+            let block_str = block.join("\n");
+            facet_chars_used += block_str.len();
+            lines.push(block_str);
         }
     }
 
