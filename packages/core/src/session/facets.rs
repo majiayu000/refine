@@ -47,21 +47,32 @@ pub fn build_facet_prompt(session_content: &str) -> String {
 会话内容:
 {session_content}
 
-请以 JSON 格式返回:
+提取优先级（高优先级维度应尽量填充）:
+1. decisions（最重要）— 明确的技术决策，含选择原因和被拒绝的替代方案
+2. bugs_fixed — 修复的 bug，含根因分析
+3. patterns — 通用可复用的设计/编码模式
+4. knowledge_gained — 次要，仅记录真正新颖的技术知识
+
+维度边界说明（避免重叠）:
+- patterns: 通用可复用的编码/设计惯例（如 Builder 模式、错误处理约定），不依赖具体项目
+- knowledge_gained: 针对特定技术、API 或领域的新认知（如"了解到 serde 支持 flatten"），不是通用模式
+- architecture: 本项目的系统级结构决策（模块划分、服务边界、数据流），与具体项目强绑定；纯讨论不记录，只记录已确定的决策
+
+请以 JSON 格式返回（严格遵守每个字段的条目上限）:
 {{
   "session_summary": "一句话概括会话核心内容",
   "cognitive_level": "novice|advanced_beginner|competent|proficient|expert",
   "collaboration_mode": "delegation|pair_programming|review|exploration|teaching|deep_inquiry",
-  "decisions": ["做出的技术决策（含原因）"],
-  "bugs_fixed": ["修复的 bug（含根因）"],
-  "patterns": ["使用或发现的设计模式/编码模式"],
-  "friction": ["遇到的阻力/困难"],
-  "project_progress": ["项目推进的里程碑"],
-  "questions": ["提出的深度问题"],
-  "knowledge_gained": ["获得的新知识"],
-  "tools_discovered": ["发现或使用的工具/库"],
-  "architecture": ["架构设计相关的讨论或决策"],
-  "code_artifacts": ["产出的关键代码文件/模块"]
+  "decisions": ["做出的技术决策（含原因），最多 5 条"],
+  "bugs_fixed": ["修复的 bug（含根因），最多 5 条"],
+  "patterns": ["通用可复用的设计/编码模式，最多 3 条"],
+  "friction": ["遇到的阻力/困难，最多 3 条"],
+  "project_progress": ["项目推进的里程碑，最多 3 条"],
+  "questions": ["提出的深度问题，最多 3 条"],
+  "knowledge_gained": ["获得的新技术知识（仅记录新颖认知），最多 5 条"],
+  "tools_discovered": ["发现或使用的工具/库，最多 3 条"],
+  "architecture": ["本项目系统级架构决策（仅已确定的），最多 3 条"],
+  "code_artifacts": ["产出的关键代码文件/模块，最多 5 条"]
 }}
 
 每个数组中的条目应为简洁的描述性文本。空数组表示该维度无观测。"#
@@ -93,10 +104,12 @@ pub fn parse_facet_response(response: &str) -> Result<FacetResponse, String> {
         }
     }
 
-    Err(format!(
-        "无法解析 facet 响应: {}",
-        &trimmed[..trimmed.len().min(200)]
-    ))
+    let preview = trimmed
+        .char_indices()
+        .find(|&(i, _)| i >= 200)
+        .map(|(i, _)| &trimmed[..i])
+        .unwrap_or(trimmed);
+    Err(format!("无法解析 facet 响应: {}", preview))
 }
 
 fn extract_json_from_fence(text: &str) -> Option<String> {
