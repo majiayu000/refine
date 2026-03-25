@@ -4,6 +4,8 @@ set -euo pipefail
 REFINE_DIR="${HOME}/.refine"
 TRACKER_FILE="${REFINE_DIR}/growth-tracker.json"
 HISTORY_FILE="${REFINE_DIR}/growth-history.jsonl"
+LAST_SCAN_REF="${REFINE_DIR}/.last_scan_ref"
+SEEN_SESSIONS_FILE="${REFINE_DIR}/.seen_sessions"
 LOG_PREFIX="[refine-reset]"
 
 log() {
@@ -37,5 +39,10 @@ jq --arg ws "$new_week_start" '{
   total_sessions: 0,
   last_scan_ts: ""
 }' "$TRACKER_FILE" > "${TRACKER_FILE}.tmp" && mv "${TRACKER_FILE}.tmp" "$TRACKER_FILE"
+
+# Remove watermark and seen-sessions list so the next scan starts fresh from
+# the new week boundary (issue #2: last_scan_ts reset alone was insufficient
+# because session-tagger.sh prefers .last_scan_ref when the file exists).
+rm -f "$LAST_SCAN_REF" "$SEEN_SESSIONS_FILE"
 
 log "Weekly tracker reset complete"

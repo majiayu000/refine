@@ -18,7 +18,9 @@ TRACKER_FILE="${REFINE_DIR}/growth-tracker.json"
 LOCK_FILE="${REFINE_DIR}/.growth-tracker.lock"
 LOCK_DIR="${REFINE_DIR}/.growth.lock"
 LAST_SCAN_REF="${REFINE_DIR}/.last_scan_ref"
+SEEN_SESSIONS_FILE="${REFINE_DIR}/.seen_sessions"
 SESSIONS_DIR="${HOME}/.claude/projects"
+MAX_LOCK_AGE=120  # seconds; locks older than this are assumed stale (guards PID reuse)
 
 # Tunable classification thresholds
 DELEGATION_KEYWORD_THRESHOLD=8
@@ -149,19 +151,26 @@ do_scan_and_update() {
   fi
 
   # Phase B: classify ─────────────────────────────────────────────────────────
+  # Skip files already counted in a prior run so that an active .jsonl whose
+  # mtime advances on every append is never double-counted (issue #1 in review).
 
   local delta_exploration=0 delta_deep=0 delta_delegation=0 delta_total=0
+  local new_files=()
   local f tag
   for f in "${candidates[@]+"${candidates[@]}"}"; do
     [[ -f "$f" ]] || continue
+    # grep -qxF: exact whole-line literal match — bash 3.2 safe, no assoc arrays
+    if [[ -f "$SEEN_SESSIONS_FILE" ]] && grep -qxF "$f" "$SEEN_SESSIONS_FILE" 2>/dev/null; then
+      continue
+    fi
     tag=$(classify_session "$f" 2>/dev/null || echo "uncategorized")
     case "$tag" in
       exploration)  delta_exploration=$(( delta_exploration + 1 )) ;;
       deep_inquiry) delta_deep=$(( delta_deep + 1 )) ;;
       delegation)   delta_delegation=$(( delta_delegation + 1 )) ;;
     esac
-    # Use $(( )) assignment — never returns non-zero, safe under set -e
     delta_total=$(( delta_total + 1 ))
+    new_files+=("$f")
   done
 
   # Phase C: atomic tracker update ────────────────────────────────────────────
@@ -186,6 +195,11 @@ do_scan_and_update() {
   # Done AFTER the JSON write so a failed write leaves the watermark un-advanced
   # and candidates are safely re-processed on the next run.
   touch -r "$upper_ref" "$LAST_SCAN_REF"
+
+  # Record newly counted files to prevent re-counting on future runs.
+  if [[ ${#new_files[@]} -gt 0 ]]; then
+    printf '%s\n' "${new_files[@]}" >> "$SEEN_SESSIONS_FILE"
+  fi
 }
 
 # ── Lock and run ──────────────────────────────────────────────────────────────
@@ -202,18 +216,26 @@ else
   _try_acquire_lock() {
     if mkdir "$LOCK_DIR" 2>/dev/null; then
       echo $$ > "${LOCK_DIR}/pid"
+      date +%s > "${LOCK_DIR}/created"
       return 0
     fi
-    # Lock dir exists — check if holder is still alive.
-    local p
+    # Lock dir exists — check if holder is still alive AND the lock is fresh.
+    # kill -0 alone is unsafe: after a crash the PID may be reused by an
+    # unrelated process, making the lock appear permanently live (issue #3).
+    # Adding an age check ensures the lock is force-expired after MAX_LOCK_AGE.
+    local p created now age
     p=$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)
-    if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; then
-      return 1  # live process holds the lock
+    created=$(cat "${LOCK_DIR}/created" 2>/dev/null || echo 0)
+    now=$(date +%s)
+    age=$(( now - created ))
+    if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null && [[ $age -lt $MAX_LOCK_AGE ]]; then
+      return 1  # live process with a fresh lock
     fi
-    # Stale lock (process gone or no PID file) — remove and retry once.
+    # Stale lock (process gone, no PID file, or lock expired) — remove and retry once.
     rm -rf "$LOCK_DIR"
     if mkdir "$LOCK_DIR" 2>/dev/null; then
       echo $$ > "${LOCK_DIR}/pid"
+      date +%s > "${LOCK_DIR}/created"
       return 0
     fi
     return 1
