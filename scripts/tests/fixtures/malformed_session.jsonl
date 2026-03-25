@@ -1,0 +1,5 @@
+{"role":"user","content":"this is valid"}
+{broken json here
+{"role":"user","content":"another valid line"}
+not json at all
+{"role":"assistant","content":"response"}

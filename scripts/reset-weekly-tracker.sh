@@ -34,7 +34,8 @@ jq --arg ws "$new_week_start" '{
   deep_inquiry_sessions: 0,
   delegation_sessions: 0,
   prediction_before_ask: 0,
-  total_sessions: 0
+  total_sessions: 0,
+  last_scan_ts: ""
 }' "$TRACKER_FILE" > "${TRACKER_FILE}.tmp" && mv "${TRACKER_FILE}.tmp" "$TRACKER_FILE"
 
 log "Weekly tracker reset complete"
