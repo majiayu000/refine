@@ -10,7 +10,8 @@ SEEN_SESSIONS_FILE="${REFINE_DIR}/.seen_sessions"
 LOCK_FILE="${REFINE_DIR}/.growth-tracker.lock"
 LOCK_DIR="${REFINE_DIR}/.growth.lock"
 LOG_PREFIX="[refine-reset]"
-MAX_LOCK_WAIT=15  # seconds to wait for the tagger to release the lock
+MAX_LOCK_WAIT=15   # seconds to wait for the tagger to release the lock
+MAX_LOCK_AGE=120   # seconds — mirrors session-tagger.sh; locks older than this are assumed stale (guards PID reuse)
 
 log() {
   echo "${LOG_PREFIX} $(date '+%Y-%m-%d %H:%M:%S') $*"
@@ -80,15 +81,20 @@ else
       date +%s > "${LOCK_DIR}/created"
       return 0
     fi
-    # Lock dir exists — check if the holder is still alive.
-    # Without this check an abnormal exit (crash/SIGKILL) leaves a permanent
-    # stale lock and all subsequent weekly resets fail indefinitely (issue #4).
-    local p
+    # Lock dir exists — check if the holder is still alive AND the lock is fresh.
+    # Using only kill -0 is insufficient: after a crash the PID can be reused by
+    # an unrelated live process, causing weekly resets to time out indefinitely.
+    # MAX_LOCK_AGE bounds that window: a lock older than MAX_LOCK_AGE seconds is
+    # treated as stale regardless of whether kill -0 succeeds.
+    local p created_ts now_ts lock_age
     p=$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)
-    if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; then
-      return 1  # live process holds the lock
+    created_ts=$(cat "${LOCK_DIR}/created" 2>/dev/null || echo 0)
+    now_ts=$(date +%s)
+    lock_age=$(( now_ts - created_ts ))
+    if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null && [[ "$lock_age" -lt "$MAX_LOCK_AGE" ]]; then
+      return 1  # live process holds a fresh lock
     fi
-    # Stale lock — remove and retry once.
+    # Stale lock (process gone, no PID/created file, or age >= MAX_LOCK_AGE) — remove and retry once.
     rm -rf "$LOCK_DIR"
     if mkdir "$LOCK_DIR" 2>/dev/null; then
       echo $$ > "${LOCK_DIR}/pid"
