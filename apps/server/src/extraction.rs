@@ -1,4 +1,4 @@
-use refine_core::knowledge::{Document, DocumentRepository, Source};
+use refine_core::knowledge::{Document, DocumentId, DocumentRepository, Source};
 use refine_core::refinement::{extract_items_with_defaults, ExtractionPolicy, ItemExtractionInput};
 use std::sync::Arc;
 
@@ -46,8 +46,7 @@ async fn run_extraction(
     if let Some(title) = &conversation.title {
         doc.set_title(title);
     }
-    let doc_id = doc.id().clone();
-    save_document(&state.doc_store, &doc).await?;
+    let doc_id = save_document(&state.doc_store, &doc).await?;
 
     let input = ItemExtractionInput {
         source: &conversation.source,
@@ -200,14 +199,23 @@ where
     }
 }
 
+// Saves the document (INSERT OR IGNORE) and returns the canonical DocumentId.
+// If the URL already exists the insert is a no-op, so we look up the actual
+// stored document to return its ID instead of the freshly-generated one.
 async fn save_document(
     doc_store: &Arc<dyn DocumentRepository>,
     doc: &Document,
-) -> Result<(), String> {
+) -> Result<DocumentId, String> {
     doc_store
         .save(doc)
         .await
-        .map_err(|e| format!("failed to save document: {}", e))
+        .map_err(|e| format!("failed to save document: {}", e))?;
+    doc_store
+        .find_by_url(doc.url())
+        .await
+        .map_err(|e| format!("failed to find document by url after save: {}", e))?
+        .map(|d| d.id().clone())
+        .ok_or_else(|| "document not found after save — unexpected state".to_string())
 }
 
 async fn update_conversation<F>(

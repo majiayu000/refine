@@ -33,6 +33,23 @@ fn migrate_items_add_document_columns(conn: &Connection) -> InfraResult<()> {
 }
 
 fn migrate_documents_url_unique(conn: &Connection) -> InfraResult<()> {
+    // Remap items that point to a duplicate document to the kept document (earliest rowid
+    // per URL) before deleting duplicates, so no items become orphans after the migration.
+    conn.execute_batch(
+        "UPDATE items
+         SET document_id = (
+             SELECT d_keep.id
+             FROM documents d_dup
+             JOIN documents d_keep ON d_dup.url = d_keep.url
+             WHERE d_dup.id = items.document_id
+               AND d_keep.rowid = (SELECT MIN(rowid) FROM documents WHERE url = d_dup.url)
+         )
+         WHERE document_id IN (
+             SELECT id FROM documents
+             WHERE rowid NOT IN (SELECT MIN(rowid) FROM documents GROUP BY url)
+         )",
+    )
+    .map_err(|e| InfraError::Database(e.to_string()))?;
     // Remove duplicate URLs keeping the earliest-inserted row before adding constraint.
     conn.execute_batch(
         "DELETE FROM documents WHERE rowid NOT IN (SELECT MIN(rowid) FROM documents GROUP BY url)",
