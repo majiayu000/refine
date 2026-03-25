@@ -2,6 +2,7 @@ use super::rows::configure_connection;
 use super::{doc_ops, ops};
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{Document, Item, ItemType};
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -63,6 +64,15 @@ pub(super) enum SqliteCommand {
     },
     FindByDocumentId {
         document_id: String,
+        resp: oneshot::Sender<InfraResult<Vec<Item>>>,
+    },
+    FindSince {
+        since: DateTime<Utc>,
+        resp: oneshot::Sender<InfraResult<Vec<Item>>>,
+    },
+    FindByDateRange {
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
         resp: oneshot::Sender<InfraResult<Vec<Item>>>,
     },
     // Document 操作
@@ -209,6 +219,12 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
         }
         SqliteCommand::FindByDocumentId { document_id, resp } => {
             let _ = resp.send(ops::find_by_document_id(conn, &document_id));
+        }
+        SqliteCommand::FindSince { since, resp } => {
+            let _ = resp.send(ops::find_since(conn, since));
+        }
+        SqliteCommand::FindByDateRange { start, end, resp } => {
+            let _ = resp.send(ops::find_by_date_range(conn, start, end));
         }
         SqliteCommand::DocFindByUrl { url, resp } => {
             let _ = resp.send(doc_ops::find_by_url(conn, &url));

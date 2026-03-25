@@ -21,17 +21,23 @@ pub struct Cli {
 pub enum Commands {
     /// Compute 3-layer signal lights + 9 indicators + tension analysis
     Score {
-        /// Filter observations since date (YYYY-MM-DD), default: all
+        /// Filter observations since date (YYYY-MM-DD), default: last 90 days
         #[arg(long)]
         since: Option<String>,
+        /// Show all observations regardless of date (overrides default 90-day window)
+        #[arg(long)]
+        all: bool,
     },
     /// One-line briefing (add to .zshrc)
     Motd,
     /// Full ASCII dashboard
     Dashboard {
-        /// Filter observations since date (YYYY-MM-DD), default: all
+        /// Filter observations since date (YYYY-MM-DD), default: last 90 days
         #[arg(long)]
         since: Option<String>,
+        /// Show all observations regardless of date (overrides default 90-day window)
+        #[arg(long)]
+        all: bool,
     },
     /// Weekly delta analysis (requires LLM)
     Weekly,

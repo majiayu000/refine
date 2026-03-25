@@ -5,6 +5,7 @@
 use crate::error::RepoResult;
 use crate::knowledge::{DocumentId, Item, ItemId, ItemType, Tag};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 
 /// Item 仓储接口
 #[async_trait]
@@ -40,6 +41,16 @@ pub trait ItemRepository: Send + Sync {
 
     /// 是否存在
     async fn exists(&self, id: &ItemId) -> RepoResult<bool>;
+
+    /// 查找 since 时间点之后创建的所有 items
+    async fn find_since(&self, since: DateTime<Utc>) -> RepoResult<Vec<Item>>;
+
+    /// 查找 start..=end 时间范围内创建的 items（SQL: WHERE created_at BETWEEN start AND end）
+    async fn find_by_date_range(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> RepoResult<Vec<Item>>;
 
     /// 全文搜索（分页）
     async fn search_text(&self, query: &str, offset: usize, limit: usize) -> RepoResult<Vec<Item>>;

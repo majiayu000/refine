@@ -11,7 +11,7 @@ mod tests;
 
 use anyhow::Result;
 use chrono::{DateTime, NaiveDate, Utc};
-use refine_core::knowledge::{Item, ItemRepository};
+use refine_core::knowledge::{Item, ItemRepository, ItemType};
 use refine_core::session::cluster_observations;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,6 +39,8 @@ use persistence::load_recent_scores_from_path;
 
 /// Filter items to only those created since the given date string (YYYY-MM-DD).
 /// If `since` is None, returns all items unchanged.
+// Preserved for use in tests and potential future callers.
+#[allow(dead_code)]
 pub fn filter_since(items: Vec<Item>, since: &Option<String>) -> Result<Vec<Item>> {
     let Some(since_str) = since.as_deref() else {
         return Ok(items);
@@ -61,13 +63,56 @@ pub async fn handle_score(
     repo: Arc<dyn ItemRepository>,
     llm: Option<Arc<dyn refine_core::infra::LlmClient>>,
     since: Option<String>,
+    all: bool,
     db_path: &Path,
 ) -> Result<()> {
-    let all_items = repo
-        .find_all()
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    let items = filter_since(all_items, &since)?;
+    if all && since.is_some() {
+        anyhow::bail!("--all and --since are mutually exclusive");
+    }
+    let items = if all {
+        repo.find_all()
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+    } else if let Some(ref since_str) = since {
+        let date = chrono::NaiveDate::parse_from_str(since_str, "%Y-%m-%d")
+            .map_err(|e| anyhow::anyhow!("invalid --since date '{}': {}", since_str, e))?;
+        let cutoff = date
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| anyhow::anyhow!("invalid date"))?
+            .and_utc();
+        repo.find_since(cutoff)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+    } else {
+        let cutoff = Utc::now() - chrono::Duration::days(90);
+        repo.find_since(cutoff)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+    };
+    if items.is_empty() {
+        println!(
+            "{}",
+            crate::lang::t!(
+                "No observation data. Run `refine ingest-sessions` first.",
+                "暂无观测数据。请先运行 `refine ingest-sessions` 导入会话。"
+            )
+        );
+        return Ok(());
+    }
+    let obs_count = items
+        .iter()
+        .filter(|i| i.item_type() == ItemType::Observation)
+        .count();
+    if obs_count == 0 {
+        println!(
+            "{}",
+            crate::lang::t!(
+                "No observation data in the time window. Run `refine ingest-sessions` first.",
+                "当前时间窗口内无观测数据。请先运行 `refine ingest-sessions` 导入会话。"
+            )
+        );
+        return Ok(());
+    }
     let cluster = cluster_observations(&items);
     let config = crate::config::load();
     let mut result = compute(&cluster, &config.targets);
