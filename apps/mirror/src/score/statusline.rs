@@ -3,6 +3,16 @@ use std::path::{Path, PathBuf};
 
 use super::types::ScoreResult;
 
+/// Sanitize a string for safe single-line statusline output.
+///
+/// Strips newlines, carriage returns, and ASCII control characters that could
+/// corrupt the statusline file or inject terminal escape sequences.
+fn sanitize_single_line(s: &str) -> String {
+    s.chars()
+        .filter(|c| *c != '\n' && *c != '\r' && !c.is_ascii_control())
+        .collect()
+}
+
 /// Build the one-line statusline string from score data.
 ///
 /// Format: "本周N 深度🟢 广度🔴 协作🔴 <short_advice>"
@@ -20,8 +30,9 @@ pub fn build_statusline(result: &ScoreResult, session_count: u64, short: &str) -
         format!("{}{}", crate::lang::t!("Breadth", "广度"), breadth_e),
         format!("{}{}", crate::lang::t!("Collab", "协作"), collab_e),
     ];
-    if !short.is_empty() {
-        parts.push(short.to_string());
+    let sanitized = sanitize_single_line(short);
+    if !sanitized.is_empty() {
+        parts.push(sanitized);
     }
     parts.join(" ")
 }
@@ -46,24 +57,63 @@ fn growth_tracker_path(db_path: &Path) -> PathBuf {
 ///
 /// Called after `mirror score` completes so that `cat ~/.mirror/statusline.txt`
 /// returns the status in O(1) without spawning python3.
+///
+/// Uses an atomic write (temp file + rename) to prevent concurrent readers from
+/// observing a partially-written file.
 pub fn write_statusline(result: &ScoreResult, db_path: &Path) -> Result<()> {
-    let session_count = std::fs::read_to_string(growth_tracker_path(db_path))
-        .ok()
-        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-        .and_then(|v| v.get("total_sessions").and_then(|n| n.as_u64()))
-        .unwrap_or(0);
+    let tracker_path = growth_tracker_path(db_path);
+    let session_count = match std::fs::read_to_string(&tracker_path) {
+        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(v) => v
+                .get("total_sessions")
+                .and_then(|n| n.as_u64())
+                .unwrap_or_else(|| {
+                    eprintln!(
+                        "[mirror] warn: growth-tracker.json missing 'total_sessions' field, defaulting to 0"
+                    );
+                    0
+                }),
+            Err(e) => {
+                eprintln!(
+                    "[mirror] error: failed to parse growth-tracker.json at {}: {}",
+                    tracker_path.display(),
+                    e
+                );
+                0
+            }
+        },
+        Err(e) => {
+            eprintln!(
+                "[mirror] error: failed to read growth-tracker.json at {}: {}",
+                tracker_path.display(),
+                e
+            );
+            0
+        }
+    };
 
-    let short = crate::advice::load_cached()
-        .ok()
-        .flatten()
-        .map(|c| c.short)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_default();
+    let short = match crate::advice::load_cached() {
+        Ok(cached) => cached
+            .map(|c| c.short)
+            .filter(|s: &String| !s.is_empty())
+            .unwrap_or_default(),
+        Err(e) => {
+            eprintln!("[mirror] error: failed to load advice cache: {}", e);
+            String::new()
+        }
+    };
 
     let line = build_statusline(result, session_count, &short);
     let dir = crate::config::ensure_mirror_dir()?;
-    std::fs::write(dir.join("statusline.txt"), &line)
-        .map_err(|e| anyhow::anyhow!("failed to write statusline.txt: {}", e))?;
+    let dest = dir.join("statusline.txt");
+
+    // Atomic write: write to a sibling temp file then rename.
+    // On POSIX, rename(2) is atomic, so readers never see a partial write.
+    let tmp = dir.join("statusline.txt.tmp");
+    std::fs::write(&tmp, &line)
+        .map_err(|e| anyhow::anyhow!("failed to write statusline.txt.tmp: {}", e))?;
+    std::fs::rename(&tmp, &dest)
+        .map_err(|e| anyhow::anyhow!("failed to rename statusline.txt.tmp -> statusline.txt: {}", e))?;
     Ok(())
 }
 
