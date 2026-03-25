@@ -1,6 +1,7 @@
 use super::rows::{row_to_item, to_fts_query};
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{Item, ItemType};
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 const FTS_BOOTSTRAP_USER_VERSION: i64 = 1;
@@ -333,6 +334,20 @@ pub(super) fn count_text_hits(conn: &Connection, query: &str) -> InfraResult<usi
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     Ok(count.max(0) as usize)
+}
+pub(super) fn find_since(conn: &Connection, since: DateTime<Utc>) -> InfraResult<Vec<Item>> {
+    let mut stmt = conn
+        .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at, document_id, excerpt FROM items WHERE created_at >= ?1 ORDER BY created_at DESC")
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+
+    let rows = stmt
+        .query_map([since.to_rfc3339()], |row| {
+            row_to_item(row).map_err(to_row_err)
+        })
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+
+    rows.map(|r| r.map_err(|e| InfraError::Database(e.to_string())))
+        .collect()
 }
 pub(super) fn find_by_document_id(conn: &Connection, document_id: &str) -> InfraResult<Vec<Item>> {
     let mut stmt = conn

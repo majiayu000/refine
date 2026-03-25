@@ -42,12 +42,12 @@ async fn main() -> Result<()> {
     let store = Arc::new(SqliteStore::open(&db_path).context("Failed to open database")?);
 
     match cli.command {
-        Commands::Score { since } => {
+        Commands::Score { since, all } => {
             let llm = build_llm_client_from_env();
-            score::handle_score(store, llm, since, &db_path).await
+            score::handle_score(store, llm, since, all, &db_path).await
         }
         Commands::Motd => motd::handle_motd(),
-        Commands::Dashboard { since } => dashboard::handle_dashboard(store, since).await,
+        Commands::Dashboard { since, all } => dashboard::handle_dashboard(store, since, all).await,
         Commands::Weekly => {
             let llm = build_llm_client_from_env().ok_or_else(|| {
                 anyhow::anyhow!(

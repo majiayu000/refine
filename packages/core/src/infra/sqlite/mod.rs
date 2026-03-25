@@ -8,6 +8,7 @@ use crate::knowledge::{
     Document, DocumentId, DocumentRepository, Item, ItemId, ItemRepository, ItemType, Tag,
 };
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
 use tokio::sync::oneshot;
 
@@ -136,6 +137,12 @@ impl ItemRepository for SqliteStore {
     async fn count_text_hits(&self, query: &str) -> RepoResult<usize> {
         let query = query.to_string();
         self.request(|resp| SqliteCommand::CountTextHits { query, resp })
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn find_since(&self, since: DateTime<Utc>) -> RepoResult<Vec<Item>> {
+        self.request(|resp| SqliteCommand::FindSince { since, resp })
             .await
             .map_err(Into::into)
     }

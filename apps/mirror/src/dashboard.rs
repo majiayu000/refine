@@ -28,12 +28,34 @@ fn box_w() -> usize {
     76
 }
 
-pub async fn handle_dashboard(repo: Arc<dyn ItemRepository>, since: Option<String>) -> Result<()> {
-    let all_items = repo
-        .find_all()
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    let items = score::filter_since(all_items, &since)?;
+pub async fn handle_dashboard(
+    repo: Arc<dyn ItemRepository>,
+    since: Option<String>,
+    all: bool,
+) -> Result<()> {
+    if all && since.is_some() {
+        anyhow::bail!("--all and --since are mutually exclusive");
+    }
+    let items = if all {
+        repo.find_all()
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+    } else if let Some(ref since_str) = since {
+        let date = chrono::NaiveDate::parse_from_str(since_str, "%Y-%m-%d")
+            .map_err(|e| anyhow::anyhow!("invalid --since date '{}': {}", since_str, e))?;
+        let cutoff = date
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| anyhow::anyhow!("invalid date"))?
+            .and_utc();
+        repo.find_since(cutoff)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+    } else {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(90);
+        repo.find_since(cutoff)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+    };
     if items.is_empty() {
         println!(
             "{}",
