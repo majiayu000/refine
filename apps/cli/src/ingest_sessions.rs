@@ -132,8 +132,7 @@ pub async fn handle_ingest_sessions(
     }
 
     // 阶段 2: 并发做 LLM 提取 + 保存
-    let client = llm_client
-        .ok_or_else(|| anyhow::anyhow!("非 dry-run 模式需要 LLM API Key"))?;
+    let client = llm_client.ok_or_else(|| anyhow::anyhow!("非 dry-run 模式需要 LLM API Key"))?;
     let semaphore = Arc::new(Semaphore::new(CONCURRENCY));
     let processed = Arc::new(AtomicUsize::new(0));
     let failed = Arc::new(AtomicUsize::new(0));
@@ -161,12 +160,7 @@ pub async fn handle_ingest_sessions(
                     total_items.fetch_add(item_count, Ordering::Relaxed);
                 }
                 Err(e) => {
-                    eprintln!(
-                        "  ✗ [{}/{}] 失败: {}",
-                        ps.idx + 1,
-                        ps.total,
-                        e
-                    );
+                    eprintln!("  ✗ [{}/{}] 失败: {}", ps.idx + 1, ps.total, e);
                     failed.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -188,7 +182,8 @@ pub async fn handle_ingest_sessions(
         processed, skipped_dup, skipped_filter, failed, total_items
     );
     if failed > 0 {
-        println!("提示: 重新运行即可续传失败的会话");
+        eprintln!("提示: 重新运行即可续传失败的会话");
+        return Err(anyhow::anyhow!("{} 个会话提取失败", failed));
     }
 
     Ok(())
@@ -238,10 +233,7 @@ async fn process_single_session(
     Ok(item_count)
 }
 
-async fn llm_call_with_retry(
-    client: &Arc<dyn LlmClient>,
-    content: &str,
-) -> Result<String> {
+async fn llm_call_with_retry(client: &Arc<dyn LlmClient>, content: &str) -> Result<String> {
     let prompt = build_facet_prompt(content);
     let mut last_err = String::new();
 

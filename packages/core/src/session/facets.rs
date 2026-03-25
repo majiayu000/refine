@@ -93,7 +93,10 @@ pub fn parse_facet_response(response: &str) -> Result<FacetResponse, String> {
         }
     }
 
-    Err(format!("无法解析 facet 响应: {}", &trimmed[..trimmed.len().min(200)]))
+    Err(format!(
+        "无法解析 facet 响应: {}",
+        &trimmed[..trimmed.len().min(200)]
+    ))
 }
 
 fn extract_json_from_fence(text: &str) -> Option<String> {
@@ -124,8 +127,7 @@ pub fn facets_to_items(
     let mut items = Vec::new();
 
     // 宏观标注作为一个综合 observation
-    let mut summary_item =
-        Item::new_observation(&facets.session_summary, &facets.session_summary);
+    let mut summary_item = Item::new_observation(&facets.session_summary, &facets.session_summary);
     let mut content = format!(
         "认知水平: {}\n协作模式: {}",
         facets.cognitive_level, facets.collaboration_mode
@@ -134,7 +136,10 @@ pub fn facets_to_items(
         content.push_str(&format!("\n\n决策:\n- {}", facets.decisions.join("\n- ")));
     }
     if !facets.bugs_fixed.is_empty() {
-        content.push_str(&format!("\n\nBug 修复:\n- {}", facets.bugs_fixed.join("\n- ")));
+        content.push_str(&format!(
+            "\n\nBug 修复:\n- {}",
+            facets.bugs_fixed.join("\n- ")
+        ));
     }
     if !facets.patterns.is_empty() {
         content.push_str(&format!("\n\n模式:\n- {}", facets.patterns.join("\n- ")));

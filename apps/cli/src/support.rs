@@ -1,7 +1,5 @@
 use anyhow::{anyhow, Result};
-use refine_core::infra::{
-    build_llm_client_from_env as build_core_llm_client_from_env, LlmClient,
-};
+use refine_core::infra::{build_llm_client_from_env as build_core_llm_client_from_env, LlmClient};
 use refine_core::knowledge::{Item, ItemType};
 use std::sync::Arc;
 

@@ -100,10 +100,13 @@ pub enum Commands {
         #[arg(short, long, default_value = "10")]
         limit: usize,
     },
-    /// 认知成长仪表盘
+    /// Removed — use 'mirror dashboard' instead
+    #[command(hide = true)]
     Growth,
-    /// 标记一次探索 session
+    /// Removed — use 'mirror score' instead
+    #[command(hide = true)]
     Explore,
-    /// 标记一次深度思考 session
+    /// Removed — use 'mirror score' instead
+    #[command(hide = true)]
     DeepInquiry,
 }

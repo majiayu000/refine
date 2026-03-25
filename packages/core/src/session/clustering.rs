@@ -6,15 +6,34 @@ use crate::knowledge::{Item, ItemType};
 use std::collections::{HashMap, HashSet};
 
 const META_TAGS: &[&str] = &[
-    "decision", "bugfix",
-    "novice", "advanced_beginner", "competent", "proficient", "expert",
-    "delegation", "pair_programming", "review", "exploration", "teaching", "deep_inquiry",
+    "decision",
+    "bugfix",
+    "novice",
+    "advanced_beginner",
+    "competent",
+    "proficient",
+    "expert",
+    "delegation",
+    "pair_programming",
+    "review",
+    "exploration",
+    "teaching",
+    "deep_inquiry",
     "debugging",
 ];
 
 const GENERIC_PATH_SEGMENTS: &[&str] = &[
-    "users", "lifcc", "desktop", "code", "ai", "tools", "agent", "work", "life",
-    "information", "mutil",
+    "users",
+    "lifcc",
+    "desktop",
+    "code",
+    "ai",
+    "tools",
+    "agent",
+    "work",
+    "life",
+    "information",
+    "mutil",
 ];
 
 /// 单个项目的聚类数据
@@ -68,7 +87,9 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
         if let Some(doc_id) = item.document_id() {
             let tags: Vec<&str> = item.tags().iter().map(|t| t.as_str()).collect();
             if let Some(name) = extract_project_from_tags(&tags) {
-                doc_project_map.entry(doc_id.as_str().to_string()).or_insert(name);
+                doc_project_map
+                    .entry(doc_id.as_str().to_string())
+                    .or_insert(name);
             }
         }
     }
@@ -99,8 +120,9 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
             }
         };
 
-        let cluster = projects.entry(project_name.clone()).or_insert_with(|| {
-            ProjectCluster {
+        let cluster = projects
+            .entry(project_name.clone())
+            .or_insert_with(|| ProjectCluster {
                 project_name: project_name.clone(),
                 session_count: 0,
                 summary_excerpts: Vec::new(),
@@ -113,8 +135,7 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
                 architectures: Vec::new(),
                 knowledge_gained: Vec::new(),
                 patterns: Vec::new(),
-            }
-        });
+            });
 
         // 跟踪 session 数
         if let Some(doc_id) = item.document_id() {
@@ -135,7 +156,9 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
             total_summaries += 1;
             let content = item.content();
             let excerpt: String = content.chars().take(300).collect();
-            cluster.summary_excerpts.push(format!("【{}】{}", item.title(), excerpt));
+            cluster
+                .summary_excerpts
+                .push(format!("【{}】{}", item.title(), excerpt));
 
             // 提取认知水平和协作模式
             for tag in &tags {
@@ -144,7 +167,10 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
                     *global_cognitive.entry(tag.to_string()).or_insert(0) += 1;
                 }
                 if is_collab_mode(tag) {
-                    *cluster.collaboration_modes.entry(tag.to_string()).or_insert(0) += 1;
+                    *cluster
+                        .collaboration_modes
+                        .entry(tag.to_string())
+                        .or_insert(0) += 1;
                     *global_collab.entry(tag.to_string()).or_insert(0) += 1;
                 }
             }
@@ -154,10 +180,18 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
                 *global_tools.entry(tool.clone()).or_insert(0) += 1;
                 cluster.tools.push(tool);
             }
-            cluster.frictions.extend(extract_section_items(content, "阻力"));
-            cluster.architectures.extend(extract_section_items(content, "架构"));
-            cluster.knowledge_gained.extend(extract_section_items(content, "知识"));
-            cluster.patterns.extend(extract_section_items(content, "模式"));
+            cluster
+                .frictions
+                .extend(extract_section_items(content, "阻力"));
+            cluster
+                .architectures
+                .extend(extract_section_items(content, "架构"));
+            cluster
+                .knowledge_gained
+                .extend(extract_section_items(content, "知识"));
+            cluster
+                .patterns
+                .extend(extract_section_items(content, "模式"));
         }
     }
 
@@ -240,13 +274,22 @@ fn extract_section_items(content: &str, section_name: &str) -> Vec<String> {
 }
 
 fn is_cognitive_level(tag: &str) -> bool {
-    matches!(tag, "novice" | "advanced_beginner" | "competent" | "proficient" | "expert")
+    matches!(
+        tag,
+        "novice" | "advanced_beginner" | "competent" | "proficient" | "expert"
+    )
 }
 
 fn is_collab_mode(tag: &str) -> bool {
     matches!(
         tag,
-        "delegation" | "pair_programming" | "review" | "exploration" | "teaching" | "deep_inquiry" | "debugging"
+        "delegation"
+            | "pair_programming"
+            | "review"
+            | "exploration"
+            | "teaching"
+            | "deep_inquiry"
+            | "debugging"
     )
 }
 
@@ -256,13 +299,28 @@ mod tests {
 
     #[test]
     fn normalize_project_name_extracts_meaningful_segments() {
-        assert_eq!(normalize_project_name("-users-lifcc-desktop-code-ai-tools-refine"), Some("refine".into()));
-        assert_eq!(normalize_project_name("-users-lifcc-desktop-code-ai-gateway-litellm-rs"), Some("gateway-litellm-rs".into()));
-        assert_eq!(normalize_project_name("-users-lifcc-desktop-code-work-life-xhh"), Some("xhh".into()));
-        assert_eq!(normalize_project_name("-users-lifcc--claude-mem-observer-sessions"), Some("claude-mem-observer-sessions".into()));
+        assert_eq!(
+            normalize_project_name("-users-lifcc-desktop-code-ai-tools-refine"),
+            Some("refine".into())
+        );
+        assert_eq!(
+            normalize_project_name("-users-lifcc-desktop-code-ai-gateway-litellm-rs"),
+            Some("gateway-litellm-rs".into())
+        );
+        assert_eq!(
+            normalize_project_name("-users-lifcc-desktop-code-work-life-xhh"),
+            Some("xhh".into())
+        );
+        assert_eq!(
+            normalize_project_name("-users-lifcc--claude-mem-observer-sessions"),
+            Some("claude-mem-observer-sessions".into())
+        );
         // Pure generic paths return None
         assert_eq!(normalize_project_name("-users-lifcc-desktop-code"), None);
-        assert_eq!(normalize_project_name("-users-lifcc-desktop-code-work-life"), None);
+        assert_eq!(
+            normalize_project_name("-users-lifcc-desktop-code-work-life"),
+            None
+        );
     }
 
     #[test]
@@ -280,7 +338,10 @@ mod tests {
     #[test]
     fn extract_section_items_parses_content() {
         let content = "认知水平: proficient\n\n工具:\n- cargo\n- rustfmt\n\n阻力:\n- 编译太慢";
-        assert_eq!(extract_section_items(content, "工具"), vec!["cargo", "rustfmt"]);
+        assert_eq!(
+            extract_section_items(content, "工具"),
+            vec!["cargo", "rustfmt"]
+        );
         assert_eq!(extract_section_items(content, "阻力"), vec!["编译太慢"]);
     }
 }

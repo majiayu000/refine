@@ -22,7 +22,7 @@ Use this when your main goal is analyzing Claude Code / Codex coding sessions.
 
 1. `refine ingest-sessions`
 2. `refine insights --prescription`
-3. `refine growth`
+3. `mirror dashboard`
 
 ## 2. Setup
 
@@ -91,7 +91,8 @@ refine ingest-sessions --source claude
 refine ingest-sessions --source codex
 refine ingest-sessions --dry-run
 refine insights --prescription
-refine growth
+mirror dashboard
+mirror score
 ```
 
 ### Knowledge and document operations

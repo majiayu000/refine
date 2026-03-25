@@ -7,9 +7,7 @@ use refine_core::infra::SqliteStore;
 use refine_core::knowledge::{
     DocumentId, DocumentRepository, Item, ItemId, ItemRepository, ItemType, Source,
 };
-use refine_core::refinement::{
-    apply_defaults, extract_items_with_llm, ExtractionPolicy,
-};
+use refine_core::refinement::{apply_defaults, extract_items_with_llm, ExtractionPolicy};
 use refine_core::search::{SearchEngine, SearchQuery};
 use refine_core::session::SessionSource;
 use std::io::{self, Read};
@@ -77,9 +75,15 @@ pub async fn run(
         Commands::Docs { limit } => handle_docs(limit, store).await,
         Commands::DocShow { id } => handle_doc_show(&id, store).await,
         Commands::DocSearch { query, limit } => handle_doc_search(&query, limit, store).await,
-        Commands::Growth => crate::growth::handle_growth(store).await,
-        Commands::Explore => crate::growth::handle_tag_session("exploration_sessions"),
-        Commands::DeepInquiry => crate::growth::handle_tag_session("deep_inquiry_sessions"),
+        Commands::Growth => {
+            anyhow::bail!("'refine growth' has been removed. Use 'mirror dashboard' instead.");
+        }
+        Commands::Explore => {
+            anyhow::bail!("'refine explore' has been removed. Use 'mirror score' instead.");
+        }
+        Commands::DeepInquiry => {
+            anyhow::bail!("'refine deep-inquiry' has been removed. Use 'mirror score' instead.");
+        }
     }
 }
 
@@ -95,8 +99,8 @@ async fn handle_extract(stdin: bool, store: Arc<SqliteStore>) -> Result<()> {
     let llm_client = build_llm_client_from_env()?;
     let mut items =
         extract_items_with_llm(llm_client.as_ref(), &content, ExtractionPolicy::default())
-        .await
-        .context("提炼失败")?;
+            .await
+            .context("提炼失败")?;
     let source = Source::new("cli");
     let doc_id = DocumentId::new();
     apply_defaults(&mut items, &source, &doc_id, &content);
@@ -176,7 +180,12 @@ async fn handle_delete(id: &str, store: Arc<SqliteStore>) -> Result<()> {
     Ok(())
 }
 
-async fn handle_add(title: &str, summary: &str, raw_type: &str, store: Arc<SqliteStore>) -> Result<()> {
+async fn handle_add(
+    title: &str,
+    summary: &str,
+    raw_type: &str,
+    store: Arc<SqliteStore>,
+) -> Result<()> {
     let item_store: &dyn ItemRepository = store.as_ref();
     let item_type = parse_add_item_type(raw_type)?;
     let item = match item_type {
@@ -279,12 +288,8 @@ fn parse_session_source(raw: &str) -> Option<SessionSource> {
 }
 
 fn parse_add_item_type(raw_type: &str) -> Result<ItemType> {
-    parse_item_type(raw_type).with_context(|| {
-        format!(
-            "无效的类型: {} (支持: knowledge, skill, snippet)",
-            raw_type
-        )
-    })
+    parse_item_type(raw_type)
+        .with_context(|| format!("无效的类型: {} (支持: knowledge, skill, snippet)", raw_type))
 }
 
 #[cfg(test)]

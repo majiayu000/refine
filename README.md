@@ -78,7 +78,7 @@ mirror profile                      # Cognitive portrait narrative (requires LLM
 
 ```bash
 # Add to .zshrc — shows signal lights every time you open terminal
-[ -x "$(command -v mirror)" ] && mirror motd 2>/dev/null
+[ -x "$(command -v mirror)" ] && { mkdir -p ~/.refine && mirror motd 2>> ~/.refine/hooks-error.log; }
 ```
 
 **StatusLine** (Claude Code bottom bar):
@@ -86,13 +86,15 @@ mirror profile                      # Cognitive portrait narrative (requires LLM
 本周243 深度🟢 广度🔴 协作🔴 每周开1次新方向探索
 ```
 
-**SessionStart hook** injects cognitive dashboard + LLM advice into every Claude Code conversation.
+**SessionStart hook** injects cognitive dashboard + LLM advice into every Claude Code conversation. Add `scripts/cognitive-reminder.sh` to your SessionStart hook to warn when daily refresh is >36h stale.
+
+Hook errors are logged to `~/.refine/hooks-error.log` instead of being silently discarded.
 
 ### Automation (launchd)
 
 | Schedule | Task | What It Does |
 |----------|------|-------------|
-| Daily 8:00 AM | `scripts/daily-refresh.sh` | `refine ingest-sessions` → `mirror score` |
+| Daily 8:00 AM | `scripts/daily-refresh.sh` | `refine ingest-sessions` → `mirror score` → writes `~/.refine/last-refresh-ok` |
 | Weekly Mon 9:00 AM | `scripts/weekly-insights.sh` | `refine insights --prescription` (10-way LLM) |
 
 ### Configuration
@@ -131,7 +133,7 @@ refine ingest-sessions                  # Import all sessions (incremental)
 refine ingest-sessions --source claude  # Claude Code only
 refine ingest-sessions --dry-run        # Preview without LLM calls
 refine insights --prescription          # L1-L4 cognitive report
-refine growth                           # Legacy dashboard (use mirror dashboard instead)
+mirror dashboard                        # Cognitive growth dashboard
 ```
 
 ### Knowledge Management

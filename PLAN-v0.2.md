@@ -32,9 +32,9 @@
 - [ ] 验证：Stop hook < 1s
 
 ### 1.4 监控告警
-- [ ] `daily-refresh.sh` 成功后写 `~/.refine/last-refresh-ok`（时间戳）
-- [ ] `cognitive-reminder.sh` 检测该文件，超 36h 未更新则显示警告
-- [ ] Hook 错误从 `2>/dev/null` 改为 `2>> ~/.refine/hooks-error.log`
+- [x] `daily-refresh.sh` 成功后写 `~/.refine/last-refresh-ok`（时间戳）
+- [x] `cognitive-reminder.sh` 检测该文件，超 36h 未更新则显示警告
+- [x] Hook 错误从 `2>/dev/null` 改为 `2>> ~/.refine/hooks-error.log`
 - [ ] 验证：手动删除 last-refresh-ok，SessionStart 看到警告
 
 ### 1.5 版本提升 + CHANGELOG

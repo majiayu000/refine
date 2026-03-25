@@ -40,10 +40,7 @@ impl CreateConversationError {
         match self {
             Self::BadRequest(message) => message.clone(),
             Self::QuotaExceeded { used, limit } => {
-                format!(
-                    "Configured quota exceeded ({}/{} items).",
-                    used, limit
-                )
+                format!("Configured quota exceeded ({}/{} items).", used, limit)
             }
             Self::Internal(message) => message.clone(),
         }

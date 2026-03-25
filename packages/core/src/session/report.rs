@@ -42,7 +42,10 @@ pub fn format_global_stats(stats: &GlobalStats) -> String {
     out.push_str("\n认知水平分布: ");
     let mut levels: Vec<_> = stats.cognitive_levels.iter().collect();
     levels.sort_by(|a, b| b.1.cmp(a.1));
-    let level_strs: Vec<String> = levels.iter().map(|(k, v)| format!("{}({})", k, v)).collect();
+    let level_strs: Vec<String> = levels
+        .iter()
+        .map(|(k, v)| format!("{}({})", k, v))
+        .collect();
     out.push_str(&level_strs.join(", "));
 
     out.push_str("\n协作模式分布: ");
@@ -152,8 +155,16 @@ mod tests {
     #[test]
     fn merge_route_results_orders_by_id() {
         let results = vec![
-            RouteResult { route_id: 3, route_title: "C".into(), content: "c".into() },
-            RouteResult { route_id: 1, route_title: "A".into(), content: "a".into() },
+            RouteResult {
+                route_id: 3,
+                route_title: "C".into(),
+                content: "c".into(),
+            },
+            RouteResult {
+                route_id: 1,
+                route_title: "A".into(),
+                content: "a".into(),
+            },
         ];
         let merged = merge_route_results(&results);
         assert!(merged.find("## A").unwrap() < merged.find("## C").unwrap());

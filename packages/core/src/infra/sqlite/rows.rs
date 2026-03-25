@@ -104,12 +104,8 @@ pub(super) fn row_to_item(row: &rusqlite::Row) -> InfraResult<Item> {
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|e| InfraError::Serialization(format!("updated_at 解析失败: {}", e)))?;
 
-    let document_id: Option<String> = row
-        .get(9)
-        .unwrap_or(None);
-    let excerpt: Option<String> = row
-        .get(10)
-        .unwrap_or(None);
+    let document_id: Option<String> = row.get(9).unwrap_or(None);
+    let excerpt: Option<String> = row.get(10).unwrap_or(None);
 
     Item::restore(RestoreParams {
         id: ItemId::from(id.as_str()),
