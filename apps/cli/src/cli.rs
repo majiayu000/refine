@@ -76,9 +76,12 @@ pub enum Commands {
         /// 来源过滤 (claude, codex)
         #[arg(long)]
         source: Option<String>,
-        /// 限制处理数量
-        #[arg(short, long)]
+        /// 限制处理数量（按路径顺序取前 N 个），与 --latest 互斥
+        #[arg(short, long, conflicts_with = "latest")]
         limit: Option<usize>,
+        /// 仅处理最近修改的 N 个会话（按 mtime 降序），与 --limit 互斥
+        #[arg(long, conflicts_with = "limit")]
+        latest: Option<usize>,
         /// 仅预览，不实际处理
         #[arg(long)]
         dry_run: bool,

@@ -21,6 +21,8 @@ const CONCURRENCY: usize = 3;
 pub struct IngestOptions {
     pub source: Option<SessionSource>,
     pub limit: Option<usize>,
+    /// 按 mtime 降序取最近 N 个会话，与 limit 互斥
+    pub latest: Option<usize>,
     pub dry_run: bool,
 }
 
@@ -42,9 +44,16 @@ pub async fn handle_ingest_sessions(
     doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
-    let discovered = discover_sessions(options.source);
+    let mut discovered = discover_sessions(options.source);
     println!("发现 {} 个会话文件", discovered.len());
 
+    // --latest: sort by mtime descending, keep N most recent
+    if let Some(n) = options.latest {
+        discovered.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+        discovered.truncate(n);
+    }
+
+    // --limit: path-ordered take (only active when latest is None, enforced by clap)
     let sessions_to_process: Vec<_> = match options.limit {
         Some(limit) => discovered.into_iter().take(limit).collect(),
         None => discovered,
@@ -132,8 +141,7 @@ pub async fn handle_ingest_sessions(
     }
 
     // 阶段 2: 并发做 LLM 提取 + 保存
-    let client = llm_client
-        .ok_or_else(|| anyhow::anyhow!("非 dry-run 模式需要 LLM API Key"))?;
+    let client = llm_client.ok_or_else(|| anyhow::anyhow!("非 dry-run 模式需要 LLM API Key"))?;
     let semaphore = Arc::new(Semaphore::new(CONCURRENCY));
     let processed = Arc::new(AtomicUsize::new(0));
     let failed = Arc::new(AtomicUsize::new(0));
@@ -161,12 +169,7 @@ pub async fn handle_ingest_sessions(
                     total_items.fetch_add(item_count, Ordering::Relaxed);
                 }
                 Err(e) => {
-                    eprintln!(
-                        "  ✗ [{}/{}] 失败: {}",
-                        ps.idx + 1,
-                        ps.total,
-                        e
-                    );
+                    eprintln!("  ✗ [{}/{}] 失败: {}", ps.idx + 1, ps.total, e);
                     failed.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -238,10 +241,7 @@ async fn process_single_session(
     Ok(item_count)
 }
 
-async fn llm_call_with_retry(
-    client: &Arc<dyn LlmClient>,
-    content: &str,
-) -> Result<String> {
+async fn llm_call_with_retry(client: &Arc<dyn LlmClient>, content: &str) -> Result<String> {
     let prompt = build_facet_prompt(content);
     let mut last_err = String::new();
 
