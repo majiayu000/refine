@@ -1,8 +1,8 @@
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-pub use refine_core::infra::CONTRACT_VERSION_HEADER;
 use refine_core::infra::CONTRACT_VERSION;
+pub use refine_core::infra::CONTRACT_VERSION_HEADER;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 

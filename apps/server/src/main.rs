@@ -127,9 +127,21 @@ mod tests {
 
     #[test]
     fn non_loopback_bindings_require_api_token() {
-        assert!(requires_api_token_for_bind(&SocketAddr::from(([0, 0, 0, 0], 8787))));
-        assert!(requires_api_token_for_bind(&SocketAddr::from(([192, 168, 1, 8], 8787))));
-        assert!(!requires_api_token_for_bind(&SocketAddr::from(([127, 0, 0, 1], 8787))));
-        assert!(!requires_api_token_for_bind(&SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 8787))));
+        assert!(requires_api_token_for_bind(&SocketAddr::from((
+            [0, 0, 0, 0],
+            8787
+        ))));
+        assert!(requires_api_token_for_bind(&SocketAddr::from((
+            [192, 168, 1, 8],
+            8787
+        ))));
+        assert!(!requires_api_token_for_bind(&SocketAddr::from((
+            [127, 0, 0, 1],
+            8787
+        ))));
+        assert!(!requires_api_token_for_bind(&SocketAddr::from((
+            [0, 0, 0, 0, 0, 0, 0, 1],
+            8787
+        ))));
     }
 }

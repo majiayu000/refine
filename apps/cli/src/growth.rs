@@ -8,12 +8,21 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 const COGNITIVE_LEVELS: &[&str] = &[
-    "expert", "proficient", "competent", "advanced_beginner", "novice",
+    "expert",
+    "proficient",
+    "competent",
+    "advanced_beginner",
+    "novice",
 ];
 
 const COLLAB_MODES: &[&str] = &[
-    "delegation", "deep_inquiry", "exploration", "review",
-    "pair_programming", "teaching", "debugging",
+    "delegation",
+    "deep_inquiry",
+    "exploration",
+    "review",
+    "pair_programming",
+    "teaching",
+    "debugging",
 ];
 
 const BAR_WIDTH: usize = 10;
@@ -70,15 +79,22 @@ pub async fn handle_growth(store: Arc<SqliteStore>) -> Result<()> {
     println!("{}", border_top());
     println!("{}", row_center("认知成长仪表盘"));
     println!("{}", border_mid());
-    println!("{}", row_left(&format!(
-        "总会话: {}  总观测: {}", total_sessions, total_obs
-    )));
+    println!(
+        "{}",
+        row_left(&format!(
+            "总会话: {}  总观测: {}",
+            total_sessions, total_obs
+        ))
+    );
     println!("{}", border_mid());
 
     println!("{}", row_left("认知水平分布"));
     for &level in COGNITIVE_LEVELS {
         let count = cognitive_counts.get(level).copied().unwrap_or(0);
-        println!("{}", row_bar(short_cognitive(level), count, cognitive_total));
+        println!(
+            "{}",
+            row_bar(short_cognitive(level), count, cognitive_total)
+        );
     }
     println!("{}", border_mid());
 
@@ -90,12 +106,35 @@ pub async fn handle_growth(store: Arc<SqliteStore>) -> Result<()> {
     println!("{}", border_mid());
 
     println!("{}", row_left("关键指标"));
-    let exploration_rate = pct(collab_counts.get("exploration").copied().unwrap_or(0), collab_total);
-    let delegation_rate = pct(collab_counts.get("delegation").copied().unwrap_or(0), collab_total);
-    let expert_rate = pct(cognitive_counts.get("expert").copied().unwrap_or(0), cognitive_total);
-    println!("{}", row_metric("探索率", exploration_rate, ">15%", exploration_rate > 15.0));
-    println!("{}", row_metric("delegation", delegation_rate, "<40%", delegation_rate < 40.0));
-    println!("{}", row_metric("expert率", expert_rate, ">15%", expert_rate > 15.0));
+    let exploration_rate = pct(
+        collab_counts.get("exploration").copied().unwrap_or(0),
+        collab_total,
+    );
+    let delegation_rate = pct(
+        collab_counts.get("delegation").copied().unwrap_or(0),
+        collab_total,
+    );
+    let expert_rate = pct(
+        cognitive_counts.get("expert").copied().unwrap_or(0),
+        cognitive_total,
+    );
+    println!(
+        "{}",
+        row_metric("探索率", exploration_rate, ">15%", exploration_rate > 15.0)
+    );
+    println!(
+        "{}",
+        row_metric(
+            "delegation",
+            delegation_rate,
+            "<40%",
+            delegation_rate < 40.0
+        )
+    );
+    println!(
+        "{}",
+        row_metric("expert率", expert_rate, ">15%", expert_rate > 15.0)
+    );
     println!("{}", border_mid());
 
     // 保存分析快照供 motd 使用
@@ -104,10 +143,13 @@ pub async fn handle_growth(store: Arc<SqliteStore>) -> Result<()> {
     match week_data {
         Some(wk) => {
             println!("{}", row_left("本周"));
-            println!("{}", row_left(&format!(
-                "  Sessions: {}  探索: {}  深度: {}",
-                wk.total_sessions, wk.exploration_sessions, wk.deep_inquiry_sessions,
-            )));
+            println!(
+                "{}",
+                row_left(&format!(
+                    "  Sessions: {}  探索: {}  深度: {}",
+                    wk.total_sessions, wk.exploration_sessions, wk.deep_inquiry_sessions,
+                ))
+            );
         }
         None => {
             println!("{}", row_left("本周: 无 tracker 数据"));
@@ -168,38 +210,74 @@ fn load_week_tracker() -> Option<WeekTracker> {
 }
 
 fn is_cognitive(tag: &str) -> bool {
-    matches!(tag, "novice" | "advanced_beginner" | "competent" | "proficient" | "expert")
+    matches!(
+        tag,
+        "novice" | "advanced_beginner" | "competent" | "proficient" | "expert"
+    )
 }
 
 fn is_collab(tag: &str) -> bool {
-    matches!(tag, "delegation" | "pair_programming" | "review" | "exploration" | "teaching" | "deep_inquiry" | "debugging")
+    matches!(
+        tag,
+        "delegation"
+            | "pair_programming"
+            | "review"
+            | "exploration"
+            | "teaching"
+            | "deep_inquiry"
+            | "debugging"
+    )
 }
 
 fn short_cognitive(s: &str) -> &str {
-    match s { "advanced_beginner" => "adv_begin", other => other }
+    match s {
+        "advanced_beginner" => "adv_begin",
+        other => other,
+    }
 }
 
 fn short_collab(s: &str) -> &str {
-    match s { "pair_programming" => "pair_prog", "deep_inquiry" => "deep_inq", other => other }
+    match s {
+        "pair_programming" => "pair_prog",
+        "deep_inquiry" => "deep_inq",
+        other => other,
+    }
 }
 
 fn pct(count: usize, total: usize) -> f64 {
-    if total == 0 { 0.0 } else { count as f64 / total as f64 * 100.0 }
+    if total == 0 {
+        0.0
+    } else {
+        count as f64 / total as f64 * 100.0
+    }
 }
 
 // ── 行渲染（所有 padding 用 saturating_sub 防溢出）──
 
 fn row_bar(label: &str, count: usize, total: usize) -> String {
-    let ratio = if total == 0 { 0.0 } else { count as f64 / total as f64 };
+    let ratio = if total == 0 {
+        0.0
+    } else {
+        count as f64 / total as f64
+    };
     let filled = (ratio * BAR_WIDTH as f64).round() as usize;
     let bar = format!("{}{}", "█".repeat(filled), "░".repeat(BAR_WIDTH - filled));
-    let core = format!("  {:<11} {} {:>5.1}% ({:>3})", label, bar, ratio * 100.0, count);
+    let core = format!(
+        "  {:<11} {} {:>5.1}% ({:>3})",
+        label,
+        bar,
+        ratio * 100.0,
+        count
+    );
     padded_row(&core)
 }
 
 fn row_metric(label: &str, value: f64, target: &str, ok: bool) -> String {
     let mark = if ok { "✓" } else { "✗" };
-    let core = format!("  {:<12} {:>5.1}%  目标: {:<6} {}", label, value, target, mark);
+    let core = format!(
+        "  {:<12} {:>5.1}%  目标: {:<6} {}",
+        label, value, target, mark
+    );
     padded_row(&core)
 }
 
@@ -222,9 +300,15 @@ fn padded_row(content: &str) -> String {
     format!("║{}{}║", content, " ".repeat(padding))
 }
 
-fn border_top() -> String { format!("╔{}╗", "═".repeat(BOX_W.saturating_sub(2))) }
-fn border_mid() -> String { format!("╠{}╣", "═".repeat(BOX_W.saturating_sub(2))) }
-fn border_bot() -> String { format!("╚{}╝", "═".repeat(BOX_W.saturating_sub(2))) }
+fn border_top() -> String {
+    format!("╔{}╗", "═".repeat(BOX_W.saturating_sub(2)))
+}
+fn border_mid() -> String {
+    format!("╠{}╣", "═".repeat(BOX_W.saturating_sub(2)))
+}
+fn border_bot() -> String {
+    format!("╚{}╝", "═".repeat(BOX_W.saturating_sub(2)))
+}
 
 fn display_width(s: &str) -> usize {
     s.chars().map(|c| if is_wide(c) { 2 } else { 1 }).sum()
@@ -244,10 +328,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pct_zero_total_returns_zero() { assert_eq!(pct(5, 0), 0.0); }
+    fn pct_zero_total_returns_zero() {
+        assert_eq!(pct(5, 0), 0.0);
+    }
 
     #[test]
-    fn pct_normal() { assert!((pct(25, 100) - 25.0).abs() < f64::EPSILON); }
+    fn pct_normal() {
+        assert!((pct(25, 100) - 25.0).abs() < f64::EPSILON);
+    }
 
     #[test]
     fn cognitive_and_collab_tags() {

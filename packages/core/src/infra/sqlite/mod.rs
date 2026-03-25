@@ -2,9 +2,11 @@
 //!
 //! ItemRepository 的 SQLite 实现（worker 线程模型）
 
-use crate::error::{InfraError, InfraResult};
 use crate::error::RepoResult;
-use crate::knowledge::{Document, DocumentId, DocumentRepository, Item, ItemId, ItemRepository, ItemType, Tag};
+use crate::error::{InfraError, InfraResult};
+use crate::knowledge::{
+    Document, DocumentId, DocumentRepository, Item, ItemId, ItemRepository, ItemType, Tag,
+};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use tokio::sync::oneshot;
@@ -58,7 +60,9 @@ impl ItemRepository for SqliteStore {
     }
 
     async fn find_all(&self) -> RepoResult<Vec<Item>> {
-        self.request(SqliteCommand::FindAll).await.map_err(Into::into)
+        self.request(SqliteCommand::FindAll)
+            .await
+            .map_err(Into::into)
     }
 
     async fn find_by_type(&self, item_type: ItemType) -> RepoResult<Vec<Item>> {
@@ -117,12 +121,7 @@ impl ItemRepository for SqliteStore {
             .map_err(Into::into)
     }
 
-    async fn search_text(
-        &self,
-        query: &str,
-        offset: usize,
-        limit: usize,
-    ) -> RepoResult<Vec<Item>> {
+    async fn search_text(&self, query: &str, offset: usize, limit: usize) -> RepoResult<Vec<Item>> {
         let query = query.to_string();
         self.request(|resp| SqliteCommand::SearchText {
             query,
@@ -143,9 +142,12 @@ impl ItemRepository for SqliteStore {
 
     async fn find_by_document_id(&self, doc_id: &DocumentId) -> RepoResult<Vec<Item>> {
         let id = doc_id.as_str().to_string();
-        self.request(|resp| SqliteCommand::FindByDocumentId { document_id: id, resp })
-            .await
-            .map_err(Into::into)
+        self.request(|resp| SqliteCommand::FindByDocumentId {
+            document_id: id,
+            resp,
+        })
+        .await
+        .map_err(Into::into)
     }
 }
 
@@ -166,9 +168,13 @@ impl DocumentRepository for SqliteStore {
     }
 
     async fn find_recent(&self, offset: usize, limit: usize) -> RepoResult<Vec<Document>> {
-        self.request(|resp| SqliteCommand::DocFindRecent { offset, limit, resp })
-            .await
-            .map_err(Into::into)
+        self.request(|resp| SqliteCommand::DocFindRecent {
+            offset,
+            limit,
+            resp,
+        })
+        .await
+        .map_err(Into::into)
     }
 
     async fn count(&self) -> RepoResult<usize> {
@@ -191,11 +197,21 @@ impl DocumentRepository for SqliteStore {
             .map_err(Into::into)
     }
 
-    async fn search_text(&self, query: &str, offset: usize, limit: usize) -> RepoResult<Vec<Document>> {
+    async fn search_text(
+        &self,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> RepoResult<Vec<Document>> {
         let query = query.to_string();
-        self.request(|resp| SqliteCommand::DocSearchText { query, offset, limit, resp })
-            .await
-            .map_err(Into::into)
+        self.request(|resp| SqliteCommand::DocSearchText {
+            query,
+            offset,
+            limit,
+            resp,
+        })
+        .await
+        .map_err(Into::into)
     }
 
     async fn count_text_hits(&self, query: &str) -> RepoResult<usize> {

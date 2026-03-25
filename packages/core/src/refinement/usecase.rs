@@ -256,7 +256,9 @@ mod tests {
     #[async_trait]
     impl LlmClient for AlwaysFailLlmClient {
         async fn complete(&self, _prompt: &str, _system: Option<&str>) -> InfraResult<String> {
-            Err(crate::error::InfraError::LlmRequest("mock failure".to_string()))
+            Err(crate::error::InfraError::LlmRequest(
+                "mock failure".to_string(),
+            ))
         }
     }
 
@@ -349,9 +351,15 @@ mod tests {
         let items = extract_items_with_defaults(None, &input, &source, &doc_id).await;
 
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].source().map(|v| v.platform.as_str()), Some("chatgpt"));
+        assert_eq!(
+            items[0].source().map(|v| v.platform.as_str()),
+            Some("chatgpt")
+        );
         assert_eq!(items[0].content(), "原始文本");
-        assert_eq!(items[0].document_id().map(|id| id.as_str()), Some(doc_id.as_str()));
+        assert_eq!(
+            items[0].document_id().map(|id| id.as_str()),
+            Some(doc_id.as_str())
+        );
     }
 
     #[test]
@@ -361,8 +369,14 @@ mod tests {
         let doc_id = DocumentId::new();
         apply_defaults(&mut items, &source, &doc_id, "raw text");
 
-        assert_eq!(items[0].source().map(|s| s.platform.as_str()), Some("chatgpt"));
+        assert_eq!(
+            items[0].source().map(|s| s.platform.as_str()),
+            Some("chatgpt")
+        );
         assert_eq!(items[0].content(), "raw text");
-        assert_eq!(items[0].document_id().map(|id| id.as_str()), Some(doc_id.as_str()));
+        assert_eq!(
+            items[0].document_id().map(|id| id.as_str()),
+            Some(doc_id.as_str())
+        );
     }
 }

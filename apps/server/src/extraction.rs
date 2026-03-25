@@ -38,8 +38,7 @@ async fn run_extraction(
             .ok_or_else(|| "Conversation not found".to_string())?
     };
 
-    let source = Source::new(&conversation.source)
-        .with_url(&conversation.url);
+    let source = Source::new(&conversation.source).with_url(&conversation.url);
 
     let mut doc = Document::new(&conversation.source, &conversation.raw_content);
     doc.set_url(&conversation.url);
@@ -56,7 +55,8 @@ async fn run_extraction(
         captured_at: Some(&conversation.captured_at),
         policy: mode_to_policy(mode),
     };
-    let items = extract_items_with_defaults(state.llm_client.as_deref(), &input, &source, &doc_id).await;
+    let items =
+        extract_items_with_defaults(state.llm_client.as_deref(), &input, &source, &doc_id).await;
 
     let mut item_ids = Vec::with_capacity(items.len());
     for item in &items {

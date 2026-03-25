@@ -126,14 +126,30 @@ pub(super) fn count_text_hits(conn: &Connection, query: &str) -> InfraResult<usi
 }
 
 fn row_to_document(row: &rusqlite::Row) -> InfraResult<Document> {
-    let id: String = row.get(0).map_err(|e| InfraError::Database(e.to_string()))?;
-    let title: Option<String> = row.get(1).map_err(|e| InfraError::Database(e.to_string()))?;
-    let raw_content: String = row.get(2).map_err(|e| InfraError::Database(e.to_string()))?;
-    let source: String = row.get(3).map_err(|e| InfraError::Database(e.to_string()))?;
-    let url: String = row.get(4).map_err(|e| InfraError::Database(e.to_string()))?;
-    let captured_at_raw: String = row.get(5).map_err(|e| InfraError::Database(e.to_string()))?;
-    let created_at_raw: String = row.get(6).map_err(|e| InfraError::Database(e.to_string()))?;
-    let updated_at_raw: String = row.get(7).map_err(|e| InfraError::Database(e.to_string()))?;
+    let id: String = row
+        .get(0)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let title: Option<String> = row
+        .get(1)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let raw_content: String = row
+        .get(2)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let source: String = row
+        .get(3)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let url: String = row
+        .get(4)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let captured_at_raw: String = row
+        .get(5)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let created_at_raw: String = row
+        .get(6)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let updated_at_raw: String = row
+        .get(7)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
 
     let parse_dt = |raw: &str, label: &str| -> InfraResult<DateTime<Utc>> {
         DateTime::parse_from_rfc3339(raw)

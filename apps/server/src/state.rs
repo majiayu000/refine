@@ -57,12 +57,8 @@ impl AppState {
         let free_quota_items =
             env_usize(&["REFINE_MAX_ITEMS", "REFINE_FREE_QUOTA_ITEMS"]).unwrap_or(0);
         // Single-user self-host default: treat built-in user ids as premium unless explicitly configured.
-        let premium_users = env_csv_set(&["REFINE_PREMIUM_USERS"]).unwrap_or_else(|| {
-            HashSet::from([
-                "dev-user".to_string(),
-                "token-user".to_string(),
-            ])
-        });
+        let premium_users = env_csv_set(&["REFINE_PREMIUM_USERS"])
+            .unwrap_or_else(|| HashSet::from(["dev-user".to_string(), "token-user".to_string()]));
         let mut engine_builder = SearchEngine::new(store.clone());
         if semantic_search_enabled {
             engine_builder =
@@ -135,7 +131,6 @@ impl AppState {
         !normalized.is_empty() && self.premium_users.contains(normalized)
     }
 }
-
 
 fn env_var(keys: &[&str]) -> Option<String> {
     keys.iter()

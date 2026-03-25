@@ -57,10 +57,7 @@ pub fn build_prescription_prompt(report: &AggregationReport) -> String {
     }
     context.push_str(&format!("阻力数: {}\n", report.l3.friction_count));
     context.push_str(&format!("Bug 修复数: {}\n", report.l3.bugs_fixed_count));
-    context.push_str(&format!(
-        "代码产出数: {}\n",
-        report.l3.code_artifacts_count
-    ));
+    context.push_str(&format!("代码产出数: {}\n", report.l3.code_artifacts_count));
 
     format!(
         r#"基于以下开发者编程会话的聚合分析数据，生成个性化技术成长处方。
