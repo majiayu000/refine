@@ -22,4 +22,12 @@ refine ingest-sessions 2>&1
 echo "Step 2: mirror score"
 mirror score 2>&1
 
+# 3. Weekly report on Sundays — generates ~/.mirror/last-weekly.md for Monday MOTD reminder.
+# Non-fatal: weekly requires LLM API access and may fail without network/key.
+DOW=$(date +%u)  # 1=Monday … 7=Sunday
+if [ "$DOW" = "7" ]; then
+  echo "Step 3: mirror weekly (Sunday)"
+  mirror weekly 2>&1 || echo "Step 3: mirror weekly failed (non-fatal)"
+fi
+
 echo "Done."

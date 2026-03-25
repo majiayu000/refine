@@ -2,9 +2,9 @@ use crate::config::{ensure_mirror_dir, mirror_dir};
 use crate::lang::{self, t, Lang};
 use crate::score::{load_recent_scores, ScoreResult, Signal};
 use anyhow::Result;
-use chrono::{Datelike, Utc};
+use chrono::{Datelike, Local, Utc, Weekday};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
+use std::io::{Read, Write};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Tip {
@@ -311,7 +311,63 @@ pub fn handle_motd() -> Result<()> {
         tip = tip,
         stale = stale_suffix,
     );
+    if let Some(reminder) = weekly_reminder() {
+        println!("{}", reminder);
+    }
     Ok(())
+}
+
+fn is_monday() -> bool {
+    Local::now().weekday() == Weekday::Mon
+}
+
+/// Read the first non-empty line from `last-weekly.md` (capped at 500 bytes)
+/// and return a one-line reminder string, or `None` if:
+/// - today is not Monday,
+/// - the file does not exist, or
+/// - the file is older than 7 days (already reviewed last cycle).
+fn weekly_reminder() -> Option<String> {
+    if !is_monday() {
+        return None;
+    }
+    weekly_reminder_from_path(&mirror_dir().join("last-weekly.md"))
+}
+
+fn weekly_reminder_from_path(path: &std::path::Path) -> Option<String> {
+    if !path.exists() {
+        return None;
+    }
+
+    // Stale guard: if the file is older than 7 days it belongs to a previous cycle.
+    // If mtime is unavailable (exotic FS) we fall open and show the reminder.
+    if let Ok(metadata) = std::fs::metadata(path) {
+        if let Ok(mtime) = metadata.modified() {
+            let age = std::time::SystemTime::now()
+                .duration_since(mtime)
+                .unwrap_or_default();
+            if age.as_secs() > 7 * 24 * 3600 {
+                return None;
+            }
+        }
+    }
+
+    // Cap I/O at 500 bytes — the report can be large but we only need the first line.
+    let file = std::fs::File::open(path).ok()?;
+    let mut content = String::new();
+    std::io::BufReader::new(file)
+        .take(500)
+        .read_to_string(&mut content)
+        .ok()?;
+
+    let first_line = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(3)
+        .next()?
+        .trim()
+        .to_string();
+
+    Some(format!("📋 Weekly: {}", first_line))
 }
 
 #[cfg(test)]
@@ -429,5 +485,43 @@ mod tests {
 
         let age_hours_24 = chrono::Duration::hours(24);
         assert!(age_hours_24.num_hours() <= 48);
+    }
+
+    #[test]
+    fn test_weekly_reminder_no_file() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("last-weekly.md");
+        assert!(weekly_reminder_from_path(&path).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_weekly_reminder_fresh_file() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("last-weekly.md");
+        std::fs::write(&path, "# Weekly\n- Focus on testing\n- Write more docs\n")?;
+        let result = weekly_reminder_from_path(&path);
+        assert!(result.is_some());
+        if let Some(s) = result {
+            assert!(s.starts_with("📋 Weekly:"));
+            assert!(s.contains("Weekly"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_weekly_reminder_stale_file() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("last-weekly.md");
+        std::fs::write(&path, "# Weekly\n- Old suggestion\n")?;
+
+        // Use UNIX_EPOCH as mtime — always > 7 days old, avoids checked_sub.
+        let stale_time = std::time::UNIX_EPOCH;
+        let times = std::fs::FileTimes::new().set_modified(stale_time);
+        let file = std::fs::File::options().write(true).open(&path)?;
+        file.set_times(times)?;
+
+        assert!(weekly_reminder_from_path(&path).is_none());
+        Ok(())
     }
 }
