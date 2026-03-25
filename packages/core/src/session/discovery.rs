@@ -5,6 +5,7 @@
 use super::types::SessionSource;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use tracing::warn;
 
 /// 发现的会话文件
 #[derive(Debug, Clone)]
@@ -12,7 +13,7 @@ pub struct DiscoveredSession {
     pub path: PathBuf,
     pub source: SessionSource,
     pub project: Option<String>,
-    /// 文件最后修改时间；stat 失败时回退为 UNIX_EPOCH（不 panic）
+    /// 文件最后修改时间；stat 失败时记录 warn 并回退为 UNIX_EPOCH（不 panic）
     pub modified_at: SystemTime,
 }
 
@@ -94,7 +95,10 @@ fn discover_claude_code(home: &Path, results: &mut Vec<DiscoveredSession>) {
                 let modified_at = file
                     .metadata()
                     .and_then(|m| m.modified())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                    .unwrap_or_else(|e| {
+                        warn!(path = %path.display(), error = %e, "failed to read mtime; file treated as oldest for --latest");
+                        SystemTime::UNIX_EPOCH
+                    });
                 results.push(DiscoveredSession {
                     path,
                     source: SessionSource::ClaudeCode,
@@ -129,7 +133,10 @@ fn walk_jsonl_recursive(dir: &Path, source: SessionSource, results: &mut Vec<Dis
             let modified_at = entry
                 .metadata()
                 .and_then(|m| m.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
+                .unwrap_or_else(|e| {
+                    warn!(path = %path.display(), error = %e, "failed to read mtime; file treated as oldest for --latest");
+                    SystemTime::UNIX_EPOCH
+                });
             results.push(DiscoveredSession {
                 path,
                 source: source.clone(),
