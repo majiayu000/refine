@@ -1,7 +1,7 @@
 use crate::lang::t;
 use crate::score::{self, ScoreResult};
 use anyhow::{Context, Result};
-use refine_core::knowledge::ItemRepository;
+use refine_core::knowledge::{ItemRepository, ItemType};
 use refine_core::session::cluster_observations;
 use std::sync::Arc;
 use unicode_width::UnicodeWidthChar;
@@ -62,6 +62,21 @@ pub async fn handle_dashboard(
             t!(
                 "No observation data. Run `refine ingest-sessions` first.",
                 "暂无观测数据。请先运行 `refine ingest-sessions` 导入会话。"
+            )
+        );
+        return Ok(());
+    }
+
+    let obs_count = items
+        .iter()
+        .filter(|i| i.item_type() == ItemType::Observation)
+        .count();
+    if obs_count == 0 {
+        println!(
+            "{}",
+            t!(
+                "No observation data in the time window. Run `refine ingest-sessions` first.",
+                "当前时间窗口内无观测数据。请先运行 `refine ingest-sessions` 导入会话。"
             )
         );
         return Ok(());

@@ -337,7 +337,7 @@ pub(super) fn count_text_hits(conn: &Connection, query: &str) -> InfraResult<usi
 }
 pub(super) fn find_since(conn: &Connection, since: DateTime<Utc>) -> InfraResult<Vec<Item>> {
     let mut stmt = conn
-        .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at, document_id, excerpt FROM items WHERE created_at >= ?1 ORDER BY created_at DESC")
+        .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at, document_id, excerpt FROM items WHERE strftime('%s', created_at) >= strftime('%s', ?1) ORDER BY created_at DESC")
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     let rows = stmt
@@ -355,7 +355,7 @@ pub(super) fn find_by_date_range(
     end: DateTime<Utc>,
 ) -> InfraResult<Vec<Item>> {
     let mut stmt = conn
-        .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at, document_id, excerpt FROM items WHERE created_at BETWEEN ?1 AND ?2 ORDER BY created_at DESC")
+        .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at, document_id, excerpt FROM items WHERE strftime('%s', created_at) BETWEEN strftime('%s', ?1) AND strftime('%s', ?2) ORDER BY created_at DESC")
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     let rows = stmt

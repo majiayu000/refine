@@ -11,7 +11,7 @@ mod tests;
 
 use anyhow::Result;
 use chrono::{DateTime, NaiveDate, Utc};
-use refine_core::knowledge::{Item, ItemRepository};
+use refine_core::knowledge::{Item, ItemRepository, ItemType};
 use refine_core::session::cluster_observations;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -89,6 +89,30 @@ pub async fn handle_score(
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?
     };
+    if items.is_empty() {
+        println!(
+            "{}",
+            crate::lang::t!(
+                "No observation data. Run `refine ingest-sessions` first.",
+                "暂无观测数据。请先运行 `refine ingest-sessions` 导入会话。"
+            )
+        );
+        return Ok(());
+    }
+    let obs_count = items
+        .iter()
+        .filter(|i| i.item_type() == ItemType::Observation)
+        .count();
+    if obs_count == 0 {
+        println!(
+            "{}",
+            crate::lang::t!(
+                "No observation data in the time window. Run `refine ingest-sessions` first.",
+                "当前时间窗口内无观测数据。请先运行 `refine ingest-sessions` 导入会话。"
+            )
+        );
+        return Ok(());
+    }
     let cluster = cluster_observations(&items);
     let config = crate::config::load();
     let mut result = compute(&cluster, &config.targets);
