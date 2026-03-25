@@ -1,5 +1,5 @@
-{"role":"user","content":"this is valid"}
+{"type":"user","message":{"content":"this is valid"}}
 {broken json here
-{"role":"user","content":"another valid line"}
+{"type":"user","message":{"content":"another valid line"}}
 not json at all
-{"role":"assistant","content":"response"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"response"}]}}

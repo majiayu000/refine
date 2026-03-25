@@ -1,18 +1,18 @@
-{"role":"user","content":"implement a login feature for the app"}
-{"role":"assistant","content":"I'll implement that for you."}
-{"role":"user","content":"create a user model with email and password fields"}
-{"role":"assistant","content":"Sure."}
-{"role":"user","content":"write the database migration script"}
-{"role":"assistant","content":"Done."}
-{"role":"user","content":"build the authentication middleware"}
-{"role":"assistant","content":"Building it."}
-{"role":"user","content":"fix the session expiry bug"}
-{"role":"assistant","content":"Fixed."}
-{"role":"user","content":"refactor the token validation logic"}
-{"role":"assistant","content":"Refactored."}
-{"role":"user","content":"update the password hashing algorithm"}
-{"role":"assistant","content":"Updated."}
-{"role":"user","content":"write unit tests for the auth module"}
-{"role":"assistant","content":"Tests written."}
-{"role":"user","content":"create API endpoints for login and logout"}
-{"role":"assistant","content":"Created."}
+{"type":"user","message":{"content":"implement a login feature for the app"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"I'll implement that for you."}]}}
+{"type":"user","message":{"content":"create a user model with email and password fields"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Sure."}]}}
+{"type":"user","message":{"content":"write the database migration script"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}
+{"type":"user","message":{"content":"build the authentication middleware"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Building it."}]}}
+{"type":"user","message":{"content":"fix the session expiry bug"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Fixed."}]}}
+{"type":"user","message":{"content":"refactor the token validation logic"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Refactored."}]}}
+{"type":"user","message":{"content":"update the password hashing algorithm"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Updated."}]}}
+{"type":"user","message":{"content":"write unit tests for the auth module"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Tests written."}]}}
+{"type":"user","message":{"content":"create API endpoints for login and logout"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Created."}]}}
