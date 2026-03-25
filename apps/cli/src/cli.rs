@@ -100,4 +100,13 @@ pub enum Commands {
         #[arg(short, long, default_value = "10")]
         limit: usize,
     },
+    /// Removed — use 'mirror dashboard' instead
+    #[command(hide = true)]
+    Growth,
+    /// Removed — use 'mirror score' instead
+    #[command(hide = true)]
+    Explore,
+    /// Removed — use 'mirror score' instead
+    #[command(hide = true)]
+    DeepInquiry,
 }

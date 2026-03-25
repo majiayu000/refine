@@ -75,6 +75,15 @@ pub async fn run(
         Commands::Docs { limit } => handle_docs(limit, store).await,
         Commands::DocShow { id } => handle_doc_show(&id, store).await,
         Commands::DocSearch { query, limit } => handle_doc_search(&query, limit, store).await,
+        Commands::Growth => {
+            anyhow::bail!("'refine growth' has been removed. Use 'mirror dashboard' instead.");
+        }
+        Commands::Explore => {
+            anyhow::bail!("'refine explore' has been removed. Use 'mirror score' instead.");
+        }
+        Commands::DeepInquiry => {
+            anyhow::bail!("'refine deep-inquiry' has been removed. Use 'mirror score' instead.");
+        }
     }
 }
 

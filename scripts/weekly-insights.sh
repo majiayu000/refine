@@ -44,6 +44,13 @@ fi
 # Step 3: 读取认知指标并发送 macOS 通知
 log "Step 3: growth metrics & notification"
 if [[ -f "$TRACKER_FILE" ]]; then
+  # growth commands were removed; this file is no longer written in-tree.
+  # Warn explicitly if the data is stale to prevent silent metric degradation.
+  tracker_mtime=$(stat -f %m "$TRACKER_FILE" 2>/dev/null || echo 0)
+  tracker_age=$(( ($(date +%s) - tracker_mtime) / 86400 ))
+  if [[ "$tracker_age" -gt 7 ]]; then
+    log "WARNING: tracker file is ${tracker_age} days old and no longer updated (refine growth/explore commands have been removed). Metrics from ${TRACKER_FILE} are stale — use 'mirror score' for current data."
+  fi
   total_sessions=$(jq -r '.total_sessions // 0' "$TRACKER_FILE")
   exploration=$(jq -r '.exploration_sessions // 0' "$TRACKER_FILE")
 

@@ -131,7 +131,7 @@ refine ingest-sessions                  # Import all sessions (incremental)
 refine ingest-sessions --source claude  # Claude Code only
 refine ingest-sessions --dry-run        # Preview without LLM calls
 refine insights --prescription          # L1-L4 cognitive report
-refine growth                           # Legacy dashboard (use mirror dashboard instead)
+mirror dashboard                        # Cognitive growth dashboard
 ```
 
 ### Knowledge Management

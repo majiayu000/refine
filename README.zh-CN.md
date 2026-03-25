@@ -54,7 +54,7 @@ refine ingest-sessions
 refine insights --prescription
 
 # 查看成长仪表盘
-refine growth
+mirror dashboard
 ```
 
 ## CLI 命令
@@ -70,9 +70,8 @@ refine ingest-sessions --dry-run        # 预览，不调 LLM
 refine insights                         # 生成 L1-L3 报告
 refine insights --prescription          # 含 L4 成长处方
 
-refine growth                           # 认知仪表盘
-refine explore                          # 标记一次探索 session
-refine deep-inquiry                     # 标记一次深度思考 session
+mirror dashboard                        # 认知成长仪表盘（替代已移除的 refine growth）
+mirror score                            # 三层信号灯评分
 ```
 
 ### 知识管理
@@ -92,30 +91,7 @@ refine doc-search "query"               # 搜索原文文档
 
 ## 认知仪表盘
 
-`refine growth` 输出：
-
-```
-╔══════════════════════════════════════════════════════╗
-║                    认知成长仪表盘                    ║
-╠══════════════════════════════════════════════════════╣
-║ 总会话: 824  总观测: 9740                            ║
-╠══════════════════════════════════════════════════════╣
-║ 认知水平分布                                         ║
-║  expert      █░░░░░░░░░  11.5% ( 95)                ║
-║  proficient  ███░░░░░░░  34.1% (281)                ║
-║  competent   ████░░░░░░  39.8% (328)                ║
-╠══════════════════════════════════════════════════════╣
-║ 协作模式                                             ║
-║  delegation  █████░░░░░  45.5% (375)                ║
-║  deep_inq    ██░░░░░░░░  18.8% (155)                ║
-║  exploration ██░░░░░░░░  16.5% (136)                ║
-╠══════════════════════════════════════════════════════╣
-║ 关键指标                                             ║
-║  探索率           16.5%  目标: >15%   ✓              ║
-║  delegation    45.5%  目标: <40%   ✗                 ║
-║  expert率       11.5%  目标: >15%   ✗                ║
-╚══════════════════════════════════════════════════════╝
-```
+使用 `mirror dashboard` 查看认知成长仪表盘（`refine growth` 已移除，请改用 `mirror dashboard`）。
 
 ## 架构
 
@@ -130,7 +106,7 @@ Claude Code / Codex 会话文件 (.jsonl)
     本地聚类（按项目分组）→ 10 路并发 LLM 分析 → 合并报告
     │
     ▼ 三层持续追踪
-    终端 motd | refine growth | 周报追踪脚本
+    终端 motd | mirror dashboard | 周报追踪脚本
 ```
 
 ### 提取的 12 个维度
