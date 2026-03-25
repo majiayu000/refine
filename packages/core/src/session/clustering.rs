@@ -204,9 +204,9 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
             cluster
                 .question_items
                 .extend(extract_section_items(content, "问题"));
-            cluster.code_artifacts.extend(
-                extract_section_items_capped(content, "代码产出", 20),
-            );
+            cluster
+                .code_artifacts
+                .extend(extract_section_items_capped(content, "代码产出", 20));
         }
     }
 
