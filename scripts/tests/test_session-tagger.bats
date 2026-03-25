@@ -5,6 +5,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 TAGGER="${SCRIPT_DIR}/session-tagger.sh"
+RESETTER="${SCRIPT_DIR}/reset-weekly-tracker.sh"
 FIXTURES="${SCRIPT_DIR}/tests/fixtures"
 
 setup() {
@@ -128,4 +129,56 @@ teardown() {
 
   total=$(jq '.total_sessions' "${TEST_REFINE}/.refine/growth-tracker.json")
   [ "$total" -ge 1 ]
+}
+
+# T8: Weekly reset sets watermark — historical sessions are not re-scanned
+# Regression for issue #1: reset previously cleared last_scan_ts to "" and
+# deleted LAST_SCAN_REF, causing the next tagger run to epoch-scan all history.
+@test "T8: after weekly reset, historical sessions are not re-counted in new week" {
+  cp "${FIXTURES}/exploration_session.jsonl" "${TEST_REFINE}/.claude/projects/test-project/"
+
+  # Week 1: count the session
+  bash "$TAGGER"
+  total_week1=$(jq '.total_sessions' "${TEST_REFINE}/.refine/growth-tracker.json")
+  [ "$total_week1" -eq 1 ]
+
+  # Weekly reset — archives week 1, zeroes counters
+  bash "$RESETTER"
+  total_after_reset=$(jq '.total_sessions' "${TEST_REFINE}/.refine/growth-tracker.json")
+  [ "$total_after_reset" -eq 0 ]
+
+  # Week 2: tagger runs but must NOT re-count the pre-reset session
+  bash "$TAGGER"
+  total_week2=$(jq '.total_sessions' "${TEST_REFINE}/.refine/growth-tracker.json")
+  [ "$total_week2" -eq 0 ]
+
+  # LAST_SCAN_REF must exist (watermark set, not deleted)
+  [ -f "${TEST_REFINE}/.refine/.last_scan_ref" ]
+
+  # last_scan_ts in JSON must be non-empty (not "" like before the fix)
+  ts=$(jq -r '.last_scan_ts' "${TEST_REFINE}/.refine/growth-tracker.json")
+  [ -n "$ts" ]
+}
+
+# T9: Reset holds the same lock as the tagger — no counter corruption on
+# concurrent execution (issue #2: reset previously wrote files without locking).
+@test "T9: sequential reset then tagger leaves counters at zero, not overwritten" {
+  for i in $(seq 1 3); do
+    cp "${FIXTURES}/deep_inquiry_session.jsonl" \
+       "${TEST_REFINE}/.claude/projects/test-project/old_${i}.jsonl"
+  done
+
+  # Establish week 1 with 3 sessions
+  bash "$TAGGER"
+  [ "$(jq '.total_sessions' "${TEST_REFINE}/.refine/growth-tracker.json")" -eq 3 ]
+
+  # Reset (acquires lock, zeroes counters, advances watermark)
+  bash "$RESETTER"
+  [ "$(jq '.total_sessions' "${TEST_REFINE}/.refine/growth-tracker.json")" -eq 0 ]
+
+  # Tagger runs immediately after reset — no new sessions exist post-watermark
+  bash "$TAGGER"
+  total=$(jq '.total_sessions' "${TEST_REFINE}/.refine/growth-tracker.json")
+  # Must remain 0; old sessions are behind the watermark set by reset
+  [ "$total" -eq 0 ]
 }
