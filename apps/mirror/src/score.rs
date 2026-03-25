@@ -3,6 +3,7 @@ mod compute;
 mod display;
 mod indicators;
 mod persistence;
+mod statusline;
 mod types;
 
 #[cfg(test)]
@@ -19,6 +20,7 @@ pub use baseline::compute_personal_baseline;
 pub use compute::compute;
 pub use display::{indicator_display, layer_display};
 pub use persistence::{load_recent_scores, persist_score};
+pub use statusline::write_statusline;
 pub use types::{Indicator, LayerScore, ScoreResult, Signal};
 
 use baseline::apply_personal_baseline;
@@ -126,6 +128,10 @@ pub async fn handle_score(
             Ok(advice) => println!("\n  {} {}", crate::lang::t!("Advice:", "建议:"), advice),
             Err(e) => tracing::debug!("advice generation skipped: {}", e),
         }
+    }
+
+    if let Err(e) = write_statusline(&result, db_path) {
+        tracing::warn!("failed to write statusline.txt: {}", e);
     }
     Ok(())
 }
