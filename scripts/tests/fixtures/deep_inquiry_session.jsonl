@@ -1,0 +1,18 @@
+{"role":"user","content":"tell me about database indexing strategies"}
+{"role":"assistant","content":"Indexing improves query performance by..."}
+{"role":"user","content":"explain B-tree vs hash indexes"}
+{"role":"assistant","content":"B-trees support range queries while hash indexes are O(1) for equality."}
+{"role":"user","content":"when would you use a composite index"}
+{"role":"assistant","content":"When queries filter on multiple columns together."}
+{"role":"user","content":"what about partial indexes"}
+{"role":"assistant","content":"Partial indexes only index rows matching a condition."}
+{"role":"user","content":"how do covering indexes work"}
+{"role":"assistant","content":"A covering index includes all columns needed by the query."}
+{"role":"user","content":"what is index bloat and how to address it"}
+{"role":"assistant","content":"Index bloat occurs when dead tuples accumulate; VACUUM helps."}
+{"role":"user","content":"explain the difference between clustered and non-clustered indexes"}
+{"role":"assistant","content":"Clustered indexes determine physical row order."}
+{"role":"user","content":"when should you avoid over-indexing"}
+{"role":"assistant","content":"Write-heavy tables suffer from too many indexes."}
+{"role":"user","content":"what tools help analyze index usage in PostgreSQL"}
+{"role":"assistant","content":"pg_stat_user_indexes shows index scan counts."}
