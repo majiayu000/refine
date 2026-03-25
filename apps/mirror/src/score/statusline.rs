@@ -74,21 +74,28 @@ pub fn write_statusline(result: &ScoreResult, db_path: &Path) -> Result<()> {
                     0
                 }),
             Err(e) => {
-                eprintln!(
-                    "[mirror] error: failed to parse growth-tracker.json at {}: {}",
+                // Parse failure may be caused by a concurrent partial write from
+                // growth.rs (non-atomic overwrite). Propagate the error instead of
+                // writing session_count=0, which would permanently surface bad data.
+                return Err(anyhow::anyhow!(
+                    "failed to parse growth-tracker.json at {}: {}",
                     tracker_path.display(),
                     e
-                );
-                0
+                ));
             }
         },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // File does not exist yet (first run) — zero is correct.
+            0
+        }
         Err(e) => {
-            eprintln!(
-                "[mirror] error: failed to read growth-tracker.json at {}: {}",
+            // Any other IO error (e.g. EINTR during a concurrent write) — propagate
+            // rather than recording session_count=0 as visible data.
+            return Err(anyhow::anyhow!(
+                "failed to read growth-tracker.json at {}: {}",
                 tracker_path.display(),
                 e
-            );
-            0
+            ));
         }
     };
 
@@ -107,13 +114,24 @@ pub fn write_statusline(result: &ScoreResult, db_path: &Path) -> Result<()> {
     let dir = crate::config::ensure_mirror_dir()?;
     let dest = dir.join("statusline.txt");
 
-    // Atomic write: write to a sibling temp file then rename.
-    // On POSIX, rename(2) is atomic, so readers never see a partial write.
-    let tmp = dir.join("statusline.txt.tmp");
+    // Atomic write: write to a PID-unique sibling temp file then rename.
+    // Using std::process::id() in the name prevents two concurrent `mirror score`
+    // invocations from clobbering each other's temp file.  The last rename wins
+    // deterministically because rename(2) on POSIX is atomic.
+    let tmp = dir.join(format!("statusline.txt.{}.tmp", std::process::id()));
     std::fs::write(&tmp, &line)
-        .map_err(|e| anyhow::anyhow!("failed to write statusline.txt.tmp: {}", e))?;
-    std::fs::rename(&tmp, &dest)
-        .map_err(|e| anyhow::anyhow!("failed to rename statusline.txt.tmp -> statusline.txt: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("failed to write {}: {}", tmp.display(), e))?;
+    if let Err(e) = std::fs::rename(&tmp, &dest) {
+        // Best-effort cleanup so we do not leave stale PID-named temps around.
+        if let Err(rm_err) = std::fs::remove_file(&tmp) {
+            eprintln!("[mirror] warn: failed to remove temp file {}: {}", tmp.display(), rm_err);
+        }
+        return Err(anyhow::anyhow!(
+            "failed to rename {} -> statusline.txt: {}",
+            tmp.display(),
+            e
+        ));
+    }
     Ok(())
 }
 
