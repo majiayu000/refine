@@ -80,6 +80,21 @@ else
       date +%s > "${LOCK_DIR}/created"
       return 0
     fi
+    # Lock dir exists — check if the holder is still alive.
+    # Without this check an abnormal exit (crash/SIGKILL) leaves a permanent
+    # stale lock and all subsequent weekly resets fail indefinitely (issue #4).
+    local p
+    p=$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)
+    if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; then
+      return 1  # live process holds the lock
+    fi
+    # Stale lock — remove and retry once.
+    rm -rf "$LOCK_DIR"
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      echo $$ > "${LOCK_DIR}/pid"
+      date +%s > "${LOCK_DIR}/created"
+      return 0
+    fi
     return 1
   }
 

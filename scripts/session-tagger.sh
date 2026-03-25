@@ -219,19 +219,17 @@ else
       date +%s > "${LOCK_DIR}/created"
       return 0
     fi
-    # Lock dir exists — check if holder is still alive AND the lock is fresh.
-    # kill -0 alone is unsafe: after a crash the PID may be reused by an
-    # unrelated process, making the lock appear permanently live (issue #3).
-    # Adding an age check ensures the lock is force-expired after MAX_LOCK_AGE.
-    local p created now age
+    # Lock dir exists — check if holder is still alive.
+    # Never steal the lock from a live process: doing so allows concurrent writes
+    # to growth-tracker.json and .seen_sessions (double-count / overwrite).
+    # PID reuse after a crash is possible but far less likely than a long scan
+    # legitimately exceeding a fixed age threshold.
+    local p
     p=$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)
-    created=$(cat "${LOCK_DIR}/created" 2>/dev/null || echo 0)
-    now=$(date +%s)
-    age=$(( now - created ))
-    if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null && [[ $age -lt $MAX_LOCK_AGE ]]; then
-      return 1  # live process with a fresh lock
+    if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; then
+      return 1  # live process holds the lock
     fi
-    # Stale lock (process gone, no PID file, or lock expired) — remove and retry once.
+    # Stale lock (process gone or no PID file) — remove and retry once.
     rm -rf "$LOCK_DIR"
     if mkdir "$LOCK_DIR" 2>/dev/null; then
       echo $$ > "${LOCK_DIR}/pid"
