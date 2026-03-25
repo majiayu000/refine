@@ -41,32 +41,18 @@ else
   log "Step 2: insights --prescription failed with exit code $?"
 fi
 
-# Step 3: 读取认知指标并发送 macOS 通知
-log "Step 3: growth metrics & notification"
+# Step 3: 发送 macOS 通知（growth 指标已废弃，不再读取 tracker 文件）
+log "Step 3: notification"
+# NOTE: refine growth/explore/deep-inquiry commands have been permanently removed;
+# growth-tracker.json has no in-tree writer and all counters are permanently stale.
+# The mtime-based staleness check that was here was unreliable because
+# reset-weekly-tracker.sh rewrites the file each run, keeping mtime fresh while
+# data remains semantically dead.  We emit an unconditional deprecation warning
+# and omit the stale counters from the notification entirely.
 if [[ -f "$TRACKER_FILE" ]]; then
-  # growth commands were removed; this file is no longer written in-tree.
-  # Warn explicitly if the data is stale to prevent silent metric degradation.
-  tracker_mtime=$(stat -f %m "$TRACKER_FILE" 2>/dev/null || echo 0)
-  tracker_age=$(( ($(date +%s) - tracker_mtime) / 86400 ))
-  if [[ "$tracker_age" -gt 7 ]]; then
-    log "WARNING: tracker file is ${tracker_age} days old and no longer updated (refine growth/explore commands have been removed). Metrics from ${TRACKER_FILE} are stale — use 'mirror score' for current data."
-  fi
-  total_sessions=$(jq -r '.total_sessions // 0' "$TRACKER_FILE")
-  exploration=$(jq -r '.exploration_sessions // 0' "$TRACKER_FILE")
-
-  if [[ "$total_sessions" -gt 0 ]]; then
-    exploration_rate=$(( exploration * 100 / total_sessions ))
-  else
-    exploration_rate=0
-  fi
-
-  log "Metrics: total_sessions=${total_sessions}, exploration=${exploration}, exploration_rate=${exploration_rate}%"
-
-  osascript -e "display notification \"本周会话: ${total_sessions}, 探索率: ${exploration_rate}%, 报告已生成\" with title \"Refine Weekly Insights\"" 2>&1 || true
-else
-  log "WARNING: tracker file not found: ${TRACKER_FILE}, skipping metrics"
-  osascript -e 'display notification "报告已生成（无认知指标数据）" with title "Refine Weekly Insights"' 2>&1 || true
+  log "WARNING: ${TRACKER_FILE} is a DEPRECATED artifact — refine growth/explore/deep-inquiry commands have been permanently removed and no longer write to this file. All counters are stale regardless of file mtime. Use 'refine mirror score' for current data."
 fi
+osascript -e 'display notification "报告已生成（growth 指标已废弃，请使用 mirror score）" with title "Refine Weekly Insights"' 2>&1 || true
 
 # Step 4: 重置本周计数器（归档历史 + 重置）
 log "Step 4: reset weekly tracker"
