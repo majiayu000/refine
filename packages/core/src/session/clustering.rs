@@ -51,6 +51,9 @@ pub struct ProjectCluster {
     pub architectures: Vec<String>,
     pub knowledge_gained: Vec<String>,
     pub patterns: Vec<String>,
+    pub progress_items: Vec<String>,
+    pub question_items: Vec<String>,
+    pub code_artifacts: Vec<String>,
 }
 
 /// 全局聚合统计
@@ -138,6 +141,9 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
                 architectures: Vec::new(),
                 knowledge_gained: Vec::new(),
                 patterns: Vec::new(),
+                progress_items: Vec::new(),
+                question_items: Vec::new(),
+                code_artifacts: Vec::new(),
             });
 
         // 跟踪 session 数
@@ -195,6 +201,15 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
             cluster
                 .patterns
                 .extend(extract_section_items(content, "模式"));
+            cluster
+                .progress_items
+                .extend(extract_section_items(content, "进展"));
+            cluster
+                .question_items
+                .extend(extract_section_items(content, "问题"));
+            cluster
+                .code_artifacts
+                .extend(extract_section_items_capped(content, "代码产出", 20));
         }
     }
 
@@ -259,9 +274,16 @@ fn dedup_titles(titles: Vec<String>) -> Vec<String> {
 }
 
 fn extract_section_items(content: &str, section_name: &str) -> Vec<String> {
+    extract_section_items_capped(content, section_name, usize::MAX)
+}
+
+fn extract_section_items_capped(content: &str, section_name: &str, limit: usize) -> Vec<String> {
     let mut in_section = false;
     let mut items = Vec::new();
     for line in content.lines() {
+        if items.len() >= limit {
+            break;
+        }
         let trimmed = line.trim();
         if trimmed.ends_with(':') && !trimmed.starts_with('-') {
             in_section = trimmed.trim_end_matches(':') == section_name;
@@ -346,5 +368,17 @@ mod tests {
             vec!["cargo", "rustfmt"]
         );
         assert_eq!(extract_section_items(content, "阻力"), vec!["编译太慢"]);
+    }
+
+    #[test]
+    fn cluster_observations_extracts_progress_items() {
+        let content = "认知水平: proficient\n\n进展:\n- step1\n- step2\n\n问题:\n- 如何优化？\n\n代码产出:\n- main.rs";
+        let progress = extract_section_items(content, "进展");
+        let questions = extract_section_items(content, "问题");
+        let artifacts = extract_section_items(content, "代码产出");
+
+        assert_eq!(progress, vec!["step1", "step2"]);
+        assert_eq!(questions, vec!["如何优化？"]);
+        assert_eq!(artifacts, vec!["main.rs"]);
     }
 }
