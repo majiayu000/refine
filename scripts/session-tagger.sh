@@ -57,9 +57,10 @@ classify_session() {
     return
   fi
 
-  # Count user-turn lines (lines containing "\"role\":\"user\"")
+  # Count user-turn lines — matches both production Claude ("type":"user") and
+  # legacy/Codex ("role":"user") formats so classification works on real sessions.
   local user_turns
-  user_turns=$(echo "$sample" | grep -c '"role":"user"' || true)
+  user_turns=$(echo "$sample" | grep -cE '"(role|type)":"user"' || true)
 
   if [[ "$user_turns" -eq 0 ]]; then
     echo "uncategorized"
@@ -68,7 +69,7 @@ classify_session() {
 
   # Delegation: imperative verbs in user turns
   local delegation_hits
-  delegation_hits=$(echo "$sample" | grep '"role":"user"' | grep -ciE 'implement|create|write|build|fix|refactor|update' || true)
+  delegation_hits=$(echo "$sample" | grep -E '"(role|type)":"user"' | grep -ciE 'implement|create|write|build|fix|refactor|update' || true)
   if [[ "$delegation_hits" -gt "$DELEGATION_KEYWORD_THRESHOLD" ]]; then
     echo "delegation"
     return
@@ -76,7 +77,7 @@ classify_session() {
 
   # Exploration: question marks in user turns (lines ending with ?" before closing quote)
   local question_lines
-  question_lines=$(echo "$sample" | grep '"role":"user"' | grep -c '?"' || true)
+  question_lines=$(echo "$sample" | grep -E '"(role|type)":"user"' | grep -c '?"' || true)
   local question_pct=$(( question_lines * 100 / user_turns ))
   if [[ "$question_pct" -gt "$EXPLORATION_QUESTION_RATIO" ]]; then
     echo "exploration"
@@ -195,13 +196,35 @@ if command -v flock &>/dev/null; then
     do_scan_and_update
   ) 9>"$LOCK_FILE"
 else
-  # Fallback: mkdir-based lock (atomic on POSIX)
-  if mkdir "$LOCK_DIR" 2>/dev/null; then
-    trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+  # Fallback: mkdir-based lock (atomic on POSIX).
+  # A PID file inside the lock dir enables stale-lock recovery: if the process
+  # that created the lock is no longer alive, the dir is removed and we retry.
+  _try_acquire_lock() {
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      echo $$ > "${LOCK_DIR}/pid"
+      return 0
+    fi
+    # Lock dir exists — check if holder is still alive.
+    local p
+    p=$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)
+    if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; then
+      return 1  # live process holds the lock
+    fi
+    # Stale lock (process gone or no PID file) — remove and retry once.
+    rm -rf "$LOCK_DIR"
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      echo $$ > "${LOCK_DIR}/pid"
+      return 0
+    fi
+    return 1
+  }
+
+  if _try_acquire_lock; then
+    trap 'rm -rf "$LOCK_DIR" 2>/dev/null || true' EXIT
     do_scan_and_update
-    rmdir "$LOCK_DIR" 2>/dev/null || true
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
   else
-    # Another instance holds the lock; skip this run (next run will re-scan)
+    # Another live instance holds the lock; skip this run (next run will re-scan).
     exit 0
   fi
 fi

@@ -1,12 +1,12 @@
-{"role":"user","content":"what is the difference between JWT and session cookies?"}
-{"role":"assistant","content":"JWT is stateless while session cookies require server-side state."}
-{"role":"user","content":"how does OAuth2 work?"}
-{"role":"assistant","content":"OAuth2 is an authorization framework..."}
-{"role":"user","content":"why would you choose GraphQL over REST?"}
-{"role":"assistant","content":"GraphQL allows clients to request exactly the data they need."}
-{"role":"user","content":"what are the trade-offs of microservices?"}
-{"role":"assistant","content":"Microservices offer independent deployment but add operational complexity."}
-{"role":"user","content":"how does the event loop work in Node.js?"}
-{"role":"assistant","content":"The event loop processes callbacks from the task queue."}
-{"role":"user","content":"what is the CAP theorem?"}
-{"role":"assistant","content":"It states you can only guarantee two of: consistency, availability, partition tolerance."}
+{"type":"user","message":{"content":"what is the difference between JWT and session cookies?"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"JWT is stateless while session cookies require server-side state."}]}}
+{"type":"user","message":{"content":"how does OAuth2 work?"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"OAuth2 is an authorization framework..."}]}}
+{"type":"user","message":{"content":"why would you choose GraphQL over REST?"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"GraphQL allows clients to request exactly the data they need."}]}}
+{"type":"user","message":{"content":"what are the trade-offs of microservices?"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Microservices offer independent deployment but add operational complexity."}]}}
+{"type":"user","message":{"content":"how does the event loop work in Node.js?"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"The event loop processes callbacks from the task queue."}]}}
+{"type":"user","message":{"content":"what is the CAP theorem?"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"It states you can only guarantee two of: consistency, availability, partition tolerance."}]}}
