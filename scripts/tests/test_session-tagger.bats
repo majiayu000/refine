@@ -132,8 +132,8 @@ teardown() {
 }
 
 # T8: Weekly reset sets watermark — historical sessions are not re-scanned
-# Regression for issue #1: reset previously cleared last_scan_ts to "" and
-# deleted LAST_SCAN_REF, causing the next tagger run to epoch-scan all history.
+# Regression for issue #1: reset previously cleared last_scan_ts to "" causing
+# the next tagger run to epoch-scan all history.
 @test "T8: after weekly reset, historical sessions are not re-counted in new week" {
   cp "${FIXTURES}/exploration_session.jsonl" "${TEST_REFINE}/.claude/projects/test-project/"
 
@@ -151,9 +151,6 @@ teardown() {
   bash "$TAGGER"
   total_week2=$(jq '.total_sessions' "${TEST_REFINE}/.refine/growth-tracker.json")
   [ "$total_week2" -eq 0 ]
-
-  # LAST_SCAN_REF must exist (watermark set, not deleted)
-  [ -f "${TEST_REFINE}/.refine/.last_scan_ref" ]
 
   # last_scan_ts in JSON must be non-empty (not "" like before the fix)
   ts=$(jq -r '.last_scan_ts' "${TEST_REFINE}/.refine/growth-tracker.json")
@@ -181,4 +178,94 @@ teardown() {
   total=$(jq '.total_sessions' "${TEST_REFINE}/.refine/growth-tracker.json")
   # Must remain 0; old sessions are behind the watermark set by reset
   [ "$total" -eq 0 ]
+}
+
+# T10: last_scan_ts is ISO 8601 UTC format
+@test "T10: last_scan_ts is valid ISO 8601 UTC timestamp" {
+  cp "${FIXTURES}/delegation_session.jsonl" "${TEST_REFINE}/.claude/projects/test-project/"
+
+  bash "$TAGGER"
+
+  ts=$(jq -r '.last_scan_ts' "${TEST_REFINE}/.refine/growth-tracker.json")
+  # Matches YYYY-MM-DDTHH:MM:SSZ pattern
+  [[ "$ts" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+}
+
+# T11: Multiple incremental runs accumulate correctly
+@test "T11: three incremental runs accumulate correct totals" {
+  # Run 1: 1 file
+  cp "${FIXTURES}/exploration_session.jsonl" "${TEST_REFINE}/.claude/projects/test-project/"
+  bash "$TAGGER"
+  [ "$(jq '.total_sessions' "${TEST_REFINE}/.refine/growth-tracker.json")" -eq 1 ]
+  [ "$(jq '.exploration_sessions' "${TEST_REFINE}/.refine/growth-tracker.json")" -eq 1 ]
+
+  # Run 2: 1 new file
+  sleep 1
+  cp "${FIXTURES}/delegation_session.jsonl" "${TEST_REFINE}/.claude/projects/test-project/run2.jsonl"
+  bash "$TAGGER"
+  [ "$(jq '.total_sessions' "${TEST_REFINE}/.refine/growth-tracker.json")" -eq 2 ]
+  [ "$(jq '.delegation_sessions' "${TEST_REFINE}/.refine/growth-tracker.json")" -eq 1 ]
+
+  # Run 3: 1 more new file
+  sleep 1
+  cp "${FIXTURES}/deep_inquiry_session.jsonl" "${TEST_REFINE}/.claude/projects/test-project/run3.jsonl"
+  bash "$TAGGER"
+  [ "$(jq '.total_sessions' "${TEST_REFINE}/.refine/growth-tracker.json")" -eq 3 ]
+  [ "$(jq '.deep_inquiry_sessions' "${TEST_REFINE}/.refine/growth-tracker.json")" -eq 1 ]
+}
+
+# T12: last_scan_ts advances on each run even with no new files
+@test "T12: last_scan_ts advances monotonically across runs" {
+  cp "${FIXTURES}/delegation_session.jsonl" "${TEST_REFINE}/.claude/projects/test-project/"
+
+  bash "$TAGGER"
+  ts1=$(jq -r '.last_scan_ts' "${TEST_REFINE}/.refine/growth-tracker.json")
+
+  sleep 1
+  bash "$TAGGER"
+  ts2=$(jq -r '.last_scan_ts' "${TEST_REFINE}/.refine/growth-tracker.json")
+
+  sleep 1
+  bash "$TAGGER"
+  ts3=$(jq -r '.last_scan_ts' "${TEST_REFINE}/.refine/growth-tracker.json")
+
+  # ts3 > ts2 > ts1 (string comparison works for ISO 8601)
+  [[ "$ts2" > "$ts1" ]]
+  [[ "$ts3" > "$ts2" ]]
+}
+
+# T13: .last_scan_ref file mirrors last_scan_ts for sub-second precision
+@test "T13: .last_scan_ref mirrors last_scan_ts after scan" {
+  cp "${FIXTURES}/delegation_session.jsonl" "${TEST_REFINE}/.claude/projects/test-project/"
+
+  bash "$TAGGER"
+
+  # .last_scan_ref must exist (sub-second mtime shadow of last_scan_ts)
+  [ -f "${TEST_REFINE}/.refine/.last_scan_ref" ]
+
+  # last_scan_ts must also be set in JSON
+  ts=$(jq -r '.last_scan_ts' "${TEST_REFINE}/.refine/growth-tracker.json")
+  [ -n "$ts" ]
+  [ "$ts" != "" ]
+}
+
+# T14: weekly reset clears seen_sessions and advances last_scan_ts
+@test "T14: weekly reset advances last_scan_ts and clears seen_sessions" {
+  cp "${FIXTURES}/exploration_session.jsonl" "${TEST_REFINE}/.claude/projects/test-project/"
+
+  bash "$TAGGER"
+  ts_before=$(jq -r '.last_scan_ts' "${TEST_REFINE}/.refine/growth-tracker.json")
+  # seen_sessions should exist after first run
+  [ -f "${TEST_REFINE}/.refine/.seen_sessions" ]
+
+  sleep 1
+  bash "$RESETTER"
+
+  ts_after=$(jq -r '.last_scan_ts' "${TEST_REFINE}/.refine/growth-tracker.json")
+  # last_scan_ts must advance
+  [[ "$ts_after" > "$ts_before" ]]
+  # seen_sessions must be cleared
+  [ ! -f "${TEST_REFINE}/.refine/.seen_sessions" ]
+  # counters must be zero
+  [ "$(jq '.total_sessions' "${TEST_REFINE}/.refine/growth-tracker.json")" -eq 0 ]
 }

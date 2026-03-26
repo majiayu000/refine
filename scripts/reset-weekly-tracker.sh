@@ -34,9 +34,8 @@ do_reset() {
   jq -c --arg ts "$archived_at" '. + {archived_at: $ts}' "$TRACKER_FILE" >> "$HISTORY_FILE"
 
   # 重置本周计数器，更新 week_start 为今天。
-  # last_scan_ts 设为当前 UTC 时间（非空字符串）——这与 LAST_SCAN_REF 的新
-  # mtime 一起，确保下一次增量扫描只拾取重置之后的新会话，而不会把历史会话
-  # 重新计入本周指标（issue #1）。
+  # last_scan_ts 设为当前 UTC 时间——确保下一次增量扫描只拾取重置之后的新会话，
+  # 而不会把历史会话重新计入本周指标（issue #1）。
   local new_week_start now_ts
   new_week_start=$(date '+%Y-%m-%d')
   now_ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
@@ -52,9 +51,10 @@ do_reset() {
     last_scan_ts: $ts
   }' "$TRACKER_FILE" > "${TRACKER_FILE}.tmp" && mv "${TRACKER_FILE}.tmp" "$TRACKER_FILE"
 
-  # 将 LAST_SCAN_REF 的 mtime 推进到"现在"，作为子秒精度的扫描下界水位线。
-  # 上一周的会话文件 mtime < 现在，不再落入新扫描窗口，因此可以安全清空
-  # SEEN_SESSIONS_FILE（该文件只在同一周内防止重复计数）。
+  # Advance LAST_SCAN_REF mtime to "now" so find -newer excludes pre-reset files.
+  # Upper-week session files have mtime < now, so they fall outside the new scan
+  # window. This allows safely clearing SEEN_SESSIONS_FILE (which only deduplicates
+  # within a single week cycle).
   touch "$LAST_SCAN_REF"
   rm -f "$SEEN_SESSIONS_FILE"
 

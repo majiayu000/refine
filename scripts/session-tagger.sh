@@ -4,6 +4,12 @@
 # Runs as a Claude Code Stop hook. Scans only JSONL files with mtime > last_scan_ts
 # to keep execution under 1s even with thousands of files.
 #
+# Watermark strategy:
+#   - last_scan_ts (ISO 8601 in growth-tracker.json) is the primary watermark,
+#     visible to external tools and used as fallback for first-run / migration.
+#   - .last_scan_ref (file mtime) mirrors last_scan_ts at sub-second precision
+#     for find -newer comparisons. It is derived from upper_ref each scan cycle.
+#
 # Manual hook registration (add to ~/.claude/settings.json):
 #   "Stop": [{"matcher": "", "hooks": [{"type": "command",
 #     "command": "/path/to/scripts/session-tagger.sh 2>> ~/.refine/hooks-error.log"}]}]
@@ -99,12 +105,13 @@ classify_session() {
 # ── Scan + classify + update (runs entirely inside the lock) ──────────────────
 #
 # All three phases are inside the lock so that:
-#   • Two concurrent runs cannot claim the same file window (no race / double-count).
-#   • upper_ref is created BEFORE enumeration, giving an explicit upper bound so
+#   - Two concurrent runs cannot claim the same file window (no race / double-count).
+#   - upper_ref is created BEFORE enumeration, giving an explicit upper bound so
 #     files written during classification fall outside the window and are picked up
 #     by the next run — avoids both over-counting and missed-file gaps.
-#   • LAST_SCAN_REF persists the watermark at sub-second mtime precision so that
-#     files in the same second as the cut-off are never re-selected.
+#   - last_scan_ts (JSON) is the primary watermark for visibility and fallback.
+#     LAST_SCAN_REF mirrors it at sub-second mtime precision for find -newer.
+#     .seen_sessions prevents double-counting on mtime boundary overlap.
 
 do_scan_and_update() {
   # Create upper-bound ref BEFORE enumeration — its mtime is the exact cut-off.
@@ -117,13 +124,12 @@ do_scan_and_update() {
   trap "rm -f '$upper_ref' '$lower_ref'" RETURN
 
   # Phase A: establish lower bound ─────────────────────────────────────────────
+  # Prefer LAST_SCAN_REF (sub-second mtime precision). Fall back to last_scan_ts
+  # from JSON on first run or after migration from an older script version.
 
   if [[ -f "$LAST_SCAN_REF" ]]; then
-    # Authoritative sub-second watermark: copy its mtime directly to lower_ref.
     touch -r "$LAST_SCAN_REF" "$lower_ref"
   else
-    # Bootstrap: LAST_SCAN_REF absent — derive from JSON timestamp (first run or
-    # migration from an older version of this script that lacked LAST_SCAN_REF).
     local last_scan_ts
     last_scan_ts=$(jq -r '.last_scan_ts // ""' "$TRACKER_FILE")
     if [[ -z "$last_scan_ts" ]]; then
@@ -192,7 +198,7 @@ do_scan_and_update() {
      .last_scan_ts = $ts' \
     "$TRACKER_FILE" > "${TRACKER_FILE}.tmp" && mv "${TRACKER_FILE}.tmp" "$TRACKER_FILE"
 
-  # Advance the sub-second watermark to upper_ref's exact mtime.
+  # Advance LAST_SCAN_REF to upper_ref's exact sub-second mtime.
   # Done AFTER the JSON write so a failed write leaves the watermark un-advanced
   # and candidates are safely re-processed on the next run.
   touch -r "$upper_ref" "$LAST_SCAN_REF"
@@ -251,7 +257,7 @@ else
   waited=0
   until _try_acquire_lock; do
     if [[ $waited -ge $MAX_LOCK_WAIT_TAGGER ]]; then
-      # Timed out — next hook invocation will re-scan from current LAST_SCAN_REF.
+      # Timed out — next hook invocation will re-scan from current last_scan_ts.
       exit 0
     fi
     sleep 1
