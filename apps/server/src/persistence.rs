@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::application::ports::{ConversationRepository, EventRepository, JobRepository};
 use crate::models::{
@@ -19,83 +19,110 @@ impl ServerPersistence {
         Ok(persistence)
     }
 
-    pub fn load_conversations(&self) -> Result<Vec<ConversationRecord>, String> {
+    pub fn find_conversation_by_id(&self, id: &str) -> Result<Option<ConversationRecord>, String> {
         let conn = self.open()?;
+        conn.query_row(
+            r#"
+            SELECT id, user_id, source, url, title, raw_content, metadata_json,
+                   captured_at, created_at, status, idempotency_key, item_ids, last_error
+            FROM conversations
+            WHERE id = ?1
+            "#,
+            [id],
+            row_to_conversation,
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn find_conversation_by_idempotency(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<ConversationRecord>, String> {
+        let conn = self.open()?;
+        conn.query_row(
+            r#"
+            SELECT id, user_id, source, url, title, raw_content, metadata_json,
+                   captured_at, created_at, status, idempotency_key, item_ids, last_error
+            FROM conversations
+            WHERE idempotency_key = ?1
+            "#,
+            [idempotency_key],
+            row_to_conversation,
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn list_conversations(
+        &self,
+        status: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<ConversationRecord>, String> {
+        let conn = self.open()?;
+        let limit = std::cmp::min(limit, i64::MAX as usize) as i64;
+        let offset = std::cmp::min(offset, i64::MAX as usize) as i64;
+        let normalized_status = normalize_status_filter(status);
+
+        let mut out = Vec::new();
+        if let Some(status) = normalized_status {
+            let mut stmt = conn
+                .prepare(
+                    r#"
+                    SELECT id, user_id, source, url, title, raw_content, metadata_json,
+                           captured_at, created_at, status, idempotency_key, item_ids, last_error
+                    FROM conversations
+                    WHERE status = ?1
+                    ORDER BY captured_at DESC
+                    LIMIT ?2 OFFSET ?3
+                    "#,
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![status, limit, offset], row_to_conversation)
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                out.push(row.map_err(|e| e.to_string())?);
+            }
+            return Ok(out);
+        }
+
         let mut stmt = conn
             .prepare(
                 r#"
                 SELECT id, user_id, source, url, title, raw_content, metadata_json,
                        captured_at, created_at, status, idempotency_key, item_ids, last_error
                 FROM conversations
-                ORDER BY created_at DESC
+                ORDER BY captured_at DESC
+                LIMIT ?1 OFFSET ?2
                 "#,
             )
             .map_err(|e| e.to_string())?;
-
         let rows = stmt
-            .query_map([], |row| {
-                let metadata_raw: String = row.get(6)?;
-                let item_ids_raw: String = row.get(11)?;
-
-                Ok(ConversationRecord {
-                    id: row.get(0)?,
-                    user_id: row.get(1)?,
-                    source: row.get(2)?,
-                    url: row.get(3)?,
-                    title: row.get(4)?,
-                    raw_content: row.get(5)?,
-                    metadata: serde_json::from_str(&metadata_raw)
-                        .unwrap_or_else(|_| serde_json::json!({})),
-                    captured_at: row.get(7)?,
-                    created_at: row.get(8)?,
-                    status: conversation_status_from_db(row.get::<_, String>(9)?.as_str()),
-                    idempotency_key: row.get(10)?,
-                    item_ids: serde_json::from_str(&item_ids_raw).unwrap_or_default(),
-                    last_error: row.get(12)?,
-                })
-            })
+            .query_map(params![limit, offset], row_to_conversation)
             .map_err(|e| e.to_string())?;
-
-        let mut conversations = Vec::new();
         for row in rows {
-            conversations.push(row.map_err(|e| e.to_string())?);
+            out.push(row.map_err(|e| e.to_string())?);
         }
-
-        Ok(conversations)
+        Ok(out)
     }
 
-    pub fn load_jobs(&self) -> Result<Vec<ExtractionJobRecord>, String> {
+    pub fn count_conversations(&self, status: Option<&str>) -> Result<usize, String> {
         let conn = self.open()?;
-        let mut stmt = conn
-            .prepare(
-                r#"
-                SELECT id, conversation_id, mode, status, created_at, updated_at, error
-                FROM extraction_jobs
-                ORDER BY created_at DESC
-                "#,
+        let normalized_status = normalize_status_filter(status);
+        let count: i64 = if let Some(status) = normalized_status {
+            conn.query_row(
+                "SELECT COUNT(*) FROM conversations WHERE status = ?1",
+                [status],
+                |row| row.get(0),
             )
-            .map_err(|e| e.to_string())?;
-
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(ExtractionJobRecord {
-                    id: row.get(0)?,
-                    conversation_id: row.get(1)?,
-                    mode: extraction_mode_from_db(row.get::<_, String>(2)?.as_str()),
-                    status: job_status_from_db(row.get::<_, String>(3)?.as_str()),
-                    created_at: row.get(4)?,
-                    updated_at: row.get(5)?,
-                    error: row.get(6)?,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-
-        let mut jobs = Vec::new();
-        for row in rows {
-            jobs.push(row.map_err(|e| e.to_string())?);
-        }
-
-        Ok(jobs)
+            .map_err(|e| e.to_string())?
+        } else {
+            conn.query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
+                .map_err(|e| e.to_string())?
+        };
+        Ok(count.max(0) as usize)
     }
 
     pub fn upsert_conversation(&self, record: &ConversationRecord) -> Result<(), String> {
@@ -144,6 +171,21 @@ impl ServerPersistence {
         .map_err(|e| e.to_string())?;
 
         Ok(())
+    }
+
+    pub fn find_job_by_id(&self, id: &str) -> Result<Option<ExtractionJobRecord>, String> {
+        let conn = self.open()?;
+        conn.query_row(
+            r#"
+            SELECT id, conversation_id, mode, status, created_at, updated_at, error
+            FROM extraction_jobs
+            WHERE id = ?1
+            "#,
+            [id],
+            row_to_job,
+        )
+        .optional()
+        .map_err(|e| e.to_string())
     }
 
     pub fn upsert_job(&self, job: &ExtractionJobRecord) -> Result<(), String> {
@@ -318,8 +360,28 @@ impl ServerPersistence {
 }
 
 impl ConversationRepository for ServerPersistence {
-    fn load_conversations(&self) -> Result<Vec<ConversationRecord>, String> {
-        ServerPersistence::load_conversations(self)
+    fn find_conversation_by_id(&self, id: &str) -> Result<Option<ConversationRecord>, String> {
+        ServerPersistence::find_conversation_by_id(self, id)
+    }
+
+    fn find_conversation_by_idempotency(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<ConversationRecord>, String> {
+        ServerPersistence::find_conversation_by_idempotency(self, idempotency_key)
+    }
+
+    fn list_conversations(
+        &self,
+        status: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<ConversationRecord>, String> {
+        ServerPersistence::list_conversations(self, status, offset, limit)
+    }
+
+    fn count_conversations(&self, status: Option<&str>) -> Result<usize, String> {
+        ServerPersistence::count_conversations(self, status)
     }
 
     fn upsert_conversation(&self, record: &ConversationRecord) -> Result<(), String> {
@@ -328,8 +390,8 @@ impl ConversationRepository for ServerPersistence {
 }
 
 impl JobRepository for ServerPersistence {
-    fn load_jobs(&self) -> Result<Vec<ExtractionJobRecord>, String> {
-        ServerPersistence::load_jobs(self)
+    fn find_job_by_id(&self, id: &str) -> Result<Option<ExtractionJobRecord>, String> {
+        ServerPersistence::find_job_by_id(self, id)
     }
 
     fn upsert_job(&self, job: &ExtractionJobRecord) -> Result<(), String> {
@@ -347,6 +409,68 @@ impl EventRepository for ServerPersistence {
     }
 }
 
+fn row_to_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationRecord> {
+    let metadata_raw: String = row.get(6)?;
+    let item_ids_raw: String = row.get(11)?;
+    let status_raw: String = row.get(9)?;
+
+    let metadata = serde_json::from_str(&metadata_raw).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+    let item_ids = serde_json::from_str(&item_ids_raw).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+    let status = conversation_status_from_db(status_raw.as_str()).map_err(|err| {
+        let wrapped = std::io::Error::new(std::io::ErrorKind::InvalidData, err);
+        rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(wrapped))
+    })?;
+
+    Ok(ConversationRecord {
+        id: row.get(0)?,
+        user_id: row.get(1)?,
+        source: row.get(2)?,
+        url: row.get(3)?,
+        title: row.get(4)?,
+        raw_content: row.get(5)?,
+        metadata,
+        captured_at: row.get(7)?,
+        created_at: row.get(8)?,
+        status,
+        idempotency_key: row.get(10)?,
+        item_ids,
+        last_error: row.get(12)?,
+    })
+}
+
+fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExtractionJobRecord> {
+    let mode_raw: String = row.get(2)?;
+    let status_raw: String = row.get(3)?;
+    let mode = extraction_mode_from_db(mode_raw.as_str()).map_err(|err| {
+        let wrapped = std::io::Error::new(std::io::ErrorKind::InvalidData, err);
+        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(wrapped))
+    })?;
+    let status = job_status_from_db(status_raw.as_str()).map_err(|err| {
+        let wrapped = std::io::Error::new(std::io::ErrorKind::InvalidData, err);
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(wrapped))
+    })?;
+
+    Ok(ExtractionJobRecord {
+        id: row.get(0)?,
+        conversation_id: row.get(1)?,
+        mode,
+        status,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+        error: row.get(6)?,
+    })
+}
+
+fn normalize_status_filter(status: Option<&str>) -> Option<String> {
+    status
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+}
+
 fn conversation_status_to_db(status: &ConversationStatus) -> &'static str {
     match status {
         ConversationStatus::Captured => "captured",
@@ -357,14 +481,14 @@ fn conversation_status_to_db(status: &ConversationStatus) -> &'static str {
     }
 }
 
-fn conversation_status_from_db(raw: &str) -> ConversationStatus {
+fn conversation_status_from_db(raw: &str) -> Result<ConversationStatus, String> {
     match raw {
-        "captured" => ConversationStatus::Captured,
-        "queued" => ConversationStatus::Queued,
-        "processing" => ConversationStatus::Processing,
-        "processed" => ConversationStatus::Processed,
-        "failed" => ConversationStatus::Failed,
-        _ => ConversationStatus::Failed,
+        "captured" => Ok(ConversationStatus::Captured),
+        "queued" => Ok(ConversationStatus::Queued),
+        "processing" => Ok(ConversationStatus::Processing),
+        "processed" => Ok(ConversationStatus::Processed),
+        "failed" => Ok(ConversationStatus::Failed),
+        _ => Err(format!("invalid conversation status: {}", raw)),
     }
 }
 
@@ -377,12 +501,13 @@ fn extraction_mode_to_db(mode: &ExtractionMode) -> &'static str {
     }
 }
 
-fn extraction_mode_from_db(raw: &str) -> ExtractionMode {
+fn extraction_mode_from_db(raw: &str) -> Result<ExtractionMode, String> {
     match raw {
-        "knowledge" => ExtractionMode::Knowledge,
-        "skill" => ExtractionMode::Skill,
-        "snippet" => ExtractionMode::Snippet,
-        _ => ExtractionMode::Auto,
+        "auto" => Ok(ExtractionMode::Auto),
+        "knowledge" => Ok(ExtractionMode::Knowledge),
+        "skill" => Ok(ExtractionMode::Skill),
+        "snippet" => Ok(ExtractionMode::Snippet),
+        _ => Err(format!("invalid extraction mode: {}", raw)),
     }
 }
 
@@ -395,12 +520,13 @@ fn job_status_to_db(status: &JobStatus) -> &'static str {
     }
 }
 
-fn job_status_from_db(raw: &str) -> JobStatus {
+fn job_status_from_db(raw: &str) -> Result<JobStatus, String> {
     match raw {
-        "running" => JobStatus::Running,
-        "succeeded" => JobStatus::Succeeded,
-        "failed" => JobStatus::Failed,
-        _ => JobStatus::Pending,
+        "pending" => Ok(JobStatus::Pending),
+        "running" => Ok(JobStatus::Running),
+        "succeeded" => Ok(JobStatus::Succeeded),
+        "failed" => Ok(JobStatus::Failed),
+        _ => Err(format!("invalid job status: {}", raw)),
     }
 }
 
@@ -421,7 +547,10 @@ fn collect_event_counts(
 #[cfg(test)]
 mod tests {
     use super::ServerPersistence;
-    use crate::models::{now_iso, EventRecord};
+    use crate::models::{
+        now_iso, ConversationRecord, ConversationStatus, EventRecord, ExtractionJobRecord,
+        ExtractionMode, JobStatus,
+    };
     use serde_json::json;
     use std::path::{Path, PathBuf};
     use uuid::Uuid;
@@ -445,6 +574,25 @@ mod tests {
             source: "extension".to_string(),
             properties: json!({"from": "test"}),
             created_at: created_at.to_string(),
+        }
+    }
+
+    fn build_conversation(status: ConversationStatus, idempotency_key: &str) -> ConversationRecord {
+        let now = now_iso();
+        ConversationRecord {
+            id: Uuid::new_v4().to_string(),
+            user_id: "u".to_string(),
+            source: "s".to_string(),
+            url: "https://example.com".to_string(),
+            title: Some("title".to_string()),
+            raw_content: "content".to_string(),
+            metadata: json!({"k":"v"}),
+            captured_at: now.clone(),
+            created_at: now,
+            status,
+            idempotency_key: idempotency_key.to_string(),
+            item_ids: vec![],
+            last_error: None,
         }
     }
 
@@ -512,6 +660,70 @@ mod tests {
             .unwrap_or(0);
 
         assert_eq!(extracted, 1);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn conversation_queries_work_with_status_and_idempotency() {
+        let path = temp_db_path();
+        let persistence = ServerPersistence::new(path.clone()).expect("persistence init failed");
+        let queued = build_conversation(ConversationStatus::Queued, "k1");
+        let captured = build_conversation(ConversationStatus::Captured, "k2");
+        persistence
+            .upsert_conversation(&queued)
+            .expect("upsert queued conversation");
+        persistence
+            .upsert_conversation(&captured)
+            .expect("upsert captured conversation");
+
+        let total = persistence
+            .count_conversations(None)
+            .expect("count all conversations");
+        assert_eq!(total, 2);
+
+        let queued_total = persistence
+            .count_conversations(Some("queued"))
+            .expect("count queued conversations");
+        assert_eq!(queued_total, 1);
+
+        let found = persistence
+            .find_conversation_by_idempotency("k1")
+            .expect("find by idempotency");
+        assert_eq!(
+            found.expect("conversation should exist").idempotency_key,
+            "k1".to_string()
+        );
+
+        let page = persistence
+            .list_conversations(Some("queued"), 0, 10)
+            .expect("list queued conversations");
+        assert_eq!(page.len(), 1);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn find_job_by_id_returns_saved_job() {
+        let path = temp_db_path();
+        let persistence = ServerPersistence::new(path.clone()).expect("persistence init failed");
+        let now = now_iso();
+        let job = ExtractionJobRecord {
+            id: Uuid::new_v4().to_string(),
+            conversation_id: "c1".to_string(),
+            mode: ExtractionMode::Auto,
+            status: JobStatus::Pending,
+            created_at: now.clone(),
+            updated_at: now,
+            error: None,
+        };
+        persistence.upsert_job(&job).expect("upsert job");
+
+        let loaded = persistence
+            .find_job_by_id(&job.id)
+            .expect("find job by id")
+            .expect("job should exist");
+        assert_eq!(loaded.id, job.id);
+        assert_eq!(loaded.status, JobStatus::Pending);
 
         cleanup(&path);
     }

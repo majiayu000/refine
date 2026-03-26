@@ -137,7 +137,10 @@ pub async fn list_conversations(
     _auth: AuthenticatedUser,
     Query(query): Query<ListConversationsQuery>,
 ) -> impl IntoResponse {
-    let result = run_list_conversations(state, query).await;
+    let result = match run_list_conversations(state, query).await {
+        Ok(result) => result,
+        Err(err) => return err_response(status_from_error_code(err.code()), err.message()),
+    };
     ok_serializable(result)
 }
 

@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 const DEFAULT_BIND_HOST: &str = "127.0.0.1";
+const DEFAULT_SERVER_PORT: u16 = 5567;
 
 #[tokio::main]
 async fn main() {
@@ -37,7 +38,7 @@ async fn main() {
 
     if state.llm_client.is_none() {
         println!(
-            "LLM is not configured, server will use fallback extraction. Set REFINE_ANTHROPIC_API_KEY or REFINE_OPENAI_API_KEY to enable LLM extraction."
+            "LLM is not configured, extraction requests will fail in strict mode. Set REFINE_ANTHROPIC_API_KEY or REFINE_OPENAI_API_KEY to enable extraction."
         );
     }
 
@@ -81,11 +82,12 @@ async fn main() {
         .layer(cors)
         .with_state(state.clone());
 
-    let port = std::env::var("PORT")
+    let port = std::env::var("REFINE_SERVER_PORT")
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
-        .unwrap_or(8787);
-    let host = std::env::var("HOST").unwrap_or_else(|_| DEFAULT_BIND_HOST.to_string());
+        .unwrap_or(DEFAULT_SERVER_PORT);
+    let host =
+        std::env::var("REFINE_SERVER_HOST").unwrap_or_else(|_| DEFAULT_BIND_HOST.to_string());
 
     let addr = parse_bind_addr(&host, port);
     if requires_api_token_for_bind(&addr) && state.api_token.is_none() {

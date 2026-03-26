@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tiny_http::Server;
 use tokio::runtime::Builder as RuntimeBuilder;
 
-const DEFAULT_SERVER_PORT: u16 = 8787;
+const DEFAULT_SERVER_PORT: u16 = 5568;
 const MAX_SERVER_WORKERS: usize = 8;
 
 /// 启动 HTTP 服务器
@@ -31,7 +31,7 @@ pub fn start_server(store: Arc<dyn ItemRepository>) {
             Ok(client) => Some(client),
             Err(err) => {
                 eprintln!(
-                    "LLM is not configured, /extract will return errors: {}",
+                    "LLM is not configured, /v1/conversations extraction will return errors: {}",
                     err
                 );
                 None

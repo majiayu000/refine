@@ -6,8 +6,8 @@
 
 import {
   checkCloudHealth,
+  fetchCloudTotalItems,
   fetchQuotaStatus,
-  fetchCloudTotalItemsWithOptions,
   fetchRecommendations,
   type QuotaStatusResponse,
   trackEvent,
@@ -207,7 +207,7 @@ async function getCloudStatusWithCache(): Promise<{
   let quota: QuotaStatusResponse | null = null
   if (cloudHealthy) {
     ;[remoteTotalItems, quota] = await Promise.all([
-      fetchCloudTotalItemsWithOptions({ allowLegacyScan: false }),
+      fetchCloudTotalItems(),
       fetchQuotaStatus(),
     ])
   }

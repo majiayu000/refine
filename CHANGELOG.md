@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.2] - 2026-03-26
+
+### Changed
+- Removed backward-compatibility paths from ingestion/search contract and switched extraction to strict mode only.
+- Refactored server state to repository single source of truth (removed in-memory runtime state).
+- Unified default runtime ports: server `5567`, desktop local API `5568`.
+
 ## [0.1.0] - 2026-03-23
 
 ### Added — Mirror CLI (`apps/mirror/`)

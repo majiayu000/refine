@@ -1,5 +1,7 @@
 use refine_core::knowledge::{Document, DocumentId, DocumentRepository, Source};
-use refine_core::refinement::{extract_items_with_defaults, ExtractionPolicy, ItemExtractionInput};
+use refine_core::refinement::{
+    extract_items_with_strict_defaults, ExtractionPolicy, ItemExtractionInput,
+};
 use std::sync::Arc;
 
 use crate::models::{
@@ -30,13 +32,10 @@ async fn run_extraction(
     set_job_running(&state, job_id).await;
     set_conversation_status(&state, conversation_id, ConversationStatus::Processing).await;
 
-    let conversation = {
-        let guard = state.runtime.conversations.read().await;
-        guard
-            .get(conversation_id)
-            .cloned()
-            .ok_or_else(|| "Conversation not found".to_string())?
-    };
+    let conversation = state
+        .conversation_repo
+        .find_conversation_by_id(conversation_id)?
+        .ok_or_else(|| "Conversation not found".to_string())?;
 
     let source = Source::new(&conversation.source).with_url(&conversation.url);
 
@@ -54,8 +53,13 @@ async fn run_extraction(
         captured_at: Some(&conversation.captured_at),
         policy: mode_to_policy(mode),
     };
-    let items =
-        extract_items_with_defaults(state.llm_client.as_deref(), &input, &source, &doc_id).await;
+    let llm_client = state
+        .llm_client
+        .as_deref()
+        .ok_or_else(|| "LLM client is required for strict extraction mode".to_string())?;
+    let items = extract_items_with_strict_defaults(llm_client, &input, &source, &doc_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let mut item_ids = Vec::with_capacity(items.len());
     for item in &items {
@@ -183,25 +187,23 @@ async fn update_job<F>(state: &Arc<AppState>, job_id: &str, mutate: F, phase: &s
 where
     F: FnOnce(&mut ExtractionJobRecord),
 {
-    let job_snapshot = {
-        let mut jobs = state.runtime.jobs.write().await;
-        if let Some(job) = jobs.get_mut(job_id) {
-            mutate(job);
-            Some(job.clone())
-        } else {
-            None
+    let mut job = match state.job_repo.find_job_by_id(job_id) {
+        Ok(Some(job)) => job,
+        Ok(None) => {
+            tracing::warn!("persist {} job skipped: not found {}", phase, job_id);
+            return;
+        }
+        Err(err) => {
+            tracing::warn!("persist {} job skipped: load error {}", phase, err);
+            return;
         }
     };
-    if let Some(job) = job_snapshot {
-        if let Err(err) = state.job_repo.upsert_job(&job) {
-            tracing::warn!("persist {} job failed: {}", phase, err);
-        }
+    mutate(&mut job);
+    if let Err(err) = state.job_repo.upsert_job(&job) {
+        tracing::warn!("persist {} job failed: {}", phase, err);
     }
 }
 
-// Saves the document (INSERT OR IGNORE) and returns the canonical DocumentId.
-// If the URL already exists the insert is a no-op, so we look up the actual
-// stored document to return its ID instead of the freshly-generated one.
 async fn save_document(
     doc_store: &Arc<dyn DocumentRepository>,
     doc: &Document,
@@ -226,18 +228,26 @@ async fn update_conversation<F>(
 ) where
     F: FnOnce(&mut ConversationRecord),
 {
-    let conversation_snapshot = {
-        let mut conversations = state.runtime.conversations.write().await;
-        if let Some(conversation) = conversations.get_mut(conversation_id) {
-            mutate(conversation);
-            Some(conversation.clone())
-        } else {
-            None
+    let mut conversation = match state
+        .conversation_repo
+        .find_conversation_by_id(conversation_id)
+    {
+        Ok(Some(conversation)) => conversation,
+        Ok(None) => {
+            tracing::warn!(
+                "persist {} conversation skipped: not found {}",
+                phase,
+                conversation_id
+            );
+            return;
+        }
+        Err(err) => {
+            tracing::warn!("persist {} conversation skipped: load error {}", phase, err);
+            return;
         }
     };
-    if let Some(conversation) = conversation_snapshot {
-        if let Err(err) = state.conversation_repo.upsert_conversation(&conversation) {
-            tracing::warn!("persist {} conversation failed: {}", phase, err);
-        }
+    mutate(&mut conversation);
+    if let Err(err) = state.conversation_repo.upsert_conversation(&conversation) {
+        tracing::warn!("persist {} conversation failed: {}", phase, err);
     }
 }

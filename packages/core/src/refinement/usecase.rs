@@ -79,6 +79,23 @@ pub async fn extract_items_with_defaults(
     items
 }
 
+/// 严格提炼并补齐默认值。
+///
+/// 与 `extract_items_with_defaults` 不同：
+/// - 不允许 fallback；
+/// - LLM 缺失或提炼失败直接返回错误。
+pub async fn extract_items_with_strict_defaults(
+    llm_client: &dyn LlmClient,
+    input: &ItemExtractionInput<'_>,
+    source: &Source,
+    document_id: &DocumentId,
+) -> DomainResult<Vec<Item>> {
+    let mut items =
+        extract_items_with_llm(llm_client, input.raw_content, input.policy.clone()).await?;
+    apply_defaults(&mut items, source, document_id, input.raw_content);
+    Ok(items)
+}
+
 /// 使用 LLM 提炼 Item 列表。
 ///
 /// 调用方可在失败时降级到 `build_fallback_item`。
@@ -360,6 +377,25 @@ mod tests {
             items[0].document_id().map(|id| id.as_str()),
             Some(doc_id.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn extract_items_with_strict_defaults_fails_when_llm_fails() {
+        let client = AlwaysFailLlmClient;
+        let input = ItemExtractionInput {
+            source: "chatgpt",
+            title: Some("示例"),
+            raw_content: "原始文本",
+            captured_at: None,
+            policy: ExtractionPolicy::default(),
+        };
+        let source = Source::new("chatgpt").with_url("https://example.com");
+        let doc_id = DocumentId::new();
+
+        let err = extract_items_with_strict_defaults(&client, &input, &source, &doc_id)
+            .await
+            .expect_err("strict mode should not fallback");
+        assert!(err.to_string().contains("LLM 调用失败"));
     }
 
     #[test]

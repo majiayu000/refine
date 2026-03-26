@@ -6,9 +6,8 @@ use refine_core::infra::{
 };
 use refine_core::knowledge::ItemRepository;
 use serde_json::json;
-use std::collections::HashMap;
 use std::io::Cursor;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Response};
 use tokio::runtime::Runtime;
@@ -57,24 +56,6 @@ pub(super) fn handle_request(
             }),
             allowed_origin.as_deref(),
         ),
-        (Method::Post, "/extract") => {
-            if !is_authorized_extension_request(request, allowed_origin.as_deref()) {
-                return unauthorized_response(allowed_origin.as_deref());
-            }
-
-            match extract::handle_extract(request, store, runtime, llm_client) {
-                Ok(ids) => json_response(
-                    200,
-                    json!({"success": true, "ids": ids}),
-                    allowed_origin.as_deref(),
-                ),
-                Err(err) => json_response(
-                    400,
-                    json!({"success": false, "message": err}),
-                    allowed_origin.as_deref(),
-                ),
-            }
-        }
         (Method::Post, "/v1/conversations") => {
             if !is_authorized_extension_request(request, allowed_origin.as_deref()) {
                 return unauthorized_response(allowed_origin.as_deref());
@@ -140,19 +121,6 @@ fn handle_create_conversation(
             }
         };
 
-    if let Some(conversation_id) = find_idempotency_hit(&normalized.idempotency_key) {
-        return json_response(
-            200,
-            json!({
-                "success": true,
-                "conversation_id": conversation_id,
-                "status": "queued",
-                "deduplicated": true
-            }),
-            allowed_origin,
-        );
-    }
-
     let extract_result = extract::ingest_conversation(
         store,
         runtime,
@@ -168,7 +136,6 @@ fn handle_create_conversation(
     match extract_result {
         Ok(_) => {
             let conversation_id = generate_conversation_id();
-            remember_idempotency(normalized.idempotency_key, conversation_id.clone());
             json_response(
                 200,
                 json!({
@@ -259,22 +226,6 @@ fn find_query_value<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
         .split('&')
         .filter_map(|entry| entry.split_once('='))
         .find_map(|(k, v)| if k == key { Some(v) } else { None })
-}
-
-fn idempotency_index() -> &'static Mutex<HashMap<String, String>> {
-    static INDEX: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    INDEX.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn find_idempotency_hit(idempotency_key: &str) -> Option<String> {
-    let guard = idempotency_index().lock().ok()?;
-    guard.get(idempotency_key).cloned()
-}
-
-fn remember_idempotency(idempotency_key: String, conversation_id: String) {
-    if let Ok(mut guard) = idempotency_index().lock() {
-        guard.insert(idempotency_key, conversation_id);
-    }
 }
 
 fn generate_conversation_id() -> String {

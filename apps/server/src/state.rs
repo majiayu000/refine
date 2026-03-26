@@ -3,20 +3,12 @@ use refine_core::infra::{
 };
 use refine_core::knowledge::{DocumentRepository, ItemRepository};
 use refine_core::search::SearchEngine;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::application::ports::{ConversationRepository, EventRepository, JobRepository};
-use crate::models::{ConversationRecord, ExtractionJobRecord};
 use crate::persistence::ServerPersistence;
 use crate::vector_search::InMemoryVectorSearch;
-
-pub struct RuntimeState {
-    pub conversations: Arc<RwLock<HashMap<String, ConversationRecord>>>,
-    pub idempotency: Arc<RwLock<HashMap<String, String>>>,
-    pub jobs: Arc<RwLock<HashMap<String, ExtractionJobRecord>>>,
-}
 
 pub struct AppState {
     pub store: Arc<dyn ItemRepository>,
@@ -30,7 +22,6 @@ pub struct AppState {
     pub conversation_repo: Arc<dyn ConversationRepository>,
     pub job_repo: Arc<dyn JobRepository>,
     pub event_repo: Arc<dyn EventRepository>,
-    pub runtime: RuntimeState,
 }
 
 impl AppState {
@@ -53,10 +44,8 @@ impl AppState {
         }
 
         let semantic_search_enabled = env_flag(&["REFINE_ENABLE_SEMANTIC_SEARCH"]);
-        // Self-host default: no quota limit unless explicitly configured.
         let free_quota_items =
             env_usize(&["REFINE_MAX_ITEMS", "REFINE_FREE_QUOTA_ITEMS"]).unwrap_or(0);
-        // Single-user self-host default: treat built-in user ids as premium unless explicitly configured.
         let premium_users = env_csv_set(&["REFINE_PREMIUM_USERS"])
             .unwrap_or_else(|| HashSet::from(["dev-user".to_string(), "token-user".to_string()]));
         let mut engine_builder = SearchEngine::new(store.clone());
@@ -86,24 +75,6 @@ impl AppState {
             );
         }
 
-        let conversation_vec = conversation_repo.load_conversations()?;
-        let job_vec = job_repo.load_jobs()?;
-
-        let mut conversations = HashMap::new();
-        let mut idempotency = HashMap::new();
-        for conversation in conversation_vec {
-            idempotency.insert(
-                conversation.idempotency_key.clone(),
-                conversation.id.clone(),
-            );
-            conversations.insert(conversation.id.clone(), conversation);
-        }
-
-        let mut jobs = HashMap::new();
-        for job in job_vec {
-            jobs.insert(job.id.clone(), job);
-        }
-
         Ok(Self {
             store,
             doc_store,
@@ -116,11 +87,6 @@ impl AppState {
             conversation_repo,
             job_repo,
             event_repo,
-            runtime: RuntimeState {
-                conversations: Arc::new(RwLock::new(conversations)),
-                idempotency: Arc::new(RwLock::new(idempotency)),
-                jobs: Arc::new(RwLock::new(jobs)),
-            },
         })
     }
 }

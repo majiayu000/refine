@@ -65,18 +65,15 @@ pub async fn create_conversation(
     let normalized = normalize_conversation_input(content, url, source, title, idempotency_key)
         .map_err(CreateConversationError::BadRequest)?;
 
-    if let Some(conversation_id) =
-        find_conversation_by_idempotency(&state, &normalized.idempotency_key).await
+    if let Some(record) =
+        find_conversation_by_idempotency(&state, &normalized.idempotency_key).await?
     {
-        let conversations = state.runtime.conversations.read().await;
-        if let Some(record) = conversations.get(&conversation_id) {
-            return Ok(CreateConversationResult {
-                conversation_id: record.id.clone(),
-                status: record.status.clone(),
-                deduplicated: true,
-                job_id: None,
-            });
-        }
+        return Ok(CreateConversationResult {
+            conversation_id: record.id,
+            status: record.status,
+            deduplicated: true,
+            job_id: None,
+        });
     }
 
     if state.free_quota_items > 0 && !state.is_premium_user(&user_id) {
@@ -114,7 +111,7 @@ pub async fn create_conversation(
         captured_at: normalize_timestamp(captured_at),
         created_at: now.clone(),
         status: conversation_status.clone(),
-        idempotency_key: normalized.idempotency_key.clone(),
+        idempotency_key: normalized.idempotency_key,
         item_ids: Vec::new(),
         last_error: None,
     };
@@ -123,15 +120,6 @@ pub async fn create_conversation(
         .conversation_repo
         .upsert_conversation(&conversation)
         .map_err(CreateConversationError::Internal)?;
-
-    {
-        let mut conversations = state.runtime.conversations.write().await;
-        conversations.insert(conversation_id.clone(), conversation);
-    }
-    {
-        let mut idempotency = state.runtime.idempotency.write().await;
-        idempotency.insert(normalized.idempotency_key, conversation_id.clone());
-    }
 
     let mut job_id = None;
     if !ingest_only {
@@ -149,10 +137,6 @@ pub async fn create_conversation(
             .job_repo
             .upsert_job(&job)
             .map_err(CreateConversationError::Internal)?;
-        {
-            let mut jobs = state.runtime.jobs.write().await;
-            jobs.insert(id.clone(), job);
-        }
         spawn_extraction(state, conversation_id.clone(), id.clone(), mode);
         job_id = Some(id);
     }
@@ -205,17 +189,13 @@ pub async fn create_extraction_job(
             CreateExtractionJobError::BadRequest("conversation_id is required".to_string())
         })?;
 
-    let queued_conversation = {
-        let mut conversations = state.runtime.conversations.write().await;
-        let Some(conversation) = conversations.get_mut(&conversation_id) else {
-            return Err(CreateExtractionJobError::NotFound(
-                "Conversation not found".to_string(),
-            ));
-        };
-        conversation.status = ConversationStatus::Queued;
-        conversation.last_error = None;
-        conversation.clone()
-    };
+    let mut queued_conversation = state
+        .conversation_repo
+        .find_conversation_by_id(&conversation_id)
+        .map_err(CreateExtractionJobError::Internal)?
+        .ok_or_else(|| CreateExtractionJobError::NotFound("Conversation not found".to_string()))?;
+    queued_conversation.status = ConversationStatus::Queued;
+    queued_conversation.last_error = None;
     state
         .conversation_repo
         .upsert_conversation(&queued_conversation)
@@ -238,10 +218,6 @@ pub async fn create_extraction_job(
         .job_repo
         .upsert_job(&job)
         .map_err(CreateExtractionJobError::Internal)?;
-    {
-        let mut jobs = state.runtime.jobs.write().await;
-        jobs.insert(job_id.clone(), job);
-    }
 
     spawn_extraction(state, conversation_id, job_id.clone(), mode);
 
@@ -251,9 +227,14 @@ pub async fn create_extraction_job(
     })
 }
 
-async fn find_conversation_by_idempotency(state: &Arc<AppState>, key: &str) -> Option<String> {
-    let index = state.runtime.idempotency.read().await;
-    index.get(key).cloned()
+async fn find_conversation_by_idempotency(
+    state: &Arc<AppState>,
+    key: &str,
+) -> Result<Option<crate::models::ConversationRecord>, CreateConversationError> {
+    state
+        .conversation_repo
+        .find_conversation_by_idempotency(key)
+        .map_err(CreateConversationError::Internal)
 }
 
 #[cfg(test)]

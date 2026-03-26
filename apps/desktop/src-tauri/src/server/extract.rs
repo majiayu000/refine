@@ -1,8 +1,8 @@
-use super::json::parse_json_body;
 use refine_core::infra::LlmClient;
 use refine_core::knowledge::{DocumentId, ItemRepository, Source};
-use refine_core::refinement::{extract_items_with_defaults, ExtractionPolicy, ItemExtractionInput};
-use serde::Deserialize;
+use refine_core::refinement::{
+    extract_items_with_strict_defaults, ExtractionPolicy, ItemExtractionInput,
+};
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
@@ -12,34 +12,6 @@ pub(super) struct IngestRequest {
     pub url: String,
     pub source: String,
     pub title: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExtractRequest {
-    content: String,
-    url: String,
-    source: String,
-    title: Option<String>,
-}
-
-pub(super) fn handle_extract(
-    request: &mut tiny_http::Request,
-    store: &Arc<dyn ItemRepository>,
-    runtime: &Runtime,
-    llm_client: Option<&Arc<dyn LlmClient>>,
-) -> Result<Vec<String>, String> {
-    let req = parse_json_body::<ExtractRequest>(request)?;
-    ingest_conversation(
-        store,
-        runtime,
-        llm_client,
-        IngestRequest {
-            content: req.content,
-            url: req.url,
-            source: req.source,
-            title: req.title,
-        },
-    )
 }
 
 pub(super) fn ingest_conversation(
@@ -56,6 +28,9 @@ async fn extract_and_store(
     llm_client: Option<Arc<dyn LlmClient>>,
     req: IngestRequest,
 ) -> Result<Vec<String>, String> {
+    let llm_client = llm_client
+        .as_deref()
+        .ok_or_else(|| "LLM client is required for strict extraction mode".to_string())?;
     let source = Source::new(&req.source).with_url(&req.url);
     let input = ItemExtractionInput {
         source: &req.source,
@@ -65,7 +40,9 @@ async fn extract_and_store(
         policy: ExtractionPolicy::default(),
     };
     let doc_id = DocumentId::new();
-    let items = extract_items_with_defaults(llm_client.as_deref(), &input, &source, &doc_id).await;
+    let items = extract_items_with_strict_defaults(llm_client, &input, &source, &doc_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let mut ids = Vec::with_capacity(items.len());
     for item in &items {

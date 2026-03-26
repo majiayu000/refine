@@ -5,8 +5,7 @@ use std::sync::Arc;
 
 use crate::application::error::ApplicationErrorCode;
 use crate::models::{
-    ConversationDto, ConversationRecord, ConversationStatus, ItemDto, ListConversationsQuery,
-    ListItemsQuery, SearchQuery,
+    ConversationDto, ItemDto, ListConversationsQuery, ListItemsQuery, SearchQuery,
 };
 use crate::state::AppState;
 
@@ -20,7 +19,7 @@ pub struct ListConversationsResult {
 pub async fn list_conversations(
     state: Arc<AppState>,
     query: ListConversationsQuery,
-) -> ListConversationsResult {
+) -> Result<ListConversationsResult, QueryError> {
     let cursor = query.cursor.unwrap_or(0);
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let status_filter = query
@@ -28,29 +27,26 @@ pub async fn list_conversations(
         .map(|status| status.trim().to_ascii_lowercase())
         .filter(|status| !status.is_empty());
 
-    let mut conversations: Vec<ConversationRecord> = {
-        let guard = state.runtime.conversations.read().await;
-        guard.values().cloned().collect()
-    };
-    if let Some(filter_status) = status_filter {
-        conversations.retain(|record| conversation_status_name(&record.status) == filter_status);
-    }
-    conversations.sort_by(|a, b| b.captured_at.cmp(&a.captured_at));
+    let total = state
+        .conversation_repo
+        .count_conversations(status_filter.as_deref())
+        .map_err(QueryError::Internal)?;
+    let conversations = state
+        .conversation_repo
+        .list_conversations(status_filter.as_deref(), cursor, limit)
+        .map_err(QueryError::Internal)?;
 
-    let total = conversations.len();
-    let conversations = conversations
-        .into_iter()
-        .skip(cursor)
-        .take(limit)
-        .map(|record| ConversationDto::from(&record))
+    let mapped = conversations
+        .iter()
+        .map(ConversationDto::from)
         .collect::<Vec<_>>();
-    let next_cursor = paginate_next_cursor(cursor, conversations.len(), total);
+    let next_cursor = paginate_next_cursor(cursor, mapped.len(), total);
 
-    ListConversationsResult {
-        conversations,
+    Ok(ListConversationsResult {
+        conversations: mapped,
         total,
         next_cursor,
-    }
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -193,7 +189,7 @@ pub async fn list_documents(
         .find_recent(cursor, limit)
         .await
         .map_err(|e| QueryError::Internal(e.to_string()))?;
-    let item_counts = count_items_per_document(&state, &docs).await;
+    let item_counts = count_items_per_document(&state, &docs).await?;
     let next_cursor = paginate_next_cursor(cursor, docs.len(), total);
 
     Ok(ListDocumentsResult {
@@ -247,27 +243,17 @@ pub async fn get_document(
 async fn count_items_per_document(
     state: &Arc<AppState>,
     docs: &[refine_core::knowledge::Document],
-) -> Vec<usize> {
+) -> Result<Vec<usize>, QueryError> {
     let mut counts = Vec::with_capacity(docs.len());
     for doc in docs {
         let items = state
             .store
             .find_by_document_id(doc.id())
             .await
-            .unwrap_or_default();
+            .map_err(|e| QueryError::Internal(e.to_string()))?;
         counts.push(items.len());
     }
-    counts
-}
-
-fn conversation_status_name(status: &ConversationStatus) -> &'static str {
-    match status {
-        ConversationStatus::Captured => "captured",
-        ConversationStatus::Queued => "queued",
-        ConversationStatus::Processing => "processing",
-        ConversationStatus::Processed => "processed",
-        ConversationStatus::Failed => "failed",
-    }
+    Ok(counts)
 }
 
 fn paginate_next_cursor(cursor: usize, returned: usize, total: usize) -> Option<usize> {
@@ -280,8 +266,7 @@ fn paginate_next_cursor(cursor: usize, returned: usize, total: usize) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::{conversation_status_name, paginate_next_cursor};
-    use crate::models::ConversationStatus;
+    use super::paginate_next_cursor;
 
     #[test]
     fn paginate_next_cursor_returns_none_on_last_page() {
@@ -293,29 +278,5 @@ mod tests {
     fn paginate_next_cursor_returns_next_when_remaining() {
         assert_eq!(paginate_next_cursor(0, 20, 55), Some(20));
         assert_eq!(paginate_next_cursor(20, 20, 55), Some(40));
-    }
-
-    #[test]
-    fn conversation_status_name_is_stable_for_filters() {
-        assert_eq!(
-            conversation_status_name(&ConversationStatus::Captured),
-            "captured"
-        );
-        assert_eq!(
-            conversation_status_name(&ConversationStatus::Queued),
-            "queued"
-        );
-        assert_eq!(
-            conversation_status_name(&ConversationStatus::Processing),
-            "processing"
-        );
-        assert_eq!(
-            conversation_status_name(&ConversationStatus::Processed),
-            "processed"
-        );
-        assert_eq!(
-            conversation_status_name(&ConversationStatus::Failed),
-            "failed"
-        );
     }
 }

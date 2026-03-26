@@ -1,4 +1,4 @@
-const DEFAULT_CLOUD_API_BASE = 'http://localhost:8787'
+const DEFAULT_CLOUD_API_BASE = 'http://localhost:5567'
 declare const process: { env: Record<string, string | undefined> }
 
 export const OUTBOX_FLUSH_ALARM = 'flushOutbox'
