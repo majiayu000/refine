@@ -3,6 +3,7 @@ mod compute;
 mod display;
 mod indicators;
 mod persistence;
+pub(crate) mod streak;
 mod statusline;
 mod types;
 
@@ -36,6 +37,9 @@ use compute::{
 
 #[cfg(test)]
 use persistence::load_recent_scores_from_path;
+
+#[cfg(test)]
+use streak::{calculate_streak, format_streak, milestone_message};
 
 /// Filter items to only those created since the given date string (YYYY-MM-DD).
 /// If `since` is None, returns all items unchanged.

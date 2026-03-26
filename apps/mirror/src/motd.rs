@@ -297,8 +297,14 @@ pub fn handle_motd() -> Result<()> {
         String::new()
     };
 
+    // Streak info
+    let streak = crate::score::streak::current_streak();
+    let streak_suffix = crate::score::streak::format_streak(streak)
+        .map(|s| format!(" {}", s))
+        .unwrap_or_default();
+
     println!(
-        "🪞 {d}{de}{dt} {b}{be}{bt} {c}{ce}{ct} | {tip}{stale}",
+        "🪞 {d}{de}{dt} {b}{be}{bt} {c}{ce}{ct}{streak} | {tip}{stale}",
         d = t!("Depth", "深度"),
         de = depth_e,
         dt = depth_t,
@@ -308,9 +314,13 @@ pub fn handle_motd() -> Result<()> {
         c = t!("Collab", "协作"),
         ce = collab_e,
         ct = collab_t,
+        streak = streak_suffix,
         tip = tip,
         stale = stale_suffix,
     );
+    if let Some(milestone) = crate::score::streak::milestone_message(streak) {
+        println!("  {}", milestone);
+    }
     if let Some(reminder) = weekly_reminder() {
         println!("{}", reminder);
     }

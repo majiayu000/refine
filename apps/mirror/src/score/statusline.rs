@@ -15,7 +15,7 @@ fn sanitize_single_line(s: &str) -> String {
 
 /// Build the one-line statusline string from score data.
 ///
-/// Format: "本周N 深度🟢 广度🔴 协作🔴 <short_advice>"
+/// Format: "本周N 深度🟢 广度🔴 协作🔴 🔥连续N天 <short_advice>"
 ///
 /// `session_count` comes from growth-tracker.json `total_sessions`.
 /// `short` is the short advice from the LLM advice cache (may be empty).
@@ -24,12 +24,17 @@ pub fn build_statusline(result: &ScoreResult, session_count: u64, short: &str) -
     let breadth_e = result.layers[1].signal.emoji();
     let collab_e = result.layers[2].signal.emoji();
 
+    let streak = super::streak::current_streak();
+
     let mut parts = vec![
         format!("{}{}", crate::lang::t!("Week", "本周"), session_count),
         format!("{}{}", crate::lang::t!("Depth", "深度"), depth_e),
         format!("{}{}", crate::lang::t!("Breadth", "广度"), breadth_e),
         format!("{}{}", crate::lang::t!("Collab", "协作"), collab_e),
     ];
+    if let Some(streak_text) = super::streak::format_streak(streak) {
+        parts.push(streak_text);
+    }
     let sanitized = sanitize_single_line(short);
     if !sanitized.is_empty() {
         parts.push(sanitized);
