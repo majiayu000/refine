@@ -15,7 +15,7 @@ fn sanitize_single_line(s: &str) -> String {
 
 /// Build the one-line statusline string from score data.
 ///
-/// Format: "本周N 深度🟢 广度🔴 协作🔴 🔥连续N天 <short_advice>"
+/// Format: "🪞🟡🔴🔴 🔥4天 <short_advice>"
 ///
 /// `session_count` comes from growth-tracker.json `total_sessions`.
 /// `short` is the short advice from the LLM advice cache (may be empty).
@@ -26,14 +26,9 @@ pub fn build_statusline(result: &ScoreResult, session_count: u64, short: &str) -
 
     let streak = super::streak::current_streak();
 
-    let mut parts = vec![
-        format!("{}{}", crate::lang::t!("Week", "本周"), session_count),
-        format!("{}{}", crate::lang::t!("Depth", "深度"), depth_e),
-        format!("{}{}", crate::lang::t!("Breadth", "广度"), breadth_e),
-        format!("{}{}", crate::lang::t!("Collab", "协作"), collab_e),
-    ];
-    if let Some(streak_text) = super::streak::format_streak(streak) {
-        parts.push(streak_text);
+    let mut parts = vec![format!("🪞{}{}{}", depth_e, breadth_e, collab_e)];
+    if streak >= 2 {
+        parts.push(format!("🔥{}天", streak));
     }
     let sanitized = sanitize_single_line(short);
     if !sanitized.is_empty() {
@@ -129,7 +124,11 @@ pub fn write_statusline(result: &ScoreResult, db_path: &Path) -> Result<()> {
     if let Err(e) = std::fs::rename(&tmp, &dest) {
         // Best-effort cleanup so we do not leave stale PID-named temps around.
         if let Err(rm_err) = std::fs::remove_file(&tmp) {
-            eprintln!("[mirror] warn: failed to remove temp file {}: {}", tmp.display(), rm_err);
+            eprintln!(
+                "[mirror] warn: failed to remove temp file {}: {}",
+                tmp.display(),
+                rm_err
+            );
         }
         return Err(anyhow::anyhow!(
             "failed to rename {} -> statusline.txt: {}",
@@ -165,14 +164,13 @@ mod tests {
     }
 
     #[test]
-    fn build_statusline_contains_emojis_and_count() {
+    fn build_statusline_compact_format() {
         let result = make_result([Signal::Green, Signal::Red, Signal::Yellow]);
         let line = build_statusline(&result, 243, "some advice");
-        // Emoji signals must appear regardless of language
+        assert!(line.starts_with("🪞"), "should start with mirror emoji");
         assert!(line.contains("🟢"), "depth signal missing");
         assert!(line.contains("🔴"), "breadth signal missing");
         assert!(line.contains("🟡"), "collab signal missing");
-        assert!(line.contains("243"), "session count missing");
         assert!(line.ends_with("some advice"), "advice missing");
     }
 
@@ -181,18 +179,15 @@ mod tests {
         let result = make_result([Signal::Green, Signal::Green, Signal::Green]);
         let line = build_statusline(&result, 0, "");
         assert!(!line.ends_with(' '), "should not have trailing space");
-        assert!(line.contains("🟢"));
-        assert!(line.contains('0'));
+        assert!(line.starts_with("🪞🟢🟢🟢"));
     }
 
     #[test]
-    fn build_statusline_four_parts_with_advice() {
+    fn build_statusline_ends_with_advice() {
         let result = make_result([Signal::Red, Signal::Red, Signal::Red]);
         let line = build_statusline(&result, 10, "tip");
-        // 4 space-separated sections + advice: "XN X🔴 X🔴 X🔴 tip"
-        let parts: Vec<&str> = line.splitn(5, ' ').collect();
-        assert_eq!(parts.len(), 5);
-        assert_eq!(parts[4], "tip");
+        assert!(line.ends_with("tip"), "advice should be last: {}", line);
+        assert!(line.starts_with("🪞🔴🔴🔴"));
     }
 
     #[test]
@@ -204,7 +199,6 @@ mod tests {
         std::fs::write(&path, &line)?;
         let content = std::fs::read_to_string(&path)?;
         assert_eq!(content, line);
-        assert!(content.contains("50"));
         assert!(content.contains("test-advice"));
         Ok(())
     }
