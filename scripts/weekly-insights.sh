@@ -25,6 +25,12 @@ fi
 
 log "=== Weekly Insights Run Start ==="
 
+# Preflight: environment diagnostics for troubleshooting
+log "Preflight: PATH=$PATH"
+log "Preflight: refine=$(command -v "$REFINE_BIN" 2>/dev/null && echo "$REFINE_BIN" || echo 'NOT FOUND')"
+log "Preflight: cwd=$(pwd)"
+log "Preflight: env REFINE_DB_PATH=${REFINE_DB_PATH:-<unset>} REFINE_ANTHROPIC_MODEL=${REFINE_ANTHROPIC_MODEL:-<unset>}"
+
 # Step 1: 增量导入新会话
 log "Step 1: ingest-sessions"
 if "$REFINE_BIN" ingest-sessions 2>&1; then

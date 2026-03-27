@@ -14,6 +14,12 @@ fi
 
 echo "=== $(date) ==="
 
+# Preflight: environment diagnostics for troubleshooting
+echo "Preflight: PATH=$PATH"
+echo "Preflight: refine=$(command -v refine) mirror=$(command -v mirror)"
+echo "Preflight: cwd=$(pwd)"
+echo "Preflight: env REFINE_DB_PATH=${REFINE_DB_PATH:-<unset>} REFINE_ANTHROPIC_MODEL=${REFINE_ANTHROPIC_MODEL:-<unset>}"
+
 # 1. Ingest new sessions (capture exit code without aborting the script)
 echo "Step 1: ingest-sessions"
 if refine ingest-sessions 2>&1; then

@@ -215,8 +215,11 @@ pub fn facets_to_items(
     for decision in &facets.decisions {
         let mut item = Item::new_observation(decision, decision);
         item.set_document_id(document_id.clone());
-        let tag = Tag::try_new("decision").into_iter().collect();
-        let _ = item.set_tags(tag);
+        let mut dtags: Vec<Tag> = Tag::try_new("decision").into_iter().collect();
+        if let Some(proj) = project {
+            dtags.extend(Tag::try_new(proj));
+        }
+        let _ = item.set_tags(dtags);
         items.push(item);
     }
 
@@ -224,8 +227,11 @@ pub fn facets_to_items(
     for bug in &facets.bugs_fixed {
         let mut item = Item::new_observation(bug, bug);
         item.set_document_id(document_id.clone());
-        let tag = Tag::try_new("bugfix").into_iter().collect();
-        let _ = item.set_tags(tag);
+        let mut btags: Vec<Tag> = Tag::try_new("bugfix").into_iter().collect();
+        if let Some(proj) = project {
+            btags.extend(Tag::try_new(proj));
+        }
+        let _ = item.set_tags(btags);
         items.push(item);
     }
 
@@ -311,5 +317,36 @@ mod tests {
         assert_eq!(items.len(), 3);
         assert!(items.iter().all(|i| i.item_type() == ItemType::Observation));
         assert_eq!(items[0].title(), "测试会话");
+    }
+
+    #[test]
+    fn facets_to_items_decision_bugfix_carry_project_tag() {
+        let facets = FacetResponse {
+            session_summary: "测试".to_string(),
+            cognitive_level: "competent".to_string(),
+            collaboration_mode: "delegation".to_string(),
+            decisions: vec!["用 Rust 重写".to_string()],
+            bugs_fixed: vec!["修复空指针".to_string()],
+            patterns: Vec::new(),
+            friction: Vec::new(),
+            project_progress: Vec::new(),
+            questions: Vec::new(),
+            knowledge_gained: Vec::new(),
+            tools_discovered: Vec::new(),
+            architecture: Vec::new(),
+            code_artifacts: Vec::new(),
+        };
+        let doc_id = DocumentId::new();
+        let items = facets_to_items(&facets, &doc_id, Some("-users-lifcc-desktop-code-ai-tools-harness"));
+
+        // decision item (index 1) should carry both "decision" and project tag
+        let decision_tags: Vec<&str> = items[1].tags().iter().map(|t| t.as_str()).collect();
+        assert!(decision_tags.contains(&"decision"));
+        assert!(decision_tags.contains(&"-users-lifcc-desktop-code-ai-tools-harness"));
+
+        // bugfix item (index 2) should carry both "bugfix" and project tag
+        let bugfix_tags: Vec<&str> = items[2].tags().iter().map(|t| t.as_str()).collect();
+        assert!(bugfix_tags.contains(&"bugfix"));
+        assert!(bugfix_tags.contains(&"-users-lifcc-desktop-code-ai-tools-harness"));
     }
 }
