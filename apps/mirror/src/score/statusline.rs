@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::types::ScoreResult;
 
@@ -17,9 +17,8 @@ fn sanitize_single_line(s: &str) -> String {
 ///
 /// Format: "🪞🟡🔴🔴 🔥4天 <short_advice>"
 ///
-/// `session_count` comes from growth-tracker.json `total_sessions`.
 /// `short` is the short advice from the LLM advice cache (may be empty).
-pub fn build_statusline(result: &ScoreResult, session_count: u64, short: &str) -> String {
+pub fn build_statusline(result: &ScoreResult, short: &str) -> String {
     let depth_e = result.layers[0].signal.emoji();
     let breadth_e = result.layers[1].signal.emoji();
     let collab_e = result.layers[2].signal.emoji();
@@ -37,22 +36,6 @@ pub fn build_statusline(result: &ScoreResult, session_count: u64, short: &str) -
     parts.join(" ")
 }
 
-fn growth_tracker_path(db_path: &Path) -> PathBuf {
-    let primary = db_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("growth-tracker.json");
-    if primary.exists() {
-        return primary;
-    }
-    if let Some(legacy) = dirs::home_dir().map(|h| h.join(".refine").join("growth-tracker.json")) {
-        if legacy.exists() {
-            return legacy;
-        }
-    }
-    primary
-}
-
 /// Write the one-line statusline to `~/.mirror/statusline.txt`.
 ///
 /// Called after `mirror score` completes so that `cat ~/.mirror/statusline.txt`
@@ -60,45 +43,7 @@ fn growth_tracker_path(db_path: &Path) -> PathBuf {
 ///
 /// Uses an atomic write (temp file + rename) to prevent concurrent readers from
 /// observing a partially-written file.
-pub fn write_statusline(result: &ScoreResult, db_path: &Path) -> Result<()> {
-    let tracker_path = growth_tracker_path(db_path);
-    let session_count = match std::fs::read_to_string(&tracker_path) {
-        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
-            Ok(v) => v
-                .get("total_sessions")
-                .and_then(|n| n.as_u64())
-                .unwrap_or_else(|| {
-                    eprintln!(
-                        "[mirror] warn: growth-tracker.json missing 'total_sessions' field, defaulting to 0"
-                    );
-                    0
-                }),
-            Err(e) => {
-                // Parse failure may be caused by a concurrent partial write from
-                // growth.rs (non-atomic overwrite). Propagate the error instead of
-                // writing session_count=0, which would permanently surface bad data.
-                return Err(anyhow::anyhow!(
-                    "failed to parse growth-tracker.json at {}: {}",
-                    tracker_path.display(),
-                    e
-                ));
-            }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // File does not exist yet (first run) — zero is correct.
-            0
-        }
-        Err(e) => {
-            // Any other IO error (e.g. EINTR during a concurrent write) — propagate
-            // rather than recording session_count=0 as visible data.
-            return Err(anyhow::anyhow!(
-                "failed to read growth-tracker.json at {}: {}",
-                tracker_path.display(),
-                e
-            ));
-        }
-    };
-
+pub fn write_statusline(result: &ScoreResult, _db_path: &Path) -> Result<()> {
     let short = match crate::advice::load_cached() {
         Ok(cached) => cached
             .map(|c| c.short)
@@ -110,7 +55,7 @@ pub fn write_statusline(result: &ScoreResult, db_path: &Path) -> Result<()> {
         }
     };
 
-    let line = build_statusline(result, session_count, &short);
+    let line = build_statusline(result, &short);
     let dir = crate::config::ensure_mirror_dir()?;
     let dest = dir.join("statusline.txt");
 
@@ -166,7 +111,7 @@ mod tests {
     #[test]
     fn build_statusline_compact_format() {
         let result = make_result([Signal::Green, Signal::Red, Signal::Yellow]);
-        let line = build_statusline(&result, 243, "some advice");
+        let line = build_statusline(&result, "some advice");
         assert!(line.starts_with("🪞"), "should start with mirror emoji");
         assert!(line.contains("🟢"), "depth signal missing");
         assert!(line.contains("🔴"), "breadth signal missing");
@@ -177,7 +122,7 @@ mod tests {
     #[test]
     fn build_statusline_no_advice_no_trailing_space() {
         let result = make_result([Signal::Green, Signal::Green, Signal::Green]);
-        let line = build_statusline(&result, 0, "");
+        let line = build_statusline(&result, "");
         assert!(!line.ends_with(' '), "should not have trailing space");
         assert!(line.starts_with("🪞🟢🟢🟢"));
     }
@@ -185,7 +130,7 @@ mod tests {
     #[test]
     fn build_statusline_ends_with_advice() {
         let result = make_result([Signal::Red, Signal::Red, Signal::Red]);
-        let line = build_statusline(&result, 10, "tip");
+        let line = build_statusline(&result, "tip");
         assert!(line.ends_with("tip"), "advice should be last: {}", line);
         assert!(line.starts_with("🪞🔴🔴🔴"));
     }
@@ -194,7 +139,7 @@ mod tests {
     fn write_statusline_creates_file() -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         let result = make_result([Signal::Green, Signal::Red, Signal::Yellow]);
-        let line = build_statusline(&result, 50, "test-advice");
+        let line = build_statusline(&result, "test-advice");
         let path = dir.path().join("statusline.txt");
         std::fs::write(&path, &line)?;
         let content = std::fs::read_to_string(&path)?;
