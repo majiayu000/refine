@@ -2,7 +2,7 @@
  * Refine 云端 API 客户端
  */
 
-import { getCloudApiBase } from './config'
+import { discoverCloudApiBase } from './config'
 import type {
   CloudIngestResponse,
   CloudItemsResponse,
@@ -54,7 +54,7 @@ function toRequestBody(item: OutboxItem): CloudUploadRequest {
 }
 
 export async function checkCloudHealth(): Promise<boolean> {
-  const apiBase = getCloudApiBase()
+  const apiBase = await discoverCloudApiBase()
 
   try {
     const res = await fetch(`${apiBase}/health`, {
@@ -71,7 +71,7 @@ export async function checkCloudHealth(): Promise<boolean> {
 }
 
 export async function uploadConversation(item: OutboxItem): Promise<CloudUploadResult> {
-  const apiBase = getCloudApiBase()
+  const apiBase = await discoverCloudApiBase()
 
   try {
     const res = await fetch(`${apiBase}/v1/conversations`, {
@@ -111,7 +111,7 @@ export async function uploadConversation(item: OutboxItem): Promise<CloudUploadR
 
 export async function fetchCloudTotalItems(): Promise<number | null> {
   // Strict contract mode: `total` 字段是必需的，不再支持旧服务端回退扫描。
-  const apiBase = getCloudApiBase()
+  const apiBase = await discoverCloudApiBase()
 
   try {
     const headers = buildHeaders()
@@ -129,7 +129,7 @@ export async function fetchRecommendations(
   query: string,
   options?: { limit?: number; timeoutMs?: number }
 ): Promise<RecommendationResponse | null> {
-  const apiBase = getCloudApiBase()
+  const apiBase = await discoverCloudApiBase()
   const limit = options?.limit ?? 5
   const timeoutMs = options?.timeoutMs ?? DEFAULT_RECOMMENDATION_TIMEOUT_MS
   const q = encodeURIComponent(query)
@@ -155,7 +155,7 @@ export async function fetchRecommendations(
 }
 
 export async function fetchQuotaStatus(): Promise<QuotaStatusResponse | null> {
-  const apiBase = getCloudApiBase()
+  const apiBase = await discoverCloudApiBase()
 
   try {
     const res = await fetch(`${apiBase}/v1/quota`, {
@@ -181,7 +181,7 @@ export async function fetchQuotaStatus(): Promise<QuotaStatusResponse | null> {
 }
 
 export async function trackEvent(payload: TrackEventRequest): Promise<boolean> {
-  const apiBase = getCloudApiBase()
+  const apiBase = await discoverCloudApiBase()
 
   try {
     const res = await fetch(`${apiBase}/v1/events`, {

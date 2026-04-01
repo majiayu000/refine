@@ -18,7 +18,11 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 const DEFAULT_BIND_HOST: &str = "127.0.0.1";
-const DEFAULT_SERVER_PORT: u16 = 5567;
+const DEFAULT_SERVER_PORT: u16 = 21567;
+/// Candidate ports when the preferred port is occupied.
+/// The extension probes the same list for discovery.
+const FALLBACK_PORTS: &[u16] = &[21567, 21568, 21569, 21570];
+const MAX_FALLBACK_ATTEMPTS: usize = FALLBACK_PORTS.len();
 
 #[tokio::main]
 async fn main() {
@@ -38,7 +42,8 @@ async fn main() {
 
     if state.llm_client.is_none() {
         println!(
-            "LLM is not configured, extraction requests will fail in strict mode. Set REFINE_ANTHROPIC_API_KEY or REFINE_OPENAI_API_KEY to enable extraction."
+            "LLM is not configured, extraction requests will fail in strict mode. \
+             Set REFINE_ANTHROPIC_API_KEY or REFINE_OPENAI_API_KEY to enable extraction."
         );
     }
 
@@ -82,14 +87,14 @@ async fn main() {
         .layer(cors)
         .with_state(state.clone());
 
-    let port = std::env::var("REFINE_SERVER_PORT")
+    let preferred_port = std::env::var("REFINE_SERVER_PORT")
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
         .unwrap_or(DEFAULT_SERVER_PORT);
     let host =
         std::env::var("REFINE_SERVER_HOST").unwrap_or_else(|_| DEFAULT_BIND_HOST.to_string());
 
-    let addr = parse_bind_addr(&host, port);
+    let addr = resolve_bind_addr(&host, preferred_port).await;
     if requires_api_token_for_bind(&addr) && state.api_token.is_none() {
         eprintln!(
             "REFINE_API_TOKEN is required when binding to non-loopback address: {}",
@@ -100,10 +105,84 @@ async fn main() {
 
     println!("Refine cloud API (Rust) listening on http://{}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .expect("failed to bind tcp listener");
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Failed to bind {}: {}", addr, e);
+            std::process::exit(1);
+        }
+    };
     axum::serve(listener, app).await.expect("server exited");
+}
+
+/// Try the preferred port, then fallback candidates.
+/// - If another refine-server is already running on any candidate → exit(0).
+/// - If a non-refine process holds the port → skip to next candidate.
+/// - If all candidates exhausted → exit(1) with diagnostics.
+async fn resolve_bind_addr(host: &str, preferred: u16) -> SocketAddr {
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let timeout = Duration::from_millis(200);
+
+    // Build candidate list: preferred first, then fallbacks (deduped)
+    let mut candidates = vec![preferred];
+    for &p in FALLBACK_PORTS {
+        if !candidates.contains(&p) {
+            candidates.push(p);
+        }
+    }
+    candidates.truncate(MAX_FALLBACK_ATTEMPTS);
+
+    for &port in &candidates {
+        let addr = parse_bind_addr(host, port);
+
+        // Can we connect? If not, the port is free.
+        if TcpStream::connect_timeout(&addr, timeout).is_err() {
+            if port != preferred {
+                eprintln!(
+                    "Port {} was occupied, using fallback port {}.",
+                    preferred, port
+                );
+            }
+            return addr;
+        }
+
+        // Port is occupied — check if it's us
+        if is_refine_server(&addr).await {
+            eprintln!(
+                "Another refine-server is already running on {}. Exiting.",
+                addr
+            );
+            std::process::exit(0);
+        }
+
+        // Not us — log and try next
+        eprintln!("Port {} is occupied by another process, trying next...", port);
+    }
+
+    eprintln!(
+        "All candidate ports {:?} are occupied. \
+         Set REFINE_SERVER_PORT to specify a free port.",
+        candidates
+    );
+    std::process::exit(1);
+}
+
+async fn is_refine_server(addr: &SocketAddr) -> bool {
+    let url = format!("http://{}/health", addr);
+    match reqwest::Client::new()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+    {
+        Ok(resp) => resp
+            .text()
+            .await
+            .map_or(false, |body| body.contains("Refine cloud API")),
+        Err(_) => false,
+    }
 }
 
 fn parse_bind_addr(host: &str, port: u16) -> SocketAddr {
@@ -123,27 +202,27 @@ mod tests {
 
     #[test]
     fn parse_bind_addr_falls_back_to_loopback_for_invalid_host() {
-        let addr = parse_bind_addr("localhost", 8787);
-        assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 8787)));
+        let addr = parse_bind_addr("localhost", 5567);
+        assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 5567)));
     }
 
     #[test]
     fn non_loopback_bindings_require_api_token() {
         assert!(requires_api_token_for_bind(&SocketAddr::from((
             [0, 0, 0, 0],
-            8787
+            5567
         ))));
         assert!(requires_api_token_for_bind(&SocketAddr::from((
             [192, 168, 1, 8],
-            8787
+            5567
         ))));
         assert!(!requires_api_token_for_bind(&SocketAddr::from((
             [127, 0, 0, 1],
-            8787
+            5567
         ))));
         assert!(!requires_api_token_for_bind(&SocketAddr::from((
             [0, 0, 0, 0, 0, 0, 0, 1],
-            8787
+            5567
         ))));
     }
 }

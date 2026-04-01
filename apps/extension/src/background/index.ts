@@ -14,7 +14,7 @@ import {
   uploadConversation,
 } from '../lib/api'
 import {
-  getCloudApiBase,
+  discoverCloudApiBase,
   OUTBOX_FLUSH_ALARM,
   OUTBOX_FLUSH_INTERVAL_MINUTES,
   RESET_DAILY_STATS_ALARM,
@@ -143,7 +143,7 @@ function recoverStuckSyncingItems(outbox: OutboxItem[], now = Date.now()): boole
   return changed
 }
 
-function buildSyncStatus(snapshot: StorageSnapshot): SyncStatus {
+async function buildSyncStatus(snapshot: StorageSnapshot): Promise<SyncStatus> {
   const counts = {
     pending: 0,
     syncing: 0,
@@ -159,7 +159,7 @@ function buildSyncStatus(snapshot: StorageSnapshot): SyncStatus {
     ...counts,
     lastError: snapshot.syncState.lastError,
     lastSyncedAt: snapshot.syncState.lastSyncedAt,
-    apiBase: getCloudApiBase(),
+    apiBase: await discoverCloudApiBase(),
   }
 }
 
@@ -394,12 +394,12 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage, _sender, sendR
         const cloud = await getCloudStatusWithCache()
         sendResponse({
           cloudHealthy: cloud.cloudHealthy,
-          status: buildSyncStatus(snapshot),
+          status: await buildSyncStatus(snapshot),
           remoteTotalItems: cloud.remoteTotalItems ?? undefined,
           quota: cloud.quota ?? undefined,
         })
       })
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
         sendResponse({
           cloudHealthy: false,
           status: {
@@ -407,7 +407,7 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage, _sender, sendR
             syncing: 0,
             failed: 0,
             sent: 0,
-            apiBase: getCloudApiBase(),
+            apiBase: await discoverCloudApiBase(),
             lastError: error instanceof Error ? error.message : String(error),
           },
         })
@@ -421,7 +421,7 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage, _sender, sendR
         const snapshot = await loadSnapshot()
         sendResponse({
           ok: true,
-          status: buildSyncStatus(snapshot),
+          status: await buildSyncStatus(snapshot),
         })
       })
       .catch((error: unknown) => {
