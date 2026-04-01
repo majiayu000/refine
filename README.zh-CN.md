@@ -148,8 +148,7 @@ refine/
 │   ├── desktop/         # 桌面应用（Tauri）
 │   └── extension/       # 浏览器扩展（Plasmo）
 └── scripts/
-    ├── weekly-insights.sh    # 每周自动分析（launchd/cron）
-    └── reset-weekly-tracker.sh # 周计数器重置
+    └── weekly-insights.sh    # 每周自动分析（launchd/cron）
 ```
 
 ## 技术栈

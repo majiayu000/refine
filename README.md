@@ -86,9 +86,7 @@ mirror profile                      # Cognitive portrait narrative (requires LLM
 本周243 深度🟢 广度🔴 协作🔴 每周开1次新方向探索
 ```
 
-**SessionStart hook** injects cognitive dashboard + LLM advice into every Claude Code conversation. Add `scripts/cognitive-reminder.sh` to your SessionStart hook to warn when daily refresh is >36h stale.
-
-Hook errors are logged to `~/.refine/hooks-error.log` instead of being silently discarded.
+**SessionStart hook** injects cognitive dashboard + LLM advice into every Claude Code conversation.
 
 ### Automation (launchd)
 

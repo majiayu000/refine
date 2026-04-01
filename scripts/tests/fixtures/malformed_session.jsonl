@@ -1,5 +1,0 @@
-{"type":"user","message":{"content":"this is valid"}}
-{broken json here
-{"type":"user","message":{"content":"another valid line"}}
-not json at all
-{"type":"assistant","message":{"content":[{"type":"text","text":"response"}]}}

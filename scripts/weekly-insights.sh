@@ -4,8 +4,6 @@ set -euo pipefail
 REFINE_BIN="/Users/lifcc/.cargo/bin/refine"
 PROJECT_DIR="/Users/lifcc/Desktop/code/AI/tools/refine"
 ENV_FILE="${PROJECT_DIR}/.env"
-TRACKER_FILE="${HOME}/.refine/growth-tracker.json"
-RESET_SCRIPT="${PROJECT_DIR}/scripts/reset-weekly-tracker.sh"
 LOG_PREFIX="[refine-weekly]"
 
 log() {
@@ -47,29 +45,8 @@ else
   log "Step 2: insights --prescription failed with exit code $?"
 fi
 
-# Step 3: 发送 macOS 通知（growth 指标已废弃，不再读取 tracker 文件）
+# Step 3: 发送 macOS 通知
 log "Step 3: notification"
-# NOTE: refine growth/explore/deep-inquiry commands have been permanently removed;
-# growth-tracker.json has no in-tree writer and all counters are permanently stale.
-# The mtime-based staleness check that was here was unreliable because
-# reset-weekly-tracker.sh rewrites the file each run, keeping mtime fresh while
-# data remains semantically dead.  We emit an unconditional deprecation warning
-# and omit the stale counters from the notification entirely.
-if [[ -f "$TRACKER_FILE" ]]; then
-  log "WARNING: ${TRACKER_FILE} is a DEPRECATED artifact — refine growth/explore/deep-inquiry commands have been permanently removed and no longer write to this file. All counters are stale regardless of file mtime. Use 'mirror score' for current data."
-fi
-osascript -e 'display notification "报告已生成（growth 指标已废弃，请使用 mirror score）" with title "Refine Weekly Insights"' 2>&1 || true
-
-# Step 4: 重置本周计数器（归档历史 + 重置）
-log "Step 4: reset weekly tracker"
-if [[ -x "$RESET_SCRIPT" ]]; then
-  if "$RESET_SCRIPT" 2>&1; then
-    log "Step 4: weekly tracker reset completed"
-  else
-    log "Step 4: weekly tracker reset failed with exit code $?"
-  fi
-else
-  log "WARNING: reset script not found or not executable: ${RESET_SCRIPT}"
-fi
+osascript -e 'display notification "Weekly insights 报告已生成" with title "Refine Weekly Insights"' 2>&1 || true
 
 log "=== Weekly Insights Run End ==="
