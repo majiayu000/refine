@@ -1,0 +1,376 @@
+# refine 数据管道与产出链路
+
+> 梳理日期：2026-04-09
+> 研究范围：refine Rust workspace (`apps/cli`, `apps/mirror`, `packages/core`) + 相关 launchd 任务 + Claude Code skill
+> 研究方法：只读研究，不执行任何命令
+
+---
+
+## 摘要
+
+共识别 **9 条产出链路**，其中 **6 条调 LLM**、**5 条写 refine.db**、其余写本地文件或 stdout：
+
+- 1 条数据流入口（`refine ingest-sessions`，JSONL → refine.db）
+- 1 条核心 LLM 聚合链路（`refine insights --prescription`，~10+1 次 LLM 并发）
+- 4 条 mirror 子命令（`score` / `motd` / `dashboard` / `weekly` / `profile`）
+- 2 条由 launchd 调度的 shell 脚本（daily/weekly）
+- 1 条外部 skill（`cognitive-portrait`，不在 Rust 代码，但读 refine.db）
+
+**核心结论**：除 `ingest-sessions` 外，所有链路都是对已经落库的 Observation 数据做聚合加工。`refine insights --prescription` 是 LLM 调用最重、耗时最长的链路（~11 次 LLM，10 并发）；`mirror score` 在原始职责"纯 SQL 聚合"之外，实际上也会调用 LLM 生成 advice（单次，带 72h 缓存）。
+
+---
+
+## 链路全景图
+
+```
+AI IDE JSONL 文件
+ (Claude Code / Codex)
+       │
+       │ parse + LLM facet extract (3 并发 × 最多 5 次重试)
+       ▼
+┌──────────────────────────────────────────────────────────────┐
+│ 链路 1: refine ingest-sessions                               │
+│   → refine.db: documents + items(type=observation)           │
+└──────────────────────────────────────────────────────────────┘
+       │                                   ▲
+       │ (item_type='observation' rows)    │
+       │                                   │ daily-refresh.sh
+       ▼                                   │ (08:00 每天)
+┌──────────────────────────────────────────────────────────────┐
+│         cluster_observations()  纯 Rust 聚合                │
+│           (packages/core/src/session)                        │
+└──────────────────────────────────────────────────────────────┘
+       │                 │                 │              │
+       ▼                 ▼                 ▼              ▼
+┌─────────────┐  ┌─────────────┐   ┌─────────────┐  ┌─────────────┐
+│ 链路 2:     │  │ 链路 3:     │   │ 链路 4:     │  │ 链路 5:     │
+│ insights    │  │ mirror      │   │ mirror      │  │ mirror      │
+│ --prescrip. │  │ score       │   │ dashboard   │  │ weekly      │
+│             │  │             │   │             │  │             │
+│ 10+1 次 LLM │  │ 1 次 LLM    │   │ 0 LLM       │  │ 1 次 LLM    │
+│ (10 并发)   │  │ (advice)    │   │             │  │             │
+└──────┬──────┘  └──────┬──────┘   └─────────────┘  └──────┬──────┘
+       │                │                                  │
+       ▼                ▼                                  ▼
+  documents        scores.jsonl                      documents
+  (session-        + statusline.txt                  (mirror-weekly)
+   insights-v2)    + advice.json                     + last-weekly.md
+                                                     + weekly-history.jsonl
+                                                            │
+                                                            ▼
+                                                      ┌─────────────┐
+                                                      │ 链路 6:     │
+                                                      │ mirror motd │
+                                                      │ (读缓存)    │
+                                                      │ 0 LLM       │
+                                                      └─────────────┘
+
+┌─────────────┐  ┌─────────────┐
+│ 链路 7:     │  │ 链路 8:     │
+│ mirror      │  │ weekly-     │
+│ profile     │  │ insights.sh │
+│ 1 次 LLM    │  │ (launchd)   │
+│             │  │ = 链路1+链路2 │
+└──────┬──────┘  └─────────────┘
+       ▼
+  documents
+  (mirror-profile)
+  + profile-summary.txt
+
+┌─────────────────────────────────────────────────────────────┐
+│ 链路 9: cognitive-portrait skill (外部)                     │
+│   读 refine.db + 调 4 个 sub-agent 写 L1/L2/L3/L4           │
+│   → docs/cognitive-portraits/cognitive-portrait-*.md        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+依赖关系核心一句话：**所有下游链路都依赖链路 1 (ingest-sessions) 写入的 `items.item_type='observation'`**。
+
+---
+
+## 链路清单
+
+### 链路 1: refine ingest-sessions
+
+| 字段 | 内容 |
+|---|---|
+| 命令入口 | `refine ingest-sessions [--source claude\|codex] [--limit N\|--latest N] [--dry-run]` |
+| 代码位置 | `apps/cli/src/cli.rs:74-88` → `apps/cli/src/handlers.rs:32-58` → `apps/cli/src/ingest_sessions.rs:41-199`（处理函数 `handle_ingest_sessions`，`process_single_session`，`llm_call_with_retry`，`extract_and_parse_facets_with_retry`）|
+| 触发方式 | 手动；由 `scripts/daily-refresh.sh` 每天 08:00 调用；由 `scripts/weekly-insights.sh` 每周一 09:00 调用 |
+| 数据来源 | `discover_sessions()` 扫描 Claude Code/Codex 的 JSONL 会话文件（路径来自 `refine_core::session::discover_sessions`）|
+| 处理步骤 | 1) 发现所有 JSONL 文件；2) 按 `--latest` (mtime 降序) 或 `--limit` (路径序) 裁剪；3) 串行去重（`doc_store.find_by_url` 查已存在 URL）+ 解析 + filter；4) `needs_chunking()` 为真时分块（每块单独 LLM 调用），否则单次调用；5) 3 路并发（`Semaphore::new(3)`）执行 LLM facet 抽取；6) `parse_facet_response` 解析 JSON；7) 保存 Document（title = session_summary），通过 `facets_to_items` 生成多条 Item 保存 |
+| LLM 调用 | **是**；每会话 1 次（或每分块 1 次，需要 chunking 时可能 N 次）+ 1 次最终合并；3 路并发；最多 5 次重试，base delay 10s，退避 `10 * 2^attempt` 秒；重试触发条件：`cooldown / service_busy / rate / 429 / Upstream / timeout / empty response` |
+| 输出目标 | **refine.db**：`documents` 表（每会话 1 行，source = `claude` 或 `codex`）+ `items` 表（每会话 N 行，`item_type='observation'`）|
+| 输出 schema | `Document { id, source, url=jsonl_path, title=session_summary, raw_content }`；`Item { id, item_type='observation', title, summary, content, tags, document_id, created_at, ... }`；字段含 `decision` / `bugfix` / `progress` / `question` / `code_artifact` / `cognitive_level` / `collaboration_mode` / `tool` / `friction` / `architecture` / `knowledge` / `pattern` 等 facet |
+| 依赖 | 无（这是唯一的数据流入口）；需要 LLM key |
+| 已知问题 | 网络波动 / API cooldown 时单会话可能耗尽 5 次重试失败；`daily-refresh.sh` 会根据 exit code 记录 `~/.refine/last-refresh-ok`，失败时不更新时间戳 |
+
+---
+
+### 链路 2: refine insights (`--prescription` 为 L4 处方开关)
+
+| 字段 | 内容 |
+|---|---|
+| 命令入口 | `refine insights [--period N] [--prescription]` |
+| 代码位置 | `apps/cli/src/cli.rs:89-97` → `apps/cli/src/handlers.rs:59-76` → `apps/cli/src/insights.rs:24-125`（`handle_insights`，`llm_with_retry`）；路由规划在 `packages/core/src/session/analysis_routes.rs:18` 的 `plan_routes` |
+| 触发方式 | 手动；由 `scripts/weekly-insights.sh` 每周一 09:00 通过 launchd 自动触发 |
+| 数据来源 | `item_store.find_by_type(ItemType::Observation)` — 全量 Observation（当前实现**未按 `--period` 过滤**时间窗口） |
+| 处理步骤 | 1) 加载所有 Observation；2) `cluster_observations()` 纯 Rust 本地聚类（按 project + facet 汇总）；3) `plan_routes()` 规划 N 路分析路由（项目总览 / 决策模式 / bug 模式 / 认知演化 / 技术雷达 / AI 协作 / 工作流 / 各项目深挖 / 知识网络 / 摩擦深挖，最少补齐到 10 路）；4) **10 路并发** LLM 调用 (`Semaphore::new(10)`)，system prompt = `ROUTE_SYSTEM_PROMPT`；5) `merge_route_results()` 合并；6) 调 1 次 LLM 做最终报告（system prompt = `INSIGHTS_SYSTEM_PROMPT`，是否含 L4 处方由 `with_prescription` 决定）；7) 保存 |
+| LLM 调用 | **是**；一次运行 ≈ **N+1 次**（N 通常为 10 路）；并发度 10；每次独立 5 次重试（和链路 1 同样的 exponential backoff 策略） |
+| 输出目标 | **stdout**（完整 markdown 报告）+ **refine.db** `documents` 表 (source=`session-insights-v2`，URL = `insights-v2://<rfc3339>`) |
+| 输出 schema | Markdown 文档；`Document.title = "Session Insights v2 YYYY-MM-DD HH:MM"`；`raw_content` 为完整的合并报告 |
+| 依赖 | 依赖链路 1 产出的 Observation；必须有 LLM key（否则提示"请配置 API Key"后直接返回） |
+| 已知问题 | `InsightsOptions.period` 字段带 `#[allow(dead_code)]` — **声明但未生效**（U-26 声明-执行鸿沟）；任意单路失败时 content 置为字面量 "分析失败: ..."，不会让总流程失败，但会写入最终报告；单路失败后无 sleep 重试窗口外的恢复 |
+
+---
+
+### 链路 3: mirror score
+
+| 字段 | 内容 |
+|---|---|
+| 命令入口 | `mirror score [--since YYYY-MM-DD\|--all]` |
+| 代码位置 | `apps/mirror/src/cli.rs:22-30` → `apps/mirror/src/main.rs:45-48` → `apps/mirror/src/score.rs:66-186`（`handle_score`）；子模块 `score/{baseline,compute,display,indicators,persistence,streak,statusline,types}.rs`；LLM 部分在 `apps/mirror/src/advice.rs` |
+| 触发方式 | 手动；由 `scripts/daily-refresh.sh` 每天 08:00 调用 |
+| 数据来源 | `ItemRepository::find_since(cutoff)` (默认 90 天) 或 `find_all()`；再通过 `cluster_observations()` 聚合 |
+| 处理步骤 | 1) 按 `--all`/`--since`/默认 90 天窗口加载 items；2) 确认有 observation；3) `cluster_observations()`；4) `score::compute(&cluster, &config.targets)` 算 3 层信号灯 + 9 指标 + tension；5) `load_recent_scores(365)` 读历史 → `compute_personal_baseline()` → 若存在则 `apply_personal_baseline()`；6) `persist_score()` 写 jsonl；7) `print_score()` stdout；8) 读 `growth-tracker.json` 展示 pending_ingest 提示；9) **若有 LLM**，调用 `advice::generate_and_cache()` 单次生成 advice 并写缓存；10) `write_statusline()` |
+| LLM 调用 | **是（best-effort）**；调用链 `advice::generate_and_cache` → `llm_with_retry`；单次调用，有 5 次重试退避；失败只 `tracing::debug`，不让命令失败；advice 本身带 **72 小时缓存** (`advice.json`)；system prompt 为 "认知成长教练"，要求返回 `{"short": ..., "full": ...}` JSON |
+| 输出目标 | **stdout**（ASCII 信号灯 + 指标） + `~/.mirror/scores.jsonl`（历史） + `<db_parent>/statusline.txt` + `~/.mirror/advice.json`（LLM 缓存） |
+| 输出 schema | `ScoreResult { layers: [LayerScore; 3], tension, timestamp }`，每 `LayerScore { name, signal(Red/Yellow/Green), indicators: [Indicator] }`；`CachedAdvice { advice, short, generated_at }` |
+| 依赖 | 依赖链路 1 的 Observation；LLM 调用为可选软依赖 |
+| 已知问题 | 文档注释与实际行为不符：代码 `advice.rs:135` 注释说 "single attempt, best-effort" 但内部实际走了带 5 次重试的 `llm_with_retry`；`--period` 相关路径 `filter_since` 被标为 `#[allow(dead_code)]` |
+
+---
+
+### 链路 4: mirror dashboard
+
+| 字段 | 内容 |
+|---|---|
+| 命令入口 | `mirror dashboard [--since YYYY-MM-DD\|--all]` |
+| 代码位置 | `apps/mirror/src/dashboard.rs:31-`（`handle_dashboard`） |
+| 触发方式 | 手动 |
+| 数据来源 | 与 score 相同：`find_since(cutoff)` 或 `find_all()` → `cluster_observations()` |
+| 处理步骤 | 1) 加载 items；2) cluster；3) `score::compute(&cluster, &config.targets)`；4) `persist_score()`；5) 渲染 ASCII dashboard（3 层信号灯 / 认知等级分布 / 协作模式分布 / 项目排行等） |
+| LLM 调用 | **否** |
+| 输出目标 | **stdout**（76 字符宽的 ASCII 框） + `~/.mirror/scores.jsonl`（与 score 共用同一份 persistence） |
+| 输出 schema | 纯终端文本 |
+| 依赖 | 依赖链路 1 的 Observation；与 score 共享 compute 逻辑 |
+| 已知问题 | 与 score 共用 `persist_score` — 一次运行 dashboard 也会污染分数历史（历史是按调用次数追加而非每天去重） |
+
+---
+
+### 链路 5: mirror weekly
+
+| 字段 | 内容 |
+|---|---|
+| 命令入口 | `mirror weekly` |
+| 代码位置 | `apps/mirror/src/weekly.rs:64-161`（`handle_weekly`），prompt 构造 `build_weekly_prompt`，持久化 `save_weekly_record` / `write_weekly_history_lines_atomically` |
+| 触发方式 | 手动；`scripts/daily-refresh.sh` 检测到 `DOW==7`（周日）时调用；失败非致命 |
+| 数据来源 | `find_by_type(ItemType::Observation)` → 按时间范围拆成 `this_week`（最近 7 天）和 `last_week`（7-14 天前） |
+| 处理步骤 | 1) 拉全量 observation；2) 切分 this/last 两个时间窗；3) 分别 `cluster_observations` + `score::compute`；4) `load_last_weekly_record()` 读上周记录作为 prompt 的"上周建议"上下文；5) `build_weekly_prompt()` 拼接本/上周信号灯 + 上周建议 + Requirements；6) **单次** LLM 调用 `llm_with_retry`（5 次重试退避）；7) 保存 |
+| LLM 调用 | **是**；单次调用（带 5 次重试）；system prompt = "认知成长分析师，生成差量报告，第二人称" |
+| 输出目标 | **stdout** + `~/.mirror/last-weekly.md`（给周一 motd 读） + `~/.mirror/weekly-history.jsonl`（上限 52 行 = 52 周） + **refine.db** `documents` 表（source=`mirror-weekly`，URL=`mirror-weekly://<rfc3339>`；通过 `document_save::save_report_to_document`） |
+| 输出 schema | `WeeklyRecord { week_end, scores:[LayerSignal; 3], suggestions: [String] }`；markdown 报告含"本周信号灯 / 上周信号灯 / 上周建议执行情况 / 下周 1-2 条建议" |
+| 依赖 | 依赖链路 1；依赖 `~/.mirror/weekly-history.jsonl`（首次运行时为空）；需要 LLM key（否则 main.rs:52 直接 anyhow!error） |
+| 已知问题 | **历史上存在 LLM 调用失败**（重试耗尽即整条命令 fail），`daily-refresh.sh` 对此命令做了 `|| echo "failed (non-fatal)"` 兜底；`extract_suggestions()` 依赖报告 markdown 包含"建议 / suggestion / 下周 / next week"等固定 section header，LLM 输出偏差时无法抽取 |
+
+---
+
+### 链路 6: mirror motd
+
+| 字段 | 内容 |
+|---|---|
+| 命令入口 | `mirror motd`（一般写进 `~/.zshrc` 每次启动终端触发） |
+| 代码位置 | `apps/mirror/src/motd.rs:233-328`（`handle_motd`），`weekly_reminder_from_path` 等 |
+| 触发方式 | shell rc 手动调用；不调 launchd |
+| 数据来源 | `~/.mirror/scores.jsonl`（通过 `load_recent_scores(2)`）+ `~/.mirror/advice.json`（LLM 缓存）+ `~/.mirror/last-weekly.md`（周一提醒）+ 内置 tips 列表（fallback） |
+| 处理步骤 | 1) 读最近 2 次 score；2) 计算信号灯 / trend 箭头；3) 找最弱 indicator 的 dimension；4) 优先用 `advice::load_cached()` 的建议（<72h 有效），否则用静态 tips；5) 检测 score 数据是否 >48h 过期；6) 追加 streak 信息；7) 如果今天是周一且 `last-weekly.md` 存在 → 追加一行周报提醒 |
+| LLM 调用 | **否**（纯读缓存；不触发任何网络请求） |
+| 输出目标 | **stdout**（单行 + 可选提醒行） |
+| 输出 schema | 形如 `🪞 深度🟢↑ 广度🟡 协作🔴 | <tip> [⚠️ Data is stale...]` |
+| 依赖 | 依赖链路 3 产生的 `scores.jsonl` 和 `advice.json`；依赖链路 5 产生的 `last-weekly.md` |
+| 已知问题 | 无核心问题；对 LLM 内容有 `strip_ansi_escapes` 防注入 |
+
+---
+
+### 链路 7: mirror profile
+
+| 字段 | 内容 |
+|---|---|
+| 命令入口 | `mirror profile` |
+| 代码位置 | `apps/mirror/src/profile.rs:269-317`（`handle_profile`），`build_profile_prompt`，`extract_profile_data` |
+| 触发方式 | 手动 |
+| 数据来源 | `find_all()` 全量 items → `cluster_observations` + `score::compute` |
+| 处理步骤 | 1) 全量加载；2) cluster + score；3) `extract_profile_data()` 算出 Top 10 项目 + 复杂度分桶 + decision:bugfix 比；4) `build_profile_prompt()` 带 facet budget 4000 字符预算；5) **单次** `llm_with_retry` 调用；6) 保存 |
+| LLM 调用 | **是**；单次（带 5 次重试）；system prompt = "认知画像艺术家，写叙事，第二人称，结尾 2-3 个反思问题" |
+| 输出目标 | **stdout** + `~/.mirror/profile-summary.txt`（短摘要，给 advice 流程做 profile context 注入） + **refine.db** `documents` 表（source=`mirror-profile`，URL=`mirror-profile://<rfc3339>`） |
+| 输出 schema | `profile-summary.txt` 是简短 key=value 清单；DB 里存完整叙事 markdown |
+| 依赖 | 依赖链路 1；需要 LLM key |
+| 已知问题 | 未做时间窗口限制（`find_all`），数据量大时 prompt 会被 `FACET_BUDGET_CHARS=4000` 硬截断 |
+
+---
+
+### 链路 8: scripts/weekly-insights.sh (launchd 周报自动化)
+
+| 字段 | 内容 |
+|---|---|
+| 命令入口 | `/Users/lifcc/Desktop/code/AI/tools/refine/scripts/weekly-insights.sh` |
+| 代码位置 | `scripts/weekly-insights.sh`（52 行） |
+| 触发方式 | launchd `com.lifcc.refine-weekly-insights.plist` — **每周一 09:00** |
+| 数据来源 | 依赖 `.env` 加载环境变量 |
+| 处理步骤 | 1) 加载 `.env`；2) 打印 preflight (PATH/refine/cwd/env)；3) `refine ingest-sessions`（链路 1）；4) `refine insights --prescription`（链路 2）；5) `osascript` 发送 macOS 通知 |
+| LLM 调用 | **是（间接）**：= 链路 1 + 链路 2 的总和（单会话 N 次 + insights ≈ 11 次） |
+| 输出目标 | `~/Library/Logs/refine-insights.log`（日志） + 链路 1/2 的所有写入目标 |
+| 输出 schema | 无自身 schema，复用下游 |
+| 依赖 | `.env` 内的 LLM API key；依赖 `refine` 二进制绝对路径 `/Users/lifcc/.cargo/bin/refine` |
+| 已知问题 | `set -euo pipefail` 但对子命令 exit code 做了 `if ... 2>&1; then ... else ... fi` 兜底，只记录日志不中断；launchd 不重试失败 |
+
+---
+
+### 链路 9: cognitive-portrait skill（外部 Claude Code skill）
+
+| 字段 | 内容 |
+|---|---|
+| 命令入口 | Claude Code skill 触发词："认知画像" / "cognitive portrait" / "认知分析" / "分析我的成长" |
+| 代码位置 | `~/.claude/skills/cognitive-portrait/SKILL.md` + `prompts/`（**不在 refine 代码库中**） |
+| 触发方式 | 用户在 Claude Code 对话中触发 |
+| 数据来源 | 直接用 `sqlite3` 读 refine.db + 调 `mirror score` 命令 |
+| 处理步骤 | 1) Dispatcher 跑 SQL 采集 8 个数据文件到 `/tmp/cp_data_*.txt`；2) 派发 4 个 Task sub-agent 并行（W-14 文件所有权隔离），分别写 L1/L2/L3/L4 markdown；3) Dispatcher 合并写盘 |
+| LLM 调用 | **是**；在 Claude Code 内部通过 sub-agent 调用（4 路并行），不经过 refine 的 `LlmClient`，也不走 refine 的环境变量链路 |
+| 输出目标 | `docs/cognitive-portraits/cognitive-portrait-<date>-v3.md` |
+| 输出 schema | ~1200 行结构化 markdown（L1/L2/L3/L4 四层） |
+| 依赖 | 依赖链路 1 产出的 Observation；依赖链路 2（`refine insights --prescription`）7 天内的报告作为 sub-agent 的上下文；依赖链路 3 `mirror score` 的输出 |
+| 已知问题 | skill 前置检查：insights 报告 other 占比 >80% 说明 clustering 有问题；v1 单 agent 输出衰减导致 L4 仅 ~70 行，v3 改 multi-agent 解决 |
+
+---
+
+## 关键发现
+
+### 1. 数据流入点
+
+**只有链路 1 `refine ingest-sessions` 是数据流入口**（从 JSONL 文件 LLM 抽取）。所有其他链路（2~9）都是在 refine.db 里对已有 Observation 做聚合/加工/叙事。因此：
+
+- **链路 1 质量决定整条管道质量**。facet prompt 改动、chunking 策略、filter 策略的变化会扩散到下游所有报告。
+- 断掉链路 1（如 API key 失效、JSONL 格式变化）会让下游全部"显示空白"（`score` / `insights` / `dashboard` 都有 "暂无观测数据" 分支）。
+
+### 2. LLM 成本分布
+
+按每次运行的 LLM 调用数排序：
+
+| 链路 | LLM 次数 | 并发度 | 场景 |
+|---|---|---|---|
+| 链路 2 `insights --prescription` | **≈11 次**（10 路 + 1 合并） | 10 | 最重 |
+| 链路 1 `ingest-sessions` | **每会话 1~N 次**（N = chunk 数量） | 3 | 批量时总量最大 |
+| 链路 5 `weekly` | 1 次 | 1 | |
+| 链路 7 `profile` | 1 次 | 1 | |
+| 链路 3 `score` (advice) | 1 次（72h 缓存） | 1 | 命中缓存后 0 次 |
+| 链路 4 `dashboard` / 链路 6 `motd` | **0 次** | — | 纯本地 |
+
+**每周一 9:00 的 launchd 任务（链路 8）= 链路 1 + 链路 2 的合计**，是 LLM 预算最集中的时间窗口。
+
+### 3. 稳定性风险
+
+- **链路 5 `mirror weekly`** 历史上最脆弱：单次 LLM 调用，重试耗尽即整个命令失败；被 `daily-refresh.sh` 周日路径用 `|| echo` 兜底；`extract_suggestions()` 还依赖固定的 markdown section header 匹配，LLM 措辞漂移会让"上周建议"回填失败。
+- **链路 2 `insights` 的 route 失败处理**：某一路 LLM 调用失败后，内容被写为字符串 "分析失败: <error>"，这段字符串**会原样进入最终 merge 的 prompt**，进而出现在持久化到 DB 的正式报告里。下游链路 9 (cognitive-portrait) 的前置检查有"other 占比 >80%"告警，但没检测这种 "分析失败" 字面量。
+- **链路 2 的 `period` 参数是死代码**：`#[allow(dead_code)]` 标注，但 CLI 仍暴露 `--period` — 用户设置后静默被忽略（U-26 声明-执行鸿沟）。
+- **链路 3 和链路 4 共用 `persist_score`**：每次运行 dashboard 或 score 都追加一行历史，personal baseline 计算会被"频繁运行 dashboard"污染。
+
+### 4. 潜在重复 / 重构机会
+
+- **三条链路重复调用 `cluster_observations + score::compute`**：链路 3 `score` / 链路 4 `dashboard` / 链路 5 `weekly` / 链路 7 `profile` 都做这一步（weekly 还做两次，this_week + last_week）。目前是每次同步调用纯函数，没有命中问题，但重构时应考虑提取为共享助手。
+- **两处 `save_report_to_document` 的调用点** (链路 5 weekly、链路 7 profile) 已经被抽到 `document_save.rs`，但链路 2 `insights` 仍直接 `Document::new + set_title + set_url + doc_store.save`，可以统一。
+- **链路 3 advice + 链路 5 weekly suggestions + 链路 7 profile** 都是 "用户可见的短叙事"，三者用的 system prompt / 调用约定完全独立，没有公共 prompt helper。
+- **外部链路 9 与内部链路 2 存在语义重叠**：两者都是"认知分析报告"。链路 2 偏向统计 + LLM 合并（单模型 10 路合成），链路 9 偏向 agent 叙事（4 个 layer sub-agent 分写）。链路 9 依赖链路 2 的输出作为 context — 这意味着 insights 报告质量越差，画像质量也越差。
+
+---
+
+## 附录 A：env 变量清单
+
+### LLM API 配置
+
+优先级：Anthropic 优先，其次 OpenAI（`packages/core/src/infra/llm.rs:20-48`）。
+
+| 变量 | 用途 | 备注 |
+|---|---|---|
+| `REFINE_ANTHROPIC_API_KEY` | Anthropic API key（最高优先级） | 或 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_API_KEY`（顺序兜底） |
+| `REFINE_ANTHROPIC_MODEL` | Claude 模型名 | 默认 `claude-opus-4-6` |
+| `REFINE_ANTHROPIC_BASE_URL` | Claude API base URL | 或 `ANTHROPIC_BASE_URL`；默认 `https://api.anthropic.com` |
+| `REFINE_OPENAI_API_KEY` | OpenAI API key（次优先级） | 或 `OPENAI_API_KEY` |
+| `REFINE_OPENAI_MODEL` | OpenAI 模型名 | |
+| `REFINE_OPENAI_BASE_URL` | OpenAI API base URL | |
+
+### 数据库 / 路径
+
+| 变量 | 用途 | 备注 |
+|---|---|---|
+| `REFINE_DB_PATH` | 统一覆盖 DB 路径（最高优先级） | 见 `packages/core/src/infra/paths.rs:20` |
+
+其他 fallback key（`resolve_db_path` 的 `fallback_keys` 参数）由各 binary 传入，当前 CLI / mirror 都传空数组。
+
+### 分组使用
+
+| 链路 | 使用 env |
+|---|---|
+| 链路 1 ingest-sessions | LLM key；可选 `REFINE_DB_PATH` |
+| 链路 2 insights | LLM key；可选 `REFINE_DB_PATH` |
+| 链路 3 score | 可选 LLM key（advice 可跳过）；可选 `REFINE_DB_PATH` |
+| 链路 4 dashboard | 可选 `REFINE_DB_PATH` |
+| 链路 5 weekly | **必需** LLM key；可选 `REFINE_DB_PATH` |
+| 链路 6 motd | 无 env 要求 |
+| 链路 7 profile | **必需** LLM key；可选 `REFINE_DB_PATH` |
+
+---
+
+## 附录 B：launchd 任务清单
+
+所有 refine 相关的 launchd plist（位于 `~/Library/LaunchAgents/`）：
+
+| Label | plist 路径 | 触发 | 当前状态（`launchctl list`） |
+|---|---|---|---|
+| `com.lifcc.refine-server` | `~/Library/LaunchAgents/com.lifcc.refine-server.plist` | 常驻 | **PID 4706 running** |
+| `com.lifcc.refine-ui-dev` | `~/Library/LaunchAgents/com.lifcc.refine-ui-dev.plist` | 常驻 | **PID 4696 running** |
+| `com.lifcc.refine-daily-ingest` | `~/Library/LaunchAgents/com.lifcc.refine-daily-ingest.plist` | **每天 08:00** | 未运行（调度中）；**last exit=1**（最近一次 ingest 失败） |
+| `com.lifcc.refine-weekly-insights` | `~/Library/LaunchAgents/com.lifcc.refine-weekly-insights.plist` | **每周一 09:00** | 未运行（调度中）；last exit=0 |
+
+### 任务详情
+
+#### `com.lifcc.refine-daily-ingest`
+
+- 执行：`/bin/bash /Users/lifcc/Desktop/code/AI/tools/refine/scripts/daily-refresh.sh`
+- 工作目录：`/Users/lifcc/Desktop/code/AI/tools/refine`
+- 触发：每天 08:00
+- 日志：`~/Library/Logs/refine-daily-ingest.log`
+- 脚本做的事：
+  1. `refine ingest-sessions`（链路 1）
+  2. `mirror score`（链路 3，包含 advice LLM 调用）
+  3. 周日额外跑 `mirror weekly`（链路 5，非致命）
+  4. 成功写 `~/.refine/last-refresh-ok` 时间戳
+  5. ingest 失败时以 `exit 1` 让 launchd 感知
+
+#### `com.lifcc.refine-weekly-insights`
+
+- 执行：`/bin/bash /Users/lifcc/Desktop/code/AI/tools/refine/scripts/weekly-insights.sh`
+- 工作目录：`/Users/lifcc/Desktop/code/AI/tools/refine`
+- 触发：每周一 09:00（`Weekday=1`）
+- 日志：`~/Library/Logs/refine-insights.log`
+- 脚本做的事：
+  1. 从 `.env` 加载 env
+  2. `refine ingest-sessions`（链路 1，补捕最近 24h 新会话）
+  3. `refine insights --prescription`（链路 2）
+  4. `osascript` 通知 "Weekly insights 报告已生成"
+
+其他 shell 脚本（非 launchd）：
+- `scripts/import_claude_code.sh` — 独立的 Claude Code JSONL 选择性导入器，通过 HTTP POST 到 `refine-server` API（不走 CLI，不属于 Rust binary 的任何链路；属于 refine-server 链路，本次研究未展开）。
+- `scripts/eval_recommendations.mjs` — 不在本次研究范围（`.mjs` 说明是 Node 脚本，非产出链路）。
+
+---
+
+## 范围外说明
+
+本次梳理**未包含**以下产品面组件（只列出以备后查）：
+
+- **`apps/server`** — refine HTTP 后端（`http://localhost:8787`），`scripts/import_claude_code.sh` 是其客户端
+- **`apps/desktop`** — Tauri 桌面应用，通常消费 refine-server API
+- **`apps/extension`** — 浏览器 extension
+- **`packages/core/src/hook_session`** — Claude Code hook ingestion 相关（见 `docs/13_CLAUDE_HOOK_INGESTION.md`）
+
+这些组件与"记录/报告产出链路"没有直接关系（它们是展示/输入层），不属于本次研究范围。
