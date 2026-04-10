@@ -60,16 +60,17 @@ fn migrate_documents_url_unique(conn: &Connection) -> InfraResult<()> {
     conn.execute_batch("DROP INDEX IF EXISTS idx_documents_url")
         .map_err(|e| InfraError::Database(e.to_string()))?;
     // Create unique index so concurrent inserts of the same URL fail fast.
-    conn.execute_batch(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_url ON documents(url)",
-    )
-    .map_err(|e| InfraError::Database(e.to_string()))?;
+    conn.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_url ON documents(url)")
+        .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(())
 }
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> InfraResult<bool> {
+    if !table.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Err(InfraError::Database(format!("invalid table name: {table}")));
+    }
     let mut stmt = conn
-        .prepare(&format!("PRAGMA table_info({})", table))
+        .prepare(&format!("PRAGMA table_info({table})"))
         .map_err(|e| InfraError::Database(e.to_string()))?;
     let names: Vec<String> = stmt
         .query_map([], |row| row.get::<_, String>(1))

@@ -158,7 +158,10 @@ async fn resolve_bind_addr(host: &str, preferred: u16) -> SocketAddr {
         }
 
         // Not us — log and try next
-        eprintln!("Port {} is occupied by another process, trying next...", port);
+        eprintln!(
+            "Port {} is occupied by another process, trying next...",
+            port
+        );
     }
 
     eprintln!(
@@ -180,7 +183,7 @@ async fn is_refine_server(addr: &SocketAddr) -> bool {
         Ok(resp) => resp
             .text()
             .await
-            .map_or(false, |body| body.contains("Refine cloud API")),
+            .is_ok_and(|body| body.contains("Refine cloud API")),
         Err(_) => false,
     }
 }
