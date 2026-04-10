@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REFINE_BIN="/Users/lifcc/.cargo/bin/refine"
-PROJECT_DIR="/Users/lifcc/Desktop/code/AI/tools/refine"
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REFINE_BIN="${HOME}/.cargo/bin/refine"
+PROJECT_DIR="${SCRIPT_DIR}/.."
 ENV_FILE="${PROJECT_DIR}/.env"
 LOG_PREFIX="[refine-weekly]"
 
