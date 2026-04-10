@@ -2,8 +2,9 @@
 # Daily refresh: ingest new sessions → update mirror score + advice
 set -euo pipefail
 
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/lifcc/.cargo/bin:$PATH"
-cd /Users/lifcc/Desktop/code/AI/tools/refine
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${HOME}/.cargo/bin:${PATH}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}/.."
 
 # Load .env for LLM API keys
 if [ -f .env ]; then
