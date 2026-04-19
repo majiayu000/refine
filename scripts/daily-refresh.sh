@@ -9,6 +9,7 @@ cd "${SCRIPT_DIR}/.."
 # Load .env for LLM API keys
 if [ -f .env ]; then
   set -a
+  # shellcheck source=/dev/null
   source .env
   set +a
 fi
