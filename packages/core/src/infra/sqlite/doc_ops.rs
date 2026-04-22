@@ -9,7 +9,10 @@ pub(super) fn save(conn: &Connection, doc: &Document) -> InfraResult<()> {
         "INSERT INTO documents (id, title, raw_content, source, url, captured_at, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(url) DO UPDATE SET
-             title = excluded.title,
+             title = CASE
+                 WHEN excluded.title IS NULL OR TRIM(excluded.title) = '' THEN documents.title
+                 ELSE excluded.title
+             END,
              raw_content = excluded.raw_content,
              captured_at = excluded.captured_at,
              updated_at = excluded.updated_at",

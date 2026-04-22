@@ -141,6 +141,46 @@ async fn document_save_refreshes_existing_url_content() {
 }
 
 #[tokio::test]
+async fn document_save_preserves_existing_title_when_duplicate_url_has_no_title() {
+    let store = SqliteStore::in_memory().expect("failed to create sqlite store");
+    let url = "https://claude.ai/chat/duplicate-no-title";
+
+    let mut first = Document::new("claude", "older content");
+    first.set_title("Canonical title");
+    first.set_url(url);
+    refine_core::knowledge::DocumentRepository::save(&store, &first)
+        .await
+        .expect("failed to save first document");
+
+    let mut second = Document::new("claude", "newer content");
+    second.set_url(url);
+    let second_captured_at = second.captured_at();
+    let second_updated_at = second.updated_at();
+    refine_core::knowledge::DocumentRepository::save(&store, &second)
+        .await
+        .expect("failed to save second document");
+
+    let by_url = refine_core::knowledge::DocumentRepository::find_by_url(&store, url)
+        .await
+        .expect("find_by_url failed")
+        .expect("document not found by url");
+    let by_id = refine_core::knowledge::DocumentRepository::find_by_id(&store, first.id())
+        .await
+        .expect("find_by_id failed")
+        .expect("document not found by id");
+
+    assert_eq!(by_url.id(), first.id());
+    assert_eq!(by_url.title(), Some("Canonical title"));
+    assert_eq!(by_url.raw_content(), "newer content");
+    assert_eq!(by_url.captured_at(), second_captured_at);
+    assert_eq!(by_url.updated_at(), second_updated_at);
+    assert_eq!(by_id.title(), Some("Canonical title"));
+    assert_eq!(by_id.raw_content(), "newer content");
+    assert_eq!(by_id.captured_at(), second_captured_at);
+    assert_eq!(by_id.updated_at(), second_updated_at);
+}
+
+#[tokio::test]
 async fn find_recent_and_count_items_respect_type_and_pagination() {
     let store = SqliteStore::in_memory().expect("failed to create sqlite store");
 
