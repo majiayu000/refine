@@ -1,6 +1,8 @@
 use chrono::{Duration, TimeZone, Utc};
 use refine_core::infra::SqliteStore;
-use refine_core::knowledge::{Item, ItemId, ItemRepository, ItemType, RestoreParams, Source, Tag};
+use refine_core::knowledge::{
+    Document, Item, ItemId, ItemRepository, ItemType, RestoreParams, Source, Tag,
+};
 use std::collections::HashSet;
 
 #[tokio::test]
@@ -93,6 +95,49 @@ async fn search_text_supports_offset_and_total_count() {
         .collect();
     let second_id = second_page[0].id().to_string();
     assert!(!first_ids.contains(&second_id));
+}
+
+#[tokio::test]
+async fn document_save_refreshes_existing_url_content() {
+    let store = SqliteStore::in_memory().expect("failed to create sqlite store");
+    let url = "https://claude.ai/chat/duplicate";
+
+    let mut first = Document::new("claude", "older content");
+    first.set_title("Older title");
+    first.set_url(url);
+    refine_core::knowledge::DocumentRepository::save(&store, &first)
+        .await
+        .expect("failed to save first document");
+    let first_updated_at = first.updated_at();
+
+    let mut second = Document::new("claude", "newer content");
+    second.set_title("Newer title");
+    second.set_url(url);
+    let second_captured_at = second.captured_at();
+    let second_updated_at = second.updated_at();
+    refine_core::knowledge::DocumentRepository::save(&store, &second)
+        .await
+        .expect("failed to save second document");
+
+    let by_url = refine_core::knowledge::DocumentRepository::find_by_url(&store, url)
+        .await
+        .expect("find_by_url failed")
+        .expect("document not found by url");
+    let by_id = refine_core::knowledge::DocumentRepository::find_by_id(&store, first.id())
+        .await
+        .expect("find_by_id failed")
+        .expect("document not found by id");
+
+    assert_eq!(by_url.id(), first.id());
+    assert_eq!(by_url.title(), Some("Newer title"));
+    assert_eq!(by_url.raw_content(), "newer content");
+    assert_eq!(by_url.captured_at(), second_captured_at);
+    assert_eq!(by_url.updated_at(), second_updated_at);
+    assert!(by_url.updated_at() >= first_updated_at);
+    assert_eq!(by_id.title(), Some("Newer title"));
+    assert_eq!(by_id.raw_content(), "newer content");
+    assert_eq!(by_id.captured_at(), second_captured_at);
+    assert_eq!(by_id.updated_at(), second_updated_at);
 }
 
 #[tokio::test]
