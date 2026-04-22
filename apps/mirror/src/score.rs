@@ -3,8 +3,8 @@ mod compute;
 mod display;
 mod indicators;
 mod persistence;
-pub(crate) mod streak;
 mod statusline;
+pub(crate) mod streak;
 mod types;
 
 #[cfg(test)]

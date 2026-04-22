@@ -1217,8 +1217,7 @@ fn filter_since_boundary_inclusive() {
 // ── Streak tests ──
 
 fn make_score_at_date(date: chrono::NaiveDate) -> ScoreResult {
-    let ts = chrono::Utc
-        .from_utc_datetime(&date.and_hms_opt(12, 0, 0).unwrap());
+    let ts = chrono::Utc.from_utc_datetime(&date.and_hms_opt(12, 0, 0).unwrap());
     ScoreResult {
         layers: std::array::from_fn(|i| {
             let names = ["depth", "breadth", "collaboration"];
@@ -1291,8 +1290,14 @@ fn test_streak_no_record_today() {
 
 #[test]
 fn test_milestone_messages() {
-    assert_eq!(milestone_message(7), Some("\u{1f3af} 一周连续！习惯正在形成"));
-    assert_eq!(milestone_message(30), Some("\u{1f3c6} 连续一个月！认知追踪已成习惯"));
+    assert_eq!(
+        milestone_message(7),
+        Some("\u{1f3af} 一周连续！习惯正在形成")
+    );
+    assert_eq!(
+        milestone_message(30),
+        Some("\u{1f3c6} 连续一个月！认知追踪已成习惯")
+    );
     assert_eq!(milestone_message(100), Some("\u{1f4af} 百日里程碑！"));
     assert_eq!(milestone_message(365), Some("\u{1f38a} 整整一年！"));
     assert_eq!(milestone_message(5), None);

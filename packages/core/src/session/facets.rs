@@ -337,7 +337,11 @@ mod tests {
             code_artifacts: Vec::new(),
         };
         let doc_id = DocumentId::new();
-        let items = facets_to_items(&facets, &doc_id, Some("-users-lifcc-desktop-code-ai-tools-harness"));
+        let items = facets_to_items(
+            &facets,
+            &doc_id,
+            Some("-users-lifcc-desktop-code-ai-tools-harness"),
+        );
 
         // decision item (index 1) should carry both "decision" and project tag
         let decision_tags: Vec<&str> = items[1].tags().iter().map(|t| t.as_str()).collect();
