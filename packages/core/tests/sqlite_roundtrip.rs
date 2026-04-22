@@ -1,7 +1,8 @@
 use chrono::{Duration, TimeZone, Utc};
 use refine_core::infra::SqliteStore;
 use refine_core::knowledge::{
-    Document, Item, ItemId, ItemRepository, ItemType, RestoreParams, Source, Tag,
+    Document, DocumentId, Item, ItemId, ItemRepository, ItemType, RestoreDocumentParams,
+    RestoreParams, Source, Tag,
 };
 use std::collections::HashSet;
 
@@ -178,6 +179,70 @@ async fn document_save_preserves_existing_title_when_duplicate_url_has_no_title(
     assert_eq!(by_id.raw_content(), "newer content");
     assert_eq!(by_id.captured_at(), second_captured_at);
     assert_eq!(by_id.updated_at(), second_updated_at);
+}
+
+#[tokio::test]
+async fn document_find_recent_orders_by_latest_capture_after_duplicate_url_refresh() {
+    let store = SqliteStore::in_memory().expect("failed to create sqlite store");
+
+    let older_capture = Utc
+        .with_ymd_and_hms(2026, 2, 6, 10, 0, 0)
+        .single()
+        .expect("invalid older capture");
+    let middle_capture = older_capture + Duration::minutes(10);
+    let newest_capture = older_capture + Duration::minutes(20);
+
+    let older = Document::restore(RestoreDocumentParams {
+        id: DocumentId::from("doc-older"),
+        title: Some("Older".to_string()),
+        raw_content: "older content".to_string(),
+        source: "claude".to_string(),
+        url: "https://claude.ai/chat/older".to_string(),
+        captured_at: older_capture,
+        created_at: older_capture,
+        updated_at: older_capture,
+    });
+    refine_core::knowledge::DocumentRepository::save(&store, &older)
+        .await
+        .expect("failed to save older document");
+
+    let newer = Document::restore(RestoreDocumentParams {
+        id: DocumentId::from("doc-newer"),
+        title: Some("Newer".to_string()),
+        raw_content: "newer content".to_string(),
+        source: "claude".to_string(),
+        url: "https://claude.ai/chat/newer".to_string(),
+        captured_at: middle_capture,
+        created_at: middle_capture,
+        updated_at: middle_capture,
+    });
+    refine_core::knowledge::DocumentRepository::save(&store, &newer)
+        .await
+        .expect("failed to save newer document");
+
+    let recaptured = Document::restore(RestoreDocumentParams {
+        id: DocumentId::from("doc-recaptured"),
+        title: Some("Recaptured".to_string()),
+        raw_content: "recaptured content".to_string(),
+        source: "claude".to_string(),
+        url: older.url().to_string(),
+        captured_at: newest_capture,
+        created_at: newest_capture,
+        updated_at: newest_capture,
+    });
+    refine_core::knowledge::DocumentRepository::save(&store, &recaptured)
+        .await
+        .expect("failed to save recaptured document");
+
+    let recent = refine_core::knowledge::DocumentRepository::find_recent(&store, 0, 10)
+        .await
+        .expect("find_recent failed");
+
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0].id(), older.id());
+    assert_eq!(recent[0].captured_at(), newest_capture);
+    assert_eq!(recent[0].raw_content(), "recaptured content");
+    assert_eq!(recent[1].id(), newer.id());
 }
 
 #[tokio::test]

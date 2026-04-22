@@ -60,7 +60,7 @@ pub(super) fn find_recent(
     let offset = std::cmp::min(offset, i64::MAX as usize) as i64;
 
     let mut stmt = conn
-        .prepare("SELECT id, title, raw_content, source, url, captured_at, created_at, updated_at FROM documents ORDER BY created_at DESC LIMIT ?1 OFFSET ?2")
+        .prepare("SELECT id, title, raw_content, source, url, captured_at, created_at, updated_at FROM documents ORDER BY captured_at DESC, created_at DESC LIMIT ?1 OFFSET ?2")
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     let rows = stmt
