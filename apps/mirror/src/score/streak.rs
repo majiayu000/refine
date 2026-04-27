@@ -12,10 +12,7 @@ pub fn calculate_streak(scores: &[ScoreResult], today: NaiveDate) -> u32 {
     }
 
     // Collect unique dates from scores
-    let mut dates: Vec<NaiveDate> = scores
-        .iter()
-        .map(|s| s.timestamp.date_naive())
-        .collect();
+    let mut dates: Vec<NaiveDate> = scores.iter().map(|s| s.timestamp.date_naive()).collect();
     dates.sort_unstable();
     dates.dedup();
 

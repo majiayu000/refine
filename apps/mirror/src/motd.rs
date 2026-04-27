@@ -354,7 +354,7 @@ fn strip_ansi_escapes(s: &str) -> String {
             match chars.peek() {
                 Some(&'[') => {
                     chars.next(); // consume '['
-                    // consume parameter/intermediate bytes until final byte (0x40–0x7E)
+                                  // consume parameter/intermediate bytes until final byte (0x40–0x7E)
                     for inner in chars.by_ref() {
                         if ('\x40'..='\x7e').contains(&inner) {
                             break;
@@ -568,7 +568,10 @@ mod tests {
         let cjk_line: String = "本".repeat(167);
         std::fs::write(&path, format!("{}\n", cjk_line))?;
         let result = weekly_reminder_from_path(&path);
-        assert!(result.is_some(), "CJK content at byte boundary must not return None");
+        assert!(
+            result.is_some(),
+            "CJK content at byte boundary must not return None"
+        );
         Ok(())
     }
 
@@ -582,7 +585,10 @@ mod tests {
             Some(v) => v,
             None => return Err("fresh file with ANSI content must yield Some".into()),
         };
-        assert!(!s.contains('\x1b'), "ANSI escape sequences must be stripped");
+        assert!(
+            !s.contains('\x1b'),
+            "ANSI escape sequences must be stripped"
+        );
         assert!(s.contains("Important"), "visible text must be preserved");
         Ok(())
     }
