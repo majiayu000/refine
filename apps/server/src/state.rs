@@ -1,5 +1,6 @@
 use refine_core::infra::{
-    build_llm_client_from_env, ensure_db_dir, resolve_db_path, LlmClient, SqliteStore,
+    build_llm_client_from_env, ensure_db_dir, migrate_stale_dbs, resolve_db_path, LlmClient,
+    MigrationReport, SqliteStore,
 };
 use refine_core::knowledge::{DocumentRepository, ItemRepository};
 use refine_core::search::SearchEngine;
@@ -28,6 +29,20 @@ impl AppState {
     pub async fn build() -> Result<Self, String> {
         let db_path = resolve_db_path(&["REFINE_SERVER_DB_PATH"]);
         ensure_db_dir(&db_path)?;
+        match migrate_stale_dbs(&db_path) {
+            Ok(MigrationReport::NoOp) => {}
+            Ok(MigrationReport::Migrated {
+                sources,
+                rows_copied,
+            }) => {
+                tracing::info!(
+                    rows_copied,
+                    sources = ?sources,
+                    "migrated legacy DB(s) into primary database"
+                );
+            }
+            Err(e) => tracing::warn!("DB migration failed (continuing): {}", e),
+        }
         let persistence = Arc::new(ServerPersistence::new(db_path.clone())?);
         let conversation_repo: Arc<dyn ConversationRepository> = persistence.clone();
         let job_repo: Arc<dyn JobRepository> = persistence.clone();
