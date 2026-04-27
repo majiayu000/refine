@@ -32,6 +32,11 @@ REFINE_OPENAI_BASE_URL=https://api.openai.com
 REFINE_OPENAI_MODEL=gpt-4o
 EOF
 
+# Set up Claude Code skills (one-time symlink)
+ln -s "$(pwd)/skills/cognitive-portrait" ~/.claude/skills/cognitive-portrait
+# If ~/.claude/skills/cognitive-portrait already exists as a directory (old copy),
+# delete it first: rm -rf ~/.claude/skills/cognitive-portrait
+
 # Import your AI coding sessions
 refine ingest-sessions
 

@@ -109,12 +109,17 @@ docs/cognitive-portraits/cognitive-portrait-{date}-v3.md
 
 ### 4.2 新增 prompt 模板
 
-- `~/.claude/skills/cognitive-portrait/prompts/l1_cognitive_evolution.md`
-- `~/.claude/skills/cognitive-portrait/prompts/l2_strategic_positioning.md`
-- `~/.claude/skills/cognitive-portrait/prompts/l3_work_health.md`
-- `~/.claude/skills/cognitive-portrait/prompts/l4_growth_prescription.md`
+代码位置（版本控制内）：
+
+- `skills/cognitive-portrait/SKILL.md` — Dispatcher 主 prompt
+- `skills/cognitive-portrait/prompts/l1_cognitive_evolution.md`
+- `skills/cognitive-portrait/prompts/l2_strategic_positioning.md`
+- `skills/cognitive-portrait/prompts/l3_work_health.md`
+- `skills/cognitive-portrait/prompts/l4_growth_prescription.md`
 
 每个模板包含：数据源列表 + 强制约束 + 章节大纲 + 风格参考 + 输出路径。
+
+Claude Code 通过 `~/.claude/skills/cognitive-portrait` 发现技能，该路径应是指向本仓库 `skills/cognitive-portrait/` 的符号链接（见 `docs/setup-skills.md`）。
 
 ### 4.3 合并阶段
 
