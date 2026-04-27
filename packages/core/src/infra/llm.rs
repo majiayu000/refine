@@ -102,6 +102,15 @@ impl LlmClient for ClaudeClient {
             .await
             .map_err(|e| InfraError::LlmRequest(e.to_string()))?;
 
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after_secs = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
+            return Err(InfraError::RateLimited { retry_after_secs });
+        }
+
         if !resp.status().is_success() {
             let err = resp.text().await.unwrap_or_default();
             return Err(InfraError::LlmRequest(format!("API 错误: {}", err)));
@@ -180,6 +189,15 @@ impl LlmClient for OpenAIClient {
             .send()
             .await
             .map_err(|e| InfraError::LlmRequest(e.to_string()))?;
+
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after_secs = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
+            return Err(InfraError::RateLimited { retry_after_secs });
+        }
 
         if !resp.status().is_success() {
             let err = resp.text().await.unwrap_or_default();

@@ -14,6 +14,16 @@ if [ -f .env ]; then
   set +a
 fi
 
+QUOTA_FILE="$HOME/.refine/quota_exhausted_until"
+if [ -f "$QUOTA_FILE" ]; then
+  UNTIL=$(cat "$QUOTA_FILE")
+  NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if [[ "$UNTIL" > "$NOW" ]]; then
+    echo "LLM quota exhausted until $UNTIL — skipping refresh"
+    exit 0
+  fi
+fi
+
 echo "=== $(date) ==="
 
 # Preflight: environment diagnostics for troubleshooting

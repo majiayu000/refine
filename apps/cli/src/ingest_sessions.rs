@@ -3,20 +3,29 @@
 //! 支持 3 路并发 + 断点续传 + API 限流重试
 
 use anyhow::{Context, Result};
-use refine_core::infra::LlmClient;
+use refine_core::error::InfraError;
+use refine_core::infra::{set_quota_exhausted, LlmClient};
 use refine_core::knowledge::{Document, DocumentId, DocumentRepository, ItemRepository};
 use refine_core::session::{
     build_facet_prompt, chunk_session, discover_sessions, facets_to_items, needs_chunking,
     parse_facet_response, parse_session_file, FilterConfig, SessionSource, FACET_SYSTEM_PROMPT,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::Semaphore;
 
 const MAX_RETRIES: usize = 5;
 const RETRY_BASE_DELAY_SECS: u64 = 10;
-const CONCURRENCY: usize = 3;
+const DEFAULT_CONCURRENCY: usize = 1;
+
+fn concurrency() -> usize {
+    std::env::var("REFINE_INGEST_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(DEFAULT_CONCURRENCY)
+}
 
 pub struct IngestOptions {
     pub source: Option<SessionSource>,
@@ -166,12 +175,13 @@ pub async fn handle_ingest_sessions(
         return Ok(());
     }
 
+    let concurrency = concurrency();
     println!(
         "待处理 {} 个会话（跳过重复 {}, 过滤 {}），{} 路并发...\n",
         pending.len(),
         skipped_dup,
         skipped_filter,
-        CONCURRENCY,
+        concurrency,
     );
 
     if pending.is_empty() {
@@ -181,10 +191,12 @@ pub async fn handle_ingest_sessions(
 
     // 阶段 2: 并发做 LLM 提取 + 保存
     let client = llm_client.ok_or_else(|| anyhow::anyhow!("非 dry-run 模式需要 LLM API Key"))?;
-    let semaphore = Arc::new(Semaphore::new(CONCURRENCY));
+    let semaphore = Arc::new(Semaphore::new(concurrency));
     let processed = Arc::new(AtomicUsize::new(0));
     let failed = Arc::new(AtomicUsize::new(0));
     let total_items = Arc::new(AtomicUsize::new(0));
+    // Shared flag: when any worker hits RateLimited, all others abort pending retries.
+    let quota_hit = Arc::new(AtomicBool::new(false));
 
     let mut handles = Vec::new();
 
@@ -196,11 +208,13 @@ pub async fn handle_ingest_sessions(
         let processed = processed.clone();
         let failed = failed.clone();
         let total_items = total_items.clone();
+        let quota_hit = quota_hit.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.expect("semaphore closed");
 
-            let result = process_single_session(&ps, &client, &item_store, &doc_store).await;
+            let result =
+                process_single_session(&ps, &client, &item_store, &doc_store, &quota_hit).await;
 
             match result {
                 Ok(item_count) => {
@@ -247,11 +261,12 @@ async fn process_single_session(
     client: &Arc<dyn LlmClient>,
     item_store: &Arc<dyn ItemRepository>,
     doc_store: &Arc<dyn DocumentRepository>,
+    quota_hit: &Arc<AtomicBool>,
 ) -> Result<usize> {
     let content = if ps.needs_chunk {
         let mut summaries = Vec::new();
         for chunk in &ps.chunks {
-            match llm_call_with_retry(client, chunk).await {
+            match llm_call_with_retry(client, chunk, quota_hit).await {
                 Ok(text) => summaries.push(text),
                 Err(e) => tracing::warn!("分块提取失败: {}", e),
             }
@@ -261,7 +276,7 @@ async fn process_single_session(
         ps.content.clone()
     };
 
-    let facet_response = extract_and_parse_facets_with_retry(&content, client).await?;
+    let facet_response = extract_and_parse_facets_with_retry(&content, client, quota_hit).await?;
 
     let doc_id = DocumentId::new();
     let mut doc = Document::new(ps.source.as_str(), &content);
@@ -286,13 +301,29 @@ async fn process_single_session(
     Ok(item_count)
 }
 
-async fn llm_call_with_retry(client: &Arc<dyn LlmClient>, content: &str) -> Result<String> {
+async fn llm_call_with_retry(
+    client: &Arc<dyn LlmClient>,
+    content: &str,
+    quota_hit: &Arc<AtomicBool>,
+) -> Result<String> {
     let prompt = build_facet_prompt(content);
     let mut last_err = String::new();
 
     for attempt in 0..MAX_RETRIES {
+        if quota_hit.load(Ordering::Relaxed) {
+            return Err(anyhow::anyhow!("LLM 配额已耗尽，跳过"));
+        }
+
         match client.complete(&prompt, Some(FACET_SYSTEM_PROMPT)).await {
             Ok(response) => return Ok(response),
+            Err(InfraError::RateLimited { retry_after_secs }) => {
+                quota_hit.store(true, Ordering::Relaxed);
+                set_quota_exhausted(retry_after_secs);
+                return Err(anyhow::anyhow!(
+                    "LLM 配额已耗尽 (retry_after: {:?}s)",
+                    retry_after_secs
+                ));
+            }
             Err(e) => {
                 last_err = e.to_string();
                 let is_retryable = last_err.contains("cooldown")
@@ -330,7 +361,8 @@ async fn llm_call_with_retry(client: &Arc<dyn LlmClient>, content: &str) -> Resu
 async fn extract_and_parse_facets_with_retry(
     content: &str,
     client: &Arc<dyn LlmClient>,
+    quota_hit: &Arc<AtomicBool>,
 ) -> Result<refine_core::session::FacetResponse> {
-    let response = llm_call_with_retry(client, content).await?;
+    let response = llm_call_with_retry(client, content, quota_hit).await?;
     parse_facet_response(&response).map_err(|e| anyhow::anyhow!(e))
 }

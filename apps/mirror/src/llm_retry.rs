@@ -1,5 +1,6 @@
 use anyhow::Result;
-use refine_core::infra::LlmClient;
+use refine_core::error::InfraError;
+use refine_core::infra::{is_quota_exhausted, set_quota_exhausted, LlmClient};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,8 +40,19 @@ pub async fn llm_with_retry_policy(
     let mut last_err = String::new();
 
     for attempt in 0..max_retries {
+        if is_quota_exhausted() {
+            return Err(anyhow::anyhow!("LLM quota exhausted — skipping call"));
+        }
+
         match client.complete(prompt, Some(system)).await {
             Ok(response) => return Ok(response),
+            Err(InfraError::RateLimited { retry_after_secs }) => {
+                set_quota_exhausted(retry_after_secs);
+                return Err(anyhow::anyhow!(
+                    "LLM quota exhausted (retry_after: {:?}s)",
+                    retry_after_secs
+                ));
+            }
             Err(e) => {
                 last_err = e.to_string();
                 if !is_retryable_error(&last_err) || attempt == max_retries - 1 {
