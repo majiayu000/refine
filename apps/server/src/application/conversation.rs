@@ -65,17 +65,6 @@ pub async fn create_conversation(
     let normalized = normalize_conversation_input(content, url, source, title, idempotency_key)
         .map_err(CreateConversationError::BadRequest)?;
 
-    if let Some(record) =
-        find_conversation_by_idempotency(&state, &normalized.idempotency_key).await?
-    {
-        return Ok(CreateConversationResult {
-            conversation_id: record.id,
-            status: record.status,
-            deduplicated: true,
-            job_id: None,
-        });
-    }
-
     if state.free_quota_items > 0 && !state.is_premium_user(&user_id) {
         let used = state
             .store
@@ -116,10 +105,21 @@ pub async fn create_conversation(
         last_error: None,
     };
 
-    state
+    // Atomically insert or, on idempotency-key conflict, fetch the existing row.
+    // Comparing returned id against the generated id reveals deduplication.
+    let persisted = state
         .conversation_repo
-        .upsert_conversation(&conversation)
+        .insert_or_fetch_conversation_by_idempotency(&conversation)
         .map_err(CreateConversationError::Internal)?;
+
+    if persisted.id != conversation_id {
+        return Ok(CreateConversationResult {
+            conversation_id: persisted.id,
+            status: persisted.status,
+            deduplicated: true,
+            job_id: None,
+        });
+    }
 
     let mut job_id = None;
     if !ingest_only {
@@ -225,16 +225,6 @@ pub async fn create_extraction_job(
         job_id,
         status: JobStatus::Pending,
     })
-}
-
-async fn find_conversation_by_idempotency(
-    state: &Arc<AppState>,
-    key: &str,
-) -> Result<Option<crate::models::ConversationRecord>, CreateConversationError> {
-    state
-        .conversation_repo
-        .find_conversation_by_idempotency(key)
-        .map_err(CreateConversationError::Internal)
 }
 
 #[cfg(test)]
