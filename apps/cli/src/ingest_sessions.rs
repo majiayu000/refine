@@ -11,7 +11,7 @@ use refine_core::session::{
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::sync::Semaphore;
 
 const MAX_RETRIES: usize = 5;
@@ -38,14 +38,53 @@ struct PendingSession {
     chunks: Vec<String>,
 }
 
+/// Read the Unix-second timestamp from `~/.refine/last-ingest-mtime`.
+fn read_last_ingest_mtime() -> Option<SystemTime> {
+    let path = dirs::home_dir()?.join(".refine").join("last-ingest-mtime");
+    let secs: u64 = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+}
+
+/// Persist the Unix-second timestamp to `~/.refine/last-ingest-mtime`.
+fn write_last_ingest_mtime(t: SystemTime) {
+    let Some(home) = dirs::home_dir() else { return };
+    let dir = home.join(".refine");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!("failed to create ~/.refine: {}", e);
+        return;
+    }
+    if let Ok(dur) = t.duration_since(SystemTime::UNIX_EPOCH) {
+        if let Err(e) = std::fs::write(dir.join("last-ingest-mtime"), dur.as_secs().to_string()) {
+            tracing::warn!("failed to write last-ingest-mtime: {}", e);
+        }
+    }
+}
+
 pub async fn handle_ingest_sessions(
     options: IngestOptions,
     item_store: Arc<dyn ItemRepository>,
     doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
-    let mut discovered = discover_sessions(options.source);
-    println!("发现 {} 个会话文件", discovered.len());
+    // Incremental scan: only active for full (no --limit/--latest) non-dry-run runs.
+    // 1-hour overlap on the cutoff absorbs clock skew and files modified near the boundary.
+    let incremental = options.limit.is_none() && options.latest.is_none() && !options.dry_run;
+    let scan_start = SystemTime::now();
+    let mtime_after = if incremental {
+        read_last_ingest_mtime().map(|last| {
+            last.checked_sub(Duration::from_secs(3600))
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+        })
+    } else {
+        None
+    };
+
+    let mut discovered = discover_sessions(options.source, mtime_after);
+    if mtime_after.is_some() {
+        println!("增量扫描：发现 {} 个会话文件", discovered.len());
+    } else {
+        println!("发现 {} 个会话文件", discovered.len());
+    }
 
     // --latest: sort by mtime descending, keep N most recent
     if let Some(n) = options.latest {
@@ -193,6 +232,11 @@ pub async fn handle_ingest_sessions(
     if failed > 0 {
         eprintln!("提示: 重新运行即可续传失败的会话");
         return Err(anyhow::anyhow!("{} 个会话提取失败", failed));
+    }
+
+    // Advance the incremental scan cursor so the next run only sees newer files.
+    if incremental {
+        write_last_ingest_mtime(scan_start);
     }
 
     Ok(())
