@@ -21,18 +21,24 @@ pub struct DiscoveredSession {
 ///
 /// Claude Code: `~/.claude/projects/*/*.jsonl`
 /// Codex:       `~/.codex/sessions/**/*.jsonl`
-pub fn discover_sessions(source_filter: Option<SessionSource>) -> Vec<DiscoveredSession> {
+///
+/// `mtime_after`: 仅返回 `modified_at >= mtime_after` 的文件；`None` 返回全部。
+pub fn discover_sessions(
+    source_filter: Option<SessionSource>,
+    mtime_after: Option<SystemTime>,
+) -> Vec<DiscoveredSession> {
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => return Vec::new(),
     };
-    discover_sessions_in(&home, source_filter)
+    discover_sessions_in(&home, source_filter, mtime_after)
 }
 
 /// 可测试版本：指定 home 目录
 pub fn discover_sessions_in(
     home: &Path,
     source_filter: Option<SessionSource>,
+    mtime_after: Option<SystemTime>,
 ) -> Vec<DiscoveredSession> {
     let mut results = Vec::new();
 
@@ -40,20 +46,24 @@ pub fn discover_sessions_in(
         .as_ref()
         .map_or(true, |s| *s == SessionSource::ClaudeCode)
     {
-        discover_claude_code(home, &mut results);
+        discover_claude_code(home, &mut results, mtime_after);
     }
     if source_filter
         .as_ref()
         .map_or(true, |s| *s == SessionSource::Codex)
     {
-        discover_codex(home, &mut results);
+        discover_codex(home, &mut results, mtime_after);
     }
 
     results.sort_by(|a, b| a.path.cmp(&b.path));
     results
 }
 
-fn discover_claude_code(home: &Path, results: &mut Vec<DiscoveredSession>) {
+fn discover_claude_code(
+    home: &Path,
+    results: &mut Vec<DiscoveredSession>,
+    mtime_after: Option<SystemTime>,
+) {
     let projects_dir = home.join(".claude").join("projects");
     let entries = match std::fs::read_dir(&projects_dir) {
         Ok(e) => e,
@@ -99,6 +109,9 @@ fn discover_claude_code(home: &Path, results: &mut Vec<DiscoveredSession>) {
                         warn!(path = %path.display(), error = %e, "failed to read mtime; file treated as oldest for --latest");
                         SystemTime::UNIX_EPOCH
                     });
+                if mtime_after.is_some_and(|cutoff| modified_at < cutoff) {
+                    continue;
+                }
                 results.push(DiscoveredSession {
                     path,
                     source: SessionSource::ClaudeCode,
@@ -110,12 +123,21 @@ fn discover_claude_code(home: &Path, results: &mut Vec<DiscoveredSession>) {
     }
 }
 
-fn discover_codex(home: &Path, results: &mut Vec<DiscoveredSession>) {
+fn discover_codex(
+    home: &Path,
+    results: &mut Vec<DiscoveredSession>,
+    mtime_after: Option<SystemTime>,
+) {
     let sessions_dir = home.join(".codex").join("sessions");
-    walk_jsonl_recursive(&sessions_dir, SessionSource::Codex, results);
+    walk_jsonl_recursive(&sessions_dir, SessionSource::Codex, results, mtime_after);
 }
 
-fn walk_jsonl_recursive(dir: &Path, source: SessionSource, results: &mut Vec<DiscoveredSession>) {
+fn walk_jsonl_recursive(
+    dir: &Path,
+    source: SessionSource,
+    results: &mut Vec<DiscoveredSession>,
+    mtime_after: Option<SystemTime>,
+) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -128,7 +150,7 @@ fn walk_jsonl_recursive(dir: &Path, source: SessionSource, results: &mut Vec<Dis
             if path.file_name().is_some_and(|n| n == "subagents") {
                 continue;
             }
-            walk_jsonl_recursive(&path, source.clone(), results);
+            walk_jsonl_recursive(&path, source.clone(), results, mtime_after);
         } else if is_session_jsonl(&path) && !is_subagent_file(&path) {
             let modified_at = entry
                 .metadata()
@@ -137,6 +159,9 @@ fn walk_jsonl_recursive(dir: &Path, source: SessionSource, results: &mut Vec<Dis
                     warn!(path = %path.display(), error = %e, "failed to read mtime; file treated as oldest for --latest");
                     SystemTime::UNIX_EPOCH
                 });
+            if mtime_after.is_some_and(|cutoff| modified_at < cutoff) {
+                continue;
+            }
             results.push(DiscoveredSession {
                 path,
                 source: source.clone(),
@@ -182,7 +207,7 @@ mod tests {
         fs::write(project_dir.join("agent-sub.jsonl"), "{}").unwrap();
         fs::write(project_dir.join("notes.txt"), "not a session").unwrap();
 
-        let results = discover_sessions_in(home, Some(SessionSource::ClaudeCode));
+        let results = discover_sessions_in(home, Some(SessionSource::ClaudeCode), None);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].source, SessionSource::ClaudeCode);
         assert_eq!(results[0].project.as_deref(), Some("my-project"));
@@ -203,7 +228,7 @@ mod tests {
         fs::create_dir_all(&sub_dir).unwrap();
         fs::write(sub_dir.join("sub.jsonl"), "{}").unwrap();
 
-        let results = discover_sessions_in(home, Some(SessionSource::Codex));
+        let results = discover_sessions_in(home, Some(SessionSource::Codex), None);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].source, SessionSource::Codex);
     }
@@ -221,10 +246,10 @@ mod tests {
         fs::create_dir_all(&codex_dir).unwrap();
         fs::write(codex_dir.join("s2.jsonl"), "{}").unwrap();
 
-        let claude_only = discover_sessions_in(home, Some(SessionSource::ClaudeCode));
+        let claude_only = discover_sessions_in(home, Some(SessionSource::ClaudeCode), None);
         assert_eq!(claude_only.len(), 1);
 
-        let all = discover_sessions_in(home, None);
+        let all = discover_sessions_in(home, None, None);
         assert_eq!(all.len(), 2);
     }
 
@@ -237,7 +262,7 @@ mod tests {
         fs::create_dir_all(&project_dir).unwrap();
         fs::write(project_dir.join("sess.jsonl"), "{}").unwrap();
 
-        let results = discover_sessions_in(home, Some(SessionSource::ClaudeCode));
+        let results = discover_sessions_in(home, Some(SessionSource::ClaudeCode), None);
         assert_eq!(results.len(), 1);
         // A freshly-created file must have mtime > UNIX_EPOCH
         assert!(results[0].modified_at > SystemTime::UNIX_EPOCH);
@@ -261,7 +286,7 @@ mod tests {
             filetime::set_file_mtime(&p, t).unwrap();
         }
 
-        let mut discovered = discover_sessions_in(home, Some(SessionSource::ClaudeCode));
+        let mut discovered = discover_sessions_in(home, Some(SessionSource::ClaudeCode), None);
         assert_eq!(discovered.len(), 5);
 
         // Simulate --latest 3
@@ -287,7 +312,7 @@ mod tests {
             fs::write(project_dir.join(name), "{}").unwrap();
         }
 
-        let mut discovered = discover_sessions_in(home, Some(SessionSource::ClaudeCode));
+        let mut discovered = discover_sessions_in(home, Some(SessionSource::ClaudeCode), None);
         // --latest 100 on 3 files
         discovered.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
         discovered.truncate(100);
@@ -306,7 +331,7 @@ mod tests {
         }
 
         // discover_sessions_in already sorts by path
-        let discovered = discover_sessions_in(home, Some(SessionSource::ClaudeCode));
+        let discovered = discover_sessions_in(home, Some(SessionSource::ClaudeCode), None);
         let limited: Vec<_> = discovered.into_iter().take(2).collect();
         assert_eq!(limited.len(), 2);
         let names: Vec<&str> = limited
@@ -314,5 +339,29 @@ mod tests {
             .map(|s| s.path.file_name().unwrap().to_str().unwrap())
             .collect();
         assert_eq!(names, vec!["a.jsonl", "b.jsonl"]);
+    }
+
+    #[test]
+    fn mtime_after_filters_old_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        let project_dir = home.join(".claude/projects/proj");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        // old.jsonl: mtime = epoch + 1000 s (definitely old)
+        // new.jsonl: mtime = epoch + 9000 s (newer)
+        let old_path = project_dir.join("old.jsonl");
+        let new_path = project_dir.join("new.jsonl");
+        fs::write(&old_path, "{}").unwrap();
+        fs::write(&new_path, "{}").unwrap();
+        filetime::set_file_mtime(&old_path, filetime::FileTime::from_unix_time(1000, 0)).unwrap();
+        filetime::set_file_mtime(&new_path, filetime::FileTime::from_unix_time(9000, 0)).unwrap();
+
+        // cutoff = epoch + 5000 s — only new.jsonl should pass
+        let cutoff = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(5000);
+        let results = discover_sessions_in(home, Some(SessionSource::ClaudeCode), Some(cutoff));
+        assert_eq!(results.len(), 1);
+        assert!(results[0].path.file_name().unwrap() == "new.jsonl");
     }
 }
