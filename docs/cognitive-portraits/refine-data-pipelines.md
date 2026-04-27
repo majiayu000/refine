@@ -14,7 +14,7 @@
 - 1 条核心 LLM 聚合链路（`refine insights --prescription`，~10+1 次 LLM 并发）
 - 4 条 mirror 子命令（`score` / `motd` / `dashboard` / `weekly` / `profile`）
 - 2 条由 launchd 调度的 shell 脚本（daily/weekly）
-- 1 条外部 skill（`cognitive-portrait`，不在 Rust 代码，但读 refine.db）
+- 1 条 in-repo skill（`cognitive-portrait`，在 `skills/` 目录，通过符号链接接入 Claude Code，读 refine.db）
 
 **核心结论**：除 `ingest-sessions` 外，所有链路都是对已经落库的 Observation 数据做聚合加工。`refine insights --prescription` 是 LLM 调用最重、耗时最长的链路（~11 次 LLM，10 并发）；`mirror score` 在原始职责"纯 SQL 聚合"之外，实际上也会调用 LLM 生成 advice（单次，带 72h 缓存）。
 
@@ -226,12 +226,12 @@ AI IDE JSONL 文件
 
 ---
 
-### 链路 9: cognitive-portrait skill（外部 Claude Code skill）
+### 链路 9: cognitive-portrait skill（in-repo Claude Code skill）
 
 | 字段 | 内容 |
 |---|---|
 | 命令入口 | Claude Code skill 触发词："认知画像" / "cognitive portrait" / "认知分析" / "分析我的成长" |
-| 代码位置 | `~/.claude/skills/cognitive-portrait/SKILL.md` + `prompts/`（**不在 refine 代码库中**） |
+| 代码位置 | `skills/cognitive-portrait/SKILL.md` + `prompts/`（在 refine 代码库中；`~/.claude/skills/cognitive-portrait` 为符号链接，见 `docs/setup-skills.md`）|
 | 触发方式 | 用户在 Claude Code 对话中触发 |
 | 数据来源 | 直接用 `sqlite3` 读 refine.db + 调 `mirror score` 命令 |
 | 处理步骤 | 1) Dispatcher 跑 SQL 采集 8 个数据文件到 `/tmp/cp_data_*.txt`；2) 派发 4 个 Task sub-agent 并行（W-14 文件所有权隔离），分别写 L1/L2/L3/L4 markdown；3) Dispatcher 合并写盘 |

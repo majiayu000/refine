@@ -10,6 +10,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  skill-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify skill files present
+        run: |
+          for f in skills/cognitive-portrait/SKILL.md \
+                    skills/cognitive-portrait/prompts/l1_cognitive_evolution.md \
+                    skills/cognitive-portrait/prompts/l2_strategic_positioning.md \
+                    skills/cognitive-portrait/prompts/l3_work_health.md \
+                    skills/cognitive-portrait/prompts/l4_growth_prescription.md; do
+            test -f "$f" || { echo "Missing: $f"; exit 1; }
+          done
+
   check:
     runs-on: ubuntu-latest
     steps:
