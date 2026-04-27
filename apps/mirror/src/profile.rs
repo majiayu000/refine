@@ -76,7 +76,7 @@ fn extract_profile_data(
             }
         })
         .collect();
-    stats.sort_by(|a, b| b.sessions.cmp(&a.sessions));
+    stats.sort_by_key(|s| std::cmp::Reverse(s.sessions));
     stats.truncate(10);
 
     // Session complexity: count observations per document_id

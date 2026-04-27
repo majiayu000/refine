@@ -49,7 +49,7 @@ pub async fn handle_ingest_sessions(
 
     // --latest: sort by mtime descending, keep N most recent
     if let Some(n) = options.latest {
-        discovered.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+        discovered.sort_by_key(|d| std::cmp::Reverse(d.modified_at));
         discovered.truncate(n);
     }
 
