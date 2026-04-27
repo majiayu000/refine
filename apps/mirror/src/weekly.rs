@@ -1,34 +1,31 @@
-use crate::config::{ensure_mirror_dir, mirror_dir};
+use crate::config::ensure_mirror_dir;
 use crate::document_save::{save_report_to_document, SaveDocumentOptions};
 use crate::lang::t;
-use crate::llm_retry::llm_with_retry;
-use crate::score::{self, LayerScore, ScoreResult};
+use crate::score::{self, LayerScore, ScoreResult, Signal};
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, Utc};
-use refine_core::infra::LlmClient;
+use chrono::{DateTime, Datelike, Duration, Utc};
 use refine_core::knowledge::{DocumentRepository, Item, ItemRepository, ItemType};
 use refine_core::session::cluster_observations;
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-const WEEKLY_HISTORY_LIMIT: usize = 52;
+#[cfg(test)]
+use std::io::BufRead;
 
-fn system_prompt() -> &'static str {
-    t!(
-        "You are a cognitive growth analyst. Based on the developer's weekly session data changes, \
-         generate a delta report. Use English. Address the developer as 'you'.",
-        "你是认知成长分析师。基于开发者本周 vs 上周的编程会话数据变化，\
-         生成差量报告。使用中文。用第二人称。"
-    )
-}
+const WEEKLY_HISTORY_LIMIT: usize = 52;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WeeklyRecord {
     pub week_end: DateTime<Utc>,
     pub scores: [LayerSignal; 3],
+    // Retained for backward-compat deserialization of old JSONL records that include
+    // this field. Not written in new records (skip_serializing) and not used in
+    // production logic (allow(dead_code)).
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
     pub suggestions: Vec<String>,
 }
 
@@ -64,7 +61,6 @@ pub struct LayerSignal {
 pub async fn handle_weekly(
     item_repo: Arc<dyn ItemRepository>,
     doc_repo: Arc<dyn DocumentRepository>,
-    llm: Arc<dyn LlmClient>,
 ) -> Result<()> {
     let now = Utc::now();
     let week_ago = now - Duration::days(7);
@@ -116,28 +112,17 @@ pub async fn handle_weekly(
         None
     };
 
-    let prev_record = match load_last_weekly_record() {
-        Ok(record) => record,
-        Err(e) => {
-            tracing::warn!("failed to load weekly history: {}", e);
-            None
-        }
-    };
-    let prompt = build_weekly_prompt(&this_score, last_score.as_ref(), prev_record.as_ref());
-    let report = llm_with_retry(&llm, &prompt, system_prompt()).await?;
+    let report = build_weekly_report(&this_score, last_score.as_ref());
 
     println!("{}", report);
 
     // Save the full report as the sentinel file for the MOTD weekly reminder.
     // The MOTD reads this on Mondays to show a one-line reminder.
-    // Note: if daily-refresh.sh also runs `mirror weekly` on Sundays, this call
-    // is idempotent — the file is simply overwritten with the latest report.
     if let Err(e) = save_last_weekly_md(&report) {
         tracing::warn!("failed to save last-weekly.md: {}", e);
     }
 
-    let suggestions = extract_suggestions(&report);
-    save_weekly_record(&this_score, suggestions)?;
+    save_weekly_record(&this_score)?;
     let doc_id = save_report_to_document(
         &doc_repo,
         &report,
@@ -171,86 +156,109 @@ fn filter_by_time_range(items: &[Item], from: DateTime<Utc>, to: DateTime<Utc>) 
         .collect()
 }
 
-fn format_layer(layer: &LayerScore) -> String {
-    let indicators: Vec<String> = layer
+/// Format the indicator sub-metrics for a layer as a comma-separated list.
+fn layer_indicators(layer: &LayerScore) -> String {
+    layer
         .indicators
         .iter()
         .map(|i| format!("{}={:.1}", score::indicator_display(&i.name), i.actual))
-        .collect();
-    format!(
-        "{}[{}]: {}",
-        score::layer_display(&layer.name),
-        layer.signal.as_str(),
-        indicators.join(", ")
-    )
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
-pub fn build_weekly_prompt(
-    this: &ScoreResult,
-    last: Option<&ScoreResult>,
-    prev_record: Option<&WeeklyRecord>,
-) -> String {
-    let mut parts = Vec::new();
-    parts.push(t!("## This Week Signal Lights", "## 本周信号灯").to_string());
+fn signal_rank(signal: Signal) -> i8 {
+    match signal {
+        Signal::Green => 2,
+        Signal::Yellow => 1,
+        Signal::Red => 0,
+    }
+}
+
+fn signal_delta(current: Signal, previous: Signal) -> &'static str {
+    match signal_rank(current) - signal_rank(previous) {
+        d if d > 0 => "↑",
+        d if d < 0 => "↓",
+        _ => "=",
+    }
+}
+
+fn build_weekly_report(this: &ScoreResult, last: Option<&ScoreResult>) -> String {
+    let now = Utc::now();
+    let week_num = now.iso_week().week();
+    let year = now.iso_week().year();
+
+    let mut lines = Vec::new();
+    lines.push(format!("# Mirror Weekly — {}-W{:02}", year, week_num));
+    lines.push(String::new());
+    lines.push(format!(
+        "> {}",
+        t!(
+            "Metrics-only report — for coaching run `refine cognitive-portrait`",
+            "纯指标报告 — 教练分析请运行 `refine cognitive-portrait`"
+        )
+    ));
+
+    // Section A: This-week 3-axis signal table
+    lines.push(String::new());
+    lines.push(format!("## {}", t!("This Week Signals", "本周信号灯")));
+    lines.push(format!(
+        "| {} | {} | {} |",
+        t!("Dimension", "维度"),
+        t!("Signal", "信号"),
+        t!("Indicators", "子指标")
+    ));
+    lines.push("| --- | --- | --- |".to_string());
     for layer in &this.layers {
-        parts.push(format!("- {}", format_layer(layer)));
+        lines.push(format!(
+            "| {} | {} {} | {} |",
+            score::layer_display(&layer.name),
+            layer.signal.emoji(),
+            layer.signal.as_str(),
+            layer_indicators(layer)
+        ));
     }
     if let Some(tension) = &this.tension {
-        parts.push(format!("\n{}: {}", t!("Tension", "张力"), tension));
+        lines.push(String::new());
+        lines.push(format!("{}: {}", t!("Tension", "张力"), tension));
     }
 
-    if let Some(last) = last {
-        parts.push(format!(
-            "\n{}",
-            t!("## Last Week Signal Lights", "## 上周信号灯")
-        ));
-        for layer in &last.layers {
-            parts.push(format!("- {}", format_layer(layer)));
-        }
-    }
-
-    if let Some(record) = prev_record {
-        if !record.suggestions.is_empty() {
-            parts.push(format!(
-                "\n{}",
-                t!("## Last Week Suggestions", "## 上周建议")
+    // Section B: Signal delta vs last week
+    lines.push(String::new());
+    lines.push(format!(
+        "## {}",
+        t!("Signal Delta vs Last Week", "vs 上周信号变化")
+    ));
+    match last {
+        Some(last) => {
+            lines.push(format!(
+                "| {} | {} | {} | {} |",
+                t!("Dimension", "维度"),
+                t!("Last Week", "上周"),
+                t!("This Week", "本周"),
+                t!("Trend", "趋势")
             ));
-            for s in &record.suggestions {
-                parts.push(format!("- {}", s));
+            lines.push("| --- | --- | --- | --- |".to_string());
+            for (cur_layer, last_layer) in this.layers.iter().zip(last.layers.iter()) {
+                lines.push(format!(
+                    "| {} | {} {} | {} {} | {} |",
+                    score::layer_display(&cur_layer.name),
+                    last_layer.signal.emoji(),
+                    last_layer.signal.as_str(),
+                    cur_layer.signal.emoji(),
+                    cur_layer.signal.as_str(),
+                    signal_delta(cur_layer.signal, last_layer.signal)
+                ));
             }
         }
+        None => {
+            lines.push(t!("No prior week data.", "无上周数据。").to_string());
+        }
     }
 
-    parts.push(format!("\n{}", t!("## Requirements", "## 要求")));
-    parts.push(
-        t!(
-            "1. Dimension change analysis (compare this vs last week signals and indicators)",
-            "1. 各维度变化分析（对比本周 vs 上周信号灯和子指标）"
-        )
-        .to_string(),
-    );
-    parts.push(
-        t!(
-            "2. Evaluate last week's suggestion execution (if applicable)",
-            "2. 上周建议执行情况评估（如有上周建议）"
-        )
-        .to_string(),
-    );
-    parts.push(
-        t!(
-            "3. 1-2 specific suggestions for next week",
-            "3. 下周 1-2 条具体建议"
-        )
-        .to_string(),
-    );
-    parts.join("\n")
+    lines.join("\n")
 }
 
-fn load_last_weekly_record() -> Result<Option<WeeklyRecord>> {
-    let path = mirror_dir().join("weekly-history.jsonl");
-    load_last_weekly_record_from_path(&path)
-}
-
+#[cfg(test)]
 fn load_last_weekly_record_from_path(path: &Path) -> Result<Option<WeeklyRecord>> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
@@ -290,52 +298,6 @@ fn load_last_weekly_record_from_path(path: &Path) -> Result<Option<WeeklyRecord>
     Ok(last)
 }
 
-fn extract_suggestions(report: &str) -> Vec<String> {
-    let lines: Vec<&str> = report.lines().collect();
-    let mut suggestions = Vec::new();
-    let mut in_suggestion_section = false;
-
-    for line in &lines {
-        let trimmed = line.trim();
-        let lowered = trimmed.to_lowercase();
-        // Detect suggestion section headers (Chinese and English)
-        let looks_like_suggestion_header = trimmed.contains("建议")
-            || lowered.contains("suggestion")
-            || lowered.contains("next week")
-            || trimmed.contains("下周");
-        if looks_like_suggestion_header && (trimmed.starts_with('#') || trimmed.starts_with("**")) {
-            in_suggestion_section = true;
-            continue;
-        }
-        // New section header ends suggestion section
-        if in_suggestion_section
-            && (trimmed.starts_with('#') || trimmed.starts_with("**"))
-            && !trimmed.contains("建议")
-            && !lowered.contains("suggestion")
-        {
-            in_suggestion_section = false;
-        }
-        // Extract numbered or bulleted list items in suggestion section
-        if in_suggestion_section && !trimmed.is_empty() {
-            let is_list_item = trimmed.starts_with('-')
-                || trimmed.starts_with('*')
-                || trimmed.chars().next().is_some_and(|c| c.is_ascii_digit());
-            if is_list_item {
-                // Strip leading bullet/number markers
-                let content = trimmed
-                    .trim_start_matches(|c: char| {
-                        c == '-' || c == '*' || c.is_ascii_digit() || c == '.' || c == ')'
-                    })
-                    .trim();
-                if !content.is_empty() {
-                    suggestions.push(content.to_string());
-                }
-            }
-        }
-    }
-    suggestions
-}
-
 fn save_last_weekly_md(report: &str) -> Result<()> {
     let dir = ensure_mirror_dir()?;
     save_last_weekly_md_to_path(report, &dir.join("last-weekly.md"))
@@ -346,7 +308,7 @@ fn save_last_weekly_md_to_path(report: &str, path: &Path) -> Result<()> {
         .with_context(|| format!("failed to write last weekly report to {}", path.display()))
 }
 
-fn save_weekly_record(score: &ScoreResult, suggestions: Vec<String>) -> Result<()> {
+fn save_weekly_record(score: &ScoreResult) -> Result<()> {
     let dir = ensure_mirror_dir()?;
     let path = dir.join("weekly-history.jsonl");
     let record = WeeklyRecord {
@@ -365,7 +327,7 @@ fn save_weekly_record(score: &ScoreResult, suggestions: Vec<String>) -> Result<(
                 signal: score.layers[2].signal.as_str().to_string(),
             },
         ],
-        suggestions,
+        suggestions: Vec::new(),
     };
     persist_weekly_record_to_path(&path, &record)
 }
@@ -461,7 +423,7 @@ fn write_weekly_history_lines_atomically(path: &Path, lines: &[String]) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::score::Signal;
+    use crate::score::{Indicator, Signal};
     use refine_core::knowledge::{ItemId, RestoreParams, Tag};
 
     fn make_weekly_record(seed: usize) -> WeeklyRecord {
@@ -481,7 +443,7 @@ mod tests {
                     signal: "red".into(),
                 },
             ],
-            suggestions: vec![format!("suggestion-{}", seed)],
+            suggestions: Vec::new(),
         }
     }
 
@@ -500,6 +462,19 @@ mod tests {
             updated_at: time,
         })
         .unwrap()
+    }
+
+    fn make_score_result(signals: [Signal; 3]) -> ScoreResult {
+        let names = ["depth", "breadth", "collaboration"];
+        ScoreResult {
+            layers: std::array::from_fn(|i| LayerScore {
+                name: names[i].to_string(),
+                signal: signals[i],
+                indicators: Vec::new(),
+            }),
+            tension: None,
+            timestamp: Utc::now(),
+        }
     }
 
     #[test]
@@ -525,77 +500,88 @@ mod tests {
     }
 
     #[test]
-    fn test_build_weekly_prompt() {
+    fn test_build_weekly_report_no_suggestions_text() {
+        let score = make_score_result([Signal::Green, Signal::Yellow, Signal::Red]);
+        let report = build_weekly_report(&score, None);
+        assert!(!report.contains("建议"), "report must not contain '建议'");
+        assert!(
+            !report.to_lowercase().contains("suggestion"),
+            "report must not contain 'suggestion'"
+        );
+        assert!(!report.contains("下周"), "report must not contain '下周'");
+    }
+
+    #[test]
+    fn test_build_weekly_report_contains_three_axes() {
+        let score = make_score_result([Signal::Green, Signal::Yellow, Signal::Red]);
+        let report = build_weekly_report(&score, None);
+        assert!(report.contains("depth") || report.contains("深度") || report.contains("Depth"));
+        assert!(
+            report.contains("breadth") || report.contains("广度") || report.contains("Breadth")
+        );
+        assert!(
+            report.contains("collaboration")
+                || report.contains("协作")
+                || report.contains("Collab")
+        );
+    }
+
+    #[test]
+    fn test_build_weekly_report_no_prior_data() {
+        let score = make_score_result([Signal::Green, Signal::Yellow, Signal::Red]);
+        let report = build_weekly_report(&score, None);
+        assert!(
+            report.contains("No prior week data") || report.contains("无上周数据"),
+            "should indicate absence of prior data"
+        );
+    }
+
+    #[test]
+    fn test_build_weekly_report_with_prior_data_shows_delta() {
+        let this_score = make_score_result([Signal::Green, Signal::Yellow, Signal::Red]);
+        let last_score = make_score_result([Signal::Yellow, Signal::Red, Signal::Green]);
+        let report = build_weekly_report(&this_score, Some(&last_score));
+        assert!(
+            report.contains('↑') || report.contains('↓') || report.contains('='),
+            "report with prior data must show trend arrows"
+        );
+    }
+
+    #[test]
+    fn test_build_weekly_report_with_indicators() {
         let score = ScoreResult {
-            layers: [
+            layers: std::array::from_fn(|i| {
+                let names = ["depth", "breadth", "collaboration"];
                 LayerScore {
-                    name: "depth".into(),
+                    name: names[i].to_string(),
                     signal: Signal::Green,
-                    indicators: Vec::new(),
-                },
-                LayerScore {
-                    name: "breadth".into(),
-                    signal: Signal::Yellow,
-                    indicators: Vec::new(),
-                },
-                LayerScore {
-                    name: "collaboration".into(),
-                    signal: Signal::Red,
-                    indicators: Vec::new(),
-                },
-            ],
+                    indicators: vec![Indicator {
+                        name: "dreyfus".into(),
+                        actual: 4.2,
+                        target: ">3.5".into(),
+                        signal: Signal::Green,
+                    }],
+                }
+            }),
             tension: Some("test tension".into()),
             timestamp: Utc::now(),
         };
-
-        let prompt = build_weekly_prompt(&score, None, None);
-        assert!(prompt.contains("This Week Signal Lights"));
-        assert!(prompt.contains("Depth"));
-        assert!(prompt.contains("green"));
-        assert!(prompt.contains("Tension"));
-        assert!(prompt.contains("Dimension change analysis"));
+        let report = build_weekly_report(&score, None);
+        assert!(
+            report.contains("4.2"),
+            "indicator values must appear in report"
+        );
+        assert!(report.contains("tension") || report.contains("张力"));
     }
 
     #[test]
-    fn test_extract_suggestions_chinese() {
-        let report = "\
-## 各维度变化分析
-深度指标从黄灯转绿灯，进步明显。
-
-## 下周建议
-1. 每天至少做一次深度 code review
-2. 尝试用 Rust 重写核心模块
-";
-        let suggestions = extract_suggestions(report);
-        assert_eq!(suggestions.len(), 2);
-        assert!(suggestions[0].contains("code review"));
-        assert!(suggestions[1].contains("Rust"));
-    }
-
-    #[test]
-    fn test_extract_suggestions_english() {
-        let report = "\
-## Dimension Analysis
-Depth improved from yellow to green.
-
-## Suggestions for Next Week
-- Focus on writing more tests
-- Try pair programming sessions
-";
-        let suggestions = extract_suggestions(report);
-        assert_eq!(suggestions.len(), 2);
-        assert!(suggestions[0].contains("tests"));
-        assert!(suggestions[1].contains("pair programming"));
-    }
-
-    #[test]
-    fn test_extract_suggestions_empty_when_no_section() {
-        let report = "\
-## Analysis
-Everything looks good. No changes needed.
-";
-        let suggestions = extract_suggestions(report);
-        assert!(suggestions.is_empty());
+    fn test_signal_delta_arrows() {
+        assert_eq!(signal_delta(Signal::Green, Signal::Yellow), "↑");
+        assert_eq!(signal_delta(Signal::Yellow, Signal::Green), "↓");
+        assert_eq!(signal_delta(Signal::Green, Signal::Green), "=");
+        assert_eq!(signal_delta(Signal::Red, Signal::Red), "=");
+        assert_eq!(signal_delta(Signal::Green, Signal::Red), "↑");
+        assert_eq!(signal_delta(Signal::Red, Signal::Green), "↓");
     }
 
     #[test]
@@ -631,7 +617,7 @@ Everything looks good. No changes needed.
                     signal: "red".into(),
                 },
             ],
-            suggestions: vec!["first".into()],
+            suggestions: Vec::new(),
         };
         let second = WeeklyRecord {
             week_end: Utc::now(),
@@ -649,7 +635,7 @@ Everything looks good. No changes needed.
                     signal: "yellow".into(),
                 },
             ],
-            suggestions: vec!["second".into()],
+            suggestions: Vec::new(),
         };
         let first_line = serde_json::to_string(&first).unwrap();
         let second_line = serde_json::to_string(&second).unwrap();
@@ -657,7 +643,8 @@ Everything looks good. No changes needed.
 
         let last = load_last_weekly_record_from_path(&path).unwrap();
         assert!(last.is_some());
-        assert_eq!(last.unwrap().suggestions, vec!["second".to_string()]);
+        // Second record has all-yellow signals; verify that record was returned
+        assert_eq!(last.unwrap().scores[0].signal, "yellow");
     }
 
     #[test]
@@ -678,6 +665,24 @@ Everything looks good. No changes needed.
     }
 
     #[test]
+    fn test_load_last_weekly_record_accepts_legacy_with_suggestions() {
+        // Old JSONL records that have a "suggestions" field must still deserialize.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weekly-history.jsonl");
+        let legacy_line = format!(
+            "{{\"week_end\":\"{}\",\"scores\":[{{\"name\":\"depth\",\"signal\":\"green\"}},{{\"name\":\"breadth\",\"signal\":\"yellow\"}},{{\"name\":\"collaboration\",\"signal\":\"red\"}}],\"suggestions\":[\"do more reviews\"]}}",
+            Utc::now().to_rfc3339()
+        );
+        std::fs::write(&path, format!("{}\n", legacy_line)).unwrap();
+
+        let record = load_last_weekly_record_from_path(&path)
+            .unwrap()
+            .expect("expected record from legacy line with suggestions");
+        assert_eq!(record.scores[0].name, "depth");
+        assert_eq!(record.suggestions, vec!["do more reviews"]);
+    }
+
+    #[test]
     fn test_save_weekly_record_caps_history_at_52() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("weekly-history.jsonl");
@@ -692,14 +697,29 @@ Everything looks good. No changes needed.
             .lines()
             .filter(|line| !line.trim().is_empty())
             .collect();
-        assert_eq!(lines.len(), 52);
+        assert_eq!(lines.len(), 52, "history must be capped at 52 records");
 
         let records: Vec<WeeklyRecord> = lines
             .into_iter()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        assert_eq!(records.first().unwrap().suggestions, vec!["suggestion-1"]);
-        assert_eq!(records.last().unwrap().suggestions, vec!["suggestion-52"]);
+        // All records use signal "green" for depth in make_weekly_record
+        assert_eq!(records.first().unwrap().scores[0].signal, "green");
+        assert_eq!(records.last().unwrap().scores[0].signal, "green");
+    }
+
+    #[test]
+    fn test_new_records_do_not_serialize_suggestions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weekly-history.jsonl");
+        let record = make_weekly_record(0);
+        persist_weekly_record_to_path(&path, &record).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !content.contains("suggestions"),
+            "new records must not serialize the suggestions field"
+        );
     }
 
     #[test]
@@ -710,6 +730,22 @@ Everything looks good. No changes needed.
         save_last_weekly_md_to_path(report, &path)?;
         let content = std::fs::read_to_string(&path)?;
         assert_eq!(content, report);
+        Ok(())
+    }
+
+    #[test]
+    fn test_weekly_sentinel_written_with_nonempty_content() -> Result<()> {
+        let score = make_score_result([Signal::Green, Signal::Yellow, Signal::Red]);
+        let report = build_weekly_report(&score, None);
+
+        let dir = tempfile::tempdir().map_err(|e| anyhow::anyhow!(e))?;
+        let path = dir.path().join("last-weekly.md");
+        save_last_weekly_md_to_path(&report, &path)?;
+        let content = std::fs::read_to_string(&path)?;
+        assert!(
+            !content.trim().is_empty(),
+            "sentinel file must not be empty"
+        );
         Ok(())
     }
 }

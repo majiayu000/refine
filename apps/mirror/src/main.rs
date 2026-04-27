@@ -48,14 +48,7 @@ async fn main() -> Result<()> {
         }
         Commands::Motd => motd::handle_motd(),
         Commands::Dashboard { since, all } => dashboard::handle_dashboard(store, since, all).await,
-        Commands::Weekly => {
-            let llm = build_llm_client_from_env().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "weekly requires LLM. Set REFINE_ANTHROPIC_API_KEY or REFINE_OPENAI_API_KEY"
-                )
-            })?;
-            weekly::handle_weekly(store.clone(), store, llm).await
-        }
+        Commands::Weekly => weekly::handle_weekly(store.clone(), store).await,
         Commands::Profile => {
             let llm = build_llm_client_from_env().ok_or_else(|| {
                 anyhow::anyhow!(
