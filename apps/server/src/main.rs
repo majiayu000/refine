@@ -9,13 +9,13 @@ mod request_guard;
 mod state;
 mod vector_search;
 
-use axum::http::{header, Method};
+use axum::http::{header, HeaderValue, Method};
 use axum::routing::{delete, get, post};
 use axum::Router;
 use state::AppState;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 const DEFAULT_BIND_HOST: &str = "127.0.0.1";
 const DEFAULT_SERVER_PORT: u16 = 21567;
@@ -48,7 +48,7 @@ async fn main() {
     }
 
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(trusted_origins())
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers([
             header::CONTENT_TYPE,
@@ -186,6 +186,19 @@ async fn is_refine_server(addr: &SocketAddr) -> bool {
             .is_ok_and(|body| body.contains("Refine cloud API")),
         Err(_) => false,
     }
+}
+
+/// Build the CORS allowed-origin list from `REFINE_TRUSTED_ORIGINS` (comma-separated).
+/// Returns an empty list when the variable is unset, blocking all cross-origin requests.
+fn trusted_origins() -> AllowOrigin {
+    let origins: Vec<HeaderValue> = std::env::var("REFINE_TRUSTED_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<HeaderValue>().ok())
+        .collect();
+    AllowOrigin::list(origins)
 }
 
 fn parse_bind_addr(host: &str, port: u16) -> SocketAddr {
