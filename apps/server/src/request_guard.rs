@@ -24,7 +24,7 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         validate_client_contract(&parts.headers)?;
         let state = Arc::<AppState>::from_ref(state);
-        let user_id = authorize_user(&parts.headers, state.api_token.as_deref())
+        let user_id = authorize_user(&parts.headers, state.api_token.as_deref(), state.dev_anon)
             .map_err(|err| error_message(StatusCode::UNAUTHORIZED, &err))?;
         Ok(Self(user_id))
     }

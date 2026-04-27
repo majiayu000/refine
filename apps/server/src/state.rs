@@ -20,6 +20,8 @@ pub struct AppState {
     pub premium_users: HashSet<String>,
     pub llm_client: Option<Arc<dyn LlmClient>>,
     pub api_token: Option<String>,
+    /// Explicit opt-in for unauthenticated local access. Requires `REFINE_DEV_ANON=1`.
+    pub dev_anon: bool,
     pub conversation_repo: Arc<dyn ConversationRepository>,
     pub job_repo: Arc<dyn JobRepository>,
     pub event_repo: Arc<dyn EventRepository>,
@@ -52,6 +54,7 @@ impl AppState {
         let store: Arc<dyn ItemRepository> = sqlite_store.clone();
         let doc_store: Arc<dyn DocumentRepository> = sqlite_store;
         let api_token = env_var(&["REFINE_API_TOKEN"]);
+        let dev_anon = env_flag(&["REFINE_DEV_ANON"]);
         if is_production_env() && api_token.is_none() {
             return Err(
                 "REFINE_API_TOKEN is required when REFINE_ENV is set to production".to_string(),
@@ -99,6 +102,7 @@ impl AppState {
             premium_users,
             llm_client: build_llm_client_from_env(),
             api_token,
+            dev_anon,
             conversation_repo,
             job_repo,
             event_repo,
