@@ -224,7 +224,7 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
         .iter()
         .map(|(name, c)| (name.clone(), c.session_count))
         .collect();
-    project_ranking.sort_by(|a, b| b.1.cmp(&a.1));
+    project_ranking.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     ClusterResult {
         projects,
