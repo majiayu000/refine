@@ -42,6 +42,27 @@ pub fn ensure_db_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Legacy database filenames written by older binaries before path unification.
+///
+/// This is the single authoritative list of stale names. No other file in the
+/// codebase should reference these strings — callers probe them via this module.
+const LEGACY_DB_NAMES: &[&str] = &["server.db", "data.db"];
+
+/// Returns paths of known legacy database files that exist on disk.
+///
+/// Only filenames listed in `LEGACY_DB_NAMES` and located in the same directory
+/// as `current` are returned. The `current` path itself is never included.
+pub fn stale_db_candidates(current: &Path) -> Vec<PathBuf> {
+    let Some(parent) = current.parent() else {
+        return Vec::new();
+    };
+    LEGACY_DB_NAMES
+        .iter()
+        .map(|name| parent.join(name))
+        .filter(|p| p.exists() && p != current)
+        .collect()
+}
+
 fn env_path(key: &str) -> Option<PathBuf> {
     std::env::var(key).ok().and_then(|raw| {
         let trimmed = raw.trim().to_string();
