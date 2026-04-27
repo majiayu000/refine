@@ -9,6 +9,9 @@ Thanks for your interest in contributing!
 git clone https://github.com/majiayu000/refine.git
 cd refine
 
+# Activate project hooks (prevents hardcoded developer paths in commits)
+git config core.hooksPath .githooks
+
 # Build
 cargo build
 
