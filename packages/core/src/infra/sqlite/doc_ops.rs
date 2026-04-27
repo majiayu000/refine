@@ -6,7 +6,16 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 pub(super) fn save(conn: &Connection, doc: &Document) -> InfraResult<()> {
     conn.execute(
-        "INSERT OR IGNORE INTO documents (id, title, raw_content, source, url, captured_at, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO documents (id, title, raw_content, source, url, captured_at, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(url) DO UPDATE SET
+             title = CASE
+                 WHEN excluded.title IS NULL OR TRIM(excluded.title) = '' THEN documents.title
+                 ELSE excluded.title
+             END,
+             raw_content = excluded.raw_content,
+             captured_at = excluded.captured_at,
+             updated_at = excluded.updated_at",
         params![
             doc.id().as_str(),
             doc.title(),
@@ -51,7 +60,7 @@ pub(super) fn find_recent(
     let offset = std::cmp::min(offset, i64::MAX as usize) as i64;
 
     let mut stmt = conn
-        .prepare("SELECT id, title, raw_content, source, url, captured_at, created_at, updated_at FROM documents ORDER BY created_at DESC LIMIT ?1 OFFSET ?2")
+        .prepare("SELECT id, title, raw_content, source, url, captured_at, created_at, updated_at FROM documents ORDER BY captured_at DESC, created_at DESC LIMIT ?1 OFFSET ?2")
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     let rows = stmt
