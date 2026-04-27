@@ -40,6 +40,10 @@ pub enum InfraError {
 
     #[error("HTTP 错误: {0}")]
     Http(String),
+
+    /// Quota/rate-limit exhaustion — not a transient error; callers must not retry.
+    #[error("LLM 配额已耗尽 (retry_after: {retry_after_secs:?}s)")]
+    RateLimited { retry_after_secs: Option<u64> },
 }
 
 /// 仓储错误（用于领域端口）
@@ -67,6 +71,10 @@ impl From<InfraError> for RepositoryError {
             InfraError::LlmRequest(msg) | InfraError::LlmParse(msg) | InfraError::Http(msg) => {
                 Self::Unavailable(msg)
             }
+            InfraError::RateLimited { retry_after_secs } => Self::Unavailable(format!(
+                "LLM quota exhausted (retry_after: {:?}s)",
+                retry_after_secs
+            )),
         }
     }
 }

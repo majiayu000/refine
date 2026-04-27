@@ -10,6 +10,7 @@ mod contract;
 mod db_migration;
 mod llm;
 mod paths;
+pub mod quota_state;
 mod sqlite;
 
 // 公共 API
@@ -25,4 +26,5 @@ pub use llm::{
     OpenAIClient,
 };
 pub use paths::{default_db_path, ensure_db_dir, resolve_db_path, stale_db_candidates};
+pub use quota_state::{is_exhausted as is_quota_exhausted, set_exhausted as set_quota_exhausted};
 pub use sqlite::SqliteStore;
