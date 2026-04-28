@@ -65,9 +65,11 @@ fn migrate_documents_url_unique(conn: &Connection) -> InfraResult<()> {
     Ok(())
 }
 
+const ALLOWED_TABLES: &[&str] = &["items", "documents"];
+
 fn column_exists(conn: &Connection, table: &str, column: &str) -> InfraResult<bool> {
-    if !table.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return Err(InfraError::Database(format!("invalid table name: {table}")));
+    if !ALLOWED_TABLES.contains(&table) {
+        return Err(InfraError::Database(format!("unknown table: {table}")));
     }
     let mut stmt = conn
         .prepare(&format!("PRAGMA table_info({table})"))
@@ -470,6 +472,21 @@ mod tests {
         let result = find_by_date_range(&conn, start, end).unwrap();
 
         assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn column_exists_rejects_unknown_table() {
+        use super::column_exists;
+        use crate::error::InfraError;
+
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        init_schema(&conn).expect("init schema");
+
+        let err = column_exists(&conn, "injected_table", "id").unwrap_err();
+        match err {
+            InfraError::Database(msg) => assert!(msg.contains("unknown table: injected_table")),
+            other => panic!("expected Database error, got {other:?}"),
+        }
     }
 
     #[test]
