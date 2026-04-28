@@ -1,19 +1,16 @@
 //! insights v2 — 两级分析：本地聚类 + 10 路 LLM 并发
 
 use anyhow::{Context, Result};
-use refine_core::infra::LlmClient;
+use refine_core::infra::{llm_with_retry, LlmClient};
 use refine_core::knowledge::{Document, DocumentRepository, ItemRepository, ItemType};
 use refine_core::session::{
     build_final_prompt, cluster_observations, merge_route_results, plan_routes, RouteResult,
     INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
 };
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::Semaphore;
 
 const LLM_CONCURRENCY: usize = 10;
-const MAX_RETRIES: usize = 5;
-const RETRY_BASE_DELAY_SECS: u64 = 10;
 
 #[allow(dead_code)]
 pub struct InsightsOptions {
@@ -122,40 +119,4 @@ pub async fn handle_insights(
     println!("\n报告已保存 (ID: {})", doc.id());
 
     Ok(())
-}
-
-async fn llm_with_retry(client: &Arc<dyn LlmClient>, prompt: &str, system: &str) -> Result<String> {
-    let mut last_err = String::new();
-    for attempt in 0..MAX_RETRIES {
-        match client.complete(prompt, Some(system)).await {
-            Ok(response) => return Ok(response),
-            Err(e) => {
-                last_err = e.to_string();
-                let is_retryable = last_err.contains("cooldown")
-                    || last_err.contains("service_busy")
-                    || last_err.contains("rate")
-                    || last_err.contains("429")
-                    || last_err.contains("Upstream")
-                    || last_err.contains("timeout")
-                    || last_err.contains("empty response");
-
-                if !is_retryable || attempt == MAX_RETRIES - 1 {
-                    break;
-                }
-                let delay = RETRY_BASE_DELAY_SECS * (1 << attempt);
-                eprintln!(
-                    "    ⏳ 重试 ({}/{}) 等待 {}s...",
-                    attempt + 1,
-                    MAX_RETRIES,
-                    delay,
-                );
-                tokio::time::sleep(Duration::from_secs(delay)).await;
-            }
-        }
-    }
-    Err(anyhow::anyhow!(
-        "LLM 调用失败 ({}次重试): {}",
-        MAX_RETRIES,
-        last_err
-    ))
 }

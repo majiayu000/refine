@@ -1,10 +1,9 @@
 use crate::config::ensure_mirror_dir;
 use crate::document_save::{save_report_to_document, SaveDocumentOptions};
 use crate::lang::t;
-use crate::llm_retry::llm_with_retry;
 use crate::score::{self, layer_display, Signal};
 use anyhow::Result;
-use refine_core::infra::LlmClient;
+use refine_core::infra::{llm_with_retry, LlmClient};
 use refine_core::knowledge::{DocumentRepository, Item, ItemRepository, ItemType};
 use refine_core::session::{cluster_observations, ClusterResult};
 use std::collections::HashMap;
