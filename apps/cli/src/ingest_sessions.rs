@@ -10,6 +10,7 @@ use refine_core::session::{
     build_facet_prompt, chunk_session, discover_sessions, facets_to_items, needs_chunking,
     parse_facet_response, parse_session_file, FilterConfig, SessionSource, FACET_SYSTEM_PROMPT,
 };
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -33,6 +34,7 @@ pub struct IngestOptions {
     /// 按 mtime 降序取最近 N 个会话，与 limit 互斥
     pub latest: Option<usize>,
     pub dry_run: bool,
+    pub db_path: PathBuf,
 }
 
 /// 待处理的会话（已通过去重和过滤）
@@ -47,26 +49,58 @@ struct PendingSession {
     chunks: Vec<String>,
 }
 
-/// Read the Unix-second timestamp from `~/.refine/last-ingest-mtime`.
-fn read_last_ingest_mtime() -> Option<SystemTime> {
-    let path = dirs::home_dir()?.join(".refine").join("last-ingest-mtime");
+/// Read the Unix-second timestamp for the current ingest scope.
+fn read_last_ingest_mtime(source: Option<&SessionSource>, db_path: &Path) -> Option<SystemTime> {
+    let path = ingest_cursor_path(source, db_path)?;
     let secs: u64 = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
     Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
 }
 
-/// Persist the Unix-second timestamp to `~/.refine/last-ingest-mtime`.
-fn write_last_ingest_mtime(t: SystemTime) {
-    let Some(home) = dirs::home_dir() else { return };
-    let dir = home.join(".refine");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!("failed to create ~/.refine: {}", e);
+/// Persist the Unix-second timestamp for the current ingest scope.
+fn write_last_ingest_mtime(source: Option<&SessionSource>, db_path: &Path, t: SystemTime) {
+    let Some(path) = ingest_cursor_path(source, db_path) else {
+        return;
+    };
+    let Some(dir) = path.parent() else { return };
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        tracing::warn!(
+            "failed to create ingest cursor dir {}: {}",
+            dir.display(),
+            e
+        );
         return;
     }
     if let Ok(dur) = t.duration_since(SystemTime::UNIX_EPOCH) {
-        if let Err(e) = std::fs::write(dir.join("last-ingest-mtime"), dur.as_secs().to_string()) {
-            tracing::warn!("failed to write last-ingest-mtime: {}", e);
+        if let Err(e) = std::fs::write(&path, dur.as_secs().to_string()) {
+            tracing::warn!("failed to write ingest cursor {}: {}", path.display(), e);
         }
     }
+}
+
+fn ingest_cursor_path(source: Option<&SessionSource>, db_path: &Path) -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    Some(ingest_cursor_path_in(&home, source, db_path))
+}
+
+fn ingest_cursor_path_in(home: &Path, source: Option<&SessionSource>, db_path: &Path) -> PathBuf {
+    let source_key = source.map_or("all-sources", SessionSource::as_str);
+    let db_hash = stable_path_hash(db_path);
+    home.join(".refine")
+        .join("ingest-cursors")
+        .join(format!("{source_key}-{db_hash}.mtime"))
+}
+
+fn stable_path_hash(path: &Path) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in path.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+
+    format!("{hash:016x}")
 }
 
 pub async fn handle_ingest_sessions(
@@ -80,7 +114,7 @@ pub async fn handle_ingest_sessions(
     let incremental = options.limit.is_none() && options.latest.is_none() && !options.dry_run;
     let scan_start = SystemTime::now();
     let mtime_after = if incremental {
-        read_last_ingest_mtime().map(|last| {
+        read_last_ingest_mtime(options.source.as_ref(), &options.db_path).map(|last| {
             last.checked_sub(Duration::from_secs(3600))
                 .unwrap_or(SystemTime::UNIX_EPOCH)
         })
@@ -88,7 +122,7 @@ pub async fn handle_ingest_sessions(
         None
     };
 
-    let mut discovered = discover_sessions(options.source, mtime_after);
+    let mut discovered = discover_sessions(options.source.clone(), mtime_after);
     if mtime_after.is_some() {
         println!("增量扫描：发现 {} 个会话文件", discovered.len());
     } else {
@@ -250,7 +284,7 @@ pub async fn handle_ingest_sessions(
 
     // Advance the incremental scan cursor so the next run only sees newer files.
     if incremental {
-        write_last_ingest_mtime(scan_start);
+        write_last_ingest_mtime(options.source.as_ref(), &options.db_path, scan_start);
     }
 
     Ok(())
@@ -365,4 +399,37 @@ async fn extract_and_parse_facets_with_retry(
 ) -> Result<refine_core::session::FacetResponse> {
     let response = llm_call_with_retry(client, content, quota_hit).await?;
     parse_facet_response(&response).map_err(|e| anyhow::anyhow!(e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_path_is_partitioned_by_source() {
+        let home = Path::new("/tmp/home");
+        let db_path = Path::new("/tmp/refine.db");
+
+        let all_sources = ingest_cursor_path_in(home, None, db_path);
+        let codex_only = ingest_cursor_path_in(home, Some(&SessionSource::Codex), db_path);
+
+        assert_ne!(all_sources, codex_only);
+    }
+
+    #[test]
+    fn cursor_path_is_partitioned_by_db_path() {
+        let home = Path::new("/tmp/home");
+        let primary = ingest_cursor_path_in(
+            home,
+            Some(&SessionSource::ClaudeCode),
+            Path::new("/tmp/refine.db"),
+        );
+        let alternate = ingest_cursor_path_in(
+            home,
+            Some(&SessionSource::ClaudeCode),
+            Path::new("/tmp/alternate/refine.db"),
+        );
+
+        assert_ne!(primary, alternate);
+    }
 }

@@ -55,8 +55,9 @@ async fn main() -> Result<()> {
     }
 
     let store = Arc::new(SqliteStore::open(&db_path).context("打开数据库失败")?);
+    let authoritative_db_path = std::fs::canonicalize(&db_path).unwrap_or_else(|_| db_path.clone());
     let repo: Arc<dyn ItemRepository> = store.clone();
     let engine = Arc::new(SearchEngine::new(repo));
 
-    handlers::run(cli.command, store, engine).await
+    handlers::run(cli.command, store, engine, authoritative_db_path).await
 }
