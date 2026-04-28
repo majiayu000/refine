@@ -31,6 +31,7 @@ impl AppState {
     pub async fn build() -> Result<Self, String> {
         let db_path = resolve_db_path(&["REFINE_SERVER_DB_PATH"]);
         ensure_db_dir(&db_path)?;
+        let persistence = Arc::new(ServerPersistence::new(db_path.clone())?);
         match migrate_stale_dbs(&db_path) {
             Ok(MigrationReport::NoOp) => {}
             Ok(MigrationReport::Migrated {
@@ -45,7 +46,6 @@ impl AppState {
             }
             Err(e) => tracing::warn!("DB migration failed (continuing): {}", e),
         }
-        let persistence = Arc::new(ServerPersistence::new(db_path.clone())?);
         let conversation_repo: Arc<dyn ConversationRepository> = persistence.clone();
         let job_repo: Arc<dyn JobRepository> = persistence.clone();
         let event_repo: Arc<dyn EventRepository> = persistence.clone();
@@ -160,4 +160,179 @@ fn is_production_env() -> bool {
         raw.trim().to_ascii_lowercase().as_str(),
         "prod" | "production"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppState;
+    use rusqlite::Connection;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use uuid::Uuid;
+
+    // These tests mutate process-global env vars, so they must run one at a time.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard(Vec<(&'static str, Option<String>)>);
+
+    impl EnvGuard {
+        fn capture(keys: &[&'static str]) -> Self {
+            Self(
+                keys.iter()
+                    .map(|key| (*key, std::env::var(key).ok()))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    fn make_temp_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("refine-app-state-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn cleanup_dir(path: &Path) {
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    fn seed_legacy_server_db(path: &Path) {
+        let conn = Connection::open(path).expect("open legacy db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS conversations (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                url TEXT NOT NULL,
+                title TEXT,
+                raw_content TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                captured_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                item_ids TEXT NOT NULL,
+                last_error TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS events (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                event_name TEXT NOT NULL,
+                source TEXT NOT NULL,
+                properties_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .expect("create legacy schema");
+        conn.execute(
+            r#"
+            INSERT INTO conversations
+              (id, user_id, source, url, title, raw_content, metadata_json,
+               captured_at, created_at, status, idempotency_key, item_ids, last_error)
+            VALUES
+              (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "#,
+            (
+                "conv-1",
+                "user-1",
+                "extension",
+                "https://example.com/conversation",
+                "Legacy conversation",
+                "legacy content",
+                "{}",
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+                "captured",
+                "legacy-key",
+                "[]",
+                Option::<String>::None,
+            ),
+        )
+        .expect("insert legacy conversation");
+        conn.execute(
+            r#"
+            INSERT INTO events
+              (id, user_id, event_name, source, properties_json, created_at)
+            VALUES
+              (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            (
+                "event-1",
+                "user-1",
+                "conversation_captured",
+                "extension",
+                "{}",
+                "2026-01-01T00:00:00Z",
+            ),
+        )
+        .expect("insert legacy event");
+    }
+
+    #[test]
+    fn build_migrates_server_owned_tables_after_schema_init() {
+        let _env_lock = ENV_LOCK.lock().expect("lock env");
+        let _env_guard = EnvGuard::capture(&[
+            "REFINE_DB_PATH",
+            "REFINE_SERVER_DB_PATH",
+            "REFINE_ENV",
+            "APP_ENV",
+            "REFINE_API_TOKEN",
+        ]);
+
+        let dir = make_temp_dir();
+        let db_path = dir.join("refine.db");
+        let legacy_path = dir.join("server.db");
+        seed_legacy_server_db(&legacy_path);
+
+        std::env::remove_var("REFINE_DB_PATH");
+        std::env::set_var("REFINE_SERVER_DB_PATH", db_path.to_string_lossy().as_ref());
+        std::env::remove_var("REFINE_ENV");
+        std::env::remove_var("APP_ENV");
+        std::env::remove_var("REFINE_API_TOKEN");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+        let state = runtime
+            .block_on(AppState::build())
+            .expect("build app state");
+        drop(state);
+
+        let conn = Connection::open(&db_path).expect("open migrated db");
+        let conversation_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM conversations WHERE id = 'conv-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count migrated conversations");
+        let event_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE id = 'event-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count migrated events");
+
+        assert_eq!(conversation_count, 1);
+        assert_eq!(event_count, 1);
+        assert!(legacy_path.with_extension("db.migrated").exists());
+        assert!(!legacy_path.exists());
+
+        cleanup_dir(&dir);
+    }
 }
