@@ -9,6 +9,7 @@ use refine_core::session::{
     build_facet_prompt, chunk_session, discover_sessions, facets_to_items, needs_chunking,
     parse_facet_response, parse_session_file, FilterConfig, SessionSource, FACET_SYSTEM_PROMPT,
 };
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -38,40 +39,95 @@ struct PendingSession {
     chunks: Vec<String>,
 }
 
-/// Read the Unix-second timestamp from `~/.refine/last-ingest-mtime`.
-fn read_last_ingest_mtime() -> Option<SystemTime> {
-    let path = dirs::home_dir()?.join(".refine").join("last-ingest-mtime");
+/// Read the Unix-second timestamp from the scoped ingest cursor file.
+fn read_last_ingest_mtime(db_path: &Path, source: Option<&SessionSource>) -> Option<SystemTime> {
+    let home = dirs::home_dir()?;
+    read_last_ingest_mtime_in(&home, db_path, source)
+}
+
+fn read_last_ingest_mtime_in(
+    home: &Path,
+    db_path: &Path,
+    source: Option<&SessionSource>,
+) -> Option<SystemTime> {
+    let path = last_ingest_mtime_path(home, db_path, source);
     let secs: u64 = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
     Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
 }
 
-/// Persist the Unix-second timestamp to `~/.refine/last-ingest-mtime`.
-fn write_last_ingest_mtime(t: SystemTime) {
+/// Persist the Unix-second timestamp to the scoped ingest cursor file.
+fn write_last_ingest_mtime(db_path: &Path, source: Option<&SessionSource>, t: SystemTime) {
     let Some(home) = dirs::home_dir() else { return };
-    let dir = home.join(".refine");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
+    write_last_ingest_mtime_in(&home, db_path, source, t);
+}
+
+fn write_last_ingest_mtime_in(
+    home: &Path,
+    db_path: &Path,
+    source: Option<&SessionSource>,
+    t: SystemTime,
+) {
+    let path = last_ingest_mtime_path(home, db_path, source);
+    let Some(dir) = path.parent() else { return };
+    if let Err(e) = std::fs::create_dir_all(dir) {
         tracing::warn!("failed to create ~/.refine: {}", e);
         return;
     }
     if let Ok(dur) = t.duration_since(SystemTime::UNIX_EPOCH) {
-        if let Err(e) = std::fs::write(dir.join("last-ingest-mtime"), dur.as_secs().to_string()) {
+        if let Err(e) = std::fs::write(&path, dur.as_secs().to_string()) {
             tracing::warn!("failed to write last-ingest-mtime: {}", e);
         }
     }
 }
 
+fn last_ingest_mtime_path(home: &Path, db_path: &Path, source: Option<&SessionSource>) -> PathBuf {
+    let source_key = source.map_or("all", ingest_source_key);
+    let db_key = hex_encode(authoritative_db_path(db_path).to_string_lossy().as_bytes());
+    home.join(".refine")
+        .join(format!("last-ingest-mtime-{source_key}-{db_key}"))
+}
+
+fn ingest_source_key(source: &SessionSource) -> &'static str {
+    match source {
+        SessionSource::ClaudeCode => "claude-code",
+        SessionSource::Codex => "codex",
+    }
+}
+
+fn authoritative_db_path(db_path: &Path) -> PathBuf {
+    if let Ok(path) = std::fs::canonicalize(db_path) {
+        return path;
+    }
+    if db_path.is_absolute() {
+        return db_path.to_path_buf();
+    }
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(db_path)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
 pub async fn handle_ingest_sessions(
     options: IngestOptions,
+    db_path: &Path,
     item_store: Arc<dyn ItemRepository>,
     doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
     // Incremental scan: only active for full (no --limit/--latest) non-dry-run runs.
+    // The cursor is partitioned by source filter and authoritative DB path.
     // 1-hour overlap on the cutoff absorbs clock skew and files modified near the boundary.
     let incremental = options.limit.is_none() && options.latest.is_none() && !options.dry_run;
     let scan_start = SystemTime::now();
     let mtime_after = if incremental {
-        read_last_ingest_mtime().map(|last| {
+        read_last_ingest_mtime(db_path, options.source.as_ref()).map(|last| {
             last.checked_sub(Duration::from_secs(3600))
                 .unwrap_or(SystemTime::UNIX_EPOCH)
         })
@@ -79,7 +135,7 @@ pub async fn handle_ingest_sessions(
         None
     };
 
-    let mut discovered = discover_sessions(options.source, mtime_after);
+    let mut discovered = discover_sessions(options.source.clone(), mtime_after);
     if mtime_after.is_some() {
         println!("增量扫描：发现 {} 个会话文件", discovered.len());
     } else {
@@ -236,7 +292,7 @@ pub async fn handle_ingest_sessions(
 
     // Advance the incremental scan cursor so the next run only sees newer files.
     if incremental {
-        write_last_ingest_mtime(scan_start);
+        write_last_ingest_mtime(db_path, options.source.as_ref(), scan_start);
     }
 
     Ok(())
@@ -333,4 +389,76 @@ async fn extract_and_parse_facets_with_retry(
 ) -> Result<refine_core::session::FacetResponse> {
     let response = llm_call_with_retry(client, content).await?;
     parse_facet_response(&response).map_err(|e| anyhow::anyhow!(e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use refine_core::session::discover_sessions_in;
+    use std::fs;
+
+    fn write_session(path: &Path, mtime_secs: i64) {
+        fs::create_dir_all(path.parent().expect("session parent")).unwrap();
+        fs::write(path, "{}").unwrap();
+        filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(mtime_secs, 0)).unwrap();
+    }
+
+    fn overlap_cutoff(last: SystemTime) -> SystemTime {
+        last.checked_sub(Duration::from_secs(3600))
+            .unwrap_or(SystemTime::UNIX_EPOCH)
+    }
+
+    #[test]
+    fn source_scoped_cursor_does_not_hide_other_source_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let db_path = home.join("data").join("refine.db");
+        let claude_cursor = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+
+        write_last_ingest_mtime_in(
+            home,
+            &db_path,
+            Some(&SessionSource::ClaudeCode),
+            claude_cursor,
+        );
+        write_session(&home.join(".codex/sessions/2026/codex.jsonl"), 1_000);
+
+        assert_eq!(
+            read_last_ingest_mtime_in(home, &db_path, Some(&SessionSource::ClaudeCode)),
+            Some(claude_cursor)
+        );
+        assert_eq!(
+            read_last_ingest_mtime_in(home, &db_path, Some(&SessionSource::Codex)),
+            None
+        );
+
+        let codex_results = discover_sessions_in(
+            home,
+            Some(SessionSource::Codex),
+            read_last_ingest_mtime_in(home, &db_path, Some(&SessionSource::Codex))
+                .map(overlap_cutoff),
+        );
+        assert_eq!(codex_results.len(), 1);
+        assert_eq!(codex_results[0].source, SessionSource::Codex);
+    }
+
+    #[test]
+    fn cursor_is_partitioned_by_db_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let db_a = home.join("dbs").join("a.db");
+        let db_b = home.join("dbs").join("b.db");
+        let cursor = SystemTime::UNIX_EPOCH + Duration::from_secs(12_345);
+
+        write_last_ingest_mtime_in(home, &db_a, Some(&SessionSource::Codex), cursor);
+
+        assert_eq!(
+            read_last_ingest_mtime_in(home, &db_a, Some(&SessionSource::Codex)),
+            Some(cursor)
+        );
+        assert_eq!(
+            read_last_ingest_mtime_in(home, &db_b, Some(&SessionSource::Codex)),
+            None
+        );
+    }
 }

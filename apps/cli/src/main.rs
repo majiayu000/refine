@@ -58,5 +58,5 @@ async fn main() -> Result<()> {
     let repo: Arc<dyn ItemRepository> = store.clone();
     let engine = Arc::new(SearchEngine::new(repo));
 
-    handlers::run(cli.command, store, engine).await
+    handlers::run(cli.command, store, engine, &db_path).await
 }
