@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use refine_core::error::InfraError;
-use refine_core::infra::{set_quota_exhausted, LlmClient};
+use refine_core::infra::{llm_with_retry_policy, LlmClient, LlmRetryPolicy};
 use refine_core::knowledge::{Document, DocumentRepository, ItemRepository};
 use refine_core::session::{
     build_facet_prompt, chunk_session, discover_sessions, facets_to_items, needs_chunking,
@@ -16,8 +16,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::Semaphore;
 
-const MAX_RETRIES: usize = 5;
-const RETRY_BASE_DELAY_SECS: u64 = 10;
 const DEFAULT_CONCURRENCY: usize = 1;
 
 fn concurrency() -> usize {
@@ -332,56 +330,39 @@ async fn llm_call_with_retry(
     content: &str,
     quota_hit: &Arc<AtomicBool>,
 ) -> Result<String> {
-    let prompt = build_facet_prompt(content);
-    let mut last_err = String::new();
-
-    for attempt in 0..MAX_RETRIES {
-        if quota_hit.load(Ordering::Relaxed) {
-            return Err(anyhow::anyhow!("LLM 配额已耗尽，跳过"));
-        }
-
-        match client.complete(&prompt, Some(FACET_SYSTEM_PROMPT)).await {
-            Ok(response) => return Ok(response),
-            Err(InfraError::RateLimited { retry_after_secs }) => {
-                quota_hit.store(true, Ordering::Relaxed);
-                set_quota_exhausted(retry_after_secs);
-                return Err(anyhow::anyhow!(
-                    "LLM 配额已耗尽 (retry_after: {:?}s)",
-                    retry_after_secs
-                ));
-            }
-            Err(e) => {
-                last_err = e.to_string();
-                let is_retryable = last_err.contains("cooldown")
-                    || last_err.contains("service_busy")
-                    || last_err.contains("rate")
-                    || last_err.contains("429")
-                    || last_err.contains("Upstream")
-                    || last_err.contains("timeout")
-                    || last_err.contains("empty response");
-
-                if !is_retryable || attempt == MAX_RETRIES - 1 {
-                    break;
-                }
-
-                let delay = RETRY_BASE_DELAY_SECS * (1 << attempt);
-                eprintln!(
-                    "    ⏳ 重试 ({}/{}) 等待 {}s: {}",
-                    attempt + 1,
-                    MAX_RETRIES,
-                    delay,
-                    &last_err[..last_err.len().min(80)],
-                );
-                tokio::time::sleep(Duration::from_secs(delay)).await;
-            }
-        }
+    if quota_hit.load(Ordering::Relaxed) {
+        return Err(anyhow::anyhow!("LLM 配额已耗尽，跳过"));
     }
 
-    Err(anyhow::anyhow!(
-        "LLM 调用失败 (重试 {} 次): {}",
-        MAX_RETRIES,
-        last_err
-    ))
+    let prompt = build_facet_prompt(content);
+    match llm_with_retry_policy(
+        client,
+        &prompt,
+        FACET_SYSTEM_PROMPT,
+        LlmRetryPolicy::default(),
+        |attempt, max_retries, delay_secs, err| {
+            let message = err.to_string();
+            eprintln!(
+                "    ⏳ 重试 ({}/{}) 等待 {}s: {}",
+                attempt,
+                max_retries,
+                delay_secs,
+                &message[..message.len().min(80)],
+            );
+        },
+    )
+    .await
+    {
+        Ok(response) => Ok(response),
+        Err(InfraError::RateLimited { retry_after_secs }) => {
+            quota_hit.store(true, Ordering::Relaxed);
+            Err(anyhow::anyhow!(
+                "LLM 配额已耗尽 (retry_after: {:?}s)",
+                retry_after_secs
+            ))
+        }
+        Err(err) => Err(anyhow::Error::new(err)),
+    }
 }
 
 async fn extract_and_parse_facets_with_retry(
@@ -564,5 +545,18 @@ mod tests {
         assert!(linked_items
             .iter()
             .all(|item| item.document_id() == Some(saved_doc.id())));
+    }
+
+    #[tokio::test]
+    async fn quota_hit_short_circuits_before_llm_call() {
+        use refine_core::infra::ClaudeClient;
+        let client: Arc<dyn LlmClient> = Arc::new(ClaudeClient::new("test-key"));
+        let quota_hit = Arc::new(AtomicBool::new(true));
+
+        let err = llm_call_with_retry(&client, "content", &quota_hit)
+            .await
+            .expect_err("quota flag should skip the call");
+
+        assert!(err.to_string().contains("LLM 配额已耗尽"));
     }
 }
