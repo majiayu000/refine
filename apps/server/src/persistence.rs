@@ -35,25 +35,6 @@ impl ServerPersistence {
         .map_err(|e| e.to_string())
     }
 
-    pub fn find_conversation_by_idempotency(
-        &self,
-        idempotency_key: &str,
-    ) -> Result<Option<ConversationRecord>, String> {
-        let conn = self.open()?;
-        conn.query_row(
-            r#"
-            SELECT id, user_id, source, url, title, raw_content, metadata_json,
-                   captured_at, created_at, status, idempotency_key, item_ids, last_error
-            FROM conversations
-            WHERE idempotency_key = ?1
-            "#,
-            [idempotency_key],
-            row_to_conversation,
-        )
-        .optional()
-        .map_err(|e| e.to_string())
-    }
-
     pub fn list_conversations(
         &self,
         status: Option<&str>,
@@ -294,8 +275,49 @@ impl ServerPersistence {
         collect_event_counts(rows)
     }
 
+    pub fn insert_or_fetch_conversation_by_idempotency(
+        &self,
+        record: &ConversationRecord,
+    ) -> Result<ConversationRecord, String> {
+        let conn = self.open()?;
+        let item_ids = serde_json::to_string(&record.item_ids).map_err(|e| e.to_string())?;
+        let metadata = serde_json::to_string(&record.metadata).map_err(|e| e.to_string())?;
+        conn.query_row(
+            r#"
+            INSERT INTO conversations
+              (id, user_id, source, url, title, raw_content, metadata_json,
+               captured_at, created_at, status, idempotency_key, item_ids, last_error)
+            VALUES
+              (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ON CONFLICT(idempotency_key) DO UPDATE SET id=id
+            RETURNING id, user_id, source, url, title, raw_content, metadata_json,
+                      captured_at, created_at, status, idempotency_key, item_ids, last_error
+            "#,
+            params![
+                record.id,
+                record.user_id,
+                record.source,
+                record.url,
+                record.title,
+                record.raw_content,
+                metadata,
+                record.captured_at,
+                record.created_at,
+                conversation_status_to_db(&record.status),
+                record.idempotency_key,
+                item_ids,
+                record.last_error,
+            ],
+            row_to_conversation,
+        )
+        .map_err(|e| e.to_string())
+    }
+
     fn open(&self) -> Result<Connection, String> {
-        Connection::open(&self.db_path).map_err(|e| e.to_string())
+        let conn = Connection::open(&self.db_path).map_err(|e| e.to_string())?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| e.to_string())?;
+        Ok(conn)
     }
 
     fn ensure_schema(&self) -> Result<(), String> {
@@ -364,13 +386,6 @@ impl ConversationRepository for ServerPersistence {
         ServerPersistence::find_conversation_by_id(self, id)
     }
 
-    fn find_conversation_by_idempotency(
-        &self,
-        idempotency_key: &str,
-    ) -> Result<Option<ConversationRecord>, String> {
-        ServerPersistence::find_conversation_by_idempotency(self, idempotency_key)
-    }
-
     fn list_conversations(
         &self,
         status: Option<&str>,
@@ -386,6 +401,13 @@ impl ConversationRepository for ServerPersistence {
 
     fn upsert_conversation(&self, record: &ConversationRecord) -> Result<(), String> {
         ServerPersistence::upsert_conversation(self, record)
+    }
+
+    fn insert_or_fetch_conversation_by_idempotency(
+        &self,
+        record: &ConversationRecord,
+    ) -> Result<ConversationRecord, String> {
+        ServerPersistence::insert_or_fetch_conversation_by_idempotency(self, record)
     }
 }
 
@@ -553,6 +575,7 @@ mod tests {
     };
     use serde_json::json;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use uuid::Uuid;
 
     fn temp_db_path() -> PathBuf {
@@ -686,13 +709,11 @@ mod tests {
             .expect("count queued conversations");
         assert_eq!(queued_total, 1);
 
-        let found = persistence
-            .find_conversation_by_idempotency("k1")
-            .expect("find by idempotency");
-        assert_eq!(
-            found.expect("conversation should exist").idempotency_key,
-            "k1".to_string()
-        );
+        let fetched = persistence
+            .insert_or_fetch_conversation_by_idempotency(&queued)
+            .expect("insert_or_fetch for existing key");
+        assert_eq!(fetched.id, queued.id);
+        assert_eq!(fetched.idempotency_key, "k1");
 
         let page = persistence
             .list_conversations(Some("queued"), 0, 10)
@@ -724,6 +745,51 @@ mod tests {
             .expect("job should exist");
         assert_eq!(loaded.id, job.id);
         assert_eq!(loaded.status, JobStatus::Pending);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn concurrent_inserts_same_idempotency_key_return_same_id() {
+        let path = temp_db_path();
+        // Pre-create the schema so both threads start from a clean, ready state.
+        ServerPersistence::new(path.clone()).expect("schema init");
+
+        let record1 = build_conversation(ConversationStatus::Queued, "concurrent-key");
+        let record2 = build_conversation(ConversationStatus::Queued, "concurrent-key");
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let b1 = Arc::clone(&barrier);
+        let b2 = Arc::clone(&barrier);
+
+        let path1 = path.clone();
+        let path2 = path.clone();
+
+        let h1 = std::thread::spawn(move || {
+            let p = ServerPersistence::new(path1).expect("init p1");
+            b1.wait();
+            p.insert_or_fetch_conversation_by_idempotency(&record1)
+        });
+        let h2 = std::thread::spawn(move || {
+            let p = ServerPersistence::new(path2).expect("init p2");
+            b2.wait();
+            p.insert_or_fetch_conversation_by_idempotency(&record2)
+        });
+
+        let r1 = h1
+            .join()
+            .expect("thread 1 panicked")
+            .expect("thread 1 error");
+        let r2 = h2
+            .join()
+            .expect("thread 2 panicked")
+            .expect("thread 2 error");
+
+        assert_eq!(
+            r1.id, r2.id,
+            "concurrent inserts with same idempotency key must return the same conversation id"
+        );
+        assert_eq!(r1.idempotency_key, "concurrent-key");
 
         cleanup(&path);
     }
