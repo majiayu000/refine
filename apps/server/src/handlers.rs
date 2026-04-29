@@ -34,6 +34,9 @@ use crate::models::{
 use crate::request_guard::AuthenticatedUser;
 use crate::state::AppState;
 
+// Only `/`, `/dashboard`, and `/health` are public. Every `/v1/*` handler must
+// keep `AuthenticatedUser` in its signature so request_guard.rs remains the
+// single auth boundary.
 pub async fn health() -> impl IntoResponse {
     ok(json!({
         "message": "Refine cloud API (Rust) is running",

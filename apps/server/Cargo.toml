@@ -20,3 +20,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 dirs = "5"
 dotenvy = "0.15"
 rusqlite.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
