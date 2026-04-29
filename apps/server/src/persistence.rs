@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use refine_core::infra::prepare_sqlite_db;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::application::ports::{ConversationRepository, EventRepository, JobRepository};
@@ -322,62 +323,7 @@ impl ServerPersistence {
 
     fn ensure_schema(&self) -> Result<(), String> {
         let conn = self.open()?;
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS conversations (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                source TEXT NOT NULL,
-                url TEXT NOT NULL,
-                title TEXT,
-                raw_content TEXT NOT NULL,
-                metadata_json TEXT NOT NULL DEFAULT '{}',
-                captured_at TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                status TEXT NOT NULL,
-                idempotency_key TEXT NOT NULL UNIQUE,
-                item_ids TEXT NOT NULL,
-                last_error TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_conversations_status_created
-            ON conversations(status, created_at DESC);
-
-            CREATE INDEX IF NOT EXISTS idx_conversations_captured_at
-            ON conversations(captured_at DESC);
-
-            CREATE TABLE IF NOT EXISTS extraction_jobs (
-                id TEXT PRIMARY KEY,
-                conversation_id TEXT NOT NULL,
-                mode TEXT NOT NULL,
-                status TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                error TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_extraction_jobs_conversation
-            ON extraction_jobs(conversation_id, created_at DESC);
-
-            CREATE TABLE IF NOT EXISTS events (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                event_name TEXT NOT NULL,
-                source TEXT NOT NULL,
-                properties_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_events_created_at
-            ON events(created_at DESC);
-
-            CREATE INDEX IF NOT EXISTS idx_events_event_name_created_at
-            ON events(event_name, created_at DESC);
-            "#,
-        )
-        .map_err(|e| e.to_string())?;
-
-        Ok(())
+        prepare_sqlite_db(&conn).map_err(|e| e.to_string())
     }
 }
 

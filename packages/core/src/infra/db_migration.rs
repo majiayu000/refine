@@ -3,8 +3,6 @@ use std::path::{Path, PathBuf};
 
 use super::paths::stale_db_candidates;
 
-const SCHEMA_SQL: &str = include_str!("schema.sql");
-
 /// Result of a `migrate_stale_dbs` run.
 pub enum MigrationReport {
     /// No legacy files were found; nothing was done.
@@ -32,7 +30,8 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
     let conn = Connection::open(target)
         .map_err(|e| format!("failed to open target DB {}: {}", target.display(), e))?;
 
-    init_target_schema(&conn)?;
+    crate::infra::prepare_sqlite_db(&conn)
+        .map_err(|e| format!("failed to initialise target schema: {}", e))?;
 
     let mut sources = Vec::new();
     let mut total_rows = 0usize;
@@ -79,11 +78,6 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
         sources,
         rows_copied: total_rows,
     })
-}
-
-fn init_target_schema(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(SCHEMA_SQL)
-        .map_err(|e| format!("failed to initialise target schema: {}", e))
 }
 
 fn copy_all_tables(conn: &Connection, legacy_alias: &str) -> Result<usize, String> {
@@ -166,7 +160,7 @@ mod tests {
     fn make_target_db(dir: &Path) -> PathBuf {
         let p = dir.join("refine.db");
         let conn = Connection::open(&p).unwrap();
-        init_target_schema(&conn).unwrap();
+        crate::infra::prepare_sqlite_db(&conn).unwrap();
         p
     }
 
@@ -235,39 +229,152 @@ mod tests {
     }
 
     #[test]
-    fn migrates_matching_tables_from_server_db() {
+    fn migrates_server_owned_tables_into_fresh_target() {
         let tmp = TempDir::new().unwrap();
         let target_path = tmp.path().join("refine.db");
-
-        // Target: base schema + a conversations table
-        let tc = Connection::open(&target_path).unwrap();
-        init_target_schema(&tc).unwrap();
-        tc.execute_batch(
-            "CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, data TEXT)",
-        )
-        .unwrap();
-        drop(tc);
-
-        // Legacy: conversations only
         let legacy = tmp.path().join("server.db");
         let lc = Connection::open(&legacy).unwrap();
         lc.execute_batch(
-            "CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, data TEXT)",
+            "CREATE TABLE conversations (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                url TEXT NOT NULL,
+                title TEXT,
+                raw_content TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                captured_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                item_ids TEXT NOT NULL,
+                last_error TEXT
+            );
+            CREATE TABLE extraction_jobs (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                error TEXT
+            );
+            CREATE TABLE events (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                event_name TEXT NOT NULL,
+                source TEXT NOT NULL,
+                properties_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );",
         )
         .unwrap();
-        lc.execute("INSERT INTO conversations VALUES ('conv-1', 'hello')", [])
-            .unwrap();
+        lc.execute(
+            "INSERT INTO conversations
+             (id, user_id, source, url, title, raw_content, metadata_json, captured_at,
+              created_at, status, idempotency_key, item_ids, last_error)
+             VALUES
+             ('conv-1', 'user-1', 'extension', 'https://example.com/1', 'Title 1', 'Raw 1',
+              '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'captured', 'idem-1',
+              '[]', NULL)",
+            [],
+        )
+        .unwrap();
+        lc.execute(
+            "INSERT INTO extraction_jobs
+             (id, conversation_id, mode, status, created_at, updated_at, error)
+             VALUES
+             ('job-1', 'conv-1', 'auto', 'pending', '2026-01-01T00:00:00Z',
+              '2026-01-01T00:05:00Z', NULL)",
+            [],
+        )
+        .unwrap();
+        lc.execute(
+            "INSERT INTO events
+             (id, user_id, event_name, source, properties_json, created_at)
+             VALUES
+             ('event-1', 'user-1', 'conversation_created', 'extension', '{}',
+              '2026-01-01T00:10:00Z')",
+            [],
+        )
+        .unwrap();
         drop(lc);
 
-        migrate_stale_dbs(&target_path).unwrap();
+        let report = migrate_stale_dbs(&target_path).unwrap();
+        assert!(matches!(
+            report,
+            MigrationReport::Migrated { rows_copied: 3, .. }
+        ));
+        assert!(
+            !legacy.exists(),
+            "legacy DB should be renamed after success"
+        );
+        assert!(tmp.path().join("server.db.migrated").exists());
 
         let tc = Connection::open(&target_path).unwrap();
-        let count: i64 = tc
+        let conversation_count: i64 = tc
             .query_row(
                 "SELECT COUNT(*) FROM conversations WHERE id='conv-1'",
                 [],
                 |r| r.get(0),
             )
+            .unwrap();
+        let job_count: i64 = tc
+            .query_row(
+                "SELECT COUNT(*) FROM extraction_jobs WHERE id='job-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let event_count: i64 = tc
+            .query_row("SELECT COUNT(*) FROM events WHERE id='event-1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(conversation_count, 1);
+        assert_eq!(job_count, 1);
+        assert_eq!(event_count, 1);
+    }
+
+    #[test]
+    fn migrates_subset_of_server_tables_without_manual_target_bootstrap() {
+        let tmp = TempDir::new().unwrap();
+        let target_path = tmp.path().join("refine.db");
+        let legacy = tmp.path().join("server.db");
+        let lc = Connection::open(&legacy).unwrap();
+        lc.execute_batch(
+            "CREATE TABLE events (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                event_name TEXT NOT NULL,
+                source TEXT NOT NULL,
+                properties_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        lc.execute(
+            "INSERT INTO events
+             (id, user_id, event_name, source, properties_json, created_at)
+             VALUES
+             ('event-2', 'user-2', 'conversation_synced', 'extension', '{}',
+              '2026-02-02T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        drop(lc);
+
+        let report = migrate_stale_dbs(&target_path).unwrap();
+        assert!(matches!(
+            report,
+            MigrationReport::Migrated { rows_copied: 1, .. }
+        ));
+
+        let tc = Connection::open(&target_path).unwrap();
+        let count: i64 = tc
+            .query_row("SELECT COUNT(*) FROM events WHERE id='event-2'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(count, 1);
     }
