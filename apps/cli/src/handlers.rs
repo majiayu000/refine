@@ -11,12 +11,14 @@ use refine_core::refinement::{apply_defaults, extract_items_with_llm, Extraction
 use refine_core::search::{SearchEngine, SearchQuery};
 use refine_core::session::SessionSource;
 use std::io::{self, Read};
+use std::path::Path;
 use std::sync::Arc;
 
 pub async fn run(
     command: Commands,
     store: Arc<SqliteStore>,
     engine: Arc<SearchEngine>,
+    db_path: &Path,
 ) -> Result<()> {
     match command {
         Commands::Extract { stdin } => handle_extract(stdin, store).await,
@@ -50,6 +52,7 @@ pub async fn run(
                     latest,
                     dry_run,
                 },
+                db_path,
                 item_store,
                 doc_store,
                 llm_client,
