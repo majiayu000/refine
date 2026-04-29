@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use refine_core::error::InfraError;
 use refine_core::infra::{set_quota_exhausted, LlmClient};
-use refine_core::knowledge::{Document, DocumentId, DocumentRepository, ItemRepository};
+use refine_core::knowledge::{Document, DocumentRepository, ItemRepository};
 use refine_core::session::{
     build_facet_prompt, chunk_session, discover_sessions, facets_to_items, needs_chunking,
     parse_facet_response, parse_session_file, FilterConfig, SessionSource, FACET_SYSTEM_PROMPT,
@@ -305,13 +305,12 @@ async fn process_single_session(
 
     let facet_response = extract_and_parse_facets_with_retry(&content, client, quota_hit).await?;
 
-    let doc_id = DocumentId::new();
     let mut doc = Document::new(ps.source.as_str(), &content);
     doc.set_title(&facet_response.session_summary);
     doc.set_url(&ps.url);
     doc_store.save(&doc).await.context("保存 Document 失败")?;
 
-    let items = facets_to_items(&facet_response, &doc_id, ps.project.as_deref());
+    let items = facets_to_items(&facet_response, doc.id(), ps.project.as_deref());
     let item_count = items.len();
     for item in &items {
         item_store.save(item).await.context("保存 Item 失败")?;
@@ -397,8 +396,23 @@ async fn extract_and_parse_facets_with_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use refine_core::error::InfraResult;
+    use refine_core::infra::SqliteStore;
+    use refine_core::knowledge::{DocumentRepository, ItemRepository};
     use refine_core::session::discover_sessions_in;
     use std::fs;
+
+    struct StaticLlmClient {
+        response: String,
+    }
+
+    #[async_trait]
+    impl LlmClient for StaticLlmClient {
+        async fn complete(&self, _prompt: &str, _system: Option<&str>) -> InfraResult<String> {
+            Ok(self.response.clone())
+        }
+    }
 
     #[test]
     fn scoped_cursor_keeps_other_sources_discoverable() {
@@ -493,5 +507,62 @@ mod tests {
         fs::create_dir_all(dir).unwrap();
         let dur = t.duration_since(SystemTime::UNIX_EPOCH).unwrap();
         fs::write(path, dur.as_secs().to_string()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn process_single_session_links_items_to_saved_document_id() {
+        let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+        let item_store: Arc<dyn ItemRepository> = store.clone();
+        let doc_store: Arc<dyn DocumentRepository> = store.clone();
+        let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+            response: r#"{
+                "session_summary": "修复文档关联",
+                "cognitive_level": "proficient",
+                "collaboration_mode": "pair_programming",
+                "decisions": ["使用保存后的文档 ID"],
+                "bugs_fixed": ["修复会话导入的 shadow document id"],
+                "patterns": [],
+                "friction": [],
+                "project_progress": [],
+                "questions": [],
+                "knowledge_gained": [],
+                "tools_discovered": [],
+                "architecture": [],
+                "code_artifacts": []
+            }"#
+            .to_string(),
+        });
+        let quota_hit = Arc::new(AtomicBool::new(false));
+        let pending = PendingSession {
+            idx: 0,
+            total: 1,
+            url: "file:///tmp/session.jsonl".to_string(),
+            source: SessionSource::Codex,
+            project: Some("refine".to_string()),
+            content: "user: fix the ingest bug".to_string(),
+            needs_chunk: false,
+            chunks: Vec::new(),
+        };
+
+        let item_count =
+            process_single_session(&pending, &client, &item_store, &doc_store, &quota_hit)
+                .await
+                .expect("session ingest should succeed");
+        assert_eq!(item_count, 3);
+
+        let docs = DocumentRepository::find_recent(store.as_ref(), 0, 10)
+            .await
+            .expect("documents should load");
+        assert_eq!(docs.len(), 1);
+        let saved_doc = &docs[0];
+
+        let linked_items = store
+            .find_by_document_id(saved_doc.id())
+            .await
+            .expect("items should be queryable by saved document id");
+        assert_eq!(linked_items.len(), item_count);
+        assert!(linked_items
+            .iter()
+            .all(|item| item.document_id() == Some(saved_doc.id())));
     }
 }
