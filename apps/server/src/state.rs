@@ -5,6 +5,7 @@ use refine_core::infra::{
 use refine_core::knowledge::{DocumentRepository, ItemRepository};
 use refine_core::search::SearchEngine;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::application::ports::{ConversationRepository, EventRepository, JobRepository};
@@ -27,9 +28,80 @@ pub struct AppState {
     pub event_repo: Arc<dyn EventRepository>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthConfig {
+    pub api_token: Option<String>,
+    pub dev_anon: bool,
+}
+
+impl AuthConfig {
+    pub fn from_env() -> Result<Self, String> {
+        let api_token = env_var(&["REFINE_API_TOKEN"]);
+        let dev_anon = env_flag(&["REFINE_DEV_ANON"]);
+        if is_production_env() && api_token.is_none() {
+            return Err(
+                "REFINE_API_TOKEN is required when REFINE_ENV is set to production".to_string(),
+            );
+        }
+
+        Ok(Self {
+            api_token,
+            dev_anon,
+        })
+    }
+}
+
+struct AppStateConfig {
+    db_path: PathBuf,
+    semantic_search_enabled: bool,
+    free_quota_items: usize,
+    premium_users: HashSet<String>,
+    llm_client: Option<Arc<dyn LlmClient>>,
+    auth: AuthConfig,
+}
+
+impl AppStateConfig {
+    fn from_env() -> Result<Self, String> {
+        Ok(Self {
+            db_path: resolve_db_path(&["REFINE_SERVER_DB_PATH"]),
+            semantic_search_enabled: env_flag(&["REFINE_ENABLE_SEMANTIC_SEARCH"]),
+            free_quota_items: env_usize(&["REFINE_MAX_ITEMS", "REFINE_FREE_QUOTA_ITEMS"])
+                .unwrap_or(0),
+            premium_users: env_csv_set(&["REFINE_PREMIUM_USERS"])
+                .unwrap_or_else(default_premium_users),
+            llm_client: build_llm_client_from_env(),
+            auth: AuthConfig::from_env()?,
+        })
+    }
+
+    #[cfg(test)]
+    fn for_test(db_path: PathBuf, auth: AuthConfig) -> Self {
+        Self {
+            db_path,
+            semantic_search_enabled: false,
+            free_quota_items: 0,
+            premium_users: default_premium_users(),
+            llm_client: None,
+            auth,
+        }
+    }
+}
+
 impl AppState {
     pub async fn build() -> Result<Self, String> {
-        let db_path = resolve_db_path(&["REFINE_SERVER_DB_PATH"]);
+        Self::build_with_config(AppStateConfig::from_env()?).await
+    }
+
+    async fn build_with_config(config: AppStateConfig) -> Result<Self, String> {
+        let AppStateConfig {
+            db_path,
+            semantic_search_enabled,
+            free_quota_items,
+            premium_users,
+            llm_client,
+            auth,
+        } = config;
+
         ensure_db_dir(&db_path)?;
         match migrate_stale_dbs(&db_path) {
             Ok(MigrationReport::NoOp) => {}
@@ -53,19 +125,6 @@ impl AppState {
         let sqlite_store = Arc::new(SqliteStore::open(&db_path).map_err(|e| e.to_string())?);
         let store: Arc<dyn ItemRepository> = sqlite_store.clone();
         let doc_store: Arc<dyn DocumentRepository> = sqlite_store;
-        let api_token = env_var(&["REFINE_API_TOKEN"]);
-        let dev_anon = env_flag(&["REFINE_DEV_ANON"]);
-        if is_production_env() && api_token.is_none() {
-            return Err(
-                "REFINE_API_TOKEN is required when REFINE_ENV is set to production".to_string(),
-            );
-        }
-
-        let semantic_search_enabled = env_flag(&["REFINE_ENABLE_SEMANTIC_SEARCH"]);
-        let free_quota_items =
-            env_usize(&["REFINE_MAX_ITEMS", "REFINE_FREE_QUOTA_ITEMS"]).unwrap_or(0);
-        let premium_users = env_csv_set(&["REFINE_PREMIUM_USERS"])
-            .unwrap_or_else(|| HashSet::from(["dev-user".to_string(), "token-user".to_string()]));
         let mut engine_builder = SearchEngine::new(store.clone());
         if semantic_search_enabled {
             engine_builder =
@@ -100,13 +159,18 @@ impl AppState {
             semantic_search_enabled,
             free_quota_items,
             premium_users,
-            llm_client: build_llm_client_from_env(),
-            api_token,
-            dev_anon,
+            llm_client,
+            api_token: auth.api_token,
+            dev_anon: auth.dev_anon,
             conversation_repo,
             job_repo,
             event_repo,
         })
+    }
+
+    #[cfg(test)]
+    pub async fn build_for_test(db_path: PathBuf, auth: AuthConfig) -> Result<Self, String> {
+        Self::build_with_config(AppStateConfig::for_test(db_path, auth)).await
     }
 }
 
@@ -135,6 +199,10 @@ fn env_csv_set(keys: &[&str]) -> Option<HashSet<String>> {
         }
     }
     None
+}
+
+fn default_premium_users() -> HashSet<String> {
+    HashSet::from(["dev-user".to_string(), "token-user".to_string()])
 }
 
 fn env_flag(keys: &[&str]) -> bool {

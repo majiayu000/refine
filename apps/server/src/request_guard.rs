@@ -11,6 +11,7 @@ use crate::state::AppState;
 
 pub use crate::api_response::{CONTRACT_VERSION_HEADER, SERVER_CONTRACT_VERSION};
 
+/// Shared extractor for every protected `/v1/*` route.
 pub struct AuthenticatedUser(pub String);
 
 #[async_trait]
@@ -75,5 +76,16 @@ mod tests {
         headers.insert(CONTRACT_VERSION_HEADER, HeaderValue::from_static("2.0"));
         let response = validate_client_contract(&headers).expect_err("expected mismatch error");
         assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
+    }
+
+    #[test]
+    fn validate_contract_rejects_non_utf8_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTRACT_VERSION_HEADER,
+            HeaderValue::from_bytes(b"\xFF").expect("header value"),
+        );
+        let response = validate_client_contract(&headers).expect_err("expected header error");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }
