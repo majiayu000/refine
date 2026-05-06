@@ -1,9 +1,8 @@
 use crate::lang::t;
-use crate::llm_retry::llm_with_retry;
 use crate::score::{indicator_display, layer_display, ScoreResult, Signal};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use refine_core::infra::LlmClient;
+use refine_core::infra::{llm_with_retry, LlmClient};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;

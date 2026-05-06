@@ -4,7 +4,6 @@ mod config;
 mod dashboard;
 mod document_save;
 mod lang;
-mod llm_retry;
 mod motd;
 mod profile;
 mod score;

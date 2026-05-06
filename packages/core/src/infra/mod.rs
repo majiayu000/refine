@@ -12,6 +12,7 @@ use rusqlite::Connection;
 mod contract;
 mod db_migration;
 mod llm;
+mod llm_retry;
 mod paths;
 pub mod quota_state;
 mod sqlite;
@@ -139,6 +140,10 @@ pub use db_migration::{migrate_stale_dbs, MigrationReport};
 pub use llm::{
     build_llm_client_from_env, build_required_llm_client_from_env, ClaudeClient, LlmClient,
     OpenAIClient,
+};
+pub use llm_retry::{
+    llm_with_retry, llm_with_retry_policy, LlmRetryPolicy, DEFAULT_MAX_RETRIES,
+    DEFAULT_RETRY_BASE_DELAY_SECS,
 };
 pub use paths::{default_db_path, ensure_db_dir, resolve_db_path, stale_db_candidates};
 pub use quota_state::{is_exhausted as is_quota_exhausted, set_exhausted as set_quota_exhausted};

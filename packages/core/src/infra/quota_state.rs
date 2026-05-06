@@ -16,8 +16,31 @@ pub const DEFAULT_QUOTA_BACKOFF_SECS: u64 = 3600;
 const MAX_QUOTA_BACKOFF_SECS: u64 = 3600;
 
 fn quota_file_path() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = quota_file_override()
+        .lock()
+        .expect("quota override lock poisoned")
+        .clone()
+    {
+        return path;
+    }
+
     let base = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join(".refine").join("quota_exhausted_until")
+}
+
+#[cfg(test)]
+fn quota_file_override() -> &'static std::sync::Mutex<Option<PathBuf>> {
+    static OVERRIDE: std::sync::OnceLock<std::sync::Mutex<Option<PathBuf>>> =
+        std::sync::OnceLock::new();
+    OVERRIDE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(test)]
+pub(crate) fn set_quota_file_override(path: Option<PathBuf>) {
+    *quota_file_override()
+        .lock()
+        .expect("quota override lock poisoned") = path;
 }
 
 /// Returns `true` when the persisted quota-exhaustion timestamp is still in
