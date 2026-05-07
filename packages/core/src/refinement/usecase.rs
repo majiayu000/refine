@@ -1,6 +1,6 @@
 //! 提炼用例（应用层编排）
 //!
-//! 在不引入新 crate 的过渡阶段，将 LLM 调用、JSON 修复和 fallback 逻辑集中，
+//! 在不引入新 crate 的过渡阶段，将 LLM 调用、JSON 修复集中，
 //! 供 server/desktop/cli 复用，避免多处重复实现。
 
 use crate::error::{DomainError, DomainResult};
@@ -24,33 +24,6 @@ pub struct ItemExtractionInput<'a> {
     pub policy: ExtractionPolicy,
 }
 
-/// 执行提炼；若 LLM 缺失或提炼失败，则自动降级为 fallback item。
-pub async fn extract_items_or_fallback(
-    llm_client: Option<&dyn LlmClient>,
-    input: &ItemExtractionInput<'_>,
-) -> Vec<Item> {
-    let fallback = || {
-        vec![build_fallback_item(
-            input.source,
-            input.title,
-            input.raw_content,
-            input.captured_at,
-        )]
-    };
-
-    let Some(client) = llm_client else {
-        return fallback();
-    };
-
-    match extract_items_with_llm(client, input.raw_content, input.policy.clone()).await {
-        Ok(items) => items,
-        Err(err) => {
-            tracing::warn!("提炼失败，降级为 fallback item: {}", err);
-            fallback()
-        }
-    }
-}
-
 /// 为提炼结果补齐来源、文档关联与兜底 content。
 pub fn apply_defaults(
     items: &mut [Item],
@@ -67,23 +40,7 @@ pub fn apply_defaults(
     }
 }
 
-/// 提炼并补齐来源/文档关联/内容默认值，供多端 ingest 流程复用。
-pub async fn extract_items_with_defaults(
-    llm_client: Option<&dyn LlmClient>,
-    input: &ItemExtractionInput<'_>,
-    source: &Source,
-    document_id: &DocumentId,
-) -> Vec<Item> {
-    let mut items = extract_items_or_fallback(llm_client, input).await;
-    apply_defaults(&mut items, source, document_id, input.raw_content);
-    items
-}
-
-/// 严格提炼并补齐默认值。
-///
-/// 与 `extract_items_with_defaults` 不同：
-/// - 不允许 fallback；
-/// - LLM 缺失或提炼失败直接返回错误。
+/// 严格提炼并补齐默认值。LLM 缺失或提炼失败直接返回错误，不允许 fallback。
 pub async fn extract_items_with_strict_defaults(
     llm_client: &dyn LlmClient,
     input: &ItemExtractionInput<'_>,
@@ -97,8 +54,6 @@ pub async fn extract_items_with_strict_defaults(
 }
 
 /// 使用 LLM 提炼 Item 列表。
-///
-/// 调用方可在失败时降级到 `build_fallback_item`。
 pub async fn extract_items_with_llm(
     llm_client: &dyn LlmClient,
     raw_content: &str,
@@ -120,32 +75,6 @@ pub async fn extract_items_with_llm(
     }
 
     Ok(extraction.items)
-}
-
-/// 构建 fallback Item。
-///
-/// - `captured_at` 存在时，默认标题为 `[source] captured_at`
-/// - 否则默认标题为 `[source] 对话提炼`
-pub fn build_fallback_item(
-    source: &str,
-    title: Option<&str>,
-    raw_content: &str,
-    captured_at: Option<&str>,
-) -> Item {
-    let default_title = match captured_at.map(str::trim).filter(|v| !v.is_empty()) {
-        Some(ts) => format!("[{}] {}", source, ts),
-        None => format!("[{}] 对话提炼", source),
-    };
-    let title = title
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(|v| trim_to(v, 120))
-        .unwrap_or_else(|| trim_to(&default_title, 120));
-
-    let summary = build_summary(raw_content, 200);
-    let mut item = Item::new_knowledge(&title, &summary);
-    item.set_content(raw_content);
-    item
 }
 
 async fn parse_extraction_with_repair(
@@ -206,29 +135,6 @@ fn build_json_repair_prompt(raw_response: &str, parse_error: &str) -> String {
 "#,
         parse_error, raw_response
     )
-}
-
-fn build_summary(text: &str, max_chars: usize) -> String {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() {
-        return "No content".to_string();
-    }
-    trim_to(&normalized, max_chars)
-}
-
-fn trim_to(input: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    for (idx, ch) in input.chars().enumerate() {
-        if idx >= max_chars {
-            break;
-        }
-        out.push(ch);
-    }
-    if out.len() < input.len() {
-        format!("{}...", out.trim_end())
-    } else {
-        out
-    }
 }
 
 #[cfg(test)]
@@ -312,73 +218,6 @@ mod tests {
         assert_eq!(items[0].title(), "fixed");
     }
 
-    #[test]
-    fn fallback_item_uses_timestamp_when_present() {
-        let item =
-            build_fallback_item("chatgpt", None, "hello world", Some("2026-02-06T00:00:00Z"));
-        assert_eq!(item.title(), "[chatgpt] 2026-02-06T00:00:00Z");
-    }
-
-    #[test]
-    fn fallback_item_uses_default_title_without_timestamp() {
-        let item = build_fallback_item("claude", None, "hello world", None);
-        assert_eq!(item.title(), "[claude] 对话提炼");
-    }
-
-    #[tokio::test]
-    async fn extract_items_or_fallback_returns_fallback_without_client() {
-        let input = ItemExtractionInput {
-            source: "chatgpt",
-            title: None,
-            raw_content: "Human: h\nAssistant: a",
-            captured_at: Some("2026-02-07T00:00:00Z"),
-            policy: ExtractionPolicy::default(),
-        };
-        let items = extract_items_or_fallback(None, &input).await;
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].title(), "[chatgpt] 2026-02-07T00:00:00Z");
-    }
-
-    #[tokio::test]
-    async fn extract_items_or_fallback_returns_fallback_on_error() {
-        let client = AlwaysFailLlmClient;
-        let input = ItemExtractionInput {
-            source: "claude",
-            title: Some("my title"),
-            raw_content: "Human: h\nAssistant: a",
-            captured_at: None,
-            policy: ExtractionPolicy::default(),
-        };
-        let items = extract_items_or_fallback(Some(&client), &input).await;
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].title(), "my title");
-    }
-
-    #[tokio::test]
-    async fn extract_items_with_defaults_applies_source_and_content() {
-        let input = ItemExtractionInput {
-            source: "chatgpt",
-            title: Some("示例"),
-            raw_content: "原始文本",
-            captured_at: None,
-            policy: ExtractionPolicy::default(),
-        };
-        let source = Source::new("chatgpt").with_url("https://example.com");
-        let doc_id = DocumentId::new();
-        let items = extract_items_with_defaults(None, &input, &source, &doc_id).await;
-
-        assert_eq!(items.len(), 1);
-        assert_eq!(
-            items[0].source().map(|v| v.platform.as_str()),
-            Some("chatgpt")
-        );
-        assert_eq!(items[0].content(), "原始文本");
-        assert_eq!(
-            items[0].document_id().map(|id| id.as_str()),
-            Some(doc_id.as_str())
-        );
-    }
-
     #[tokio::test]
     async fn extract_items_with_strict_defaults_fails_when_llm_fails() {
         let client = AlwaysFailLlmClient;
@@ -398,18 +237,30 @@ mod tests {
         assert!(err.to_string().contains("LLM 调用失败"));
     }
 
-    #[test]
-    fn apply_defaults_fills_missing_fields() {
-        let mut items = vec![Item::new_knowledge("t", "s")];
+    #[tokio::test]
+    async fn extract_items_with_strict_defaults_applies_source_and_content() {
+        let client = SequenceLlmClient::new(vec![
+            r#"{"items":[{"type":"knowledge","title":"T","summary":"S","content":"","tags":[]}]}"#,
+        ]);
+        let input = ItemExtractionInput {
+            source: "chatgpt",
+            title: Some("示例"),
+            raw_content: "原始文本",
+            captured_at: None,
+            policy: ExtractionPolicy::default(),
+        };
         let source = Source::new("chatgpt").with_url("https://example.com");
         let doc_id = DocumentId::new();
-        apply_defaults(&mut items, &source, &doc_id, "raw text");
 
+        let items = extract_items_with_strict_defaults(&client, &input, &source, &doc_id)
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1);
         assert_eq!(
-            items[0].source().map(|s| s.platform.as_str()),
+            items[0].source().map(|v| v.platform.as_str()),
             Some("chatgpt")
         );
-        assert_eq!(items[0].content(), "raw text");
+        assert_eq!(items[0].content(), "原始文本");
         assert_eq!(
             items[0].document_id().map(|id| id.as_str()),
             Some(doc_id.as_str())
