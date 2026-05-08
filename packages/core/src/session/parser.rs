@@ -5,8 +5,28 @@
 use super::types::{MessageRole, Session, SessionMessage, SessionMeta, SessionSource};
 use std::path::Path;
 
+/// 单个 session 文件大小上限（200 MiB）。
+///
+/// 超出后跳过解析，避免 jsonl 异常膨胀触发 OOM 杀掉整个 batch ingest。
+/// 对应 HI-6：`std::fs::read_to_string` 默认无上限，本地恶意/损坏/外部共享的
+/// jsonl 几 GB 即可耗尽进程内存。
+pub const MAX_SESSION_FILE_BYTES: u64 = 200 * 1024 * 1024;
+
 /// 解析 JSONL 文件为 Session
 pub fn parse_session_file(path: &Path, source: SessionSource) -> Result<Session, String> {
+    let metadata = std::fs::metadata(path).map_err(|e| format!("读取文件失败: {}", e))?;
+    let size = metadata.len();
+    if size > MAX_SESSION_FILE_BYTES {
+        let msg = format!(
+            "session 文件过大: {} ({} 字节 > 上限 {} 字节)，已跳过",
+            path.display(),
+            size,
+            MAX_SESSION_FILE_BYTES
+        );
+        tracing::error!(target: "session::parser", path = %path.display(), bytes = size, limit = MAX_SESSION_FILE_BYTES, "session file exceeds size cap, skipping");
+        return Err(msg);
+    }
+
     let content = std::fs::read_to_string(path).map_err(|e| format!("读取文件失败: {}", e))?;
     parse_session_content(&content, path, source)
 }
@@ -224,6 +244,29 @@ mod tests {
         assert_eq!(session.messages[1].role, MessageRole::Assistant);
         assert_eq!(session.messages[1].content, "I found the issue.");
         assert_eq!(session.meta.model.as_deref(), Some("o3-mini"));
+    }
+
+    #[test]
+    fn parse_session_file_rejects_oversize_files() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("oversize.jsonl");
+
+        // Write a sparse file just over the configured limit so the test runs cheaply.
+        let mut file = std::fs::File::create(&path).expect("create oversize file");
+        file.set_len(MAX_SESSION_FILE_BYTES + 1)
+            .expect("expand to oversize");
+        file.write_all(b"{}").ok();
+        drop(file);
+
+        let result = parse_session_file(&path, SessionSource::ClaudeCode);
+        assert!(result.is_err(), "oversize file must be rejected");
+        let msg = result.err().unwrap();
+        assert!(
+            msg.contains("过大"),
+            "error must mention size cap, got: {msg}"
+        );
     }
 
     #[test]
