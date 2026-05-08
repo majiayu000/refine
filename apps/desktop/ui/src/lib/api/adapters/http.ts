@@ -26,7 +26,7 @@ type ApiEnvelope<T extends object> = T & {
   message?: string
 }
 
-const DEFAULT_API_BASE = 'http://127.0.0.1:5567'
+const DEFAULT_API_BASE = 'http://127.0.0.1:21567'
 const TOKEN_STORAGE_KEY = 'refine_api_token'
 
 const capabilities: ApiCapabilities = {
