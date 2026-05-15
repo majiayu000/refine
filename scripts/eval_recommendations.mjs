@@ -4,7 +4,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 
-const DEFAULT_BASE_URL = process.env.REFINE_API_BASE || 'http://localhost:8787'
+const DEFAULT_BASE_URL = process.env.REFINE_API_BASE || 'http://127.0.0.1:21567'
 const DEFAULT_DATASET = 'docs/eval/recommendation_queries.jsonl'
 const DEFAULT_LIMIT = 5
 const DEFAULT_TIMEOUT_MS = 1_500

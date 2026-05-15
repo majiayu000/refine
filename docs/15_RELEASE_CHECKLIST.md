@@ -70,7 +70,7 @@ unset REFINE_ENV
 先将 `REFINE_ENABLE_SEMANTIC_SEARCH=false` 回退到关键词模式，再分析评测脚本输出：
 
 ```bash
-node scripts/eval_recommendations.mjs --base-url http://localhost:8787
+node scripts/eval_recommendations.mjs --base-url http://127.0.0.1:21567
 ```
 
 ### Q4: 同步队列一直失败怎么办？

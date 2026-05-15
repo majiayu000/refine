@@ -7,7 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - Removed backward-compatibility paths from ingestion/search contract and switched extraction to strict mode only.
 - Refactored server state to repository single source of truth (removed in-memory runtime state).
-- Unified default runtime ports: server `5567`, desktop local API `5568`.
+- Unified local API runtime port contract around `21567` with fallback probes through `21570`.
 
 ## [0.1.0] - 2026-03-23
 

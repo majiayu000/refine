@@ -133,7 +133,7 @@
   - `cargo check -p refine-server`
   - `cargo test -p refine-server`
 - 完成判定:
-  - `http://localhost:8787/` 与 `/dashboard` 都加载统一 React UI。
+  - `http://127.0.0.1:21567/` 与 `/dashboard` 都加载统一 React UI。
   - `/v1/*` 接口行为与原先一致。
 
 ### Step A4 清理旧实现与文档对齐

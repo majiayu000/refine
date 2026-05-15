@@ -26,7 +26,14 @@
   },
   "manifest": {
     "host_permissions": [
-      "http://localhost:5567/*",
+      "http://localhost:21567/*",
+      "http://localhost:21568/*",
+      "http://localhost:21569/*",
+      "http://localhost:21570/*",
+      "http://127.0.0.1:21567/*",
+      "http://127.0.0.1:21568/*",
+      "http://127.0.0.1:21569/*",
+      "http://127.0.0.1:21570/*",
       "https://api.refine.so/*",
       "https://chat.openai.com/*",
       "https://chatgpt.com/*",

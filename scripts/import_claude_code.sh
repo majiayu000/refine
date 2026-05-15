@@ -24,7 +24,7 @@ Important:
 
 Options:
   --root <dir>         Claude projects root (default: current repo project dir under ~/.claude/projects if exists, otherwise ~/.claude/projects)
-  --api-base <url>     Refine API base (default: http://localhost:8787)
+  --api-base <url>     Refine API base (default: http://127.0.0.1:21567)
   --token <token>      Bearer token when REFINE_API_TOKEN is enabled
   --source <name>      Source field in payload (default: claude_code)
   --title-prefix <t>   Title prefix (default: Claude Code Session)
@@ -155,7 +155,7 @@ while [[ "$probe_dir" != "/" ]]; do
 done
 
 ROOT="${CLAUDE_PROJECTS_ROOT:-$DEFAULT_ROOT}"
-API_BASE="${REFINE_API_BASE:-http://localhost:8787}"
+API_BASE="${REFINE_API_BASE:-http://127.0.0.1:21567}"
 TOKEN="${REFINE_API_TOKEN:-}"
 SOURCE="claude_code"
 TITLE_PREFIX="Claude Code Session"

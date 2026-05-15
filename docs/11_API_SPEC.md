@@ -113,10 +113,10 @@ invoke('delete_item', {
 ## 2. Unified HTTP API
 
 浏览器扩展调用统一 `v1` HTTP 协议：
-- 桌面本地模式：`http://localhost:8787`（由 desktop 内置服务提供）
-- 独立服务模式：`http://localhost:8787` 或部署域名（由 `refine-server` 提供）
+- 桌面本地模式：`http://127.0.0.1:21567`（由本地 `refine-server` 提供；占用时自动尝试 `21568..21570`）
+- 独立服务模式：`http://127.0.0.1:21567` 或部署域名（由 `refine-server` 提供）
 
-**基础 URL（开发）**: `http://localhost:8787`  
+**基础 URL（开发）**: `http://127.0.0.1:21567`
 **基础 URL（生产）**: `https://api.refine.so`（示例）
 
 扩展会附带请求头：`X-Refine-Client: extension`。
@@ -541,7 +541,7 @@ export async function deleteItem(id: string): Promise<boolean> {
 
 ```typescript
 // lib/api.ts
-const API_BASE = process.env.PLASMO_PUBLIC_REFINE_API_BASE || 'http://localhost:8787'
+const API_BASE = process.env.PLASMO_PUBLIC_REFINE_API_BASE || 'http://localhost:21567'
 
 export async function checkCloudHealth(): Promise<boolean> {
   try {

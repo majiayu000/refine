@@ -91,7 +91,7 @@
 ### Step A4 统一默认端口与 API 基址
 
 - 状态: `completed`
-- 目标: 替换多端 8787 默认值，统一为新端口（server=5567, desktop local=5568）
+- 目标: 替换多端旧默认值，统一为新端口（server/desktop local=21567，fallback=21568..21570）
 - 预计改动文件:
   - `apps/server/src/main.rs`
   - `apps/desktop/src-tauri/src/server/mod.rs`
@@ -185,8 +185,8 @@
       - `apps/extension/package.json`
       - `apps/desktop/ui/src/lib/api/adapters/http.ts`
     - 主要改动:
-      - 默认端口改为 server `5567`、desktop local `5568`
-      - extension/UI 默认 API 基址切到 `5567`
+      - 默认端口改为 server/desktop local `21567`
+      - extension/UI 默认 API 基址切到 `21567`
     - 执行测试:
       - `cargo check -p refine-server -p refine-desktop` -> pass
       - `cd apps/desktop/ui && pnpm build` -> pass
