@@ -1,4 +1,5 @@
 use axum::http::HeaderMap;
+use subtle::ConstantTimeEq;
 
 const UNAUTHORIZED_MESSAGE: &str =
     "Unauthorized: provide Authorization: Bearer <token> and ensure REFINE_API_TOKEN matches.";
@@ -29,7 +30,9 @@ pub fn authorize_user(
             .unwrap_or_default()
             .trim();
 
-        if provided != token {
+        // Constant-time comparison to avoid byte-by-byte timing leak (HI-7).
+        // `ct_eq` short-circuits to false on length mismatch in constant time.
+        if provided.as_bytes().ct_eq(token.as_bytes()).unwrap_u8() != 1 {
             return Err(UNAUTHORIZED_MESSAGE.to_string());
         }
 
@@ -81,6 +84,29 @@ mod tests {
             result.err().unwrap_or_default().contains("REFINE_DEV_ANON"),
             "error message must mention REFINE_DEV_ANON"
         );
+    }
+
+    #[test]
+    fn authorize_rejects_token_with_wrong_length() {
+        // Constant-time comparison must still reject length-mismatched tokens (HI-7).
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_static("Bearer secret"));
+
+        let result = authorize_user(&headers, Some("secret-token"), false);
+        assert!(result.is_err(), "shorter token must be rejected");
+    }
+
+    #[test]
+    fn authorize_rejects_token_with_one_byte_differ() {
+        // Single-byte mismatch must still produce an unauthorized error (HI-7).
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer secret-tokeX"),
+        );
+
+        let result = authorize_user(&headers, Some("secret-token"), false);
+        assert!(result.is_err(), "differing-byte token must be rejected");
     }
 
     #[test]
