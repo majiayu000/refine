@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use std::time::Duration;
 
-pub(super) fn configure_connection(conn: &Connection, in_memory: bool) -> InfraResult<()> {
+pub(crate) fn configure_connection(conn: &Connection, in_memory: bool) -> InfraResult<()> {
     conn.busy_timeout(Duration::from_secs(5))
         .map_err(|e| InfraError::Database(e.to_string()))?;
 

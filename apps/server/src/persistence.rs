@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use refine_core::infra::prepare_sqlite_db;
+use refine_core::infra::{configure_sqlite_connection, prepare_sqlite_db};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::application::ports::{ConversationRepository, EventRepository, JobRepository};
@@ -316,8 +316,7 @@ impl ServerPersistence {
 
     fn open(&self) -> Result<Connection, String> {
         let conn = Connection::open(&self.db_path).map_err(|e| e.to_string())?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(|e| e.to_string())?;
+        configure_sqlite_connection(&conn).map_err(|e| e.to_string())?;
         Ok(conn)
     }
 
@@ -691,6 +690,32 @@ mod tests {
             .expect("job should exist");
         assert_eq!(loaded.id, job.id);
         assert_eq!(loaded.status, JobStatus::Pending);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn open_applies_canonical_pragmas() {
+        let path = temp_db_path();
+        let persistence = ServerPersistence::new(path.clone()).expect("persistence init failed");
+
+        let conn = persistence.open().expect("open connection");
+        let foreign_keys: i64 = conn
+            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .expect("read foreign_keys pragma");
+        let journal_mode: String = conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .expect("read journal_mode pragma");
+
+        assert_eq!(
+            foreign_keys, 1,
+            "foreign_keys must be enabled on every server connection"
+        );
+        assert_eq!(
+            journal_mode.to_lowercase(),
+            "wal",
+            "server connections must run under WAL journal mode"
+        );
 
         cleanup(&path);
     }

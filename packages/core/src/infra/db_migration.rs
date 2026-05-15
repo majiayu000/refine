@@ -30,6 +30,9 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
     let conn = Connection::open(target)
         .map_err(|e| format!("failed to open target DB {}: {}", target.display(), e))?;
 
+    crate::infra::configure_sqlite_connection(&conn)
+        .map_err(|e| format!("failed to configure target connection: {}", e))?;
+
     crate::infra::prepare_sqlite_db(&conn)
         .map_err(|e| format!("failed to initialise target schema: {}", e))?;
 

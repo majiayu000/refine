@@ -19,6 +19,8 @@ mod worker;
 
 use worker::{start_worker, OpenMode, SqliteCommand, WorkerHandle};
 
+pub(crate) use rows::configure_connection;
+
 const WORKER_CLOSED: &str = "sqlite worker closed";
 
 /// SQLite 存储

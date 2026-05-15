@@ -31,6 +31,18 @@ pub fn prepare_sqlite_db(conn: &Connection) -> InfraResult<()> {
     Ok(())
 }
 
+/// Apply the canonical PRAGMA configuration (foreign_keys, WAL, busy_timeout,
+/// temp_store, synchronous) to a freshly opened SQLite connection.
+///
+/// Every entry point that opens a connection to the shared application database
+/// must call this — `foreign_keys` and `busy_timeout` are connection-scoped, so
+/// missing the call leaves the connection running with SQLite defaults
+/// regardless of how the WAL journal was initialised on the file.
+pub fn configure_sqlite_connection(conn: &Connection) -> InfraResult<()> {
+    let in_memory = matches!(conn.path(), Some(":memory:") | None);
+    sqlite::configure_connection(conn, in_memory)
+}
+
 pub(crate) fn maybe_rebuild_fts_index(conn: &Connection) -> InfraResult<bool> {
     let user_version = conn
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
