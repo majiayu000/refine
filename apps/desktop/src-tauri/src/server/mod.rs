@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tiny_http::Server;
 use tokio::runtime::Builder as RuntimeBuilder;
 
-const DEFAULT_SERVER_PORT: u16 = 5568;
+const DEFAULT_SERVER_PORT: u16 = 21567;
 const MAX_SERVER_WORKERS: usize = 8;
 
 /// 启动 HTTP 服务器

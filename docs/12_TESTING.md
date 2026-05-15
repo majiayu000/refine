@@ -208,7 +208,7 @@ async fn test_full_search_flow() {
 
 ```bash
 node scripts/eval_recommendations.mjs \
-  --base-url http://localhost:8787 \
+  --base-url http://127.0.0.1:21567 \
   --dataset docs/eval/recommendation_queries.jsonl \
   --out docs/eval/recommendation_eval_latest.md
 ```
@@ -372,7 +372,7 @@ import { rest } from 'msw'
 import { setupServer } from 'msw/node'
 
 const server = setupServer(
-  rest.get('http://localhost:8787/health', (req, res, ctx) => {
+  rest.get('http://127.0.0.1:21567/health', (req, res, ctx) => {
     return res(ctx.json({ success: true }))
   })
 )

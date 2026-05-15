@@ -56,7 +56,13 @@ EOF
 cargo run --package refine-server
 ```
 
-Default server address: `http://localhost:8787`
+Default server address: `http://127.0.0.1:21567`. If that port is occupied by another process, `refine-server` tries `21568`, `21569`, then `21570`.
+
+Optional server bind overrides:
+
+```bash
+REFINE_SERVER_HOST=127.0.0.1 REFINE_SERVER_PORT=21567 cargo run --package refine-server
+```
 
 ### Start extension
 
@@ -115,9 +121,9 @@ refine doc-search "query"
 After starting server:
 
 ```bash
-curl http://localhost:8787/health
-curl "http://localhost:8787/v1/items?cursor=0&limit=20"
-curl "http://localhost:8787/v1/recommendations?q=rust&limit=5"
+curl http://127.0.0.1:21567/health
+curl "http://127.0.0.1:21567/v1/items?cursor=0&limit=20"
+curl "http://127.0.0.1:21567/v1/recommendations?q=rust&limit=5"
 ```
 
 ## 6. Data and Paths

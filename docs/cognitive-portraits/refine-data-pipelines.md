@@ -368,7 +368,7 @@ AI IDE JSONL 文件
 
 本次梳理**未包含**以下产品面组件（只列出以备后查）：
 
-- **`apps/server`** — refine HTTP 后端（`http://localhost:8787`），`scripts/import_claude_code.sh` 是其客户端
+- **`apps/server`** — refine HTTP 后端（默认 `http://127.0.0.1:21567`，备用端口 `21568..21570`），`scripts/import_claude_code.sh` 是其客户端
 - **`apps/desktop`** — Tauri 桌面应用，通常消费 refine-server API
 - **`apps/extension`** — 浏览器 extension
 - **`packages/core/src/hook_session`** — Claude Code hook ingestion 相关（见 `docs/13_CLAUDE_HOOK_INGESTION.md`）

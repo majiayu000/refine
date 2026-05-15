@@ -218,7 +218,7 @@ fn requires_api_token_for_bind(addr: &SocketAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_app, parse_bind_addr, requires_api_token_for_bind};
+    use super::{build_app, parse_bind_addr, requires_api_token_for_bind, DEFAULT_SERVER_PORT};
     use crate::state::{AppState, AuthConfig};
     use axum::body::Body;
     use axum::http::{header, HeaderValue, Method, Request, StatusCode};
@@ -232,27 +232,30 @@ mod tests {
 
     #[test]
     fn parse_bind_addr_falls_back_to_loopback_for_invalid_host() {
-        let addr = parse_bind_addr("localhost", 5567);
-        assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 5567)));
+        let addr = parse_bind_addr("localhost", DEFAULT_SERVER_PORT);
+        assert_eq!(
+            addr,
+            SocketAddr::from(([127, 0, 0, 1], DEFAULT_SERVER_PORT))
+        );
     }
 
     #[test]
     fn non_loopback_bindings_require_api_token() {
         assert!(requires_api_token_for_bind(&SocketAddr::from((
             [0, 0, 0, 0],
-            5567
+            DEFAULT_SERVER_PORT
         ))));
         assert!(requires_api_token_for_bind(&SocketAddr::from((
             [192, 168, 1, 8],
-            5567
+            DEFAULT_SERVER_PORT
         ))));
         assert!(!requires_api_token_for_bind(&SocketAddr::from((
             [127, 0, 0, 1],
-            5567
+            DEFAULT_SERVER_PORT
         ))));
         assert!(!requires_api_token_for_bind(&SocketAddr::from((
             [0, 0, 0, 0, 0, 0, 0, 1],
-            5567
+            DEFAULT_SERVER_PORT
         ))));
     }
 

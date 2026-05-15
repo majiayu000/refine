@@ -480,7 +480,10 @@ mod tests {
         )
         .unwrap();
 
-        let started = session.meta.started_at.expect("should fall through to next valid ts");
+        let started = session
+            .meta
+            .started_at
+            .expect("should fall through to next valid ts");
         assert_eq!(started.to_rfc3339(), "2026-04-21T05:00:00+00:00");
         assert_eq!(session.messages.len(), 2);
     }

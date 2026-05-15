@@ -8,7 +8,7 @@ Refine 浏览器插件的云端服务 Rust 实现（Axum + refine-core）。
 cargo run --package refine-server
 ```
 
-默认监听 `http://localhost:8787`。
+默认监听 `http://127.0.0.1:21567`。如果首选端口被其他非 Refine 进程占用，服务会依次尝试 `21568`、`21569`、`21570`；如果端口上已经是另一个 `refine-server`，当前进程会直接退出。
 服务端启动时会自动加载当前工作目录下的 `.env`。
 
 例如可在仓库根目录创建 `.env`（或复制 `apps/server/.env.example`）：
@@ -27,8 +27,8 @@ cp apps/server/.env.production.example .env
 
 ## 环境变量
 
-- `HOST`：监听地址（默认 `127.0.0.1`）
-- `PORT`：服务端口（默认 `8787`）
+- `REFINE_SERVER_HOST`：监听地址（默认 `127.0.0.1`）
+- `REFINE_SERVER_PORT`：首选服务端口（默认 `21567`，备用端口 `21568..21570`）
 - `REFINE_ENV`：运行环境（`production` 时强制要求 `REFINE_API_TOKEN`）
 - `REFINE_API_TOKEN`：鉴权令牌；设置后要求 `Authorization: Bearer <token>`
 - `REFINE_SERVER_DB_PATH`：SQLite 路径（默认 `$XDG_DATA_HOME/refine/refine.db`）
