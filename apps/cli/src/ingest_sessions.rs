@@ -289,11 +289,19 @@ async fn process_single_session(
     quota_hit: &Arc<AtomicBool>,
 ) -> Result<usize> {
     let content = if ps.needs_chunk {
-        let mut summaries = Vec::new();
-        for chunk in &ps.chunks {
+        let total_chunks = ps.chunks.len();
+        let mut summaries = Vec::with_capacity(total_chunks);
+        for (idx, chunk) in ps.chunks.iter().enumerate() {
             match llm_call_with_retry(client, chunk, quota_hit).await {
                 Ok(text) => summaries.push(text),
-                Err(e) => tracing::warn!("分块提取失败: {}", e),
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "分块 {}/{} 提取失败，整个 session 视为失败以避免数据缺失: {}",
+                        idx + 1,
+                        total_chunks,
+                        e
+                    ));
+                }
             }
         }
         summaries.join("\n\n---\n\n")
