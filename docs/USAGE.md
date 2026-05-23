@@ -32,10 +32,27 @@ Use this when your main goal is analyzing Claude Code / Codex coding sessions.
 - Bun (for extension)
 - Chromium-based browser (for loading unpacked extension)
 
-### Install CLI
+### Install Local Stack
+
+Recommended:
+
+```bash
+scripts/install-local.sh
+scripts/doctor-local.sh
+```
+
+This installs `refine`, `mirror`, and `refine-server`, writes macOS LaunchAgents,
+starts the local server, schedules daily/weekly jobs, and installs desktop UI
+dependencies when Bun is available.
+
+For details, see [LOCAL_SETUP.md](./LOCAL_SETUP.md).
+
+### Install CLI Only
 
 ```bash
 cargo install --path apps/cli
+cargo install --path apps/mirror
+cargo install --path apps/server
 ```
 
 ### Configure LLM (optional but recommended)
@@ -57,6 +74,15 @@ cargo run --package refine-server
 ```
 
 Default server address: `http://127.0.0.1:21567`. If that port is occupied by another process, `refine-server` tries `21568`, `21569`, then `21570`.
+
+For unauthenticated local dashboard/API access, set:
+
+```bash
+REFINE_DEV_ANON=1 cargo run --package refine-server
+```
+
+For token auth, set `REFINE_API_TOKEN` and send `Authorization: Bearer <token>`
+from the client.
 
 Optional server bind overrides:
 
@@ -126,6 +152,10 @@ curl "http://127.0.0.1:21567/v1/items?cursor=0&limit=20"
 curl "http://127.0.0.1:21567/v1/recommendations?q=rust&limit=5"
 ```
 
+If `/health` succeeds but `/v1/items` returns Unauthorized, the server is
+running without `REFINE_DEV_ANON=1` and without a matching `REFINE_API_TOKEN`.
+Run `scripts/install-local.sh` for the default local setup.
+
 ## 6. Data and Paths
 
 - Unified DB path priority:
@@ -136,6 +166,8 @@ curl "http://127.0.0.1:21567/v1/recommendations?q=rust&limit=5"
 ## 7. Where To Go Next
 
 - Project overview: [00_OVERVIEW.md](./00_OVERVIEW.md)
+- Local setup: [LOCAL_SETUP.md](./LOCAL_SETUP.md)
+- Local release flow: [LOCAL_RELEASE.md](./LOCAL_RELEASE.md)
 - Server details: [../apps/server/README.md](../apps/server/README.md)
 - API details: [11_API_SPEC.md](./11_API_SPEC.md)
 - Architecture details: [09_ARCHITECTURE.md](./09_ARCHITECTURE.md)
