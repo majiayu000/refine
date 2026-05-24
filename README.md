@@ -21,9 +21,8 @@
 ## Quick Start
 
 ```bash
-# Install both tools
-cargo install --path apps/cli      # refine
-cargo install --path apps/mirror   # mirror
+# Install the local stack: CLI tools, server, launchd jobs, and optional UI dev service
+scripts/install-local.sh
 
 # Configure LLM (.env file)
 cat > .env << 'EOF'
@@ -43,6 +42,9 @@ refine ingest-sessions
 # See your cognitive snapshot
 mirror score
 ```
+
+For local install, doctor, and upgrade details, see [Local Setup](docs/LOCAL_SETUP.md)
+and [Local Release Flow](docs/LOCAL_RELEASE.md).
 
 ## Mirror — Cognitive Growth Tracker
 
@@ -94,6 +96,13 @@ mirror profile                      # Cognitive portrait narrative (requires LLM
 **SessionStart hook** injects cognitive dashboard + LLM advice into every Claude Code conversation.
 
 ### Automation (launchd)
+
+The local installer writes and reloads these jobs:
+
+```bash
+scripts/install-local.sh
+scripts/doctor-local.sh
+```
 
 | Schedule | Task | What It Does |
 |----------|------|-------------|

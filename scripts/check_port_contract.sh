@@ -3,7 +3,13 @@ set -euo pipefail
 
 stale_pattern='localhost:8787|127\.0\.0\.1:8787|localhost:5567|127\.0\.0\.1:5567|5568'
 
-if grep -RInE "$stale_pattern" apps docs CHANGELOG.md scripts/import_claude_code.sh scripts/eval_recommendations.mjs; then
+if grep -RInE \
+  --exclude-dir=.git \
+  --exclude-dir=.run \
+  --exclude-dir=dist \
+  --exclude-dir=node_modules \
+  --exclude-dir=target \
+  "$stale_pattern" apps docs CHANGELOG.md scripts/import_claude_code.sh scripts/eval_recommendations.mjs; then
   echo "Found stale local API port references. Use 21567 with fallback ports 21568..21570." >&2
   exit 1
 fi
