@@ -5,7 +5,7 @@
 mod keyword;
 mod semantic;
 
-use crate::error::{InfraResult, RepoResult, RepositoryError};
+use crate::error::InfraResult;
 use crate::knowledge::{Document, DocumentRepository, Item, ItemRepository};
 use crate::search::query::{SearchHit, SearchQuery, SearchResult};
 use async_trait::async_trait;
@@ -51,7 +51,7 @@ impl SearchEngine {
     }
 
     /// 执行搜索（Items）
-    pub async fn search(&self, query: SearchQuery) -> RepoResult<SearchResult<Item>> {
+    pub async fn search(&self, query: SearchQuery) -> InfraResult<SearchResult<Item>> {
         if query.text.trim().is_empty() {
             return self.get_recent(&query).await;
         }
@@ -67,7 +67,7 @@ impl SearchEngine {
     pub async fn search_documents(
         &self,
         query: &SearchQuery,
-    ) -> RepoResult<SearchResult<Document>> {
+    ) -> InfraResult<SearchResult<Document>> {
         let Some(doc_repo) = &self.doc_repo else {
             return Ok(SearchResult::empty(query.clone()));
         };
@@ -96,20 +96,20 @@ impl SearchEngine {
     }
 
     /// 索引 Item
-    pub async fn index_item(&self, item: &Item) -> RepoResult<()> {
+    pub async fn index_item(&self, item: &Item) -> InfraResult<()> {
         if let Some(vs) = &self.vector_search {
             let text = format!("{} {} {}", item.title(), item.summary(), item.content());
             vs.index(item.id().as_str(), &text)
                 .await
-                .map_err(RepositoryError::from)?;
+                ?;
         }
         Ok(())
     }
 
     /// 从索引中删除
-    pub async fn remove_from_index(&self, id: &str) -> RepoResult<()> {
+    pub async fn remove_from_index(&self, id: &str) -> InfraResult<()> {
         if let Some(vs) = &self.vector_search {
-            vs.remove(id).await.map_err(RepositoryError::from)?;
+            vs.remove(id).await?;
         }
         Ok(())
     }

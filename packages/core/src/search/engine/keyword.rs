@@ -1,5 +1,5 @@
 use super::SearchEngine;
-use crate::error::RepoResult;
+use crate::error::InfraResult;
 use crate::knowledge::Item;
 use crate::search::query::{SearchFilter, SearchQuery, SearchResult};
 
@@ -9,7 +9,7 @@ impl SearchEngine {
     pub(super) async fn keyword_search(
         &self,
         query: &SearchQuery,
-    ) -> RepoResult<SearchResult<Item>> {
+    ) -> InfraResult<SearchResult<Item>> {
         let has_filter = query.filter.item_type.is_some() || !query.filter.tags.is_empty();
 
         if !has_filter {
@@ -70,7 +70,7 @@ impl SearchEngine {
         })
     }
 
-    pub(super) async fn get_recent(&self, query: &SearchQuery) -> RepoResult<SearchResult<Item>> {
+    pub(super) async fn get_recent(&self, query: &SearchQuery) -> InfraResult<SearchResult<Item>> {
         if query.filter.tags.is_empty() {
             let total = self.item_repo.count_items(query.filter.item_type).await?;
             let items = self

@@ -48,4 +48,4 @@ pub mod search;
 pub mod session;
 
 // 常用类型重导出
-pub use error::{AppError, DomainError, InfraError, RepositoryError, Result};
+pub use error::{AppError, DomainError, InfraError, Result};

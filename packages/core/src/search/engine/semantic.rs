@@ -1,5 +1,5 @@
 use super::{SearchEngine, VectorSearch};
-use crate::error::{RepoResult, RepositoryError};
+use crate::error::InfraResult;
 use crate::knowledge::{Item, ItemId};
 use crate::search::query::{SearchHit, SearchQuery, SearchResult};
 use std::cmp::Ordering;
@@ -16,7 +16,7 @@ impl SearchEngine {
         &self,
         vs: &Arc<dyn VectorSearch>,
         query: &SearchQuery,
-    ) -> RepoResult<SearchResult<Item>> {
+    ) -> InfraResult<SearchResult<Item>> {
         let request_limit = query
             .pagination
             .offset
@@ -28,7 +28,7 @@ impl SearchEngine {
         let semantic = vs
             .search(&query.text, request_limit)
             .await
-            .map_err(RepositoryError::from)?;
+            ?;
 
         let mut merged: HashMap<String, SearchHit<Item>> = HashMap::new();
 
