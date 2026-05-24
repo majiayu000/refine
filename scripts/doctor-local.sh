@@ -1,10 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+  cat <<'EOF'
+Usage: scripts/doctor-local.sh [OPTIONS]
+
+Check the machine-local Refine install.
+
+Options:
+  --no-ui-dev   Skip desktop UI dev LaunchAgent, log, and dependency checks.
+  -h, --help    Show this help.
+EOF
+}
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 server_url="${REFINE_SERVER_URL:-http://127.0.0.1:21567}"
 failures=0
 warnings=0
+ui_dev_enabled=1
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-ui-dev)
+      ui_dev_enabled=0
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
 
 pass() {
   printf 'PASS %s\n' "$*"
@@ -164,12 +195,17 @@ check_freshness() {
 
 check_logs() {
   local log_path
-  for log_path in \
+  local log_paths=(
     "${HOME}/Library/Logs/refine-server.log" \
     "${HOME}/Library/Logs/refine-server.err.log" \
     "${HOME}/Library/Logs/refine-daily-ingest.log" \
-    "${HOME}/Library/Logs/refine-insights.log" \
-    "${repo_root}/.run/launchd-refine-ui.err.log"; do
+    "${HOME}/Library/Logs/refine-insights.log"
+  )
+  if [[ "$ui_dev_enabled" == "1" ]]; then
+    log_paths+=("${repo_root}/.run/launchd-refine-ui.err.log")
+  fi
+
+  for log_path in "${log_paths[@]}"; do
     if [[ -f "$log_path" ]]; then
       pass "log exists: $log_path ($(mtime_text "$log_path"))"
     else
@@ -206,13 +242,21 @@ check_cmd refine-server
 check_launch_agent com.lifcc.refine-server
 check_launch_agent com.lifcc.refine-daily-ingest
 check_launch_agent com.lifcc.refine-weekly-insights
-check_launch_agent com.lifcc.refine-ui-dev
+if [[ "$ui_dev_enabled" == "1" ]]; then
+  check_launch_agent com.lifcc.refine-ui-dev
+else
+  pass "desktop UI dev service skipped"
+fi
 
 check_http
 check_db
 check_freshness
 check_logs
-check_ui_deps
+if [[ "$ui_dev_enabled" == "1" ]]; then
+  check_ui_deps
+else
+  pass "desktop UI dependency check skipped"
+fi
 
 printf '\nSummary: %s failure(s), %s warning(s)\n' "$failures" "$warnings"
 if [[ "$failures" -gt 0 ]]; then

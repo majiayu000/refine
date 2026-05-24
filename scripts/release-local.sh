@@ -112,6 +112,10 @@ if [[ "$skip_install" != "1" ]]; then
   run scripts/install-local.sh "${install_args[@]}"
 fi
 
-run scripts/doctor-local.sh
+doctor_args=()
+if [[ "$no_ui_dev" == "1" || "$skip_ui" == "1" ]]; then
+  doctor_args+=(--no-ui-dev)
+fi
+run scripts/doctor-local.sh "${doctor_args[@]}"
 
 printf '\n[release-local] local release flow completed\n'

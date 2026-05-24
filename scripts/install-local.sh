@@ -8,7 +8,7 @@ Usage: scripts/install-local.sh [OPTIONS]
 Install or upgrade the local Refine stack from this checkout.
 
 Options:
-  --no-ui-dev       Do not install/start the desktop UI Vite dev service.
+  --no-ui-dev       Do not install/start the desktop UI Vite dev service; disable any existing UI LaunchAgent.
   --no-launchd      Install binaries only; skip macOS LaunchAgents.
   --no-start        Write LaunchAgents but do not start/restart services.
   --token-auth      Require REFINE_API_TOKEN instead of local dev anonymous API access.
@@ -73,6 +73,10 @@ xml_escape() {
   sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
 }
 
+shell_quote() {
+  printf '%q' "$1"
+}
+
 write_file() {
   local path="$1"
   local tmp
@@ -87,24 +91,70 @@ write_file() {
   fi
 }
 
+write_server_token_file() {
+  local path="$1"
+
+  [[ -n "${REFINE_API_TOKEN:-}" ]] || die "--token-auth requires REFINE_API_TOKEN in the current environment"
+  write_file "$path" <<EOF
+${REFINE_API_TOKEN}
+EOF
+  chmod 600 "$path"
+}
+
+write_server_token_wrapper() {
+  local path="$1"
+  local token_path="$2"
+  local server_bin="$3"
+  local token_path_sh server_bin_sh
+  token_path_sh="$(shell_quote "$token_path")"
+  server_bin_sh="$(shell_quote "$server_bin")"
+
+  write_file "$path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+token_file=${token_path_sh}
+server_bin=${server_bin_sh}
+
+if [[ ! -f "\$token_file" ]]; then
+  echo "[refine-server] missing token file: \$token_file" >&2
+  exit 1
+fi
+
+IFS= read -r token < "\$token_file" || true
+if [[ -z "\$token" ]]; then
+  echo "[refine-server] token file is empty: \$token_file" >&2
+  exit 1
+fi
+
+export REFINE_API_TOKEN="\$token"
+exec "\$server_bin"
+EOF
+  chmod 700 "$path"
+}
+
 write_server_plist() {
   local path="$1"
   local cargo_bin="$2"
   local repo="$3"
   local path_env="$4"
-  local repo_xml cargo_bin_xml path_xml token_xml=""
+  local repo_xml server_program_xml path_xml token_xml=""
+  local server_program="${cargo_bin}/refine-server"
   repo_xml="$(printf '%s' "$repo" | xml_escape)"
-  cargo_bin_xml="$(printf '%s' "$cargo_bin" | xml_escape)"
   path_xml="$(printf '%s' "$path_env" | xml_escape)"
 
   if [[ "$auth_mode" == "token" ]]; then
-    [[ -n "${REFINE_API_TOKEN:-}" ]] || die "--token-auth requires REFINE_API_TOKEN in the current environment"
-    token_xml="<key>REFINE_API_TOKEN</key>
-    <string>$(printf '%s' "$REFINE_API_TOKEN" | xml_escape)</string>"
+    local token_file="${HOME}/.refine/refine-server.token"
+    local wrapper_file="${HOME}/.refine/run-refine-server.sh"
+    write_server_token_file "$token_file"
+    write_server_token_wrapper "$wrapper_file" "$token_file" "$server_program"
+    server_program="$wrapper_file"
   else
+    rm -f "${HOME}/.refine/refine-server.token" "${HOME}/.refine/run-refine-server.sh"
     token_xml="<key>REFINE_DEV_ANON</key>
     <string>1</string>"
   fi
+  server_program_xml="$(printf '%s' "$server_program" | xml_escape)"
 
   write_file "$path" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -115,7 +165,7 @@ write_server_plist() {
   <string>com.lifcc.refine-server</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${cargo_bin_xml}/refine-server</string>
+    <string>${server_program_xml}</string>
   </array>
   <key>WorkingDirectory</key>
   <string>${repo_xml}</string>
@@ -245,6 +295,21 @@ load_plist() {
   fi
 }
 
+disable_plist() {
+  local path="$1"
+  local label="$2"
+  local domain="gui/$(id -u)"
+
+  launchctl bootout "$domain" "$path" >/dev/null 2>&1 || true
+  launchctl bootout "${domain}/${label}" >/dev/null 2>&1 || true
+  if [[ -f "$path" ]]; then
+    rm -f "$path"
+    log "removed $path"
+  else
+    log "not installed $path"
+  fi
+}
+
 need_cmd cargo
 
 log "repo root: $repo_root"
@@ -299,6 +364,8 @@ for plist in "$server_plist" "$daily_plist" "$weekly_plist"; do
 done
 if [[ "$ui_dev_enabled" == "1" ]]; then
   plutil -lint "$ui_plist" >/dev/null
+else
+  disable_plist "$ui_plist" "com.lifcc.refine-ui-dev"
 fi
 
 if [[ "$start_services" == "1" ]]; then

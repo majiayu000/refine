@@ -41,6 +41,14 @@ scripts/release-local.sh --allow-dirty --skip-tests --skip-clippy --skip-ui --sk
 
 Before publishing a PR or declaring a local release complete, run the full command again.
 
+For a headless local install without the desktop UI dev LaunchAgent:
+
+```bash
+scripts/release-local.sh --no-ui-dev
+```
+
+When `--skip-ui` or `--no-ui-dev` is used, the release flow also passes `--no-ui-dev` to the doctor smoke check.
+
 ## CI Relationship
 
 GitHub CI remains the repository gate for pull requests. The local release flow is the machine install gate: it proves this checkout can be built, installed, reloaded, and smoke-tested on the current macOS user account.

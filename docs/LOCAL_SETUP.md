@@ -38,7 +38,7 @@ Token mode:
 REFINE_API_TOKEN=your-token scripts/install-local.sh --token-auth
 ```
 
-Token mode writes `REFINE_API_TOKEN` into the server LaunchAgent. Clients must send `Authorization: Bearer <token>`.
+Token mode writes the token to `~/.refine/refine-server.token` with mode `0600` and points the server LaunchAgent at `~/.refine/run-refine-server.sh`. The token is not written into the plist. Clients must send `Authorization: Bearer <token>`.
 
 ## Useful Variants
 
@@ -52,6 +52,12 @@ Install services without the UI dev server:
 
 ```bash
 scripts/install-local.sh --no-ui-dev
+```
+
+This also unloads and removes an existing `com.lifcc.refine-ui-dev` LaunchAgent. Verify the same shape with:
+
+```bash
+scripts/doctor-local.sh --no-ui-dev
 ```
 
 Write LaunchAgents without starting them:
@@ -77,7 +83,7 @@ Run:
 scripts/doctor-local.sh
 ```
 
-The doctor checks installed binaries, LaunchAgents, `/health`, a protected `/v1/*` API route, database freshness, log files, and UI dependencies.
+The doctor checks installed binaries, LaunchAgents, `/health`, a protected `/v1/*` API route, database freshness, log files, and UI dependencies. Use `scripts/doctor-local.sh --no-ui-dev` for installs that intentionally disable the desktop UI dev service.
 
 Common symptoms:
 
