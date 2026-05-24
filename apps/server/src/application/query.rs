@@ -30,11 +30,13 @@ pub async fn list_conversations(
     let total = state
         .conversation_repo
         .count_conversations(status_filter.as_deref())
-        .map_err(QueryError::Internal)?;
+        .await
+        .map_err(|err| QueryError::Internal(err.to_string()))?;
     let conversations = state
         .conversation_repo
         .list_conversations(status_filter.as_deref(), cursor, limit)
-        .map_err(QueryError::Internal)?;
+        .await
+        .map_err(|err| QueryError::Internal(err.to_string()))?;
 
     let mapped = conversations
         .iter()

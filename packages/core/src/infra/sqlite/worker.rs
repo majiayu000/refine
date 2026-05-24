@@ -1,5 +1,6 @@
 use super::rows::configure_connection;
-use super::{doc_ops, ops};
+use super::{conversation_ops, doc_ops, ops};
+use crate::conversation::{ConversationRecord, EventRecord, ExtractionJobRecord};
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{Document, Item, ItemType};
 use chrono::{DateTime, Utc};
@@ -109,6 +110,47 @@ pub(super) enum SqliteCommand {
     DocCountTextHits {
         query: String,
         resp: oneshot::Sender<InfraResult<usize>>,
+    },
+    // Conversation 操作
+    ConversationFindById {
+        id: String,
+        resp: oneshot::Sender<InfraResult<Option<ConversationRecord>>>,
+    },
+    ConversationList {
+        status: Option<String>,
+        offset: usize,
+        limit: usize,
+        resp: oneshot::Sender<InfraResult<Vec<ConversationRecord>>>,
+    },
+    ConversationCount {
+        status: Option<String>,
+        resp: oneshot::Sender<InfraResult<usize>>,
+    },
+    ConversationUpsert {
+        record: ConversationRecord,
+        resp: oneshot::Sender<InfraResult<()>>,
+    },
+    ConversationInsertOrFetchByIdempotency {
+        record: ConversationRecord,
+        resp: oneshot::Sender<InfraResult<ConversationRecord>>,
+    },
+    // Extraction job 操作
+    JobFindById {
+        id: String,
+        resp: oneshot::Sender<InfraResult<Option<ExtractionJobRecord>>>,
+    },
+    JobUpsert {
+        job: ExtractionJobRecord,
+        resp: oneshot::Sender<InfraResult<()>>,
+    },
+    // Event 操作
+    EventInsert {
+        event: EventRecord,
+        resp: oneshot::Sender<InfraResult<()>>,
+    },
+    EventCountsSince {
+        since: Option<String>,
+        resp: oneshot::Sender<InfraResult<Vec<(String, usize)>>>,
     },
 }
 
@@ -258,6 +300,48 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
         }
         SqliteCommand::DocCountTextHits { query, resp } => {
             let _ = resp.send(doc_ops::count_text_hits(conn, &query));
+        }
+        SqliteCommand::ConversationFindById { id, resp } => {
+            let _ = resp.send(conversation_ops::find_conversation_by_id(conn, &id));
+        }
+        SqliteCommand::ConversationList {
+            status,
+            offset,
+            limit,
+            resp,
+        } => {
+            let _ = resp.send(conversation_ops::list_conversations(
+                conn,
+                status.as_deref(),
+                offset,
+                limit,
+            ));
+        }
+        SqliteCommand::ConversationCount { status, resp } => {
+            let _ = resp.send(conversation_ops::count_conversations(
+                conn,
+                status.as_deref(),
+            ));
+        }
+        SqliteCommand::ConversationUpsert { record, resp } => {
+            let _ = resp.send(conversation_ops::upsert_conversation(conn, &record));
+        }
+        SqliteCommand::ConversationInsertOrFetchByIdempotency { record, resp } => {
+            let _ = resp.send(
+                conversation_ops::insert_or_fetch_conversation_by_idempotency(conn, &record),
+            );
+        }
+        SqliteCommand::JobFindById { id, resp } => {
+            let _ = resp.send(conversation_ops::find_job_by_id(conn, &id));
+        }
+        SqliteCommand::JobUpsert { job, resp } => {
+            let _ = resp.send(conversation_ops::upsert_job(conn, &job));
+        }
+        SqliteCommand::EventInsert { event, resp } => {
+            let _ = resp.send(conversation_ops::insert_event(conn, &event));
+        }
+        SqliteCommand::EventCountsSince { since, resp } => {
+            let _ = resp.send(conversation_ops::event_counts_since(conn, since.as_deref()));
         }
     }
 }

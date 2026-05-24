@@ -115,7 +115,7 @@ pub async fn create_event(
     AuthenticatedUser(user_id): AuthenticatedUser,
     Json(payload): Json<CreateEventRequest>,
 ) -> impl IntoResponse {
-    match run_create_event(state, user_id, payload) {
+    match run_create_event(state, user_id, payload).await {
         Ok(result) => ok_serializable(CreateEventResponse {
             event_id: result.event_id,
         }),
@@ -128,7 +128,7 @@ pub async fn get_event_summary(
     _auth: AuthenticatedUser,
     Query(query): Query<EventSummaryQuery>,
 ) -> impl IntoResponse {
-    let result = match run_get_event_summary(state, query.days) {
+    let result = match run_get_event_summary(state, query.days).await {
         Ok(result) => result,
         Err(err) => return err_response(status_from_error_code(err.code()), err.message()),
     };

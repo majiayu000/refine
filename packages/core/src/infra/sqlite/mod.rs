@@ -2,6 +2,10 @@
 //!
 //! ItemRepository 的 SQLite 实现（worker 线程模型）
 
+use crate::conversation::{
+    ConversationRecord, ConversationRepository, EventRecord, EventRepository, ExtractionJobRecord,
+    JobRepository,
+};
 use crate::error::RepoResult;
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{
@@ -12,6 +16,7 @@ use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
 use tokio::sync::oneshot;
 
+mod conversation_ops;
 mod doc_ops;
 mod ops;
 mod rows;
@@ -238,5 +243,81 @@ impl DocumentRepository for SqliteStore {
         self.request(|resp| SqliteCommand::DocCountTextHits { query, resp })
             .await
             .map_err(Into::into)
+    }
+}
+
+#[async_trait]
+impl ConversationRepository for SqliteStore {
+    async fn find_conversation_by_id(&self, id: &str) -> InfraResult<Option<ConversationRecord>> {
+        let id = id.to_string();
+        self.request(|resp| SqliteCommand::ConversationFindById { id, resp })
+            .await
+    }
+
+    async fn list_conversations(
+        &self,
+        status: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> InfraResult<Vec<ConversationRecord>> {
+        let status = status.map(|s| s.to_string());
+        self.request(|resp| SqliteCommand::ConversationList {
+            status,
+            offset,
+            limit,
+            resp,
+        })
+        .await
+    }
+
+    async fn count_conversations(&self, status: Option<&str>) -> InfraResult<usize> {
+        let status = status.map(|s| s.to_string());
+        self.request(|resp| SqliteCommand::ConversationCount { status, resp })
+            .await
+    }
+
+    async fn upsert_conversation(&self, record: &ConversationRecord) -> InfraResult<()> {
+        let record = record.clone();
+        self.request(|resp| SqliteCommand::ConversationUpsert { record, resp })
+            .await
+    }
+
+    async fn insert_or_fetch_conversation_by_idempotency(
+        &self,
+        record: &ConversationRecord,
+    ) -> InfraResult<ConversationRecord> {
+        let record = record.clone();
+        self.request(|resp| SqliteCommand::ConversationInsertOrFetchByIdempotency { record, resp })
+            .await
+    }
+}
+
+#[async_trait]
+impl JobRepository for SqliteStore {
+    async fn find_job_by_id(&self, id: &str) -> InfraResult<Option<ExtractionJobRecord>> {
+        let id = id.to_string();
+        self.request(|resp| SqliteCommand::JobFindById { id, resp })
+            .await
+    }
+
+    async fn upsert_job(&self, job: &ExtractionJobRecord) -> InfraResult<()> {
+        let job = job.clone();
+        self.request(|resp| SqliteCommand::JobUpsert { job, resp })
+            .await
+    }
+}
+
+#[async_trait]
+impl EventRepository for SqliteStore {
+    async fn insert_event(&self, event: &EventRecord) -> InfraResult<()> {
+        let event = event.clone();
+        self.request(|resp| SqliteCommand::EventInsert { event, resp })
+            .await
+    }
+
+    async fn event_counts_since(&self, since: Option<&str>) -> InfraResult<Vec<(String, usize)>> {
+        let since = since.map(|s| s.to_string());
+        self.request(|resp| SqliteCommand::EventCountsSince { since, resp })
+            .await
     }
 }

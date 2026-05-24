@@ -34,7 +34,9 @@ async fn run_extraction(
 
     let conversation = state
         .conversation_repo
-        .find_conversation_by_id(conversation_id)?
+        .find_conversation_by_id(conversation_id)
+        .await
+        .map_err(|e| e.to_string())?
         .ok_or_else(|| "Conversation not found".to_string())?;
 
     let source = Source::new(&conversation.source).with_url(&conversation.url);
@@ -187,7 +189,7 @@ async fn update_job<F>(state: &Arc<AppState>, job_id: &str, mutate: F, phase: &s
 where
     F: FnOnce(&mut ExtractionJobRecord),
 {
-    let mut job = match state.job_repo.find_job_by_id(job_id) {
+    let mut job = match state.job_repo.find_job_by_id(job_id).await {
         Ok(Some(job)) => job,
         Ok(None) => {
             tracing::warn!("persist {} job skipped: not found {}", phase, job_id);
@@ -199,7 +201,7 @@ where
         }
     };
     mutate(&mut job);
-    if let Err(err) = state.job_repo.upsert_job(&job) {
+    if let Err(err) = state.job_repo.upsert_job(&job).await {
         tracing::warn!("persist {} job failed: {}", phase, err);
     }
 }
@@ -231,6 +233,7 @@ async fn update_conversation<F>(
     let mut conversation = match state
         .conversation_repo
         .find_conversation_by_id(conversation_id)
+        .await
     {
         Ok(Some(conversation)) => conversation,
         Ok(None) => {
@@ -247,7 +250,11 @@ async fn update_conversation<F>(
         }
     };
     mutate(&mut conversation);
-    if let Err(err) = state.conversation_repo.upsert_conversation(&conversation) {
+    if let Err(err) = state
+        .conversation_repo
+        .upsert_conversation(&conversation)
+        .await
+    {
         tracing::warn!("persist {} conversation failed: {}", phase, err);
     }
 }
