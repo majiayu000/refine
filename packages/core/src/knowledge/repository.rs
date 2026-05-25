@@ -52,6 +52,15 @@ pub trait ItemRepository: Send + Sync {
         end: DateTime<Utc>,
     ) -> RepoResult<Vec<Item>>;
 
+    /// 查找事件时间窗口内的 observations。
+    ///
+    /// 会话导入的 item 使用关联 Document.captured_at；缺少关联 Document 的旧数据回退到 item.created_at。
+    async fn find_observations_by_event_range(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> RepoResult<Vec<Item>>;
+
     /// 全文搜索（分页）
     async fn search_text(&self, query: &str, offset: usize, limit: usize) -> RepoResult<Vec<Item>>;
 

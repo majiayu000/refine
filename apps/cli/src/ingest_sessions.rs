@@ -3,6 +3,7 @@
 //! 支持 3 路并发 + 断点续传 + API 限流重试
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use refine_core::error::InfraError;
 use refine_core::infra::{llm_with_retry_policy, LlmClient, LlmRetryPolicy};
 use refine_core::knowledge::{Document, DocumentRepository, ItemRepository};
@@ -41,6 +42,7 @@ struct PendingSession {
     url: String,
     source: SessionSource,
     project: Option<String>,
+    captured_at: DateTime<Utc>,
     content: String,
     needs_chunk: bool,
     chunks: Vec<String>,
@@ -53,6 +55,13 @@ fn project_for_ingest(
     discovered_project
         .or(session_project)
         .map(ToOwned::to_owned)
+}
+
+fn session_captured_at(
+    session_started_at: Option<DateTime<Utc>>,
+    file_modified_at: SystemTime,
+) -> DateTime<Utc> {
+    session_started_at.unwrap_or_else(|| DateTime::<Utc>::from(file_modified_at))
 }
 
 fn incremental_cursor_path(home: &Path, source: Option<&SessionSource>, db_path: &Path) -> PathBuf {
@@ -181,6 +190,7 @@ pub async fn handle_ingest_sessions(
         }
 
         let project = project_for_ingest(ds.project.as_deref(), session.meta.project.as_deref());
+        let captured_at = session_captured_at(session.meta.started_at, ds.modified_at);
 
         let (content, chunks) = if needs_chunking(&session) {
             let cs = chunk_session(&session);
@@ -196,6 +206,7 @@ pub async fn handle_ingest_sessions(
             url,
             source: ds.source.clone(),
             project,
+            captured_at,
             content,
             needs_chunk: !chunks.is_empty(),
             chunks,
@@ -325,6 +336,7 @@ async fn process_single_session(
     let mut doc = Document::new(ps.source.as_str(), &content);
     doc.set_title(&facet_response.session_summary);
     doc.set_url(&ps.url);
+    doc.set_captured_at(ps.captured_at);
     doc_store.save(&doc).await.context("保存 Document 失败")?;
 
     let items = facets_to_items(&facet_response, doc.id(), ps.project.as_deref());
@@ -397,6 +409,7 @@ async fn extract_and_parse_facets_with_retry(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use chrono::TimeZone;
     use refine_core::error::InfraResult;
     use refine_core::infra::SqliteStore;
     use refine_core::knowledge::{DocumentRepository, ItemRepository};
@@ -425,6 +438,16 @@ mod tests {
             Some("codex-cwd")
         );
         assert_eq!(project_for_ingest(None, None), None);
+    }
+
+    #[test]
+    fn session_captured_at_prefers_session_started_at_then_file_mtime() {
+        let started_at = Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap();
+        let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(42);
+        assert_eq!(session_captured_at(Some(started_at), mtime), started_at);
+
+        let fallback = session_captured_at(None, mtime);
+        assert_eq!(fallback, DateTime::<Utc>::from(mtime));
     }
 
     #[test]
@@ -552,6 +575,7 @@ mod tests {
             url: "file:///tmp/session.jsonl".to_string(),
             source: SessionSource::Codex,
             project: Some("refine".to_string()),
+            captured_at: Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap(),
             content: "user: fix the ingest bug".to_string(),
             needs_chunk: false,
             chunks: Vec::new(),
@@ -568,6 +592,7 @@ mod tests {
             .expect("documents should load");
         assert_eq!(docs.len(), 1);
         let saved_doc = &docs[0];
+        assert_eq!(saved_doc.captured_at(), pending.captured_at);
 
         let linked_items = store
             .find_by_document_id(saved_doc.id())
