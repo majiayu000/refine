@@ -75,6 +75,11 @@ pub(super) enum SqliteCommand {
         end: DateTime<Utc>,
         resp: oneshot::Sender<InfraResult<Vec<Item>>>,
     },
+    FindObservationsByEventRange {
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        resp: oneshot::Sender<InfraResult<Vec<Item>>>,
+    },
     // Document 操作
     DocFindByUrl {
         url: String,
@@ -225,6 +230,9 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
         }
         SqliteCommand::FindByDateRange { start, end, resp } => {
             let _ = resp.send(ops::find_by_date_range(conn, start, end));
+        }
+        SqliteCommand::FindObservationsByEventRange { start, end, resp } => {
+            let _ = resp.send(ops::find_observations_by_event_range(conn, start, end));
         }
         SqliteCommand::DocFindByUrl { url, resp } => {
             let _ = resp.send(doc_ops::find_by_url(conn, &url));
