@@ -46,6 +46,15 @@ struct PendingSession {
     chunks: Vec<String>,
 }
 
+fn project_for_ingest(
+    discovered_project: Option<&str>,
+    session_project: Option<&str>,
+) -> Option<String> {
+    discovered_project
+        .or(session_project)
+        .map(ToOwned::to_owned)
+}
+
 fn incremental_cursor_path(home: &Path, source: Option<&SessionSource>, db_path: &Path) -> PathBuf {
     let source_key = match source {
         Some(SessionSource::ClaudeCode) => "claude-code",
@@ -171,6 +180,8 @@ pub async fn handle_ingest_sessions(
             continue;
         }
 
+        let project = project_for_ingest(ds.project.as_deref(), session.meta.project.as_deref());
+
         let (content, chunks) = if needs_chunking(&session) {
             let cs = chunk_session(&session);
             let chunk_texts: Vec<String> = cs.iter().map(|c| c.content.clone()).collect();
@@ -184,7 +195,7 @@ pub async fn handle_ingest_sessions(
             total,
             url,
             source: ds.source.clone(),
-            project: ds.project.clone(),
+            project,
             content,
             needs_chunk: !chunks.is_empty(),
             chunks,
@@ -401,6 +412,19 @@ mod tests {
         async fn complete(&self, _prompt: &str, _system: Option<&str>) -> InfraResult<String> {
             Ok(self.response.clone())
         }
+    }
+
+    #[test]
+    fn project_for_ingest_prefers_discovered_project_then_session_metadata() {
+        assert_eq!(
+            project_for_ingest(Some("claude-project"), Some("codex-cwd")).as_deref(),
+            Some("claude-project")
+        );
+        assert_eq!(
+            project_for_ingest(None, Some("codex-cwd")).as_deref(),
+            Some("codex-cwd")
+        );
+        assert_eq!(project_for_ingest(None, None), None);
     }
 
     #[test]
