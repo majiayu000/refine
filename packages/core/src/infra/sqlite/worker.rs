@@ -89,6 +89,11 @@ pub(super) enum SqliteCommand {
         doc: Document,
         resp: oneshot::Sender<InfraResult<()>>,
     },
+    DocSaveWithReplacedItems {
+        doc: Document,
+        items: Vec<Item>,
+        resp: oneshot::Sender<InfraResult<()>>,
+    },
     DocFindById {
         id: String,
         resp: oneshot::Sender<InfraResult<Option<Document>>>,
@@ -240,6 +245,14 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
         SqliteCommand::DocSave { doc, resp } => {
             let _ = resp.send(doc_ops::save(conn, &doc));
         }
+        SqliteCommand::DocSaveWithReplacedItems { doc, items, resp } => {
+            if resp
+                .send(save_document_with_replaced_items(conn, &doc, &items))
+                .is_err()
+            {
+                tracing::debug!("sqlite receiver dropped for DocSaveWithReplacedItems");
+            }
+        }
         SqliteCommand::DocFindById { id, resp } => {
             let _ = resp.send(doc_ops::find_by_id(conn, &id));
         }
@@ -268,4 +281,22 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
             let _ = resp.send(doc_ops::count_text_hits(conn, &query));
         }
     }
+}
+
+fn save_document_with_replaced_items(
+    conn: &Connection,
+    doc: &Document,
+    items: &[Item],
+) -> InfraResult<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    doc_ops::save(&tx, doc)?;
+    ops::delete_by_document_id(&tx, doc.id().as_str())?;
+    for item in items {
+        ops::save(&tx, item)?;
+    }
+    tx.commit()
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    Ok(())
 }
