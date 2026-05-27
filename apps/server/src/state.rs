@@ -139,11 +139,11 @@ impl AppState {
                 .map_err(|e| format!("failed to bootstrap semantic index: {}", e))?;
             for item in &existing_items {
                 if let Err(err) = engine.index_item(item).await {
-                    tracing::warn!(
-                        "semantic index bootstrap failed for item {}: {}",
+                    return Err(format!(
+                        "failed to bootstrap semantic index for item {}: {}",
                         item.id(),
                         err
-                    );
+                    ));
                 }
             }
             tracing::info!(
