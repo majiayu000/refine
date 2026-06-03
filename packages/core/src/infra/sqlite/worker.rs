@@ -76,6 +76,11 @@ pub(super) enum SqliteCommand {
         end: DateTime<Utc>,
         resp: oneshot::Sender<InfraResult<Vec<Item>>>,
     },
+    FindObservationsByEventRange {
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        resp: oneshot::Sender<InfraResult<Vec<Item>>>,
+    },
     // Document 操作
     DocFindByUrl {
         url: String,
@@ -83,6 +88,11 @@ pub(super) enum SqliteCommand {
     },
     DocSave {
         doc: Document,
+        resp: oneshot::Sender<InfraResult<()>>,
+    },
+    DocSaveWithReplacedItems {
+        doc: Document,
+        items: Vec<Item>,
         resp: oneshot::Sender<InfraResult<()>>,
     },
     DocFindById {
@@ -268,11 +278,22 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
         SqliteCommand::FindByDateRange { start, end, resp } => {
             let _ = resp.send(ops::find_by_date_range(conn, start, end));
         }
+        SqliteCommand::FindObservationsByEventRange { start, end, resp } => {
+            let _ = resp.send(ops::find_observations_by_event_range(conn, start, end));
+        }
         SqliteCommand::DocFindByUrl { url, resp } => {
             let _ = resp.send(doc_ops::find_by_url(conn, &url));
         }
         SqliteCommand::DocSave { doc, resp } => {
             let _ = resp.send(doc_ops::save(conn, &doc));
+        }
+        SqliteCommand::DocSaveWithReplacedItems { doc, items, resp } => {
+            if resp
+                .send(save_document_with_replaced_items(conn, &doc, &items))
+                .is_err()
+            {
+                tracing::debug!("sqlite receiver dropped for DocSaveWithReplacedItems");
+            }
         }
         SqliteCommand::DocFindById { id, resp } => {
             let _ = resp.send(doc_ops::find_by_id(conn, &id));
@@ -344,4 +365,22 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
             let _ = resp.send(conversation_ops::event_counts_since(conn, since.as_deref()));
         }
     }
+}
+
+fn save_document_with_replaced_items(
+    conn: &Connection,
+    doc: &Document,
+    items: &[Item],
+) -> InfraResult<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    doc_ops::save(&tx, doc)?;
+    ops::delete_by_document_id(&tx, doc.id().as_str())?;
+    for item in items {
+        ops::save(&tx, item)?;
+    }
+    tx.commit()
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    Ok(())
 }

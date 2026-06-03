@@ -182,6 +182,10 @@ pub(super) fn delete(conn: &Connection, id: &str) -> InfraResult<bool> {
         .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(rows > 0)
 }
+pub(super) fn delete_by_document_id(conn: &Connection, document_id: &str) -> InfraResult<usize> {
+    conn.execute("DELETE FROM items WHERE document_id = ?1", [document_id])
+        .map_err(|e| InfraError::Database(e.to_string()))
+}
 pub(super) fn exists(conn: &Connection, id: &str) -> InfraResult<bool> {
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM items WHERE id = ?1", [id], |row| {
@@ -264,6 +268,38 @@ pub(super) fn find_by_date_range(
         .query_map([start.to_rfc3339(), end.to_rfc3339()], |row| {
             row_to_item(row).map_err(to_row_err)
         })
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+
+    rows.map(|r| r.map_err(|e| InfraError::Database(e.to_string())))
+        .collect()
+}
+
+pub(super) fn find_observations_by_event_range(
+    conn: &Connection,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> InfraResult<Vec<Item>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT i.id, i.item_type, i.title, i.summary, i.content, i.tags, i.source, i.created_at, i.updated_at, i.document_id, i.excerpt
+             FROM items i
+             LEFT JOIN documents d ON i.document_id = d.id
+             WHERE i.item_type = ?1
+               AND COALESCE(d.captured_at, i.created_at) >= ?2
+               AND COALESCE(d.captured_at, i.created_at) < ?3
+             ORDER BY COALESCE(d.captured_at, i.created_at) DESC, i.created_at DESC",
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+
+    let rows = stmt
+        .query_map(
+            params![
+                ItemType::Observation.as_str(),
+                start.to_rfc3339(),
+                end.to_rfc3339()
+            ],
+            |row| row_to_item(row).map_err(to_row_err),
+        )
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     rows.map(|r| r.map_err(|e| InfraError::Database(e.to_string())))
@@ -371,6 +407,78 @@ mod tests {
         let result = find_by_date_range(&conn, start, end).unwrap();
 
         assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn find_observations_by_event_range_uses_document_captured_at_before_item_created_at() {
+        use super::{find_observations_by_event_range, save};
+        use crate::knowledge::{DocumentId, Item, ItemId, ItemType, RestoreParams};
+        use chrono::{Duration, TimeZone, Utc};
+
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        init_schema(&conn).expect("init schema");
+
+        let base = Utc.with_ymd_and_hms(2026, 5, 25, 0, 0, 0).unwrap();
+        let historical_event = base - Duration::days(10);
+        let current_ingest = base - Duration::days(1);
+        let doc_id = DocumentId::from("doc-historical");
+
+        conn.execute(
+            "INSERT INTO documents (id, title, raw_content, source, url, captured_at, created_at, updated_at)
+             VALUES (?1, 'Historical session', 'raw', 'codex-session', 'file:///session.jsonl', ?2, ?3, ?3)",
+            (
+                doc_id.as_str(),
+                historical_event.to_rfc3339(),
+                current_ingest.to_rfc3339(),
+            ),
+        )
+        .expect("insert document");
+
+        let linked_observation = Item::restore(RestoreParams {
+            id: ItemId::from("linked-observation"),
+            item_type: ItemType::Observation,
+            title: "linked".to_string(),
+            summary: String::new(),
+            content: String::new(),
+            tags: vec![],
+            source: None,
+            document_id: Some(doc_id),
+            excerpt: None,
+            created_at: current_ingest,
+            updated_at: current_ingest,
+        })
+        .unwrap();
+        save(&conn, &linked_observation).unwrap();
+
+        let fallback_observation = Item::restore(RestoreParams {
+            id: ItemId::from("fallback-observation"),
+            item_type: ItemType::Observation,
+            title: "fallback".to_string(),
+            summary: String::new(),
+            content: String::new(),
+            tags: vec![],
+            source: None,
+            document_id: None,
+            excerpt: None,
+            created_at: current_ingest,
+            updated_at: current_ingest,
+        })
+        .unwrap();
+        save(&conn, &fallback_observation).unwrap();
+
+        let this_week = find_observations_by_event_range(&conn, base - Duration::days(7), base)
+            .expect("query current week");
+        assert_eq!(this_week.len(), 1);
+        assert_eq!(this_week[0].id().as_str(), "fallback-observation");
+
+        let last_week = find_observations_by_event_range(
+            &conn,
+            base - Duration::days(14),
+            base - Duration::days(7),
+        )
+        .expect("query previous week");
+        assert_eq!(last_week.len(), 1);
+        assert_eq!(last_week[0].id().as_str(), "linked-observation");
     }
 
     #[test]

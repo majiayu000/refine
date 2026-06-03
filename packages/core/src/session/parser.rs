@@ -130,17 +130,33 @@ fn parse_iso8601_utc(s: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
-/// 同时覆盖两种格式：Claude Code 与 Codex 行均在顶层带 `timestamp` 字段。
+fn project_name_from_cwd(cwd: &str) -> Option<String> {
+    let trimmed = cwd.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Path::new(trimmed)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// 同时覆盖多种格式：Claude Code 行通常在顶层带 `timestamp`，
+/// Codex 新格式也可能把时间放在 `payload.timestamp`。
 /// 取首个能解析成 RFC3339 的时间戳作为 `started_at`，与 JSONL 写入顺序对齐。
 fn update_meta_started_at(value: &serde_json::Value, meta: &mut SessionMeta) {
     if meta.started_at.is_some() {
         return;
     }
-    let Some(ts_str) = value.get("timestamp").and_then(|v| v.as_str()) else {
-        return;
-    };
-    if let Some(ts) = parse_iso8601_utc(ts_str) {
-        meta.started_at = Some(ts);
+    for pointer in ["/timestamp", "/payload/timestamp"] {
+        let Some(ts_str) = value.pointer(pointer).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if let Some(ts) = parse_iso8601_utc(ts_str) {
+            meta.started_at = Some(ts);
+            return;
+        }
     }
 }
 
@@ -218,10 +234,17 @@ fn extract_claude_code_assistant_content(value: &serde_json::Value) -> Option<St
 
 /// 从 content 数组中提取所有 type=text 的 text 字段
 fn extract_text_from_content_array(arr: &[serde_json::Value]) -> String {
+    extract_text_from_content_array_by_types(arr, &["text"])
+}
+
+fn extract_text_from_content_array_by_types(
+    arr: &[serde_json::Value],
+    allowed_types: &[&str],
+) -> String {
     let mut parts = Vec::new();
     for item in arr {
         let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if item_type == "text" {
+        if allowed_types.contains(&item_type) {
             if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
                 parts.push(text);
             }
@@ -231,9 +254,13 @@ fn extract_text_from_content_array(arr: &[serde_json::Value]) -> String {
 }
 
 /// Codex 格式:
-/// - `type: "response_item"` → `payload.content[].text`
+/// - legacy `type: "user_message"` → 顶层 `content`
+/// - legacy `type: "response_item"` → `payload.content[].text`
+/// - current `type: "response_item"` + `payload.type: "message"`:
+///   `payload.role` 区分 user / assistant，`input_text` / `output_text` 存正文
 /// - `type: "session_meta"` → 元数据
-/// - `type: "turn_context"` / `type: "event_msg"` → 跳过
+/// - `type: "turn_context"` → 元数据
+/// - `type: "event_msg"` → 跳过
 fn parse_codex_line(
     value: &serde_json::Value,
     messages: &mut Vec<SessionMessage>,
@@ -243,8 +270,27 @@ fn parse_codex_line(
 
     match msg_type {
         "session_meta" => {
-            if let Some(model) = value.get("model").and_then(|v| v.as_str()) {
+            if let Some(model) = value
+                .pointer("/payload/model")
+                .or_else(|| value.get("model"))
+                .and_then(|v| v.as_str())
+            {
                 meta.model = Some(model.to_string());
+            }
+            if meta.project.is_none() {
+                if let Some(cwd) = value.pointer("/payload/cwd").and_then(|v| v.as_str()) {
+                    meta.project = project_name_from_cwd(cwd);
+                }
+            }
+        }
+        "turn_context" => {
+            if let Some(model) = value.pointer("/payload/model").and_then(|v| v.as_str()) {
+                meta.model = Some(model.to_string());
+            }
+            if meta.project.is_none() {
+                if let Some(cwd) = value.pointer("/payload/cwd").and_then(|v| v.as_str()) {
+                    meta.project = project_name_from_cwd(cwd);
+                }
             }
         }
         "user_message" => {
@@ -258,18 +304,50 @@ fn parse_codex_line(
             }
         }
         "response_item" => {
-            if let Some(arr) = value.pointer("/payload/content").and_then(|v| v.as_array()) {
-                let text = extract_text_from_content_array(arr);
-                if !text.is_empty() {
-                    messages.push(SessionMessage {
-                        role: MessageRole::Assistant,
-                        content: text,
-                    });
-                }
+            if let Some(message) = parse_codex_response_item_message(value) {
+                messages.push(message);
             }
         }
         _ => {}
     }
+}
+
+fn parse_codex_response_item_message(value: &serde_json::Value) -> Option<SessionMessage> {
+    let arr = value
+        .pointer("/payload/content")
+        .and_then(|v| v.as_array())?;
+    let payload_type = value.pointer("/payload/type").and_then(|v| v.as_str());
+
+    if payload_type == Some("message") {
+        let role = value.pointer("/payload/role").and_then(|v| v.as_str())?;
+        let (role, allowed_types): (MessageRole, &[&str]) = match role {
+            "user" => (MessageRole::User, &["input_text", "text"]),
+            "assistant" => (MessageRole::Assistant, &["output_text", "text"]),
+            // developer/system instructions are context, not user intent for Mirror metrics.
+            _ => return None,
+        };
+        let text = extract_text_from_content_array_by_types(arr, allowed_types);
+        if text.is_empty() {
+            return None;
+        }
+        return Some(SessionMessage {
+            role,
+            content: text,
+        });
+    }
+
+    // Legacy Codex response items had no payload.type/role and used content[].type=text.
+    if payload_type.is_none() {
+        let text = extract_text_from_content_array(arr);
+        if !text.is_empty() {
+            return Some(SessionMessage {
+                role: MessageRole::Assistant,
+                content: text,
+            });
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -322,6 +400,58 @@ mod tests {
         assert_eq!(session.messages[1].role, MessageRole::Assistant);
         assert_eq!(session.messages[1].content, "I found the issue.");
         assert_eq!(session.meta.model.as_deref(), Some("o3-mini"));
+    }
+
+    #[test]
+    fn parse_codex_current_response_item_schema() {
+        let jsonl = r#"{"type":"session_meta","payload":{"timestamp":"2026-05-25T08:00:00Z","model_provider":"openai"}}
+{"type":"turn_context","payload":{"cwd":"/Users/lifcc/Desktop/code/AI/tools/refine","model":"gpt-5.3-codex"}}
+{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"developer instruction"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix Codex ingest"}]}}
+{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"internal"}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Parsed the current schema."}]}}
+"#;
+        let session = match parse_session_content(
+            jsonl,
+            &PathBuf::from("/tmp/codex-current.jsonl"),
+            SessionSource::Codex,
+        ) {
+            Ok(session) => session,
+            Err(err) => panic!("current Codex schema should parse: {err}"),
+        };
+
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].role, MessageRole::User);
+        assert_eq!(session.messages[0].content, "Fix Codex ingest");
+        assert_eq!(session.messages[1].role, MessageRole::Assistant);
+        assert_eq!(session.messages[1].content, "Parsed the current schema.");
+        assert_eq!(session.meta.model.as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(session.meta.project.as_deref(), Some("refine"));
+        assert_eq!(
+            session.meta.started_at.as_ref().map(|ts| ts.to_rfc3339()),
+            Some("2026-05-25T08:00:00+00:00".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_codex_skips_non_transcript_response_items() {
+        let jsonl = r#"{"type":"response_item","payload":{"type":"message","role":"system","content":[{"type":"input_text","text":"system"}]}}
+{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"developer"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_image","image_url":"file:///tmp/a.png"}]}}
+{"type":"response_item","payload":{"type":"function_call_output","output":"tool output"}}
+"#;
+        let session = match parse_session_content(
+            jsonl,
+            &PathBuf::from("/tmp/codex-skip.jsonl"),
+            SessionSource::Codex,
+        ) {
+            Ok(session) => session,
+            Err(err) => panic!("non-transcript Codex items should be skipped, not fail: {err}"),
+        };
+
+        assert_eq!(session.messages.len(), 0);
+        assert_eq!(session.user_message_count(), 0);
     }
 
     #[test]

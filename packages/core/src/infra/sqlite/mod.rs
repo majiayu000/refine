@@ -164,6 +164,16 @@ impl ItemRepository for SqliteStore {
             .map_err(Into::into)
     }
 
+    async fn find_observations_by_event_range(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> RepoResult<Vec<Item>> {
+        self.request(|resp| SqliteCommand::FindObservationsByEventRange { start, end, resp })
+            .await
+            .map_err(Into::into)
+    }
+
     async fn find_by_document_id(&self, doc_id: &DocumentId) -> RepoResult<Vec<Item>> {
         let id = doc_id.as_str().to_string();
         self.request(|resp| SqliteCommand::FindByDocumentId {
@@ -210,6 +220,14 @@ impl DocumentRepository for SqliteStore {
     async fn save(&self, doc: &Document) -> RepoResult<()> {
         let doc = doc.clone();
         self.request(|resp| SqliteCommand::DocSave { doc, resp })
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn save_with_replaced_items(&self, doc: &Document, items: &[Item]) -> RepoResult<()> {
+        let doc = doc.clone();
+        let items = items.to_vec();
+        self.request(|resp| SqliteCommand::DocSaveWithReplacedItems { doc, items, resp })
             .await
             .map_err(Into::into)
     }
