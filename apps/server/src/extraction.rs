@@ -1,4 +1,4 @@
-use refine_core::knowledge::{Document, DocumentId, DocumentRepository, Source};
+use refine_core::knowledge::{Document, DocumentId, DocumentRepository, Item, ItemId, Source};
 use refine_core::refinement::{
     extract_items_with_strict_defaults, ExtractionPolicy, ItemExtractionInput,
 };
@@ -61,23 +61,81 @@ async fn run_extraction(
         .await
         .map_err(|e| e.to_string())?;
 
-    let mut item_ids = Vec::with_capacity(items.len());
-    for item in &items {
-        state.store.save(item).await.map_err(|e| e.to_string())?;
-        if let Err(err) = state.engine.index_item(item).await {
-            tracing::warn!(
-                "failed to index item {} for semantic search: {}",
-                item.id(),
-                err
-            );
-        }
-        item_ids.push(item.id().to_string());
-    }
+    let item_ids = save_and_index_items(&state, &items).await?;
 
     set_conversation_processed(&state, conversation_id, item_ids).await;
     set_job_succeeded(&state, job_id).await;
 
     Ok(())
+}
+
+async fn save_and_index_items(
+    state: &Arc<AppState>,
+    items: &[Item],
+) -> Result<Vec<String>, String> {
+    let mut saved_ids = Vec::with_capacity(items.len());
+    let mut indexed_ids = Vec::with_capacity(items.len());
+
+    for item in items {
+        if let Err(err) = state.store.save(item).await {
+            let cleanup_error = cleanup_partial_items(state, &saved_ids, &indexed_ids).await;
+            return Err(with_cleanup_error(
+                format!("failed to save item {}: {}", item.id(), err),
+                cleanup_error,
+            ));
+        }
+        saved_ids.push(item.id().clone());
+
+        if let Err(err) = state.engine.index_item(item).await {
+            let cleanup_error = cleanup_partial_items(state, &saved_ids, &indexed_ids).await;
+            return Err(with_cleanup_error(
+                format!(
+                    "failed to index item {} for semantic search: {}",
+                    item.id(),
+                    err
+                ),
+                cleanup_error,
+            ));
+        }
+        indexed_ids.push(item.id().clone());
+    }
+
+    Ok(saved_ids.iter().map(ToString::to_string).collect())
+}
+
+async fn cleanup_partial_items(
+    state: &Arc<AppState>,
+    saved_ids: &[ItemId],
+    indexed_ids: &[ItemId],
+) -> Option<String> {
+    let mut errors = Vec::new();
+
+    for item_id in indexed_ids {
+        if let Err(err) = state.engine.remove_from_index(item_id.as_str()).await {
+            errors.push(format!("remove index {}: {}", item_id, err));
+        }
+    }
+
+    for item_id in saved_ids {
+        match state.store.delete(item_id).await {
+            Ok(true) => {}
+            Ok(false) => errors.push(format!("delete item {}: not found", item_id)),
+            Err(err) => errors.push(format!("delete item {}: {}", item_id, err)),
+        }
+    }
+
+    if errors.is_empty() {
+        None
+    } else {
+        Some(errors.join("; "))
+    }
+}
+
+fn with_cleanup_error(error: String, cleanup_error: Option<String>) -> String {
+    match cleanup_error {
+        Some(cleanup_error) => format!("{}; cleanup failed: {}", error, cleanup_error),
+        None => error,
+    }
 }
 
 fn mode_to_policy(mode: ExtractionMode) -> ExtractionPolicy {
@@ -249,5 +307,187 @@ async fn update_conversation<F>(
     mutate(&mut conversation);
     if let Err(err) = state.conversation_repo.upsert_conversation(&conversation) {
         tracing::warn!("persist {} conversation failed: {}", phase, err);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spawn_extraction;
+    use crate::models::{
+        now_iso, ConversationRecord, ConversationStatus, ExtractionJobRecord, ExtractionMode,
+        JobStatus,
+    };
+    use crate::persistence::ServerPersistence;
+    use crate::state::AppState;
+    use async_trait::async_trait;
+    use refine_core::error::{InfraError, InfraResult};
+    use refine_core::infra::{LlmClient, SqliteStore};
+    use refine_core::knowledge::{DocumentRepository, ItemRepository};
+    use refine_core::search::{SearchEngine, VectorSearch};
+    use serde_json::json;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::time::{sleep, Duration, Instant};
+    use uuid::Uuid;
+
+    struct StaticLlmClient;
+
+    #[async_trait]
+    impl LlmClient for StaticLlmClient {
+        async fn complete(&self, _prompt: &str, _system: Option<&str>) -> InfraResult<String> {
+            Ok(
+                r#"{"items":[{"type":"knowledge","title":"Indexed","summary":"S","content":"C","tags":[]}]}"#
+                    .to_string(),
+            )
+        }
+    }
+
+    struct FailingVectorSearch;
+
+    #[async_trait]
+    impl VectorSearch for FailingVectorSearch {
+        async fn search(&self, _query: &str, _limit: usize) -> InfraResult<Vec<(String, f32)>> {
+            Ok(Vec::new())
+        }
+
+        async fn index(&self, _id: &str, _text: &str) -> InfraResult<()> {
+            Err(InfraError::Database("vector index unavailable".to_string()))
+        }
+
+        async fn remove(&self, _id: &str) -> InfraResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn semantic_index_failure_marks_extraction_failed() {
+        let (_tmp, state, persistence, conversation_id, job_id) = build_state_with_failing_index()
+            .await
+            .expect("build test state");
+
+        spawn_extraction(
+            state.clone(),
+            conversation_id.clone(),
+            job_id.clone(),
+            ExtractionMode::Auto,
+        );
+
+        let job = wait_for_failed_job(&persistence, &job_id).await;
+        assert_eq!(job.status, JobStatus::Failed);
+        assert!(job
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("failed to index item"));
+
+        let conversation = persistence
+            .find_conversation_by_id(&conversation_id)
+            .expect("load conversation")
+            .expect("conversation exists");
+        assert_eq!(conversation.status, ConversationStatus::Failed);
+        assert!(conversation.item_ids.is_empty());
+        assert!(conversation
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("failed to index item"));
+
+        let saved_items = match state.store.find_all().await {
+            Ok(items) => items,
+            Err(err) => panic!("load saved items: {}", err),
+        };
+        assert!(
+            saved_items.is_empty(),
+            "failed extraction left orphan items: {:?}",
+            saved_items
+        );
+    }
+
+    async fn build_state_with_failing_index() -> Result<
+        (
+            TempDir,
+            Arc<AppState>,
+            Arc<ServerPersistence>,
+            String,
+            String,
+        ),
+        String,
+    > {
+        let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let db_path = tmp.path().join("refine-server.sqlite");
+        let persistence = Arc::new(ServerPersistence::new(db_path.clone())?);
+        let sqlite_store = Arc::new(SqliteStore::open(&db_path).map_err(|e| e.to_string())?);
+        let store: Arc<dyn ItemRepository> = sqlite_store.clone();
+        let doc_store: Arc<dyn DocumentRepository> = sqlite_store;
+        let engine = Arc::new(
+            SearchEngine::new(store.clone()).with_vector_search(Arc::new(FailingVectorSearch)),
+        );
+
+        let conversation_id = Uuid::new_v4().to_string();
+        let job_id = Uuid::new_v4().to_string();
+        let now = now_iso();
+        persistence.upsert_conversation(&ConversationRecord {
+            id: conversation_id.clone(),
+            user_id: "test-user".to_string(),
+            source: "test".to_string(),
+            url: format!("https://example.com/{}", conversation_id),
+            title: Some("test conversation".to_string()),
+            raw_content: "Human: hello\nAssistant: world".to_string(),
+            metadata: json!({}),
+            captured_at: now.clone(),
+            created_at: now.clone(),
+            status: ConversationStatus::Queued,
+            idempotency_key: Uuid::new_v4().to_string(),
+            item_ids: Vec::new(),
+            last_error: None,
+        })?;
+        persistence.upsert_job(&ExtractionJobRecord {
+            id: job_id.clone(),
+            conversation_id: conversation_id.clone(),
+            mode: ExtractionMode::Auto,
+            status: JobStatus::Pending,
+            created_at: now.clone(),
+            updated_at: now,
+            error: None,
+        })?;
+
+        let state = Arc::new(AppState {
+            store,
+            doc_store,
+            engine,
+            semantic_search_enabled: true,
+            free_quota_items: 0,
+            premium_users: Default::default(),
+            llm_client: Some(Arc::new(StaticLlmClient)),
+            api_token: None,
+            dev_anon: true,
+            conversation_repo: persistence.clone(),
+            job_repo: persistence.clone(),
+            event_repo: persistence.clone(),
+        });
+
+        Ok((tmp, state, persistence, conversation_id, job_id))
+    }
+
+    async fn wait_for_failed_job(
+        persistence: &ServerPersistence,
+        job_id: &str,
+    ) -> ExtractionJobRecord {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let job = persistence
+                .find_job_by_id(job_id)
+                .expect("load job")
+                .expect("job exists");
+            if job.status == JobStatus::Failed {
+                return job;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "job did not fail before timeout; latest status: {:?}",
+                job.status
+            );
+            sleep(Duration::from_millis(20)).await;
+        }
     }
 }
