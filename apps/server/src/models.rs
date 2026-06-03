@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub use refine_core::conversation::{
-    now_iso, normalize_timestamp, ConversationRecord, ConversationStatus, EventRecord,
+    normalize_timestamp, now_iso, ConversationRecord, ConversationStatus, EventRecord,
     ExtractionJobRecord, ExtractionMode, JobStatus,
 };
 
@@ -124,7 +124,6 @@ impl From<&ConversationRecord> for ConversationDto {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

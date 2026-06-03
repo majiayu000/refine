@@ -348,9 +348,8 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
             let _ = resp.send(conversation_ops::upsert_conversation(conn, &record));
         }
         SqliteCommand::ConversationInsertOrFetchByIdempotency { record, resp } => {
-            let _ = resp.send(
-                conversation_ops::insert_or_fetch_conversation_by_idempotency(conn, &record),
-            );
+            let _ = resp
+                .send(conversation_ops::insert_or_fetch_conversation_by_idempotency(conn, &record));
         }
         SqliteCommand::JobFindById { id, resp } => {
             let _ = resp.send(conversation_ops::find_job_by_id(conn, &id));

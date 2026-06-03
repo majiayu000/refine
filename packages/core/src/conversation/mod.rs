@@ -12,7 +12,7 @@ mod record;
 mod repository;
 
 pub use record::{
-    now_iso, normalize_timestamp, ConversationRecord, ConversationStatus, EventRecord,
+    normalize_timestamp, now_iso, ConversationRecord, ConversationStatus, EventRecord,
     ExtractionJobRecord, ExtractionMode, JobStatus,
 };
 pub use repository::{ConversationRepository, EventRepository, JobRepository};

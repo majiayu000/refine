@@ -324,9 +324,9 @@ mod tests {
         now_iso, ConversationRecord, ConversationStatus, ExtractionJobRecord, ExtractionMode,
         JobStatus,
     };
-    use crate::persistence::ServerPersistence;
     use crate::state::AppState;
     use async_trait::async_trait;
+    use refine_core::conversation::{ConversationRepository, EventRepository, JobRepository};
     use refine_core::error::{InfraError, InfraResult};
     use refine_core::infra::{LlmClient, SqliteStore};
     use refine_core::knowledge::{DocumentRepository, ItemRepository};
@@ -389,6 +389,7 @@ mod tests {
 
         let conversation = persistence
             .find_conversation_by_id(&conversation_id)
+            .await
             .expect("load conversation")
             .expect("conversation exists");
         assert_eq!(conversation.status, ConversationStatus::Failed);
@@ -410,22 +411,16 @@ mod tests {
         );
     }
 
-    async fn build_state_with_failing_index() -> Result<
-        (
-            TempDir,
-            Arc<AppState>,
-            Arc<ServerPersistence>,
-            String,
-            String,
-        ),
-        String,
-    > {
+    async fn build_state_with_failing_index(
+    ) -> Result<(TempDir, Arc<AppState>, Arc<SqliteStore>, String, String), String> {
         let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
         let db_path = tmp.path().join("refine-server.sqlite");
-        let persistence = Arc::new(ServerPersistence::new(db_path.clone())?);
         let sqlite_store = Arc::new(SqliteStore::open(&db_path).map_err(|e| e.to_string())?);
         let store: Arc<dyn ItemRepository> = sqlite_store.clone();
-        let doc_store: Arc<dyn DocumentRepository> = sqlite_store;
+        let doc_store: Arc<dyn DocumentRepository> = sqlite_store.clone();
+        let conversation_repo: Arc<dyn ConversationRepository> = sqlite_store.clone();
+        let job_repo: Arc<dyn JobRepository> = sqlite_store.clone();
+        let event_repo: Arc<dyn EventRepository> = sqlite_store.clone();
         let engine = Arc::new(
             SearchEngine::new(store.clone()).with_vector_search(Arc::new(FailingVectorSearch)),
         );
@@ -433,30 +428,36 @@ mod tests {
         let conversation_id = Uuid::new_v4().to_string();
         let job_id = Uuid::new_v4().to_string();
         let now = now_iso();
-        persistence.upsert_conversation(&ConversationRecord {
-            id: conversation_id.clone(),
-            user_id: "test-user".to_string(),
-            source: "test".to_string(),
-            url: format!("https://example.com/{}", conversation_id),
-            title: Some("test conversation".to_string()),
-            raw_content: "Human: hello\nAssistant: world".to_string(),
-            metadata: json!({}),
-            captured_at: now.clone(),
-            created_at: now.clone(),
-            status: ConversationStatus::Queued,
-            idempotency_key: Uuid::new_v4().to_string(),
-            item_ids: Vec::new(),
-            last_error: None,
-        })?;
-        persistence.upsert_job(&ExtractionJobRecord {
-            id: job_id.clone(),
-            conversation_id: conversation_id.clone(),
-            mode: ExtractionMode::Auto,
-            status: JobStatus::Pending,
-            created_at: now.clone(),
-            updated_at: now,
-            error: None,
-        })?;
+        sqlite_store
+            .upsert_conversation(&ConversationRecord {
+                id: conversation_id.clone(),
+                user_id: "test-user".to_string(),
+                source: "test".to_string(),
+                url: format!("https://example.com/{}", conversation_id),
+                title: Some("test conversation".to_string()),
+                raw_content: "Human: hello\nAssistant: world".to_string(),
+                metadata: json!({}),
+                captured_at: now.clone(),
+                created_at: now.clone(),
+                status: ConversationStatus::Queued,
+                idempotency_key: Uuid::new_v4().to_string(),
+                item_ids: Vec::new(),
+                last_error: None,
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        sqlite_store
+            .upsert_job(&ExtractionJobRecord {
+                id: job_id.clone(),
+                conversation_id: conversation_id.clone(),
+                mode: ExtractionMode::Auto,
+                status: JobStatus::Pending,
+                created_at: now.clone(),
+                updated_at: now,
+                error: None,
+            })
+            .await
+            .map_err(|e| e.to_string())?;
 
         let state = Arc::new(AppState {
             store,
@@ -468,22 +469,20 @@ mod tests {
             llm_client: Some(Arc::new(StaticLlmClient)),
             api_token: None,
             dev_anon: true,
-            conversation_repo: persistence.clone(),
-            job_repo: persistence.clone(),
-            event_repo: persistence.clone(),
+            conversation_repo,
+            job_repo,
+            event_repo,
         });
 
-        Ok((tmp, state, persistence, conversation_id, job_id))
+        Ok((tmp, state, sqlite_store, conversation_id, job_id))
     }
 
-    async fn wait_for_failed_job(
-        persistence: &ServerPersistence,
-        job_id: &str,
-    ) -> ExtractionJobRecord {
+    async fn wait_for_failed_job(persistence: &SqliteStore, job_id: &str) -> ExtractionJobRecord {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let job = persistence
                 .find_job_by_id(job_id)
+                .await
                 .expect("load job")
                 .expect("job exists");
             if job.status == JobStatus::Failed {
