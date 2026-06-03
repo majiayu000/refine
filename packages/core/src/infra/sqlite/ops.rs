@@ -182,6 +182,10 @@ pub(super) fn delete(conn: &Connection, id: &str) -> InfraResult<bool> {
         .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(rows > 0)
 }
+pub(super) fn delete_by_document_id(conn: &Connection, document_id: &str) -> InfraResult<usize> {
+    conn.execute("DELETE FROM items WHERE document_id = ?1", [document_id])
+        .map_err(|e| InfraError::Database(e.to_string()))
+}
 pub(super) fn exists(conn: &Connection, id: &str) -> InfraResult<bool> {
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM items WHERE id = ?1", [id], |row| {

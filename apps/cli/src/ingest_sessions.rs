@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use refine_core::error::InfraError;
 use refine_core::infra::{llm_with_retry_policy, LlmClient, LlmRetryPolicy};
-use refine_core::knowledge::{Document, DocumentRepository, ItemRepository};
+use refine_core::knowledge::{Document, DocumentRepository, RestoreDocumentParams};
 use refine_core::session::{
     build_facet_prompt, chunk_session, discover_sessions, facets_to_items, needs_chunking,
     parse_facet_response, parse_session_file, FilterConfig, SessionSource, FACET_SYSTEM_PROMPT,
@@ -43,9 +43,11 @@ struct PendingSession {
     source: SessionSource,
     project: Option<String>,
     captured_at: DateTime<Utc>,
-    content: String,
+    has_embedded_timestamp: bool,
+    raw_content: String,
     needs_chunk: bool,
     chunks: Vec<String>,
+    existing_document: Option<Document>,
 }
 
 fn project_for_ingest(
@@ -62,6 +64,11 @@ fn session_captured_at(
     file_modified_at: SystemTime,
 ) -> DateTime<Utc> {
     session_started_at.unwrap_or_else(|| DateTime::<Utc>::from(file_modified_at))
+}
+
+fn session_needs_refresh(existing_doc: &Document, file_modified_at: SystemTime) -> bool {
+    let file_modified_at = DateTime::<Utc>::from(file_modified_at);
+    file_modified_at > existing_doc.updated_at()
 }
 
 fn incremental_cursor_path(home: &Path, source: Option<&SessionSource>, db_path: &Path) -> PathBuf {
@@ -113,7 +120,6 @@ fn write_last_ingest_mtime(source: Option<&SessionSource>, db_path: &Path, t: Sy
 pub async fn handle_ingest_sessions(
     options: IngestOptions,
     db_path: &Path,
-    item_store: Arc<dyn ItemRepository>,
     doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
@@ -155,14 +161,20 @@ pub async fn handle_ingest_sessions(
     let mut pending = Vec::new();
     let mut skipped_dup = 0usize;
     let mut skipped_filter = 0usize;
+    let mut stale_refresh = 0usize;
 
     // 阶段 1: 串行做去重 + 过滤 + 解析（快，不需要 LLM）
     for (idx, ds) in sessions_to_process.iter().enumerate() {
         let url = ds.path.to_string_lossy().to_string();
 
-        if doc_store.find_by_url(&url).await?.is_some() {
-            skipped_dup += 1;
-            continue;
+        let existing_document = doc_store.find_by_url(&url).await?;
+        if let Some(existing_doc) = existing_document.as_ref() {
+            if session_needs_refresh(existing_doc, ds.modified_at) {
+                stale_refresh += 1;
+            } else {
+                skipped_dup += 1;
+                continue;
+            }
         }
 
         let session = match parse_session_file(&ds.path, ds.source.clone()) {
@@ -190,14 +202,15 @@ pub async fn handle_ingest_sessions(
         }
 
         let project = project_for_ingest(ds.project.as_deref(), session.meta.project.as_deref());
+        let has_embedded_timestamp = session.meta.started_at.is_some();
         let captured_at = session_captured_at(session.meta.started_at, ds.modified_at);
 
-        let (content, chunks) = if needs_chunking(&session) {
+        let raw_content = session.to_document_content();
+        let chunks = if needs_chunking(&session) {
             let cs = chunk_session(&session);
-            let chunk_texts: Vec<String> = cs.iter().map(|c| c.content.clone()).collect();
-            (String::new(), chunk_texts)
+            cs.iter().map(|c| c.content.clone()).collect()
         } else {
-            (session.to_document_content(), Vec::new())
+            Vec::new()
         };
 
         pending.push(PendingSession {
@@ -207,27 +220,30 @@ pub async fn handle_ingest_sessions(
             source: ds.source.clone(),
             project,
             captured_at,
-            content,
+            has_embedded_timestamp,
+            raw_content,
             needs_chunk: !chunks.is_empty(),
             chunks,
+            existing_document,
         });
     }
 
     if options.dry_run {
         let dry_count = total - skipped_dup - skipped_filter;
         println!(
-            "\n[dry-run] 可处理 {}, 跳过重复 {}, 过滤 {}",
-            dry_count, skipped_dup, skipped_filter
+            "\n[dry-run] 可处理 {}, 跳过重复 {}, 过滤 {}, 刷新过期 {}",
+            dry_count, skipped_dup, skipped_filter, stale_refresh
         );
         return Ok(());
     }
 
     let concurrency = concurrency();
     println!(
-        "待处理 {} 个会话（跳过重复 {}, 过滤 {}），{} 路并发...\n",
+        "待处理 {} 个会话（跳过重复 {}, 过滤 {}, 刷新过期 {}），{} 路并发...\n",
         pending.len(),
         skipped_dup,
         skipped_filter,
+        stale_refresh,
         concurrency,
     );
 
@@ -250,7 +266,6 @@ pub async fn handle_ingest_sessions(
     for ps in pending {
         let sem = semaphore.clone();
         let client = client.clone();
-        let item_store = item_store.clone();
         let doc_store = doc_store.clone();
         let processed = processed.clone();
         let failed = failed.clone();
@@ -260,8 +275,7 @@ pub async fn handle_ingest_sessions(
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.expect("semaphore closed");
 
-            let result =
-                process_single_session(&ps, &client, &item_store, &doc_store, &quota_hit).await;
+            let result = process_single_session(&ps, &client, &doc_store, &quota_hit).await;
 
             match result {
                 Ok(item_count) => {
@@ -287,8 +301,8 @@ pub async fn handle_ingest_sessions(
     let total_items = total_items.load(Ordering::Relaxed);
 
     println!(
-        "\n完成: 处理 {}, 跳过重复 {}, 过滤 {}, 失败 {}, 生成 {} 条观测",
-        processed, skipped_dup, skipped_filter, failed, total_items
+        "\n完成: 处理 {}, 跳过重复 {}, 过滤 {}, 刷新过期 {}, 失败 {}, 生成 {} 条观测",
+        processed, skipped_dup, skipped_filter, stale_refresh, failed, total_items
     );
     if failed > 0 {
         eprintln!("提示: 重新运行即可续传失败的会话");
@@ -306,7 +320,6 @@ pub async fn handle_ingest_sessions(
 async fn process_single_session(
     ps: &PendingSession,
     client: &Arc<dyn LlmClient>,
-    item_store: &Arc<dyn ItemRepository>,
     doc_store: &Arc<dyn DocumentRepository>,
     quota_hit: &Arc<AtomicBool>,
 ) -> Result<usize> {
@@ -328,22 +341,18 @@ async fn process_single_session(
         }
         summaries.join("\n\n---\n\n")
     } else {
-        ps.content.clone()
+        ps.raw_content.clone()
     };
 
     let facet_response = extract_and_parse_facets_with_retry(&content, client, quota_hit).await?;
 
-    let mut doc = Document::new(ps.source.as_str(), &content);
-    doc.set_title(&facet_response.session_summary);
-    doc.set_url(&ps.url);
-    doc.set_captured_at(ps.captured_at);
-    doc_store.save(&doc).await.context("保存 Document 失败")?;
-
+    let doc = build_session_document(ps, &facet_response.session_summary);
     let items = facets_to_items(&facet_response, doc.id(), ps.project.as_deref());
     let item_count = items.len();
-    for item in &items {
-        item_store.save(item).await.context("保存 Item 失败")?;
-    }
+    doc_store
+        .save_with_replaced_items(&doc, &items)
+        .await
+        .context("保存 Document/Items 失败")?;
 
     println!(
         "  + [{}/{}] {} | {} items",
@@ -354,6 +363,33 @@ async fn process_single_session(
     );
 
     Ok(item_count)
+}
+
+fn build_session_document(ps: &PendingSession, title: &str) -> Document {
+    if let Some(existing_doc) = &ps.existing_document {
+        let captured_at = if ps.has_embedded_timestamp {
+            ps.captured_at
+        } else {
+            existing_doc.captured_at()
+        };
+
+        return Document::restore(RestoreDocumentParams {
+            id: existing_doc.id().clone(),
+            title: Some(title.to_string()),
+            raw_content: ps.raw_content.clone(),
+            source: ps.source.as_str().to_string(),
+            url: ps.url.clone(),
+            captured_at,
+            created_at: existing_doc.created_at(),
+            updated_at: Utc::now(),
+        });
+    }
+
+    let mut doc = Document::new(ps.source.as_str(), &ps.raw_content);
+    doc.set_title(title);
+    doc.set_url(&ps.url);
+    doc.set_captured_at(ps.captured_at);
+    doc
 }
 
 async fn llm_call_with_retry(
@@ -412,7 +448,7 @@ mod tests {
     use chrono::TimeZone;
     use refine_core::error::InfraResult;
     use refine_core::infra::SqliteStore;
-    use refine_core::knowledge::{DocumentRepository, ItemRepository};
+    use refine_core::knowledge::{DocumentRepository, Item, ItemRepository};
     use refine_core::session::discover_sessions_in;
     use std::fs;
 
@@ -448,6 +484,20 @@ mod tests {
 
         let fallback = session_captured_at(None, mtime);
         assert_eq!(fallback, DateTime::<Utc>::from(mtime));
+    }
+
+    #[test]
+    fn session_needs_refresh_when_file_mtime_is_newer_than_saved_document() {
+        let mut doc = Document::new("codex-session", "raw");
+        doc.set_url("file:///tmp/session.jsonl");
+
+        let old_mtime = SystemTime::now()
+            .checked_sub(Duration::from_secs(60))
+            .unwrap();
+        assert!(!session_needs_refresh(&doc, old_mtime));
+
+        let new_mtime = SystemTime::now() + Duration::from_millis(200);
+        assert!(session_needs_refresh(&doc, new_mtime));
     }
 
     #[test]
@@ -548,7 +598,6 @@ mod tests {
     #[tokio::test]
     async fn process_single_session_links_items_to_saved_document_id() {
         let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
-        let item_store: Arc<dyn ItemRepository> = store.clone();
         let doc_store: Arc<dyn DocumentRepository> = store.clone();
         let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
             response: r#"{
@@ -576,15 +625,16 @@ mod tests {
             source: SessionSource::Codex,
             project: Some("refine".to_string()),
             captured_at: Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap(),
-            content: "user: fix the ingest bug".to_string(),
+            has_embedded_timestamp: true,
+            raw_content: "User: fix the ingest bug".to_string(),
             needs_chunk: false,
             chunks: Vec::new(),
+            existing_document: None,
         };
 
-        let item_count =
-            process_single_session(&pending, &client, &item_store, &doc_store, &quota_hit)
-                .await
-                .expect("session ingest should succeed");
+        let item_count = process_single_session(&pending, &client, &doc_store, &quota_hit)
+            .await
+            .expect("session ingest should succeed");
         assert_eq!(item_count, 3);
 
         let docs = DocumentRepository::find_recent(store.as_ref(), 0, 10)
@@ -602,6 +652,82 @@ mod tests {
         assert!(linked_items
             .iter()
             .all(|item| item.document_id() == Some(saved_doc.id())));
+    }
+
+    #[tokio::test]
+    async fn process_single_session_refresh_replaces_old_items_and_preserves_raw_transcript() {
+        let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+        let item_store: Arc<dyn ItemRepository> = store.clone();
+        let doc_store: Arc<dyn DocumentRepository> = store.clone();
+
+        let mut existing_doc = Document::new("codex-session", "old raw");
+        existing_doc.set_url("file:///tmp/session.jsonl");
+        doc_store
+            .save(&existing_doc)
+            .await
+            .expect("existing document should save");
+
+        let mut old_item = Item::new_observation("old", "old");
+        old_item.set_document_id(existing_doc.id().clone());
+        item_store
+            .save(&old_item)
+            .await
+            .expect("old item should save");
+
+        let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+            response: r#"{
+                "session_summary": "刷新后的会话",
+                "cognitive_level": "proficient",
+                "collaboration_mode": "pair_programming",
+                "decisions": ["保留原始 transcript"],
+                "bugs_fixed": ["替换 stale session 的旧 items"],
+                "patterns": [],
+                "friction": [],
+                "project_progress": [],
+                "questions": [],
+                "knowledge_gained": [],
+                "tools_discovered": [],
+                "architecture": [],
+                "code_artifacts": []
+            }"#
+            .to_string(),
+        });
+        let quota_hit = Arc::new(AtomicBool::new(false));
+        let pending = PendingSession {
+            idx: 0,
+            total: 1,
+            url: existing_doc.url().to_string(),
+            source: SessionSource::Codex,
+            project: Some("refine".to_string()),
+            captured_at: Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap(),
+            has_embedded_timestamp: false,
+            raw_content: "User: original transcript\nAssistant: final answer\n".to_string(),
+            needs_chunk: true,
+            chunks: vec!["chunk summary input".to_string()],
+            existing_document: Some(existing_doc.clone()),
+        };
+
+        let item_count = process_single_session(&pending, &client, &doc_store, &quota_hit)
+            .await
+            .expect("session refresh should succeed");
+        assert_eq!(item_count, 3);
+
+        let saved_doc = doc_store
+            .find_by_url(&pending.url)
+            .await
+            .expect("document query should succeed")
+            .expect("document should exist");
+        assert_eq!(saved_doc.id(), existing_doc.id());
+        assert_eq!(saved_doc.raw_content(), pending.raw_content);
+        assert_eq!(saved_doc.title(), Some("刷新后的会话"));
+        assert_eq!(saved_doc.captured_at(), existing_doc.captured_at());
+
+        let linked_items = store
+            .find_by_document_id(existing_doc.id())
+            .await
+            .expect("items should be queryable by saved document id");
+        assert_eq!(linked_items.len(), item_count);
+        assert!(linked_items.iter().all(|item| item.title() != "old"));
     }
 
     #[tokio::test]

@@ -219,6 +219,14 @@ impl DocumentRepository for SqliteStore {
             .map_err(Into::into)
     }
 
+    async fn save_with_replaced_items(&self, doc: &Document, items: &[Item]) -> RepoResult<()> {
+        let doc = doc.clone();
+        let items = items.to_vec();
+        self.request(|resp| SqliteCommand::DocSaveWithReplacedItems { doc, items, resp })
+            .await
+            .map_err(Into::into)
+    }
+
     async fn delete(&self, id: &DocumentId) -> RepoResult<bool> {
         let id = id.as_str().to_string();
         self.request(|resp| SqliteCommand::DocDelete { id, resp })
