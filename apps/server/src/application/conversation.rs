@@ -110,7 +110,8 @@ pub async fn create_conversation(
     let persisted = state
         .conversation_repo
         .insert_or_fetch_conversation_by_idempotency(&conversation)
-        .map_err(CreateConversationError::Internal)?;
+        .await
+        .map_err(|err| CreateConversationError::Internal(err.to_string()))?;
 
     if persisted.id != conversation_id {
         return Ok(CreateConversationResult {
@@ -136,7 +137,8 @@ pub async fn create_conversation(
         state
             .job_repo
             .upsert_job(&job)
-            .map_err(CreateConversationError::Internal)?;
+            .await
+            .map_err(|err| CreateConversationError::Internal(err.to_string()))?;
         spawn_extraction(state, conversation_id.clone(), id.clone(), mode);
         job_id = Some(id);
     }
@@ -192,14 +194,16 @@ pub async fn create_extraction_job(
     let mut queued_conversation = state
         .conversation_repo
         .find_conversation_by_id(&conversation_id)
-        .map_err(CreateExtractionJobError::Internal)?
+        .await
+        .map_err(|err| CreateExtractionJobError::Internal(err.to_string()))?
         .ok_or_else(|| CreateExtractionJobError::NotFound("Conversation not found".to_string()))?;
     queued_conversation.status = ConversationStatus::Queued;
     queued_conversation.last_error = None;
     state
         .conversation_repo
         .upsert_conversation(&queued_conversation)
-        .map_err(CreateExtractionJobError::Internal)?;
+        .await
+        .map_err(|err| CreateExtractionJobError::Internal(err.to_string()))?;
 
     let mode = ExtractionMode::from_option(payload.mode);
     let now = now_iso();
@@ -217,7 +221,8 @@ pub async fn create_extraction_job(
     state
         .job_repo
         .upsert_job(&job)
-        .map_err(CreateExtractionJobError::Internal)?;
+        .await
+        .map_err(|err| CreateExtractionJobError::Internal(err.to_string()))?;
 
     spawn_extraction(state, conversation_id, job_id.clone(), mode);
 

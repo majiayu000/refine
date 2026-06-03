@@ -1,3 +1,4 @@
+use refine_core::conversation::{ConversationRepository, EventRepository, JobRepository};
 use refine_core::infra::{
     build_llm_client_from_env, ensure_db_dir, migrate_stale_dbs, resolve_db_path, LlmClient,
     MigrationReport, SqliteStore,
@@ -8,8 +9,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::application::ports::{ConversationRepository, EventRepository, JobRepository};
-use crate::persistence::ServerPersistence;
 use crate::vector_search::InMemoryVectorSearch;
 
 pub struct AppState {
@@ -103,7 +102,6 @@ impl AppState {
         } = config;
 
         ensure_db_dir(&db_path)?;
-        let persistence = Arc::new(ServerPersistence::new(db_path.clone())?);
         match migrate_stale_dbs(&db_path) {
             Ok(MigrationReport::NoOp) => {}
             Ok(MigrationReport::Migrated {
@@ -118,13 +116,13 @@ impl AppState {
             }
             Err(e) => tracing::warn!("DB migration failed (continuing): {}", e),
         }
-        let conversation_repo: Arc<dyn ConversationRepository> = persistence.clone();
-        let job_repo: Arc<dyn JobRepository> = persistence.clone();
-        let event_repo: Arc<dyn EventRepository> = persistence.clone();
 
         let sqlite_store = Arc::new(SqliteStore::open(&db_path).map_err(|e| e.to_string())?);
         let store: Arc<dyn ItemRepository> = sqlite_store.clone();
-        let doc_store: Arc<dyn DocumentRepository> = sqlite_store;
+        let doc_store: Arc<dyn DocumentRepository> = sqlite_store.clone();
+        let conversation_repo: Arc<dyn ConversationRepository> = sqlite_store.clone();
+        let job_repo: Arc<dyn JobRepository> = sqlite_store.clone();
+        let event_repo: Arc<dyn EventRepository> = sqlite_store;
         let mut engine_builder = SearchEngine::new(store.clone());
         if semantic_search_enabled {
             engine_builder =

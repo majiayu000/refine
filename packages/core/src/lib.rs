@@ -40,6 +40,7 @@
 //! let results = engine.search(SearchQuery::new("Rust")).await?;
 //! ```
 
+pub mod conversation;
 pub mod error;
 pub mod infra;
 pub mod knowledge;
