@@ -1,4 +1,4 @@
-use refine_core::knowledge::{Document, DocumentId, DocumentRepository, Source};
+use refine_core::knowledge::{Document, DocumentId, DocumentRepository, Item, ItemId, Source};
 use refine_core::refinement::{
     extract_items_with_strict_defaults, ExtractionPolicy, ItemExtractionInput,
 };
@@ -61,23 +61,81 @@ async fn run_extraction(
         .await
         .map_err(|e| e.to_string())?;
 
-    let mut item_ids = Vec::with_capacity(items.len());
-    for item in &items {
-        state.store.save(item).await.map_err(|e| e.to_string())?;
-        if let Err(err) = state.engine.index_item(item).await {
-            return Err(format!(
-                "failed to index item {} for semantic search: {}",
-                item.id(),
-                err
-            ));
-        }
-        item_ids.push(item.id().to_string());
-    }
+    let item_ids = save_and_index_items(&state, &items).await?;
 
     set_conversation_processed(&state, conversation_id, item_ids).await;
     set_job_succeeded(&state, job_id).await;
 
     Ok(())
+}
+
+async fn save_and_index_items(
+    state: &Arc<AppState>,
+    items: &[Item],
+) -> Result<Vec<String>, String> {
+    let mut saved_ids = Vec::with_capacity(items.len());
+    let mut indexed_ids = Vec::with_capacity(items.len());
+
+    for item in items {
+        if let Err(err) = state.store.save(item).await {
+            let cleanup_error = cleanup_partial_items(state, &saved_ids, &indexed_ids).await;
+            return Err(with_cleanup_error(
+                format!("failed to save item {}: {}", item.id(), err),
+                cleanup_error,
+            ));
+        }
+        saved_ids.push(item.id().clone());
+
+        if let Err(err) = state.engine.index_item(item).await {
+            let cleanup_error = cleanup_partial_items(state, &saved_ids, &indexed_ids).await;
+            return Err(with_cleanup_error(
+                format!(
+                    "failed to index item {} for semantic search: {}",
+                    item.id(),
+                    err
+                ),
+                cleanup_error,
+            ));
+        }
+        indexed_ids.push(item.id().clone());
+    }
+
+    Ok(saved_ids.iter().map(ToString::to_string).collect())
+}
+
+async fn cleanup_partial_items(
+    state: &Arc<AppState>,
+    saved_ids: &[ItemId],
+    indexed_ids: &[ItemId],
+) -> Option<String> {
+    let mut errors = Vec::new();
+
+    for item_id in indexed_ids {
+        if let Err(err) = state.engine.remove_from_index(item_id.as_str()).await {
+            errors.push(format!("remove index {}: {}", item_id, err));
+        }
+    }
+
+    for item_id in saved_ids {
+        match state.store.delete(item_id).await {
+            Ok(true) => {}
+            Ok(false) => errors.push(format!("delete item {}: not found", item_id)),
+            Err(err) => errors.push(format!("delete item {}: {}", item_id, err)),
+        }
+    }
+
+    if errors.is_empty() {
+        None
+    } else {
+        Some(errors.join("; "))
+    }
+}
+
+fn with_cleanup_error(error: String, cleanup_error: Option<String>) -> String {
+    match cleanup_error {
+        Some(cleanup_error) => format!("{}; cleanup failed: {}", error, cleanup_error),
+        None => error,
+    }
 }
 
 fn mode_to_policy(mode: ExtractionMode) -> ExtractionPolicy {
@@ -308,7 +366,7 @@ mod tests {
             .expect("build test state");
 
         spawn_extraction(
-            state,
+            state.clone(),
             conversation_id.clone(),
             job_id.clone(),
             ExtractionMode::Auto,
@@ -333,6 +391,16 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("failed to index item"));
+
+        let saved_items = match state.store.find_all().await {
+            Ok(items) => items,
+            Err(err) => panic!("load saved items: {}", err),
+        };
+        assert!(
+            saved_items.is_empty(),
+            "failed extraction left orphan items: {:?}",
+            saved_items
+        );
     }
 
     async fn build_state_with_failing_index() -> Result<
