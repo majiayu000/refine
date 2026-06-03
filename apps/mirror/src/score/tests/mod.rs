@@ -4,11 +4,11 @@ use chrono::{DateTime, TimeZone, Utc};
 use refine_core::session::{ClusterResult, GlobalStats, ProjectCluster};
 use std::collections::HashMap;
 
-mod signal;
-mod persistence;
 mod baseline;
 mod compute;
 mod paths;
+mod persistence;
+mod signal;
 mod streak;
 
 pub(super) fn make_cluster(
