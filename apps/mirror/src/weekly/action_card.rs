@@ -18,6 +18,7 @@ pub(super) fn build_weekly_action_card(
     }
 
     let project = select_action_project(cluster, &triggers)?;
+    let evidence = project_evidence(project)?;
     let mut lines = Vec::new();
     lines.push(t!("## Weekly Action Card", "## 下周行动卡").to_string());
     lines.push(String::new());
@@ -52,13 +53,14 @@ pub(super) fn build_weekly_action_card(
         "- {}",
         project_selection_reason(project, &triggers)
     ));
-    if let Some(evidence) = project_evidence(project) {
-        lines.push(format!("{}:", t!("Project evidence", "项目证据")));
-        lines.push(format!("- {}", evidence));
-    }
+    lines.push(format!("{}:", t!("Project evidence", "项目证据")));
+    lines.push(format!("- {}", evidence));
     lines.push(String::new());
     lines.push(format!("{}:", t!("Next week experiment", "下周实验")));
-    lines.push(format!("- {}", project_experiment(project, &triggers)));
+    lines.push(format!(
+        "- {}",
+        project_experiment(project, &triggers, &evidence)
+    ));
     lines.push(format!(
         "- {}",
         t!(
@@ -90,6 +92,7 @@ fn select_action_project<'a>(
         .projects
         .values()
         .filter(|project| project.session_count > 0)
+        .filter(|project| project_evidence(project).is_some())
         .filter(|project| project.project_name != "other")
         .collect::<Vec<_>>();
     if projects.is_empty() {
@@ -97,6 +100,7 @@ fn select_action_project<'a>(
             .projects
             .values()
             .filter(|project| project.session_count > 0)
+            .filter(|project| project_evidence(project).is_some())
             .collect();
     }
 
@@ -160,14 +164,7 @@ fn project_selection_reason(project: &ProjectCluster, triggers: &[&Indicator]) -
     )
 }
 
-fn project_experiment(project: &ProjectCluster, triggers: &[&Indicator]) -> String {
-    let focus = project_evidence(project).unwrap_or_else(|| {
-        t!(
-            "one concrete project question".to_string(),
-            "一个具体项目问题".to_string()
-        )
-    });
-
+fn project_experiment(project: &ProjectCluster, triggers: &[&Indicator], focus: &str) -> String {
     if has_trigger(triggers, "deep_invest") && !has_trigger(triggers, "fragmentation") {
         return t!(
             format!(
@@ -384,7 +381,7 @@ mod tests {
     #[test]
     fn test_action_card_skipped_without_project_evidence() {
         let score = score_with_breadth(vec![indicator("exploration", 5.2, Signal::Red)]);
-        let cluster = cluster(Vec::new());
+        let cluster = cluster(vec![project("active-without-evidence", 3, None)]);
 
         assert!(build_weekly_action_card(&score, &cluster).is_none());
     }

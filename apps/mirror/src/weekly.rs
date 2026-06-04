@@ -6,7 +6,7 @@ use crate::lang::t;
 use crate::score::{self, LayerScore, ScoreResult, Signal};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Duration, Utc};
-use refine_core::knowledge::{DocumentRepository, Item, ItemRepository, ItemType};
+use refine_core::knowledge::{DocumentRepository, ItemRepository};
 use refine_core::session::{cluster_observations, ClusterResult};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -68,13 +68,14 @@ pub async fn handle_weekly(
     let week_ago = now - Duration::days(7);
     let two_weeks_ago = now - Duration::days(14);
 
-    let observations = item_repo
-        .find_by_type(ItemType::Observation)
+    let this_week = item_repo
+        .find_observations_by_event_range(week_ago, now)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    let this_week = filter_by_time_range(&observations, week_ago, now);
-    let last_week = filter_by_time_range(&observations, two_weeks_ago, week_ago);
+    let last_week = item_repo
+        .find_observations_by_event_range(two_weeks_ago, week_ago)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     if this_week.is_empty() {
         println!(
@@ -147,7 +148,12 @@ pub async fn handle_weekly(
     Ok(())
 }
 
-fn filter_by_time_range(items: &[Item], from: DateTime<Utc>, to: DateTime<Utc>) -> Vec<Item> {
+#[cfg(test)]
+fn filter_by_time_range(
+    items: &[refine_core::knowledge::Item],
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Vec<refine_core::knowledge::Item> {
     items
         .iter()
         .filter(|item| {
@@ -435,7 +441,7 @@ fn write_weekly_history_lines_atomically(path: &Path, lines: &[String]) -> Resul
 mod tests {
     use super::*;
     use crate::score::{Indicator, Signal};
-    use refine_core::knowledge::{ItemId, RestoreParams, Tag};
+    use refine_core::knowledge::{Item, ItemId, ItemType, RestoreParams, Tag};
     use refine_core::session::GlobalStats;
     use std::collections::HashMap;
 

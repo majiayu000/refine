@@ -3,7 +3,6 @@ pub mod error;
 pub mod event;
 pub mod item;
 pub mod job;
-pub mod ports;
 pub mod query;
 pub mod recommendation;
 
@@ -12,13 +11,12 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    const APPLICATION_FILES: [&str; 8] = [
+    const APPLICATION_FILES: [&str; 7] = [
         "conversation.rs",
         "error.rs",
         "event.rs",
         "item.rs",
         "job.rs",
-        "ports.rs",
         "query.rs",
         "recommendation.rs",
     ];

@@ -44,7 +44,7 @@ impl CreateEventError {
     }
 }
 
-pub fn create_event(
+pub async fn create_event(
     state: Arc<AppState>,
     user_id: String,
     payload: CreateEventRequest,
@@ -73,7 +73,8 @@ pub fn create_event(
     state
         .event_repo
         .insert_event(&event)
-        .map_err(CreateEventError::Internal)?;
+        .await
+        .map_err(|err| CreateEventError::Internal(err.to_string()))?;
 
     Ok(CreateEventResult { event_id: event.id })
 }
@@ -104,7 +105,7 @@ impl EventSummaryError {
     }
 }
 
-pub fn get_event_summary(
+pub async fn get_event_summary(
     state: Arc<AppState>,
     requested_days: Option<u32>,
 ) -> Result<EventSummaryResult, EventSummaryError> {
@@ -113,7 +114,8 @@ pub fn get_event_summary(
     let pairs = state
         .event_repo
         .event_counts_since(Some(&since))
-        .map_err(EventSummaryError::Internal)?;
+        .await
+        .map_err(|err| EventSummaryError::Internal(err.to_string()))?;
 
     let mut counts = serde_json::Map::new();
     for name in FUNNEL_EVENTS {

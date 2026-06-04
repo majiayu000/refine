@@ -43,7 +43,6 @@ pub async fn run(
             } else {
                 Some(build_llm_client_from_env()?)
             };
-            let item_store: Arc<dyn ItemRepository> = store.clone();
             let doc_store: Arc<dyn DocumentRepository> = store.clone();
             handle_ingest_sessions(
                 IngestOptions {
@@ -53,7 +52,6 @@ pub async fn run(
                     dry_run,
                 },
                 db_path,
-                item_store,
                 doc_store,
                 llm_client,
             )
