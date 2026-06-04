@@ -46,9 +46,9 @@ pub enum InfraError {
     RateLimited { retry_after_secs: Option<u64> },
 }
 
-/// 应用层错误
+/// Core 顶层错误
 #[derive(Error, Debug)]
-pub enum AppError {
+pub enum CoreError {
     #[error(transparent)]
     Domain(#[from] DomainError),
 
@@ -60,6 +60,6 @@ pub enum AppError {
 }
 
 /// 统一 Result 类型
-pub type Result<T> = std::result::Result<T, AppError>;
+pub type Result<T> = std::result::Result<T, CoreError>;
 pub type DomainResult<T> = std::result::Result<T, DomainError>;
 pub type InfraResult<T> = std::result::Result<T, InfraError>;

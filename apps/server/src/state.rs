@@ -1,3 +1,4 @@
+use refine_core::conversation::{ConversationRepository, EventRepository, JobRepository};
 use refine_core::infra::{
     build_llm_client_from_env, ensure_db_dir, migrate_stale_dbs, resolve_db_path, LlmClient,
     MigrationReport, SqliteStore,
@@ -8,8 +9,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::application::ports::{ConversationRepository, EventRepository, JobRepository};
-use crate::persistence::ServerPersistence;
 use crate::vector_search::InMemoryVectorSearch;
 
 pub struct AppState {
@@ -103,7 +102,6 @@ impl AppState {
         } = config;
 
         ensure_db_dir(&db_path)?;
-        let persistence = Arc::new(ServerPersistence::new(db_path.clone())?);
         match migrate_stale_dbs(&db_path) {
             Ok(MigrationReport::NoOp) => {}
             Ok(MigrationReport::Migrated {
@@ -118,13 +116,13 @@ impl AppState {
             }
             Err(e) => tracing::warn!("DB migration failed (continuing): {}", e),
         }
-        let conversation_repo: Arc<dyn ConversationRepository> = persistence.clone();
-        let job_repo: Arc<dyn JobRepository> = persistence.clone();
-        let event_repo: Arc<dyn EventRepository> = persistence.clone();
 
         let sqlite_store = Arc::new(SqliteStore::open(&db_path).map_err(|e| e.to_string())?);
         let store: Arc<dyn ItemRepository> = sqlite_store.clone();
-        let doc_store: Arc<dyn DocumentRepository> = sqlite_store;
+        let doc_store: Arc<dyn DocumentRepository> = sqlite_store.clone();
+        let conversation_repo: Arc<dyn ConversationRepository> = sqlite_store.clone();
+        let job_repo: Arc<dyn JobRepository> = sqlite_store.clone();
+        let event_repo: Arc<dyn EventRepository> = sqlite_store;
         let mut engine_builder = SearchEngine::new(store.clone());
         if semantic_search_enabled {
             engine_builder =
@@ -133,22 +131,10 @@ impl AppState {
         let engine = Arc::new(engine_builder);
 
         if semantic_search_enabled {
-            let existing_items = store
-                .find_all()
-                .await
-                .map_err(|e| format!("failed to bootstrap semantic index: {}", e))?;
-            for item in &existing_items {
-                if let Err(err) = engine.index_item(item).await {
-                    tracing::warn!(
-                        "semantic index bootstrap failed for item {}: {}",
-                        item.id(),
-                        err
-                    );
-                }
-            }
+            let indexed_count = bootstrap_semantic_index(store.as_ref(), engine.as_ref()).await?;
             tracing::info!(
                 "semantic search enabled, bootstrapped {} items into vector index",
-                existing_items.len()
+                indexed_count
             );
         }
 
@@ -172,6 +158,26 @@ impl AppState {
     pub async fn build_for_test(db_path: PathBuf, auth: AuthConfig) -> Result<Self, String> {
         Self::build_with_config(AppStateConfig::for_test(db_path, auth)).await
     }
+}
+
+async fn bootstrap_semantic_index(
+    store: &dyn ItemRepository,
+    engine: &SearchEngine,
+) -> Result<usize, String> {
+    let existing_items = store
+        .find_all()
+        .await
+        .map_err(|e| format!("failed to bootstrap semantic index: {}", e))?;
+    for item in &existing_items {
+        if let Err(err) = engine.index_item(item).await {
+            return Err(format!(
+                "failed to bootstrap semantic index for item {}: {}",
+                item.id(),
+                err
+            ));
+        }
+    }
+    Ok(existing_items.len())
 }
 
 impl AppState {
@@ -232,10 +238,15 @@ fn is_production_env() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::AppState;
+    use super::{bootstrap_semantic_index, AppState};
+    use async_trait::async_trait;
+    use refine_core::error::{InfraError, InfraResult};
+    use refine_core::infra::SqliteStore;
+    use refine_core::knowledge::{Item, ItemRepository};
+    use refine_core::search::{SearchEngine, VectorSearch};
     use rusqlite::Connection;
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use uuid::Uuid;
 
     // These tests mutate process-global env vars, so they must run one at a time.
@@ -349,6 +360,23 @@ mod tests {
         .expect("insert legacy event");
     }
 
+    struct FailingVectorSearch;
+
+    #[async_trait]
+    impl VectorSearch for FailingVectorSearch {
+        async fn search(&self, _query: &str, _limit: usize) -> InfraResult<Vec<(String, f32)>> {
+            Ok(Vec::new())
+        }
+
+        async fn index(&self, _id: &str, _text: &str) -> InfraResult<()> {
+            Err(InfraError::Database("vector index unavailable".to_string()))
+        }
+
+        async fn remove(&self, _id: &str) -> InfraResult<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn build_migrates_server_owned_tables_after_schema_init() {
         let _env_lock = ENV_LOCK.lock().expect("lock env");
@@ -400,6 +428,45 @@ mod tests {
         assert_eq!(event_count, 1);
         assert!(legacy_path.with_extension("db.migrated").exists());
         assert!(!legacy_path.exists());
+
+        cleanup_dir(&dir);
+    }
+
+    #[test]
+    fn bootstrap_semantic_index_reports_vector_index_failure() {
+        let dir = make_temp_dir();
+        let db_path = dir.join("bootstrap-store");
+
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(err) => panic!("build tokio runtime: {}", err),
+        };
+        runtime.block_on(async {
+            let sqlite_store = match SqliteStore::open(&db_path) {
+                Ok(store) => Arc::new(store),
+                Err(err) => panic!("open sqlite store: {}", err),
+            };
+            let mut item = Item::new_knowledge("Existing item", "Existing summary");
+            item.set_content("Existing semantic content");
+            if let Err(err) = sqlite_store.save(&item).await {
+                panic!("save existing item: {}", err);
+            }
+            let item_id = item.id().to_string();
+
+            let store: Arc<dyn ItemRepository> = sqlite_store;
+            let engine =
+                SearchEngine::new(store.clone()).with_vector_search(Arc::new(FailingVectorSearch));
+
+            let err = match bootstrap_semantic_index(store.as_ref(), &engine).await {
+                Ok(_) => panic!("bootstrap should fail when vector index fails"),
+                Err(err) => err,
+            };
+            assert!(err.contains("failed to bootstrap semantic index for item"));
+            assert!(err.contains(&item_id));
+        });
 
         cleanup_dir(&dir);
     }

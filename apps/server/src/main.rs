@@ -4,7 +4,6 @@ mod auth;
 mod extraction;
 mod handlers;
 mod models;
-mod persistence;
 mod request_guard;
 mod state;
 mod vector_search;

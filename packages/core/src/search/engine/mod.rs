@@ -99,9 +99,7 @@ impl SearchEngine {
     pub async fn index_item(&self, item: &Item) -> InfraResult<()> {
         if let Some(vs) = &self.vector_search {
             let text = format!("{} {} {}", item.title(), item.summary(), item.content());
-            vs.index(item.id().as_str(), &text)
-                .await
-                ?;
+            vs.index(item.id().as_str(), &text).await?;
         }
         Ok(())
     }

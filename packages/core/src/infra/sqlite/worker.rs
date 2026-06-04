@@ -1,5 +1,6 @@
 use super::rows::configure_connection;
-use super::{doc_ops, ops};
+use super::{conversation_ops, doc_ops, ops};
+use crate::conversation::{ConversationRecord, EventRecord, ExtractionJobRecord};
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{Document, Item, ItemType};
 use chrono::{DateTime, Utc};
@@ -75,6 +76,11 @@ pub(super) enum SqliteCommand {
         end: DateTime<Utc>,
         resp: oneshot::Sender<InfraResult<Vec<Item>>>,
     },
+    FindObservationsByEventRange {
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        resp: oneshot::Sender<InfraResult<Vec<Item>>>,
+    },
     // Document 操作
     DocFindByUrl {
         url: String,
@@ -82,6 +88,11 @@ pub(super) enum SqliteCommand {
     },
     DocSave {
         doc: Document,
+        resp: oneshot::Sender<InfraResult<()>>,
+    },
+    DocSaveWithReplacedItems {
+        doc: Document,
+        items: Vec<Item>,
         resp: oneshot::Sender<InfraResult<()>>,
     },
     DocFindById {
@@ -109,6 +120,47 @@ pub(super) enum SqliteCommand {
     DocCountTextHits {
         query: String,
         resp: oneshot::Sender<InfraResult<usize>>,
+    },
+    // Conversation 操作
+    ConversationFindById {
+        id: String,
+        resp: oneshot::Sender<InfraResult<Option<ConversationRecord>>>,
+    },
+    ConversationList {
+        status: Option<String>,
+        offset: usize,
+        limit: usize,
+        resp: oneshot::Sender<InfraResult<Vec<ConversationRecord>>>,
+    },
+    ConversationCount {
+        status: Option<String>,
+        resp: oneshot::Sender<InfraResult<usize>>,
+    },
+    ConversationUpsert {
+        record: ConversationRecord,
+        resp: oneshot::Sender<InfraResult<()>>,
+    },
+    ConversationInsertOrFetchByIdempotency {
+        record: ConversationRecord,
+        resp: oneshot::Sender<InfraResult<ConversationRecord>>,
+    },
+    // Extraction job 操作
+    JobFindById {
+        id: String,
+        resp: oneshot::Sender<InfraResult<Option<ExtractionJobRecord>>>,
+    },
+    JobUpsert {
+        job: ExtractionJobRecord,
+        resp: oneshot::Sender<InfraResult<()>>,
+    },
+    // Event 操作
+    EventInsert {
+        event: EventRecord,
+        resp: oneshot::Sender<InfraResult<()>>,
+    },
+    EventCountsSince {
+        since: Option<String>,
+        resp: oneshot::Sender<InfraResult<Vec<(String, usize)>>>,
     },
 }
 
@@ -226,11 +278,22 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
         SqliteCommand::FindByDateRange { start, end, resp } => {
             let _ = resp.send(ops::find_by_date_range(conn, start, end));
         }
+        SqliteCommand::FindObservationsByEventRange { start, end, resp } => {
+            let _ = resp.send(ops::find_observations_by_event_range(conn, start, end));
+        }
         SqliteCommand::DocFindByUrl { url, resp } => {
             let _ = resp.send(doc_ops::find_by_url(conn, &url));
         }
         SqliteCommand::DocSave { doc, resp } => {
             let _ = resp.send(doc_ops::save(conn, &doc));
+        }
+        SqliteCommand::DocSaveWithReplacedItems { doc, items, resp } => {
+            if resp
+                .send(save_document_with_replaced_items(conn, &doc, &items))
+                .is_err()
+            {
+                tracing::debug!("sqlite receiver dropped for DocSaveWithReplacedItems");
+            }
         }
         SqliteCommand::DocFindById { id, resp } => {
             let _ = resp.send(doc_ops::find_by_id(conn, &id));
@@ -259,5 +322,64 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
         SqliteCommand::DocCountTextHits { query, resp } => {
             let _ = resp.send(doc_ops::count_text_hits(conn, &query));
         }
+        SqliteCommand::ConversationFindById { id, resp } => {
+            let _ = resp.send(conversation_ops::find_conversation_by_id(conn, &id));
+        }
+        SqliteCommand::ConversationList {
+            status,
+            offset,
+            limit,
+            resp,
+        } => {
+            let _ = resp.send(conversation_ops::list_conversations(
+                conn,
+                status.as_deref(),
+                offset,
+                limit,
+            ));
+        }
+        SqliteCommand::ConversationCount { status, resp } => {
+            let _ = resp.send(conversation_ops::count_conversations(
+                conn,
+                status.as_deref(),
+            ));
+        }
+        SqliteCommand::ConversationUpsert { record, resp } => {
+            let _ = resp.send(conversation_ops::upsert_conversation(conn, &record));
+        }
+        SqliteCommand::ConversationInsertOrFetchByIdempotency { record, resp } => {
+            let _ = resp
+                .send(conversation_ops::insert_or_fetch_conversation_by_idempotency(conn, &record));
+        }
+        SqliteCommand::JobFindById { id, resp } => {
+            let _ = resp.send(conversation_ops::find_job_by_id(conn, &id));
+        }
+        SqliteCommand::JobUpsert { job, resp } => {
+            let _ = resp.send(conversation_ops::upsert_job(conn, &job));
+        }
+        SqliteCommand::EventInsert { event, resp } => {
+            let _ = resp.send(conversation_ops::insert_event(conn, &event));
+        }
+        SqliteCommand::EventCountsSince { since, resp } => {
+            let _ = resp.send(conversation_ops::event_counts_since(conn, since.as_deref()));
+        }
     }
+}
+
+fn save_document_with_replaced_items(
+    conn: &Connection,
+    doc: &Document,
+    items: &[Item],
+) -> InfraResult<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    doc_ops::save(&tx, doc)?;
+    ops::delete_by_document_id(&tx, doc.id().as_str())?;
+    for item in items {
+        ops::save(&tx, item)?;
+    }
+    tx.commit()
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    Ok(())
 }

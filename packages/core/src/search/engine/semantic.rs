@@ -25,10 +25,7 @@ impl SearchEngine {
 
         let keyword_query = query.clone().with_offset(0).with_limit(request_limit);
         let keyword_result = self.keyword_search(&keyword_query).await?;
-        let semantic = vs
-            .search(&query.text, request_limit)
-            .await
-            ?;
+        let semantic = vs.search(&query.text, request_limit).await?;
 
         let mut merged: HashMap<String, SearchHit<Item>> = HashMap::new();
 
