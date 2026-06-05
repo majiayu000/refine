@@ -104,7 +104,7 @@ refine/
 
 | 模块 | 职责 | 关键类型 |
 |------|------|----------|
-| `error` | 统一错误处理 | `DomainError`, `InfraError`, `AppError` |
+| `error` | 统一错误处理 | `CoreError`, `DomainError`, `InfraError` |
 | `knowledge` | 知识片段管理 | `Item`, `ItemId`, `Tag`, `Source`, `ItemRepository` |
 | `refinement` | 从对话提炼知识 | `Conversation`, `Extractor`, `ExtractionPolicy` |
 | `search` | 关键词+语义搜索 | `SearchQuery`, `SearchEngine`, `SearchResult` |

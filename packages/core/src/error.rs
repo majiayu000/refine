@@ -46,42 +46,9 @@ pub enum InfraError {
     RateLimited { retry_after_secs: Option<u64> },
 }
 
-/// 仓储错误（用于领域端口）
+/// Core 顶层错误
 #[derive(Error, Debug)]
-pub enum RepositoryError {
-    #[error("存储不可用: {0}")]
-    Unavailable(String),
-
-    #[error("数据格式错误: {0}")]
-    Data(String),
-
-    #[error("未找到: {0}")]
-    NotFound(String),
-
-    #[error("存储错误: {0}")]
-    Storage(String),
-}
-
-impl From<InfraError> for RepositoryError {
-    fn from(value: InfraError) -> Self {
-        match value {
-            InfraError::NotFound(msg) => Self::NotFound(msg),
-            InfraError::Serialization(msg) => Self::Data(msg),
-            InfraError::Database(msg) => Self::Storage(msg),
-            InfraError::LlmRequest(msg) | InfraError::LlmParse(msg) | InfraError::Http(msg) => {
-                Self::Unavailable(msg)
-            }
-            InfraError::RateLimited { retry_after_secs } => Self::Unavailable(format!(
-                "LLM quota exhausted (retry_after: {:?}s)",
-                retry_after_secs
-            )),
-        }
-    }
-}
-
-/// 应用层错误
-#[derive(Error, Debug)]
-pub enum AppError {
+pub enum CoreError {
     #[error(transparent)]
     Domain(#[from] DomainError),
 
@@ -93,7 +60,28 @@ pub enum AppError {
 }
 
 /// 统一 Result 类型
-pub type Result<T> = std::result::Result<T, AppError>;
+pub type Result<T> = std::result::Result<T, CoreError>;
+pub type AppError = CoreError;
 pub type DomainResult<T> = std::result::Result<T, DomainError>;
 pub type InfraResult<T> = std::result::Result<T, InfraError>;
-pub type RepoResult<T> = std::result::Result<T, RepositoryError>;
+
+#[cfg(test)]
+mod tests {
+    use super::{AppError, CoreError, DomainError, InfraError, Result};
+
+    fn accepts_app_error(_: AppError) {}
+
+    #[test]
+    fn app_error_remains_public_alias_for_core_error() {
+        let app_error: AppError = DomainError::Validation("missing title".to_string()).into();
+        accepts_app_error(app_error);
+
+        let result: Result<()> = Err(InfraError::Database("locked".to_string()).into());
+        match result {
+            Err(core_error) => {
+                let _: CoreError = core_error;
+            }
+            Ok(()) => panic!("expected infra error"),
+        }
+    }
+}
