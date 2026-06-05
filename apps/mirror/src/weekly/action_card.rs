@@ -18,7 +18,7 @@ pub(super) fn build_weekly_action_card(
     }
 
     let project = select_action_project(cluster, &triggers)?;
-    let evidence = project_evidence(project)?;
+    let evidence = project_evidence(project);
     let mut lines = Vec::new();
     lines.push(t!("## Weekly Action Card", "## 下周行动卡").to_string());
     lines.push(String::new());
@@ -92,7 +92,6 @@ fn select_action_project<'a>(
         .projects
         .values()
         .filter(|project| project.session_count > 0)
-        .filter(|project| project_evidence(project).is_some())
         .filter(|project| project.project_name != "other")
         .collect::<Vec<_>>();
     if projects.is_empty() {
@@ -100,7 +99,6 @@ fn select_action_project<'a>(
             .projects
             .values()
             .filter(|project| project.session_count > 0)
-            .filter(|project| project_evidence(project).is_some())
             .collect();
     }
 
@@ -190,8 +188,8 @@ fn project_experiment(project: &ProjectCluster, triggers: &[&Indicator], focus: 
     )
 }
 
-fn project_evidence(project: &ProjectCluster) -> Option<String> {
-    [
+fn project_evidence(project: &ProjectCluster) -> String {
+    if let Some(item) = [
         &project.question_items,
         &project.progress_items,
         &project.patterns,
@@ -201,7 +199,28 @@ fn project_evidence(project: &ProjectCluster) -> Option<String> {
     ]
     .into_iter()
     .find_map(|items| items.first())
-    .map(|item| truncate_chars(item, 120))
+    {
+        return truncate_chars(item, 120);
+    }
+
+    if let Some(decision) = project.decision_titles.first() {
+        return truncate_chars(&format!("decision: {}", decision), 120);
+    }
+
+    if let Some(bugfix) = project.bugfix_titles.first() {
+        return truncate_chars(&format!("bugfix: {}", bugfix), 120);
+    }
+
+    t!(
+        format!(
+            "{} had {} sessions this week; use the 10% block to produce one concrete validation note.",
+            project.project_name, project.session_count
+        ),
+        format!(
+            "{} 本周有 {} 个 session；用 10% 时间块产出一条具体验证证据。",
+            project.project_name, project.session_count
+        )
+    )
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
@@ -298,7 +317,7 @@ mod tests {
             project_name: name.to_string(),
             session_count,
             summary_excerpts: Vec::new(),
-            decision_titles: vec!["decision".to_string()],
+            decision_titles: Vec::new(),
             bugfix_titles: Vec::new(),
             cognitive_levels: HashMap::new(),
             collaboration_modes: HashMap::new(),
@@ -379,10 +398,33 @@ mod tests {
     }
 
     #[test]
-    fn test_action_card_skipped_without_project_evidence() {
+    fn test_action_card_uses_fallback_without_project_evidence() {
         let score = score_with_breadth(vec![indicator("exploration", 5.2, Signal::Red)]);
         let cluster = cluster(vec![project("active-without-evidence", 3, None)]);
 
-        assert!(build_weekly_action_card(&score, &cluster).is_none());
+        let card = match build_weekly_action_card(&score, &cluster) {
+            Some(card) => card.join("\n"),
+            None => panic!("expected fallback card for non-green breadth indicators"),
+        };
+
+        assert!(card.contains("Weekly Action Card"));
+        assert!(card.contains("active-without-evidence"));
+        assert!(card.contains("3 sessions this week"));
+    }
+
+    #[test]
+    fn test_action_card_uses_decision_title_as_project_evidence() {
+        let score = score_with_breadth(vec![indicator("fragmentation", 26.0, Signal::Red)]);
+        let mut project = project("decision-only", 2, None);
+        project.decision_titles = vec!["keep the release path explicit".to_string()];
+        let cluster = cluster(vec![project]);
+
+        let card = match build_weekly_action_card(&score, &cluster) {
+            Some(card) => card.join("\n"),
+            None => panic!("expected card for decision-only project evidence"),
+        };
+
+        assert!(card.contains("decision-only"));
+        assert!(card.contains("decision: keep the release path explicit"));
     }
 }
