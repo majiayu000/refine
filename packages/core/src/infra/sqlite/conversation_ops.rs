@@ -101,6 +101,8 @@ pub(super) fn upsert_conversation(
     conn: &Connection,
     record: &ConversationRecord,
 ) -> InfraResult<()> {
+    validate_conversation_transition(conn, record)?;
+
     let item_ids =
         serde_json::to_string(&record.item_ids).map_err(|e| InfraError::Database(e.to_string()))?;
     let metadata =
@@ -205,6 +207,8 @@ pub(super) fn find_job_by_id(
 }
 
 pub(super) fn upsert_job(conn: &Connection, job: &ExtractionJobRecord) -> InfraResult<()> {
+    validate_job_transition(conn, job)?;
+
     conn.execute(
         r#"
         INSERT INTO extraction_jobs
@@ -231,6 +235,69 @@ pub(super) fn upsert_job(conn: &Connection, job: &ExtractionJobRecord) -> InfraR
     )
     .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(())
+}
+
+fn validate_conversation_transition(
+    conn: &Connection,
+    record: &ConversationRecord,
+) -> InfraResult<()> {
+    let existing = conn
+        .query_row(
+            "SELECT status FROM conversations WHERE id = ?1",
+            [record.id.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| InfraError::Database(e.to_string()))?
+        .map(|raw| conversation_status_from_db(raw.as_str()))
+        .transpose()
+        .map_err(InfraError::Database)?;
+
+    if let Some(existing) = existing {
+        if !existing.can_transition_to(&record.status) {
+            return Err(invalid_transition_error(
+                "conversation",
+                &record.id,
+                conversation_status_to_db(&existing),
+                conversation_status_to_db(&record.status),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_job_transition(conn: &Connection, job: &ExtractionJobRecord) -> InfraResult<()> {
+    let existing = conn
+        .query_row(
+            "SELECT status FROM extraction_jobs WHERE id = ?1",
+            [job.id.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| InfraError::Database(e.to_string()))?
+        .map(|raw| job_status_from_db(raw.as_str()))
+        .transpose()
+        .map_err(InfraError::Database)?;
+
+    if let Some(existing) = existing {
+        if !existing.can_transition_to(&job.status) {
+            return Err(invalid_transition_error(
+                "job",
+                &job.id,
+                job_status_to_db(&existing),
+                job_status_to_db(&job.status),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn invalid_transition_error(kind: &str, id: &str, from: &str, to: &str) -> InfraError {
+    let message = format!("invalid {kind} status transition for {id}: {from} -> {to}");
+    tracing::error!("{message}");
+    InfraError::Database(message)
 }
 
 pub(super) fn insert_event(conn: &Connection, event: &EventRecord) -> InfraResult<()> {
@@ -622,6 +689,48 @@ mod tests {
             .expect("job should exist");
         assert_eq!(loaded.id, job.id);
         assert_eq!(loaded.status, JobStatus::Pending);
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn upsert_job_rejects_invalid_status_regression() {
+        let path = temp_db_path();
+        let store = SqliteStore::open(&path).expect("store init");
+        let store: Arc<dyn JobRepository> = Arc::new(store);
+        let now = now_iso();
+        let mut job = ExtractionJobRecord {
+            id: Uuid::new_v4().to_string(),
+            conversation_id: "c1".to_string(),
+            mode: ExtractionMode::Auto,
+            status: JobStatus::Pending,
+            created_at: now.clone(),
+            updated_at: now,
+            error: None,
+        };
+
+        store.upsert_job(&job).await.expect("insert pending job");
+        job.status = JobStatus::Running;
+        store.upsert_job(&job).await.expect("mark job running");
+        job.status = JobStatus::Succeeded;
+        store.upsert_job(&job).await.expect("mark job succeeded");
+
+        job.status = JobStatus::Pending;
+        let err = store
+            .upsert_job(&job)
+            .await
+            .expect_err("succeeded jobs must not regress to pending");
+        assert!(
+            err.to_string().contains("invalid job status transition"),
+            "unexpected error: {}",
+            err
+        );
+
+        let loaded = store
+            .find_job_by_id(&job.id)
+            .await
+            .expect("find job")
+            .expect("job should exist");
+        assert_eq!(loaded.status, JobStatus::Succeeded);
         cleanup(&path);
     }
 
