@@ -1,3 +1,5 @@
+mod action_card;
+
 use crate::config::ensure_mirror_dir;
 use crate::document_save::{save_report_to_document, SaveDocumentOptions};
 use crate::lang::t;
@@ -5,7 +7,7 @@ use crate::score::{self, LayerScore, ScoreResult, Signal};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Duration, Utc};
 use refine_core::knowledge::{DocumentRepository, ItemRepository};
-use refine_core::session::cluster_observations;
+use refine_core::session::{cluster_observations, ClusterResult};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::Path;
@@ -113,7 +115,7 @@ pub async fn handle_weekly(
         None
     };
 
-    let report = build_weekly_report(&this_score, last_score.as_ref());
+    let report = build_weekly_report(&this_score, last_score.as_ref(), &this_cluster);
 
     println!("{}", report);
 
@@ -188,7 +190,11 @@ fn signal_delta(current: Signal, previous: Signal) -> &'static str {
     }
 }
 
-fn build_weekly_report(this: &ScoreResult, last: Option<&ScoreResult>) -> String {
+fn build_weekly_report(
+    this: &ScoreResult,
+    last: Option<&ScoreResult>,
+    cluster: &ClusterResult,
+) -> String {
     let now = Utc::now();
     let week_num = now.iso_week().week();
     let year = now.iso_week().year();
@@ -199,8 +205,8 @@ fn build_weekly_report(this: &ScoreResult, last: Option<&ScoreResult>) -> String
     lines.push(format!(
         "> {}",
         t!(
-            "Metrics-only report — for coaching run `refine cognitive-portrait`",
-            "纯指标报告 — 教练分析请运行 `refine cognitive-portrait`"
+            "Metrics-derived report — for coaching run `refine cognitive-portrait`",
+            "指标驱动报告 — 教练分析请运行 `refine cognitive-portrait`"
         )
     ));
 
@@ -259,6 +265,11 @@ fn build_weekly_report(this: &ScoreResult, last: Option<&ScoreResult>) -> String
         None => {
             lines.push(t!("No prior week data.", "无上周数据。").to_string());
         }
+    }
+
+    if let Some(action_card) = action_card::build_weekly_action_card(this, cluster) {
+        lines.push(String::new());
+        lines.extend(action_card);
     }
 
     lines.join("\n")
@@ -431,6 +442,8 @@ mod tests {
     use super::*;
     use crate::score::{Indicator, Signal};
     use refine_core::knowledge::{Item, ItemId, ItemType, RestoreParams, Tag};
+    use refine_core::session::GlobalStats;
+    use std::collections::HashMap;
 
     fn make_weekly_record(seed: usize) -> WeeklyRecord {
         WeeklyRecord {
@@ -483,6 +496,23 @@ mod tests {
         }
     }
 
+    fn empty_cluster() -> ClusterResult {
+        ClusterResult {
+            projects: HashMap::new(),
+            global_stats: GlobalStats {
+                total_sessions: 0,
+                total_decisions: 0,
+                total_bugfixes: 0,
+                total_summaries: 0,
+                cognitive_levels: HashMap::new(),
+                collaboration_modes: HashMap::new(),
+                tool_frequency: HashMap::new(),
+                project_ranking: Vec::new(),
+            },
+            untagged_count: 0,
+        }
+    }
+
     #[test]
     fn test_filter_by_time_range() {
         let now = Utc::now();
@@ -508,19 +538,18 @@ mod tests {
     #[test]
     fn test_build_weekly_report_no_suggestions_text() {
         let score = make_score_result([Signal::Green, Signal::Yellow, Signal::Red]);
-        let report = build_weekly_report(&score, None);
+        let report = build_weekly_report(&score, None, &empty_cluster());
         assert!(!report.contains("建议"), "report must not contain '建议'");
         assert!(
             !report.to_lowercase().contains("suggestion"),
             "report must not contain 'suggestion'"
         );
-        assert!(!report.contains("下周"), "report must not contain '下周'");
     }
 
     #[test]
     fn test_build_weekly_report_contains_three_axes() {
         let score = make_score_result([Signal::Green, Signal::Yellow, Signal::Red]);
-        let report = build_weekly_report(&score, None);
+        let report = build_weekly_report(&score, None, &empty_cluster());
         assert!(report.contains("depth") || report.contains("深度") || report.contains("Depth"));
         assert!(
             report.contains("breadth") || report.contains("广度") || report.contains("Breadth")
@@ -535,7 +564,7 @@ mod tests {
     #[test]
     fn test_build_weekly_report_no_prior_data() {
         let score = make_score_result([Signal::Green, Signal::Yellow, Signal::Red]);
-        let report = build_weekly_report(&score, None);
+        let report = build_weekly_report(&score, None, &empty_cluster());
         assert!(
             report.contains("No prior week data") || report.contains("无上周数据"),
             "should indicate absence of prior data"
@@ -546,7 +575,7 @@ mod tests {
     fn test_build_weekly_report_with_prior_data_shows_delta() {
         let this_score = make_score_result([Signal::Green, Signal::Yellow, Signal::Red]);
         let last_score = make_score_result([Signal::Yellow, Signal::Red, Signal::Green]);
-        let report = build_weekly_report(&this_score, Some(&last_score));
+        let report = build_weekly_report(&this_score, Some(&last_score), &empty_cluster());
         assert!(
             report.contains('↑') || report.contains('↓') || report.contains('='),
             "report with prior data must show trend arrows"
@@ -572,7 +601,7 @@ mod tests {
             tension: Some("test tension".into()),
             timestamp: Utc::now(),
         };
-        let report = build_weekly_report(&score, None);
+        let report = build_weekly_report(&score, None, &empty_cluster());
         assert!(
             report.contains("4.2"),
             "indicator values must appear in report"
@@ -742,7 +771,7 @@ mod tests {
     #[test]
     fn test_weekly_sentinel_written_with_nonempty_content() -> Result<()> {
         let score = make_score_result([Signal::Green, Signal::Yellow, Signal::Red]);
-        let report = build_weekly_report(&score, None);
+        let report = build_weekly_report(&score, None, &empty_cluster());
 
         let dir = tempfile::tempdir().map_err(|e| anyhow::anyhow!(e))?;
         let path = dir.path().join("last-weekly.md");
