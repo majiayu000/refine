@@ -207,10 +207,9 @@ pub(super) fn find_job_by_id(
 }
 
 pub(super) fn upsert_job(conn: &Connection, job: &ExtractionJobRecord) -> InfraResult<()> {
-    validate_job_transition(conn, job)?;
-
-    conn.execute(
-        r#"
+    let affected = conn
+        .execute(
+            r#"
         INSERT INTO extraction_jobs
           (id, conversation_id, mode, status, created_at, updated_at, error)
         VALUES
@@ -222,18 +221,52 @@ pub(super) fn upsert_job(conn: &Connection, job: &ExtractionJobRecord) -> InfraR
           created_at=excluded.created_at,
           updated_at=excluded.updated_at,
           error=excluded.error
+        WHERE extraction_jobs.status = excluded.status
+           OR (extraction_jobs.status = 'pending' AND excluded.status = 'running')
+           OR (extraction_jobs.status = 'running' AND excluded.status IN ('succeeded', 'failed'))
         "#,
-        params![
-            job.id,
-            job.conversation_id,
-            extraction_mode_to_db(&job.mode),
+            params![
+                job.id,
+                job.conversation_id,
+                extraction_mode_to_db(&job.mode),
+                job_status_to_db(&job.status),
+                job.created_at,
+                job.updated_at,
+                job.error,
+            ],
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+
+    if affected == 0 {
+        let existing = conn
+            .query_row(
+                "SELECT status FROM extraction_jobs WHERE id = ?1",
+                [job.id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| InfraError::Database(e.to_string()))?
+            .map(|raw| job_status_from_db(raw.as_str()))
+            .transpose()
+            .map_err(InfraError::Database)?;
+
+        if let Some(existing) = existing {
+            return Err(invalid_transition_error(
+                "job",
+                &job.id,
+                job_status_to_db(&existing),
+                job_status_to_db(&job.status),
+            ));
+        }
+
+        return Err(invalid_transition_error(
+            "job",
+            &job.id,
+            "<missing>",
             job_status_to_db(&job.status),
-            job.created_at,
-            job.updated_at,
-            job.error,
-        ],
-    )
-    .map_err(|e| InfraError::Database(e.to_string()))?;
+        ));
+    }
+
     Ok(())
 }
 
@@ -260,33 +293,6 @@ fn validate_conversation_transition(
                 &record.id,
                 conversation_status_to_db(&existing),
                 conversation_status_to_db(&record.status),
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_job_transition(conn: &Connection, job: &ExtractionJobRecord) -> InfraResult<()> {
-    let existing = conn
-        .query_row(
-            "SELECT status FROM extraction_jobs WHERE id = ?1",
-            [job.id.as_str()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|e| InfraError::Database(e.to_string()))?
-        .map(|raw| job_status_from_db(raw.as_str()))
-        .transpose()
-        .map_err(InfraError::Database)?;
-
-    if let Some(existing) = existing {
-        if !existing.can_transition_to(&job.status) {
-            return Err(invalid_transition_error(
-                "job",
-                &job.id,
-                job_status_to_db(&existing),
-                job_status_to_db(&job.status),
             ));
         }
     }
