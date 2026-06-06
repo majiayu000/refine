@@ -17,8 +17,13 @@ pub fn spawn_extraction(
 ) {
     tokio::spawn(async move {
         if let Err(err) = run_extraction(state.clone(), &conversation_id, &job_id, mode).await {
-            set_conversation_failed(&state, &conversation_id, &err).await;
-            set_job_failed(&state, &job_id, &err).await;
+            if let Err(persist_err) = set_conversation_failed(&state, &conversation_id, &err).await
+            {
+                tracing::warn!("persist failed conversation failed: {}", persist_err);
+            }
+            if let Err(persist_err) = set_job_failed(&state, &job_id, &err).await {
+                tracing::warn!("persist failed job failed: {}", persist_err);
+            }
         }
     });
 }
@@ -29,8 +34,8 @@ async fn run_extraction(
     job_id: &str,
     mode: ExtractionMode,
 ) -> Result<(), String> {
-    set_job_running(&state, job_id).await;
-    set_conversation_status(&state, conversation_id, ConversationStatus::Processing).await;
+    set_job_running(&state, job_id).await?;
+    set_conversation_status(&state, conversation_id, ConversationStatus::Processing).await?;
 
     let conversation = state
         .conversation_repo
@@ -65,8 +70,8 @@ async fn run_extraction(
 
     let item_ids = save_and_index_items(&state, &items).await?;
 
-    set_conversation_processed(&state, conversation_id, item_ids).await;
-    set_job_succeeded(&state, job_id).await;
+    set_conversation_processed(&state, conversation_id, item_ids).await?;
+    set_job_succeeded(&state, job_id).await?;
 
     Ok(())
 }
@@ -154,7 +159,7 @@ fn mode_to_policy(mode: ExtractionMode) -> ExtractionPolicy {
     }
 }
 
-async fn set_job_running(state: &Arc<AppState>, job_id: &str) {
+async fn set_job_running(state: &Arc<AppState>, job_id: &str) -> Result<(), String> {
     update_job(
         state,
         job_id,
@@ -165,10 +170,10 @@ async fn set_job_running(state: &Arc<AppState>, job_id: &str) {
         },
         "running",
     )
-    .await;
+    .await
 }
 
-async fn set_job_succeeded(state: &Arc<AppState>, job_id: &str) {
+async fn set_job_succeeded(state: &Arc<AppState>, job_id: &str) -> Result<(), String> {
     update_job(
         state,
         job_id,
@@ -179,10 +184,10 @@ async fn set_job_succeeded(state: &Arc<AppState>, job_id: &str) {
         },
         "succeeded",
     )
-    .await;
+    .await
 }
 
-async fn set_job_failed(state: &Arc<AppState>, job_id: &str, error: &str) {
+async fn set_job_failed(state: &Arc<AppState>, job_id: &str, error: &str) -> Result<(), String> {
     update_job(
         state,
         job_id,
@@ -193,14 +198,14 @@ async fn set_job_failed(state: &Arc<AppState>, job_id: &str, error: &str) {
         },
         "failed",
     )
-    .await;
+    .await
 }
 
 async fn set_conversation_status(
     state: &Arc<AppState>,
     conversation_id: &str,
     status: ConversationStatus,
-) {
+) -> Result<(), String> {
     update_conversation(
         state,
         conversation_id,
@@ -209,14 +214,14 @@ async fn set_conversation_status(
         },
         "status",
     )
-    .await;
+    .await
 }
 
 async fn set_conversation_processed(
     state: &Arc<AppState>,
     conversation_id: &str,
     item_ids: Vec<String>,
-) {
+) -> Result<(), String> {
     update_conversation(
         state,
         conversation_id,
@@ -227,10 +232,14 @@ async fn set_conversation_processed(
         },
         "processed",
     )
-    .await;
+    .await
 }
 
-async fn set_conversation_failed(state: &Arc<AppState>, conversation_id: &str, error: &str) {
+async fn set_conversation_failed(
+    state: &Arc<AppState>,
+    conversation_id: &str,
+    error: &str,
+) -> Result<(), String> {
     update_conversation(
         state,
         conversation_id,
@@ -240,28 +249,30 @@ async fn set_conversation_failed(state: &Arc<AppState>, conversation_id: &str, e
         },
         "failed",
     )
-    .await;
+    .await
 }
 
-async fn update_job<F>(state: &Arc<AppState>, job_id: &str, mutate: F, phase: &str)
+async fn update_job<F>(
+    state: &Arc<AppState>,
+    job_id: &str,
+    mutate: F,
+    phase: &str,
+) -> Result<(), String>
 where
     F: FnOnce(&mut ExtractionJobRecord),
 {
-    let mut job = match state.job_repo.find_job_by_id(job_id).await {
-        Ok(Some(job)) => job,
-        Ok(None) => {
-            tracing::warn!("persist {} job skipped: not found {}", phase, job_id);
-            return;
-        }
-        Err(err) => {
-            tracing::warn!("persist {} job skipped: load error {}", phase, err);
-            return;
-        }
-    };
+    let mut job = state
+        .job_repo
+        .find_job_by_id(job_id)
+        .await
+        .map_err(|err| format!("persist {} job skipped: load error {}", phase, err))?
+        .ok_or_else(|| format!("persist {} job skipped: not found {}", phase, job_id))?;
     mutate(&mut job);
-    if let Err(err) = state.job_repo.upsert_job(&job).await {
-        tracing::warn!("persist {} job failed: {}", phase, err);
-    }
+    state
+        .job_repo
+        .upsert_job(&job)
+        .await
+        .map_err(|err| format!("persist {} job failed: {}", phase, err))
 }
 
 async fn save_document(
@@ -285,41 +296,32 @@ async fn update_conversation<F>(
     conversation_id: &str,
     mutate: F,
     phase: &str,
-) where
+) -> Result<(), String>
+where
     F: FnOnce(&mut ConversationRecord),
 {
-    let mut conversation = match state
+    let mut conversation = state
         .conversation_repo
         .find_conversation_by_id(conversation_id)
         .await
-    {
-        Ok(Some(conversation)) => conversation,
-        Ok(None) => {
-            tracing::warn!(
+        .map_err(|err| format!("persist {} conversation skipped: load error {}", phase, err))?
+        .ok_or_else(|| {
+            format!(
                 "persist {} conversation skipped: not found {}",
-                phase,
-                conversation_id
-            );
-            return;
-        }
-        Err(err) => {
-            tracing::warn!("persist {} conversation skipped: load error {}", phase, err);
-            return;
-        }
-    };
+                phase, conversation_id
+            )
+        })?;
     mutate(&mut conversation);
-    if let Err(err) = state
+    state
         .conversation_repo
         .upsert_conversation(&conversation)
         .await
-    {
-        tracing::warn!("persist {} conversation failed: {}", phase, err);
-    }
+        .map_err(|err| format!("persist {} conversation failed: {}", phase, err))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::spawn_extraction;
+    use super::{run_extraction, spawn_extraction};
     use crate::models::{
         now_iso, ConversationRecord, ConversationStatus, ExtractionJobRecord, ExtractionMode,
         JobStatus,
@@ -407,6 +409,49 @@ mod tests {
         assert!(
             saved_items.is_empty(),
             "failed extraction left orphan items: {:?}",
+            saved_items
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_job_start_transition_aborts_before_extraction() {
+        let (_tmp, state, persistence, conversation_id, job_id) = build_state_with_failing_index()
+            .await
+            .expect("build test state");
+        let mut job = persistence
+            .find_job_by_id(&job_id)
+            .await
+            .expect("load job")
+            .expect("job exists");
+        job.status = JobStatus::Running;
+        persistence
+            .upsert_job(&job)
+            .await
+            .expect("mark job running");
+        job.status = JobStatus::Succeeded;
+        persistence
+            .upsert_job(&job)
+            .await
+            .expect("mark job succeeded");
+
+        let err = run_extraction(
+            state.clone(),
+            &conversation_id,
+            &job_id,
+            ExtractionMode::Auto,
+        )
+        .await
+        .expect_err("succeeded job must not restart extraction");
+        assert!(
+            err.contains("invalid job status transition"),
+            "unexpected error: {}",
+            err
+        );
+
+        let saved_items = state.store.find_all().await.expect("load saved items");
+        assert!(
+            saved_items.is_empty(),
+            "aborted extraction saved items: {:?}",
             saved_items
         );
     }
