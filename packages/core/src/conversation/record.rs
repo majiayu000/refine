@@ -47,6 +47,7 @@ impl JobStatus {
         matches!(
             (self, next),
             (Self::Pending, Self::Running)
+                | (Self::Pending, Self::Failed)
                 | (Self::Running, Self::Succeeded)
                 | (Self::Running, Self::Failed)
         )
@@ -135,6 +136,7 @@ mod tests {
     #[test]
     fn job_status_rejects_terminal_regression() {
         assert!(JobStatus::Pending.can_transition_to(&JobStatus::Running));
+        assert!(JobStatus::Pending.can_transition_to(&JobStatus::Failed));
         assert!(JobStatus::Running.can_transition_to(&JobStatus::Succeeded));
         assert!(JobStatus::Running.can_transition_to(&JobStatus::Failed));
         assert!(!JobStatus::Succeeded.can_transition_to(&JobStatus::Pending));

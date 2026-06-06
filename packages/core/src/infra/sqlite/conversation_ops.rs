@@ -101,15 +101,14 @@ pub(super) fn upsert_conversation(
     conn: &Connection,
     record: &ConversationRecord,
 ) -> InfraResult<()> {
-    validate_conversation_transition(conn, record)?;
-
     let item_ids =
         serde_json::to_string(&record.item_ids).map_err(|e| InfraError::Database(e.to_string()))?;
     let metadata =
         serde_json::to_string(&record.metadata).map_err(|e| InfraError::Database(e.to_string()))?;
 
-    conn.execute(
-        r#"
+    let affected = conn
+        .execute(
+            r#"
         INSERT INTO conversations
           (id, user_id, source, url, title, raw_content, metadata_json,
            captured_at, created_at, status, idempotency_key, item_ids, last_error)
@@ -129,24 +128,60 @@ pub(super) fn upsert_conversation(
           idempotency_key=excluded.idempotency_key,
           item_ids=excluded.item_ids,
           last_error=excluded.last_error
+        WHERE conversations.status = excluded.status
+           OR (conversations.status = 'captured' AND excluded.status = 'queued')
+           OR (conversations.status = 'queued' AND excluded.status IN ('processing', 'failed'))
+           OR (conversations.status = 'processing' AND excluded.status IN ('processed', 'failed'))
+           OR (conversations.status = 'failed' AND excluded.status = 'queued')
         "#,
-        params![
-            record.id,
-            record.user_id,
-            record.source,
-            record.url,
-            record.title,
-            record.raw_content,
-            metadata,
-            record.captured_at,
-            record.created_at,
+            params![
+                record.id,
+                record.user_id,
+                record.source,
+                record.url,
+                record.title,
+                record.raw_content,
+                metadata,
+                record.captured_at,
+                record.created_at,
+                conversation_status_to_db(&record.status),
+                record.idempotency_key,
+                item_ids,
+                record.last_error,
+            ],
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+
+    if affected == 0 {
+        let existing = conn
+            .query_row(
+                "SELECT status FROM conversations WHERE id = ?1",
+                [record.id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| InfraError::Database(e.to_string()))?
+            .map(|raw| conversation_status_from_db(raw.as_str()))
+            .transpose()
+            .map_err(InfraError::Database)?;
+
+        if let Some(existing) = existing {
+            return Err(invalid_transition_error(
+                "conversation",
+                &record.id,
+                conversation_status_to_db(&existing),
+                conversation_status_to_db(&record.status),
+            ));
+        }
+
+        return Err(invalid_transition_error(
+            "conversation",
+            &record.id,
+            "<missing>",
             conversation_status_to_db(&record.status),
-            record.idempotency_key,
-            item_ids,
-            record.last_error,
-        ],
-    )
-    .map_err(|e| InfraError::Database(e.to_string()))?;
+        ));
+    }
+
     Ok(())
 }
 
@@ -223,6 +258,7 @@ pub(super) fn upsert_job(conn: &Connection, job: &ExtractionJobRecord) -> InfraR
           error=excluded.error
         WHERE extraction_jobs.status = excluded.status
            OR (extraction_jobs.status = 'pending' AND excluded.status = 'running')
+           OR (extraction_jobs.status = 'pending' AND excluded.status = 'failed')
            OR (extraction_jobs.status = 'running' AND excluded.status IN ('succeeded', 'failed'))
         "#,
             params![
@@ -265,36 +301,6 @@ pub(super) fn upsert_job(conn: &Connection, job: &ExtractionJobRecord) -> InfraR
             "<missing>",
             job_status_to_db(&job.status),
         ));
-    }
-
-    Ok(())
-}
-
-fn validate_conversation_transition(
-    conn: &Connection,
-    record: &ConversationRecord,
-) -> InfraResult<()> {
-    let existing = conn
-        .query_row(
-            "SELECT status FROM conversations WHERE id = ?1",
-            [record.id.as_str()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|e| InfraError::Database(e.to_string()))?
-        .map(|raw| conversation_status_from_db(raw.as_str()))
-        .transpose()
-        .map_err(InfraError::Database)?;
-
-    if let Some(existing) = existing {
-        if !existing.can_transition_to(&record.status) {
-            return Err(invalid_transition_error(
-                "conversation",
-                &record.id,
-                conversation_status_to_db(&existing),
-                conversation_status_to_db(&record.status),
-            ));
-        }
     }
 
     Ok(())

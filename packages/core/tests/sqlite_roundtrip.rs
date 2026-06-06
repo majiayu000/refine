@@ -1,9 +1,14 @@
 use chrono::{Duration, TimeZone, Utc};
+use refine_core::conversation::{
+    now_iso, ConversationRecord, ConversationRepository, ConversationStatus, ExtractionJobRecord,
+    ExtractionMode, JobRepository, JobStatus,
+};
 use refine_core::infra::SqliteStore;
 use refine_core::knowledge::{
     Document, DocumentId, Item, ItemId, ItemRepository, ItemType, RestoreDocumentParams,
     RestoreParams, Source, Tag,
 };
+use serde_json::json;
 use std::collections::HashSet;
 
 #[tokio::test]
@@ -285,4 +290,96 @@ async fn find_recent_and_count_items_respect_type_and_pagination() {
         .await
         .expect("find_recent all failed");
     assert_eq!(paged_all.len(), 2);
+}
+
+#[tokio::test]
+async fn conversation_upsert_rejects_invalid_status_regression() {
+    let store = SqliteStore::in_memory().expect("failed to create sqlite store");
+    let mut conversation =
+        build_conversation("conv-invalid-transition", ConversationStatus::Processed);
+
+    store
+        .upsert_conversation(&conversation)
+        .await
+        .expect("insert processed conversation");
+
+    conversation.status = ConversationStatus::Queued;
+    let err = store
+        .upsert_conversation(&conversation)
+        .await
+        .expect_err("processed conversations must not regress to queued");
+    assert!(
+        err.to_string()
+            .contains("invalid conversation status transition"),
+        "unexpected error: {}",
+        err
+    );
+
+    let loaded = store
+        .find_conversation_by_id(&conversation.id)
+        .await
+        .expect("find conversation")
+        .expect("conversation should exist");
+    assert_eq!(loaded.status, ConversationStatus::Processed);
+}
+
+#[tokio::test]
+async fn pending_job_can_record_startup_failure_without_regressing_terminal_state() {
+    let store = SqliteStore::in_memory().expect("failed to create sqlite store");
+    let now = now_iso();
+    let mut job = ExtractionJobRecord {
+        id: "job-startup-failure".to_string(),
+        conversation_id: "conv-startup-failure".to_string(),
+        mode: ExtractionMode::Auto,
+        status: JobStatus::Pending,
+        created_at: now.clone(),
+        updated_at: now,
+        error: None,
+    };
+
+    store.upsert_job(&job).await.expect("insert pending job");
+    job.status = JobStatus::Failed;
+    job.error = Some("startup failed".to_string());
+    store
+        .upsert_job(&job)
+        .await
+        .expect("pending job should record startup failure");
+
+    job.status = JobStatus::Running;
+    let err = store
+        .upsert_job(&job)
+        .await
+        .expect_err("failed jobs must not regress to running");
+    assert!(
+        err.to_string().contains("invalid job status transition"),
+        "unexpected error: {}",
+        err
+    );
+
+    let loaded = store
+        .find_job_by_id(&job.id)
+        .await
+        .expect("find job")
+        .expect("job should exist");
+    assert_eq!(loaded.status, JobStatus::Failed);
+    assert_eq!(loaded.error.as_deref(), Some("startup failed"));
+}
+
+fn build_conversation(id: &str, status: ConversationStatus) -> ConversationRecord {
+    let now = now_iso();
+    ConversationRecord {
+        id: id.to_string(),
+        user_id: "test-user".to_string(),
+        source: "test".to_string(),
+        url: format!("https://example.com/{}", id),
+        title: Some("test conversation".to_string()),
+        raw_content: "Human: hello\nAssistant: world".to_string(),
+        metadata: json!({}),
+        captured_at: now.clone(),
+        created_at: now,
+        status,
+        idempotency_key: format!("idempotency-{}", id),
+        item_ids: Vec::new(),
+        last_error: None,
+    }
 }
