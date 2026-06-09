@@ -7,12 +7,22 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
+const ADVICE_CACHE_VERSION: &str = "advice-v2";
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CachedAdvice {
     pub advice: String,
     #[serde(default)]
     pub short: String,
     pub generated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub cache_version: String,
+    #[serde(default)]
+    pub cache_key: String,
+    #[serde(default)]
+    pub model_identity: String,
 }
 
 pub fn load_cached() -> Result<Option<CachedAdvice>> {
@@ -21,6 +31,17 @@ pub fn load_cached() -> Result<Option<CachedAdvice>> {
 }
 
 fn load_cached_from_path(path: &Path) -> Result<Option<CachedAdvice>> {
+    load_cached_matching_key(path, None)
+}
+
+fn load_cached_for_key_from_path(path: &Path, expected_key: &str) -> Result<Option<CachedAdvice>> {
+    load_cached_matching_key(path, Some(expected_key))
+}
+
+fn load_cached_matching_key(
+    path: &Path,
+    expected_key: Option<&str>,
+) -> Result<Option<CachedAdvice>> {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -34,6 +55,12 @@ fn load_cached_from_path(path: &Path) -> Result<Option<CachedAdvice>> {
     };
     let cached: CachedAdvice = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse advice cache JSON {}", path.display()))?;
+    if cached.cache_version != ADVICE_CACHE_VERSION {
+        return Ok(None);
+    }
+    if expected_key.is_some_and(|key| cached.cache_key != key) {
+        return Ok(None);
+    }
     let age = Utc::now() - cached.generated_at;
     if age.num_hours() < 72 {
         Ok(Some(cached))
@@ -42,12 +69,15 @@ fn load_cached_from_path(path: &Path) -> Result<Option<CachedAdvice>> {
     }
 }
 
-fn save_cached(advice: &str, short: &str) -> Result<()> {
+fn save_cached(advice: &str, short: &str, cache_key: &str, model_identity: &str) -> Result<()> {
     let dir = crate::config::ensure_mirror_dir()?;
     let cached = CachedAdvice {
         advice: advice.to_string(),
         short: short.to_string(),
         generated_at: Utc::now(),
+        cache_version: ADVICE_CACHE_VERSION.to_string(),
+        cache_key: cache_key.to_string(),
+        model_identity: model_identity.to_string(),
     };
     let json = serde_json::to_string_pretty(&cached)?;
     std::fs::write(dir.join("advice.json"), json)?;
@@ -134,6 +164,15 @@ fn system_prompt() -> &'static str {
 /// Generate advice via LLM (single attempt, best-effort) and cache result
 pub async fn generate_and_cache(score: &ScoreResult, llm: &Arc<dyn LlmClient>) -> Result<String> {
     let prompt = build_prompt(score);
+    let model_identity = llm.cache_identity();
+    let cache_key = advice_cache_key(&prompt, system_prompt(), &model_identity);
+    let cache_path = crate::config::mirror_dir().join("advice.json");
+    match load_cached_for_key_from_path(&cache_path, &cache_key) {
+        Ok(Some(cached)) => return Ok(cached.advice),
+        Ok(None) => {}
+        Err(err) => tracing::warn!("failed to load advice cache: {}", err),
+    }
+
     let response = llm_with_retry(llm, &prompt, system_prompt())
         .await
         .map_err(|e| anyhow::anyhow!("LLM advice generation failed: {}", e))?;
@@ -158,14 +197,46 @@ pub async fn generate_and_cache(score: &ScoreResult, llm: &Arc<dyn LlmClient>) -
         (s, raw.clone())
     };
 
-    save_cached(&full, &short)?;
+    save_cached(&full, &short, &cache_key, &model_identity)?;
     Ok(full)
+}
+
+fn advice_cache_key(prompt: &str, system: &str, model_identity: &str) -> String {
+    format!(
+        "{}:{:016x}",
+        ADVICE_CACHE_VERSION,
+        stable_hash(&[prompt, system, model_identity])
+    )
+}
+
+fn stable_hash(parts: &[&str]) -> u64 {
+    let mut hash = FNV_OFFSET_BASIS;
+    for part in parts {
+        for byte in part.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    fn cached_advice(advice: &str, generated_at: DateTime<Utc>) -> CachedAdvice {
+        CachedAdvice {
+            advice: advice.into(),
+            short: advice.into(),
+            generated_at,
+            cache_version: ADVICE_CACHE_VERSION.into(),
+            cache_key: "cache-key".into(),
+            model_identity: "model".into(),
+        }
+    }
 
     #[test]
     fn test_load_cached_reports_invalid_json() {
@@ -183,11 +254,7 @@ mod tests {
     fn test_load_cached_returns_none_for_stale_cache() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("advice.json");
-        let cached = CachedAdvice {
-            advice: "stale".into(),
-            short: "stale".into(),
-            generated_at: Utc::now() - Duration::hours(80),
-        };
+        let cached = cached_advice("stale", Utc::now() - Duration::hours(80));
         std::fs::write(&path, serde_json::to_string(&cached).unwrap()).unwrap();
 
         let loaded = load_cached_from_path(&path).unwrap();
@@ -198,14 +265,50 @@ mod tests {
     fn test_load_cached_returns_fresh_cache() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("advice.json");
-        let cached = CachedAdvice {
-            advice: "fresh".into(),
-            short: "fresh".into(),
-            generated_at: Utc::now() - Duration::hours(2),
-        };
+        let cached = cached_advice("fresh", Utc::now() - Duration::hours(2));
         std::fs::write(&path, serde_json::to_string(&cached).unwrap()).unwrap();
 
         let loaded = load_cached_from_path(&path).unwrap();
         assert_eq!(loaded.unwrap().advice, "fresh");
+    }
+
+    #[test]
+    fn test_load_cached_returns_none_for_key_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("advice.json");
+        let cached = cached_advice("fresh", Utc::now() - Duration::hours(2));
+        std::fs::write(&path, serde_json::to_string(&cached).unwrap()).unwrap();
+
+        let loaded = load_cached_for_key_from_path(&path, "different-key").unwrap();
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn test_load_cached_returns_none_for_legacy_cache_without_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("advice.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "advice": "legacy",
+                "short": "legacy",
+                "generated_at": Utc::now(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let loaded = load_cached_from_path(&path).unwrap();
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn test_advice_cache_key_changes_with_prompt_and_model() {
+        let base = advice_cache_key("prompt-a", system_prompt(), "openai:gpt-4o");
+        let prompt_changed = advice_cache_key("prompt-b", system_prompt(), "openai:gpt-4o");
+        let model_changed = advice_cache_key("prompt-a", system_prompt(), "openai:gpt-5");
+
+        assert_ne!(base, prompt_changed);
+        assert_ne!(base, model_changed);
     }
 }

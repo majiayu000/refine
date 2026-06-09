@@ -42,7 +42,7 @@ pub async fn list_conversations(
         .iter()
         .map(ConversationDto::from)
         .collect::<Vec<_>>();
-    let next_cursor = paginate_next_cursor(cursor, mapped.len(), total);
+    let next_cursor = paginate_next_cursor(cursor, mapped.len(), limit);
 
     Ok(ListConversationsResult {
         conversations: mapped,
@@ -110,7 +110,7 @@ pub async fn list_items(
         .find_recent(None, cursor, limit)
         .await
         .map_err(|err| QueryError::Internal(err.to_string()))?;
-    let next_cursor = paginate_next_cursor(cursor, items.len(), total);
+    let next_cursor = paginate_next_cursor(cursor, items.len(), limit);
 
     Ok(ListItemsResult {
         items: items.iter().map(ItemDto::from).collect::<Vec<_>>(),
@@ -192,7 +192,7 @@ pub async fn list_documents(
         .await
         .map_err(|e| QueryError::Internal(e.to_string()))?;
     let item_counts = count_items_per_document(&state, &docs).await?;
-    let next_cursor = paginate_next_cursor(cursor, docs.len(), total);
+    let next_cursor = paginate_next_cursor(cursor, docs.len(), limit);
 
     Ok(ListDocumentsResult {
         documents: docs
@@ -200,7 +200,7 @@ pub async fn list_documents(
             .enumerate()
             .map(|(i, doc)| DocumentDto {
                 id: doc.id().to_string(),
-                title: doc.title().unwrap_or("(无标题)").to_string(),
+                title: doc.title().map(ToString::to_string),
                 source: doc.source().to_string(),
                 url: doc.url().to_string(),
                 item_count: item_counts.get(i).copied().unwrap_or(0),
@@ -232,7 +232,7 @@ pub async fn get_document(
 
     Ok(DocumentDetailDto {
         id: doc.id().to_string(),
-        title: doc.title().unwrap_or("(无标题)").to_string(),
+        title: doc.title().map(ToString::to_string),
         raw_content: doc.raw_content().to_string(),
         source: doc.source().to_string(),
         url: doc.url().to_string(),
@@ -258,8 +258,8 @@ async fn count_items_per_document(
     Ok(counts)
 }
 
-fn paginate_next_cursor(cursor: usize, returned: usize, total: usize) -> Option<usize> {
-    if cursor + returned < total {
+fn paginate_next_cursor(cursor: usize, returned: usize, limit: usize) -> Option<usize> {
+    if returned == limit {
         Some(cursor + returned)
     } else {
         None
@@ -272,13 +272,19 @@ mod tests {
 
     #[test]
     fn paginate_next_cursor_returns_none_on_last_page() {
-        assert_eq!(paginate_next_cursor(10, 5, 15), None);
-        assert_eq!(paginate_next_cursor(0, 0, 0), None);
+        assert_eq!(paginate_next_cursor(10, 5, 20), None);
+        assert_eq!(paginate_next_cursor(0, 0, 20), None);
     }
 
     #[test]
-    fn paginate_next_cursor_returns_next_when_remaining() {
-        assert_eq!(paginate_next_cursor(0, 20, 55), Some(20));
-        assert_eq!(paginate_next_cursor(20, 20, 55), Some(40));
+    fn paginate_next_cursor_returns_next_for_full_page() {
+        assert_eq!(paginate_next_cursor(0, 20, 20), Some(20));
+        assert_eq!(paginate_next_cursor(20, 20, 20), Some(40));
+    }
+
+    #[test]
+    fn paginate_next_cursor_ignores_stale_total_after_delete() {
+        assert_eq!(paginate_next_cursor(20, 0, 20), None);
+        assert_eq!(paginate_next_cursor(20, 5, 20), None);
     }
 }

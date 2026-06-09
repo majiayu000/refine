@@ -10,6 +10,12 @@ use std::sync::Arc;
 pub trait LlmClient: Send + Sync {
     /// 发送补全请求
     async fn complete(&self, prompt: &str, system: Option<&str>) -> InfraResult<String>;
+
+    /// Stable identity for cache invalidation. Implementations should include
+    /// provider, model, and compatible endpoint identity, but never secrets.
+    fn cache_identity(&self) -> String {
+        "unknown-llm".to_string()
+    }
 }
 
 /// 从环境变量构建 LLM 客户端。
@@ -80,6 +86,10 @@ impl ClaudeClient {
 }
 #[async_trait]
 impl LlmClient for ClaudeClient {
+    fn cache_identity(&self) -> String {
+        format!("anthropic:{}:{}", self.model, self.base_url)
+    }
+
     async fn complete(&self, prompt: &str, system: Option<&str>) -> InfraResult<String> {
         let mut body = serde_json::json!({
             "model": self.model,
@@ -166,6 +176,10 @@ impl OpenAIClient {
 }
 #[async_trait]
 impl LlmClient for OpenAIClient {
+    fn cache_identity(&self) -> String {
+        format!("openai:{}:{}", self.model, self.base_url)
+    }
+
     async fn complete(&self, prompt: &str, system: Option<&str>) -> InfraResult<String> {
         let mut messages = Vec::new();
 

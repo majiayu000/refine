@@ -23,7 +23,7 @@ pub struct RecommendationItem {
     pub content: String,
     pub tags: Vec<String>,
     pub score: f32,
-    pub reason: String,
+    pub match_strategy: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,7 +43,7 @@ pub struct RecommendationResponse {
 #[derive(Debug, Clone, Copy)]
 struct RecommendationContext {
     strategy_name: &'static str,
-    reason_name: &'static str,
+    match_strategy: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -112,7 +112,7 @@ pub async fn recommend_items(
                 .map(|tag| tag.as_str().to_string())
                 .collect::<Vec<_>>(),
             score: hit.score,
-            reason: context.reason_name.to_string(),
+            match_strategy: context.match_strategy.to_string(),
         })
         .collect::<Vec<_>>();
 
@@ -134,12 +134,12 @@ fn recommendation_context(semantic_search_enabled: bool) -> RecommendationContex
     if semantic_search_enabled {
         RecommendationContext {
             strategy_name: "hybrid_search",
-            reason_name: "hybrid_match",
+            match_strategy: "hybrid_match",
         }
     } else {
         RecommendationContext {
             strategy_name: "keyword_search",
-            reason_name: "keyword_match",
+            match_strategy: "keyword_match",
         }
     }
 }
@@ -166,11 +166,11 @@ mod tests {
     fn recommendation_context_changes_with_semantic_flag() {
         let keyword = recommendation_context(false);
         assert_eq!(keyword.strategy_name, "keyword_search");
-        assert_eq!(keyword.reason_name, "keyword_match");
+        assert_eq!(keyword.match_strategy, "keyword_match");
 
         let hybrid = recommendation_context(true);
         assert_eq!(hybrid.strategy_name, "hybrid_search");
-        assert_eq!(hybrid.reason_name, "hybrid_match");
+        assert_eq!(hybrid.match_strategy, "hybrid_match");
     }
 
     #[test]

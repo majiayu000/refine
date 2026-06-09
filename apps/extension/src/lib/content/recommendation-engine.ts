@@ -123,7 +123,7 @@ export function initRecommendationEngine(options: RecommendationEngineOptions): 
         border-color: rgba(96, 165, 250, 0.48);
       }
 
-      .refine-reco-chip[data-kind="reason"] {
+      .refine-reco-chip[data-kind="strategy"] {
         color: #fde68a;
         border-color: rgba(245, 158, 11, 0.5);
       }
@@ -371,11 +371,11 @@ export function initRecommendationEngine(options: RecommendationEngineOptions): 
     }
   }
 
-  function reasonLabel(reason: string): string {
-    if (reason === 'keyword_match') return '关键词匹配'
-    if (reason === 'hybrid_match') return '混合匹配'
-    if (reason === 'semantic_match') return '语义匹配'
-    return reason || '命中'
+  function strategyLabel(strategy: string): string {
+    if (strategy === 'keyword_match') return '关键词匹配'
+    if (strategy === 'hybrid_match') return '混合匹配'
+    if (strategy === 'semantic_match') return '语义匹配'
+    return strategy || '命中'
   }
 
   async function reportExposed(query: string, items: RecommendationItem[]): Promise<void> {
@@ -466,11 +466,11 @@ export function initRecommendationEngine(options: RecommendationEngineOptions): 
       itemType.textContent = item.item_type || 'knowledge'
       meta.appendChild(itemType)
 
-      const reason = document.createElement('span')
-      reason.className = 'refine-reco-chip'
-      reason.dataset.kind = 'reason'
-      reason.textContent = reasonLabel(item.reason)
-      meta.appendChild(reason)
+      const strategy = document.createElement('span')
+      strategy.className = 'refine-reco-chip'
+      strategy.dataset.kind = 'strategy'
+      strategy.textContent = strategyLabel(item.match_strategy)
+      meta.appendChild(strategy)
 
       for (const tag of item.tags.slice(0, 3)) {
         const chip = document.createElement('span')
@@ -532,7 +532,7 @@ export function initRecommendationEngine(options: RecommendationEngineOptions): 
     const response = await fetchRecommendationsFromBackground(query)
     if (currentRequestId !== requestId) return
 
-    if (!response?.success || !response.triggered || !Array.isArray(response.items) || response.items.length === 0) {
+    if (!response?.triggered || !Array.isArray(response.items) || response.items.length === 0) {
       hidePanel()
       return
     }

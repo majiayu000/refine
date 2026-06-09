@@ -219,7 +219,9 @@ pub fn facets_to_items(
         if let Some(proj) = project {
             dtags.extend(Tag::try_new(proj));
         }
-        let _ = item.set_tags(dtags);
+        if let Err(e) = item.set_tags(dtags) {
+            tracing::warn!("设置标签失败: {}", e);
+        }
         items.push(item);
     }
 
@@ -231,7 +233,9 @@ pub fn facets_to_items(
         if let Some(proj) = project {
             btags.extend(Tag::try_new(proj));
         }
-        let _ = item.set_tags(btags);
+        if let Err(e) = item.set_tags(btags) {
+            tracing::warn!("设置标签失败: {}", e);
+        }
         items.push(item);
     }
 

@@ -63,7 +63,7 @@ impl From<&Item> for ItemDto {
 #[derive(Debug, Clone, Serialize)]
 pub struct DocumentDto {
     pub id: String,
-    pub title: String,
+    pub title: Option<String>,
     pub source: String,
     pub url: String,
     pub item_count: usize,
@@ -74,7 +74,7 @@ pub struct DocumentDto {
 #[derive(Debug, Clone, Serialize)]
 pub struct DocumentDetailDto {
     pub id: String,
-    pub title: String,
+    pub title: Option<String>,
     pub raw_content: String,
     pub source: String,
     pub url: String,
@@ -253,5 +253,23 @@ mod tests {
         let err =
             validate_contract_version(Some("2.0"), "1.0").expect_err("version mismatch expected");
         assert_eq!(err, contract_incompatible_message("2.0", "1.0"));
+    }
+
+    #[test]
+    fn document_dto_keeps_missing_title_as_null() {
+        let value = match serde_json::to_value(super::DocumentDto {
+            id: "doc-1".to_string(),
+            title: None,
+            source: "test".to_string(),
+            url: "https://example.com".to_string(),
+            item_count: 0,
+            captured_at: "2026-01-01T00:00:00Z".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        }) {
+            Ok(value) => value,
+            Err(err) => panic!("serialize document dto: {err}"),
+        };
+
+        assert_eq!(value.get("title"), Some(&serde_json::Value::Null));
     }
 }

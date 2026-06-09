@@ -681,12 +681,18 @@ mod tests {
     #[tokio::test]
     async fn find_job_by_id_returns_saved_job() {
         let path = temp_db_path();
-        let store = SqliteStore::open(&path).expect("store init");
-        let store: Arc<dyn JobRepository> = Arc::new(store);
+        let sqlite_store = Arc::new(SqliteStore::open(&path).expect("store init"));
+        let conversations: Arc<dyn ConversationRepository> = sqlite_store.clone();
+        let store: Arc<dyn JobRepository> = sqlite_store;
         let now = now_iso();
+        let conversation = build_conversation(ConversationStatus::Queued, "job-parent");
+        conversations
+            .upsert_conversation(&conversation)
+            .await
+            .expect("insert parent conversation");
         let job = ExtractionJobRecord {
             id: Uuid::new_v4().to_string(),
-            conversation_id: "c1".to_string(),
+            conversation_id: conversation.id.clone(),
             mode: ExtractionMode::Auto,
             status: JobStatus::Pending,
             created_at: now.clone(),
@@ -707,12 +713,18 @@ mod tests {
     #[tokio::test]
     async fn upsert_job_rejects_invalid_status_regression() {
         let path = temp_db_path();
-        let store = SqliteStore::open(&path).expect("store init");
-        let store: Arc<dyn JobRepository> = Arc::new(store);
+        let sqlite_store = Arc::new(SqliteStore::open(&path).expect("store init"));
+        let conversations: Arc<dyn ConversationRepository> = sqlite_store.clone();
+        let store: Arc<dyn JobRepository> = sqlite_store;
         let now = now_iso();
+        let conversation = build_conversation(ConversationStatus::Queued, "job-transition-parent");
+        conversations
+            .upsert_conversation(&conversation)
+            .await
+            .expect("insert parent conversation");
         let mut job = ExtractionJobRecord {
             id: Uuid::new_v4().to_string(),
-            conversation_id: "c1".to_string(),
+            conversation_id: conversation.id.clone(),
             mode: ExtractionMode::Auto,
             status: JobStatus::Pending,
             created_at: now.clone(),

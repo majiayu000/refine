@@ -90,7 +90,7 @@ pub struct ConversationDto {
     pub id: String,
     pub source: String,
     pub url: String,
-    pub title: String,
+    pub title: Option<String>,
     pub status: ConversationStatus,
     pub captured_at: String,
     pub created_at: String,
@@ -104,8 +104,7 @@ impl From<&ConversationRecord> for ConversationDto {
             .as_ref()
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
-            .unwrap_or("(无标题)")
-            .to_string();
+            .map(ToString::to_string);
         let mut preview = record.raw_content.trim().replace('\n', " ");
         if preview.chars().count() > 140 {
             preview = preview.chars().take(140).collect::<String>();

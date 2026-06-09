@@ -1,7 +1,10 @@
-use refine_core::knowledge::{Document, DocumentId, DocumentRepository, Item, ItemId, Source};
+use refine_core::knowledge::{
+    Document, DocumentRepository, Item, ItemId, RestoreDocumentParams, Source,
+};
 use refine_core::refinement::{
     extract_items_with_strict_defaults, ExtractionPolicy, ItemExtractionInput,
 };
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::models::{
@@ -51,7 +54,8 @@ async fn run_extraction(
     if let Some(title) = &conversation.title {
         doc.set_title(title);
     }
-    let doc_id = save_document(&state.doc_store, &doc).await?;
+    let doc = canonicalize_document(&state.doc_store, doc).await?;
+    let doc_id = doc.id().clone();
 
     let input = ItemExtractionInput {
         source: &conversation.source,
@@ -68,7 +72,7 @@ async fn run_extraction(
         .await
         .map_err(|e| e.to_string())?;
 
-    let item_ids = save_and_index_items(&state, &items).await?;
+    let item_ids = save_document_items_and_index(&state, &doc, &items).await?;
 
     set_conversation_processed(&state, conversation_id, item_ids).await?;
     set_job_succeeded(&state, job_id).await?;
@@ -76,25 +80,29 @@ async fn run_extraction(
     Ok(())
 }
 
-async fn save_and_index_items(
+async fn save_document_items_and_index(
     state: &Arc<AppState>,
+    doc: &Document,
     items: &[Item],
 ) -> Result<Vec<String>, String> {
-    let mut saved_ids = Vec::with_capacity(items.len());
+    let existing_item_ids = state
+        .store
+        .find_by_document_id(doc.id())
+        .await
+        .map_err(|e| format!("failed to load existing document items: {}", e))?
+        .into_iter()
+        .map(|item| item.id().clone())
+        .collect::<Vec<_>>();
+
+    let new_item_ids = items
+        .iter()
+        .map(|item| item.id().clone())
+        .collect::<Vec<_>>();
     let mut indexed_ids = Vec::with_capacity(items.len());
 
     for item in items {
-        if let Err(err) = state.store.save(item).await {
-            let cleanup_error = cleanup_partial_items(state, &saved_ids, &indexed_ids).await;
-            return Err(with_cleanup_error(
-                format!("failed to save item {}: {}", item.id(), err),
-                cleanup_error,
-            ));
-        }
-        saved_ids.push(item.id().clone());
-
         if let Err(err) = state.engine.index_item(item).await {
-            let cleanup_error = cleanup_partial_items(state, &saved_ids, &indexed_ids).await;
+            let cleanup_error = cleanup_indexed_items(state, &indexed_ids).await;
             return Err(with_cleanup_error(
                 format!(
                     "failed to index item {} for semantic search: {}",
@@ -107,14 +115,47 @@ async fn save_and_index_items(
         indexed_ids.push(item.id().clone());
     }
 
-    Ok(saved_ids.iter().map(ToString::to_string).collect())
+    if let Err(err) = state.doc_store.save_with_replaced_items(doc, items).await {
+        let cleanup_error = cleanup_indexed_items(state, &indexed_ids).await;
+        return Err(with_cleanup_error(
+            format!("failed to save document items transaction: {}", err),
+            cleanup_error,
+        ));
+    }
+
+    remove_obsolete_indexes(state, &existing_item_ids, &new_item_ids).await;
+
+    Ok(new_item_ids.iter().map(ToString::to_string).collect())
 }
 
-async fn cleanup_partial_items(
-    state: &Arc<AppState>,
-    saved_ids: &[ItemId],
-    indexed_ids: &[ItemId],
-) -> Option<String> {
+async fn canonicalize_document(
+    doc_store: &Arc<dyn DocumentRepository>,
+    doc: Document,
+) -> Result<Document, String> {
+    let existing = doc_store
+        .find_by_url(doc.url())
+        .await
+        .map_err(|e| format!("failed to find document by url before save: {}", e))?;
+    let Some(existing) = existing else {
+        return Ok(doc);
+    };
+
+    Ok(Document::restore(RestoreDocumentParams {
+        id: existing.id().clone(),
+        title: doc
+            .title()
+            .map(ToString::to_string)
+            .or_else(|| existing.title().map(ToString::to_string)),
+        raw_content: doc.raw_content().to_string(),
+        source: doc.source().to_string(),
+        url: doc.url().to_string(),
+        captured_at: doc.captured_at(),
+        created_at: existing.created_at(),
+        updated_at: doc.updated_at(),
+    }))
+}
+
+async fn cleanup_indexed_items(state: &Arc<AppState>, indexed_ids: &[ItemId]) -> Option<String> {
     let mut errors = Vec::new();
 
     for item_id in indexed_ids {
@@ -123,18 +164,33 @@ async fn cleanup_partial_items(
         }
     }
 
-    for item_id in saved_ids {
-        match state.store.delete(item_id).await {
-            Ok(true) => {}
-            Ok(false) => errors.push(format!("delete item {}: not found", item_id)),
-            Err(err) => errors.push(format!("delete item {}: {}", item_id, err)),
-        }
-    }
-
     if errors.is_empty() {
         None
     } else {
         Some(errors.join("; "))
+    }
+}
+
+async fn remove_obsolete_indexes(
+    state: &Arc<AppState>,
+    old_item_ids: &[ItemId],
+    new_item_ids: &[ItemId],
+) {
+    let new_item_ids = new_item_ids
+        .iter()
+        .map(|item_id| item_id.as_str())
+        .collect::<HashSet<_>>();
+    for item_id in old_item_ids {
+        if new_item_ids.contains(item_id.as_str()) {
+            continue;
+        }
+        if let Err(err) = state.engine.remove_from_index(item_id.as_str()).await {
+            tracing::warn!(
+                item_id = item_id.as_str(),
+                error = %err,
+                "failed to remove obsolete semantic index entry"
+            );
+        }
     }
 }
 
@@ -275,22 +331,6 @@ where
         .map_err(|err| format!("persist {} job failed: {}", phase, err))
 }
 
-async fn save_document(
-    doc_store: &Arc<dyn DocumentRepository>,
-    doc: &Document,
-) -> Result<DocumentId, String> {
-    doc_store
-        .save(doc)
-        .await
-        .map_err(|e| format!("failed to save document: {}", e))?;
-    doc_store
-        .find_by_url(doc.url())
-        .await
-        .map_err(|e| format!("failed to find document by url after save: {}", e))?
-        .map(|d| d.id().clone())
-        .ok_or_else(|| "document not found after save — unexpected state".to_string())
-}
-
 async fn update_conversation<F>(
     state: &Arc<AppState>,
     conversation_id: &str,
@@ -331,7 +371,7 @@ mod tests {
     use refine_core::conversation::{ConversationRepository, EventRepository, JobRepository};
     use refine_core::error::{InfraError, InfraResult};
     use refine_core::infra::{LlmClient, SqliteStore};
-    use refine_core::knowledge::{DocumentRepository, ItemRepository};
+    use refine_core::knowledge::{Document, DocumentRepository, Item, ItemRepository};
     use refine_core::search::{SearchEngine, VectorSearch};
     use serde_json::json;
     use std::sync::Arc;
@@ -411,6 +451,58 @@ mod tests {
             "failed extraction left orphan items: {:?}",
             saved_items
         );
+    }
+
+    #[tokio::test]
+    async fn semantic_index_failure_preserves_existing_document_items() {
+        let (_tmp, state, persistence, conversation_id, job_id) = build_state_with_failing_index()
+            .await
+            .expect("build test state");
+        let conversation = persistence
+            .find_conversation_by_id(&conversation_id)
+            .await
+            .expect("load conversation")
+            .expect("conversation exists");
+        let mut doc = Document::new(&conversation.source, "previous raw");
+        doc.set_url(&conversation.url);
+        if let Some(title) = &conversation.title {
+            doc.set_title(title);
+        }
+        let mut existing_item = Item::new_knowledge("existing", "old summary");
+        existing_item.set_document_id(doc.id().clone());
+        state
+            .doc_store
+            .save_with_replaced_items(&doc, &[existing_item.clone()])
+            .await
+            .expect("seed existing document items");
+
+        let err = run_extraction(
+            state.clone(),
+            &conversation_id,
+            &job_id,
+            ExtractionMode::Auto,
+        )
+        .await
+        .expect_err("index failure should fail extraction");
+        assert!(
+            err.contains("failed to index item"),
+            "unexpected error: {}",
+            err
+        );
+
+        let loaded_existing = state
+            .store
+            .find_by_id(existing_item.id())
+            .await
+            .expect("find existing item");
+        assert!(loaded_existing.is_some());
+        let linked = state
+            .store
+            .find_by_document_id(doc.id())
+            .await
+            .expect("find linked items");
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].id(), existing_item.id());
     }
 
     #[tokio::test]

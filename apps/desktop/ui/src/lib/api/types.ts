@@ -25,7 +25,7 @@ export interface SearchResult {
 
 export interface Document {
   id: string
-  title: string
+  title: string | null
   source: string
   url: string
   item_count: number
@@ -35,7 +35,7 @@ export interface Document {
 
 export interface DocumentDetail {
   id: string
-  title: string
+  title: string | null
   raw_content: string
   source: string
   url: string
@@ -83,7 +83,7 @@ export interface Conversation {
   id: string
   source: string
   url: string
-  title: string
+  title: string | null
   status: ConversationStatus
   captured_at: string
   created_at: string

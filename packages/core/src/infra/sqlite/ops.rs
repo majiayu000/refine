@@ -177,14 +177,76 @@ pub(super) fn save(conn: &Connection, item: &Item) -> InfraResult<()> {
     Ok(())
 }
 pub(super) fn delete(conn: &Connection, id: &str) -> InfraResult<bool> {
-    let rows = conn
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let rows = tx
         .execute("DELETE FROM items WHERE id = ?1", [id])
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    if rows > 0 {
+        prune_item_id_from_conversations(&tx, id)?;
+    }
+    tx.commit()
         .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(rows > 0)
 }
+
+fn prune_item_id_from_conversations(conn: &Connection, item_id: &str) -> InfraResult<()> {
+    let updates = {
+        let mut stmt = conn
+            .prepare("SELECT id, item_ids FROM conversations WHERE item_ids LIKE '%' || ?1 || '%'")
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map([item_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        let mut updates = Vec::new();
+        for row in rows {
+            let (conversation_id, raw_item_ids) =
+                row.map_err(|e| InfraError::Database(e.to_string()))?;
+            let mut item_ids: Vec<String> = serde_json::from_str(&raw_item_ids)
+                .map_err(|e| InfraError::Serialization(e.to_string()))?;
+            let original_len = item_ids.len();
+            item_ids.retain(|existing| existing != item_id);
+            if item_ids.len() != original_len {
+                let item_ids_json = serde_json::to_string(&item_ids)
+                    .map_err(|e| InfraError::Serialization(e.to_string()))?;
+                updates.push((conversation_id, item_ids_json));
+            }
+        }
+        updates
+    };
+
+    for (conversation_id, item_ids_json) in updates {
+        conn.execute(
+            "UPDATE conversations SET item_ids = ?1 WHERE id = ?2",
+            params![item_ids_json, conversation_id],
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    }
+
+    Ok(())
+}
 pub(super) fn delete_by_document_id(conn: &Connection, document_id: &str) -> InfraResult<usize> {
-    conn.execute("DELETE FROM items WHERE document_id = ?1", [document_id])
-        .map_err(|e| InfraError::Database(e.to_string()))
+    let item_ids = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM items WHERE document_id = ?1")
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map([document_id], |row| row.get::<_, String>(0))
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        rows.map(|row| row.map_err(|e| InfraError::Database(e.to_string())))
+            .collect::<InfraResult<Vec<_>>>()?
+    };
+
+    let deleted = conn
+        .execute("DELETE FROM items WHERE document_id = ?1", [document_id])
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    for item_id in item_ids {
+        prune_item_id_from_conversations(conn, &item_id)?;
+    }
+    Ok(deleted)
 }
 pub(super) fn exists(conn: &Connection, id: &str) -> InfraResult<bool> {
     let count: i64 = conn

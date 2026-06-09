@@ -251,6 +251,124 @@ async fn document_find_recent_orders_by_latest_capture_after_duplicate_url_refre
 }
 
 #[tokio::test]
+async fn item_document_id_requires_existing_document() {
+    let store = SqliteStore::in_memory().expect("failed to create sqlite store");
+    let now = Utc::now();
+    let orphan = Item::restore(RestoreParams {
+        id: ItemId::from("orphan-item"),
+        item_type: ItemType::Knowledge,
+        title: "orphan".to_string(),
+        summary: "summary".to_string(),
+        content: "content".to_string(),
+        tags: Vec::new(),
+        source: None,
+        document_id: Some(DocumentId::from("missing-doc")),
+        excerpt: None,
+        created_at: now,
+        updated_at: now,
+    })
+    .expect("restore orphan item");
+
+    let err = store
+        .save(&orphan)
+        .await
+        .expect_err("missing document FK should reject orphan item");
+    assert!(
+        err.to_string().contains("FOREIGN KEY constraint failed"),
+        "unexpected error: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn save_with_replaced_items_replaces_document_items_in_one_call() {
+    let store = SqliteStore::in_memory().expect("failed to create sqlite store");
+    let mut doc = Document::new("claude", "raw content");
+    doc.set_url("https://claude.ai/chat/replace-items");
+
+    let mut old_item = Item::new_knowledge("old", "old summary");
+    old_item.set_document_id(doc.id().clone());
+    let mut new_item = Item::new_knowledge("new", "new summary");
+    new_item.set_document_id(doc.id().clone());
+
+    refine_core::knowledge::DocumentRepository::save_with_replaced_items(
+        &store,
+        &doc,
+        &[old_item.clone()],
+    )
+    .await
+    .expect("save old item");
+    refine_core::knowledge::DocumentRepository::save_with_replaced_items(
+        &store,
+        &doc,
+        &[new_item.clone()],
+    )
+    .await
+    .expect("replace item");
+
+    assert!(store
+        .find_by_id(old_item.id())
+        .await
+        .expect("find old item")
+        .is_none());
+    assert!(store
+        .find_by_id(new_item.id())
+        .await
+        .expect("find new item")
+        .is_some());
+    let linked = store
+        .find_by_document_id(doc.id())
+        .await
+        .expect("find linked items");
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0].id(), new_item.id());
+}
+
+#[tokio::test]
+async fn save_with_replaced_items_prunes_replaced_item_ids_from_conversations() {
+    let store = SqliteStore::in_memory().expect("failed to create sqlite store");
+    let mut doc = Document::new("claude", "raw content");
+    doc.set_url("https://claude.ai/chat/prune-replaced-items");
+
+    let mut old_item = Item::new_knowledge("old", "old summary");
+    old_item.set_document_id(doc.id().clone());
+    let mut new_item = Item::new_knowledge("new", "new summary");
+    new_item.set_document_id(doc.id().clone());
+    let kept_item = Item::new_knowledge("keep", "keep summary");
+
+    store.save(&kept_item).await.expect("save kept item");
+    refine_core::knowledge::DocumentRepository::save_with_replaced_items(
+        &store,
+        &doc,
+        &[old_item.clone()],
+    )
+    .await
+    .expect("save old document item");
+
+    let mut conversation = build_conversation("conv-prune-replaced", ConversationStatus::Processed);
+    conversation.item_ids = vec![old_item.id().to_string(), kept_item.id().to_string()];
+    store
+        .upsert_conversation(&conversation)
+        .await
+        .expect("insert conversation with item refs");
+
+    refine_core::knowledge::DocumentRepository::save_with_replaced_items(
+        &store,
+        &doc,
+        &[new_item.clone()],
+    )
+    .await
+    .expect("replace document items");
+
+    let loaded = store
+        .find_conversation_by_id(&conversation.id)
+        .await
+        .expect("find conversation")
+        .expect("conversation should exist");
+    assert_eq!(loaded.item_ids, vec![kept_item.id().to_string()]);
+}
+
+#[tokio::test]
 async fn find_recent_and_count_items_respect_type_and_pagination() {
     let store = SqliteStore::in_memory().expect("failed to create sqlite store");
 
@@ -324,12 +442,47 @@ async fn conversation_upsert_rejects_invalid_status_regression() {
 }
 
 #[tokio::test]
+async fn deleting_item_prunes_conversation_item_ids() {
+    let store = SqliteStore::in_memory().expect("failed to create sqlite store");
+    let deleted_item = Item::new_knowledge("delete me", "summary");
+    let kept_item = Item::new_knowledge("keep me", "summary");
+
+    store.save(&deleted_item).await.expect("save deleted item");
+    store.save(&kept_item).await.expect("save kept item");
+
+    let mut conversation = build_conversation("conv-prune-item", ConversationStatus::Processed);
+    conversation.item_ids = vec![deleted_item.id().to_string(), kept_item.id().to_string()];
+    store
+        .upsert_conversation(&conversation)
+        .await
+        .expect("insert conversation with item refs");
+
+    let deleted = store
+        .delete(deleted_item.id())
+        .await
+        .expect("delete referenced item");
+    assert!(deleted);
+
+    let loaded = store
+        .find_conversation_by_id(&conversation.id)
+        .await
+        .expect("find conversation")
+        .expect("conversation should exist");
+    assert_eq!(loaded.item_ids, vec![kept_item.id().to_string()]);
+}
+
+#[tokio::test]
 async fn pending_job_can_record_startup_failure_without_regressing_terminal_state() {
     let store = SqliteStore::in_memory().expect("failed to create sqlite store");
     let now = now_iso();
+    let conversation = build_conversation("conv-startup-failure", ConversationStatus::Queued);
+    store
+        .upsert_conversation(&conversation)
+        .await
+        .expect("insert parent conversation");
     let mut job = ExtractionJobRecord {
         id: "job-startup-failure".to_string(),
-        conversation_id: "conv-startup-failure".to_string(),
+        conversation_id: conversation.id.clone(),
         mode: ExtractionMode::Auto,
         status: JobStatus::Pending,
         created_at: now.clone(),

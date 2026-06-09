@@ -46,6 +46,28 @@ mirror score
 For local install, doctor, and upgrade details, see [Local Setup](docs/LOCAL_SETUP.md)
 and [Local Release Flow](docs/LOCAL_RELEASE.md).
 
+## Release Status
+
+Refine is currently distributed as a source install from this repository. A
+packaged GitHub Release for the current `0.1.3` workspace version has not been
+cut yet; use `scripts/install-local.sh` from a checked-out commit for local
+installation. Release notes are tracked in [CHANGELOG.md](CHANGELOG.md).
+
+Support path: open a GitHub Issue with your OS, install method, command output,
+and the relevant `~/.refine` log snippet if available.
+
+### Current Limitations
+
+- Local-first only: the server and extension are intended for a local trusted
+  runtime unless you explicitly configure authentication and network exposure.
+- LLM-backed extraction, advice, weekly reports, and profiles require a working
+  OpenAI-compatible or Anthropic-compatible API key.
+- Browser extension support is still a developer preview and should be tested
+  against the local API before relying on it for unattended capture.
+- Mirror personal baselines need enough history; before four weeks of data,
+  signal lights use fixed thresholds instead of your own baseline.
+- No hosted multi-user service or migration SLA is claimed by this repository.
+
 ## Mirror — Cognitive Growth Tracker
 
 Mirror extracts cognitive fingerprints from your AI coding sessions and tracks growth over time.

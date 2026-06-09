@@ -114,7 +114,7 @@ pub async fn create_item(
             .iter()
             .filter_map(|tag| Tag::try_new(tag))
             .collect();
-        let _ = item.set_tags(tags);
+        item.set_tags(tags).map_err(|e| e.to_string())?;
     }
 
     state.store.save(&item).await.map_err(|e| e.to_string())?;

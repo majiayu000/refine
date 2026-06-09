@@ -5,6 +5,8 @@ export interface CloudUploadRequest {
   title?: string
   captured_at: string
   idempotency_key: string
+  ingest_only: boolean
+  metadata: Record<string, unknown>
 }
 
 export interface CloudUploadResult {
@@ -14,11 +16,18 @@ export interface CloudUploadResult {
   message?: string
 }
 
-export interface CloudIngestResponse {
-  success: boolean
+export type CloudIngestResponse = CloudIngestSuccess | CloudIngestError
+
+export interface CloudIngestSuccess {
+  success: true
   message?: string
   conversation_id?: string
   status?: string
+}
+
+export interface CloudIngestError {
+  success: false
+  message?: string
 }
 
 export interface CloudItemsResponse {
@@ -44,11 +53,11 @@ export interface RecommendationItem {
   content: string
   tags: string[]
   score: number
-  reason: string
+  match_strategy: string
 }
 
 export interface RecommendationResponse {
-  success: boolean
+  success?: boolean
   triggered: boolean
   reason?: string
   min_chars?: number

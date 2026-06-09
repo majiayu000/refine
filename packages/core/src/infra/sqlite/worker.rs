@@ -199,41 +199,72 @@ fn run_worker(
         OpenMode::InMemory => match Connection::open_in_memory() {
             Ok(conn) => (conn, true),
             Err(err) => {
-                let _ = init_tx.send(Err(InfraError::Database(err.to_string())));
+                send_init_result(
+                    &init_tx,
+                    Err(InfraError::Database(err.to_string())),
+                    "open in-memory connection",
+                );
                 return;
             }
         },
         OpenMode::File(path) => match Connection::open(path) {
             Ok(conn) => (conn, false),
             Err(err) => {
-                let _ = init_tx.send(Err(InfraError::Database(err.to_string())));
+                send_init_result(
+                    &init_tx,
+                    Err(InfraError::Database(err.to_string())),
+                    "open file connection",
+                );
                 return;
             }
         },
     };
 
     if let Err(err) = configure_connection(&conn, in_memory).and_then(|_| ops::init_schema(&conn)) {
-        let _ = init_tx.send(Err(err));
+        send_init_result(&init_tx, Err(err), "configure schema");
         return;
     }
 
-    let _ = init_tx.send(Ok(()));
+    send_init_result(&init_tx, Ok(()), "ready");
 
     for command in rx {
         handle_command(&conn, command);
     }
 }
 
+fn send_init_result(
+    init_tx: &mpsc::SyncSender<InfraResult<()>>,
+    result: InfraResult<()>,
+    context: &'static str,
+) {
+    if let Err(err) = &result {
+        tracing::error!(context = context, error = %err, "sqlite worker init failed");
+    }
+    if init_tx.send(result).is_err() {
+        tracing::warn!(context = context, "sqlite worker init receiver dropped");
+    }
+}
+
+fn send_response<T>(
+    command: &'static str,
+    resp: oneshot::Sender<InfraResult<T>>,
+    result: InfraResult<T>,
+) {
+    if resp.send(result).is_err() {
+        tracing::warn!(command = command, "sqlite response receiver dropped");
+    }
+}
+
 fn handle_command(conn: &Connection, command: SqliteCommand) {
     match command {
         SqliteCommand::FindById { id, resp } => {
-            let _ = resp.send(ops::find_by_id(conn, &id));
+            send_response("FindById", resp, ops::find_by_id(conn, &id));
         }
         SqliteCommand::FindAll(resp) => {
-            let _ = resp.send(ops::find_all(conn));
+            send_response("FindAll", resp, ops::find_all(conn));
         }
         SqliteCommand::FindByType { item_type, resp } => {
-            let _ = resp.send(ops::find_by_type(conn, item_type));
+            send_response("FindByType", resp, ops::find_by_type(conn, item_type));
         }
         SqliteCommand::FindRecent {
             item_type,
@@ -241,22 +272,26 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
             limit,
             resp,
         } => {
-            let _ = resp.send(ops::find_recent(conn, item_type, offset, limit));
+            send_response(
+                "FindRecent",
+                resp,
+                ops::find_recent(conn, item_type, offset, limit),
+            );
         }
         SqliteCommand::CountItems { item_type, resp } => {
-            let _ = resp.send(ops::count_items(conn, item_type));
+            send_response("CountItems", resp, ops::count_items(conn, item_type));
         }
         SqliteCommand::FindByTags { tags, resp } => {
-            let _ = resp.send(ops::find_by_tags(conn, &tags));
+            send_response("FindByTags", resp, ops::find_by_tags(conn, &tags));
         }
         SqliteCommand::Save { item, resp } => {
-            let _ = resp.send(ops::save(conn, &item));
+            send_response("Save", resp, ops::save(conn, &item));
         }
         SqliteCommand::Delete { id, resp } => {
-            let _ = resp.send(ops::delete(conn, &id));
+            send_response("Delete", resp, ops::delete(conn, &id));
         }
         SqliteCommand::Exists { id, resp } => {
-            let _ = resp.send(ops::exists(conn, &id));
+            send_response("Exists", resp, ops::exists(conn, &id));
         }
         SqliteCommand::SearchText {
             query,
@@ -264,52 +299,71 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
             limit,
             resp,
         } => {
-            let _ = resp.send(ops::search_text(conn, &query, offset, limit));
+            send_response(
+                "SearchText",
+                resp,
+                ops::search_text(conn, &query, offset, limit),
+            );
         }
         SqliteCommand::CountTextHits { query, resp } => {
-            let _ = resp.send(ops::count_text_hits(conn, &query));
+            send_response("CountTextHits", resp, ops::count_text_hits(conn, &query));
         }
         SqliteCommand::FindByDocumentId { document_id, resp } => {
-            let _ = resp.send(ops::find_by_document_id(conn, &document_id));
+            send_response(
+                "FindByDocumentId",
+                resp,
+                ops::find_by_document_id(conn, &document_id),
+            );
         }
         SqliteCommand::FindSince { since, resp } => {
-            let _ = resp.send(ops::find_since(conn, since));
+            send_response("FindSince", resp, ops::find_since(conn, since));
         }
         SqliteCommand::FindByDateRange { start, end, resp } => {
-            let _ = resp.send(ops::find_by_date_range(conn, start, end));
+            send_response(
+                "FindByDateRange",
+                resp,
+                ops::find_by_date_range(conn, start, end),
+            );
         }
         SqliteCommand::FindObservationsByEventRange { start, end, resp } => {
-            let _ = resp.send(ops::find_observations_by_event_range(conn, start, end));
+            send_response(
+                "FindObservationsByEventRange",
+                resp,
+                ops::find_observations_by_event_range(conn, start, end),
+            );
         }
         SqliteCommand::DocFindByUrl { url, resp } => {
-            let _ = resp.send(doc_ops::find_by_url(conn, &url));
+            send_response("DocFindByUrl", resp, doc_ops::find_by_url(conn, &url));
         }
         SqliteCommand::DocSave { doc, resp } => {
-            let _ = resp.send(doc_ops::save(conn, &doc));
+            send_response("DocSave", resp, doc_ops::save(conn, &doc));
         }
         SqliteCommand::DocSaveWithReplacedItems { doc, items, resp } => {
-            if resp
-                .send(save_document_with_replaced_items(conn, &doc, &items))
-                .is_err()
-            {
-                tracing::debug!("sqlite receiver dropped for DocSaveWithReplacedItems");
-            }
+            send_response(
+                "DocSaveWithReplacedItems",
+                resp,
+                save_document_with_replaced_items(conn, &doc, &items),
+            );
         }
         SqliteCommand::DocFindById { id, resp } => {
-            let _ = resp.send(doc_ops::find_by_id(conn, &id));
+            send_response("DocFindById", resp, doc_ops::find_by_id(conn, &id));
         }
         SqliteCommand::DocFindRecent {
             offset,
             limit,
             resp,
         } => {
-            let _ = resp.send(doc_ops::find_recent(conn, offset, limit));
+            send_response(
+                "DocFindRecent",
+                resp,
+                doc_ops::find_recent(conn, offset, limit),
+            );
         }
         SqliteCommand::DocCount { resp } => {
-            let _ = resp.send(doc_ops::count(conn));
+            send_response("DocCount", resp, doc_ops::count(conn));
         }
         SqliteCommand::DocDelete { id, resp } => {
-            let _ = resp.send(doc_ops::delete(conn, &id));
+            send_response("DocDelete", resp, doc_ops::delete(conn, &id));
         }
         SqliteCommand::DocSearchText {
             query,
@@ -317,13 +371,25 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
             limit,
             resp,
         } => {
-            let _ = resp.send(doc_ops::search_text(conn, &query, offset, limit));
+            send_response(
+                "DocSearchText",
+                resp,
+                doc_ops::search_text(conn, &query, offset, limit),
+            );
         }
         SqliteCommand::DocCountTextHits { query, resp } => {
-            let _ = resp.send(doc_ops::count_text_hits(conn, &query));
+            send_response(
+                "DocCountTextHits",
+                resp,
+                doc_ops::count_text_hits(conn, &query),
+            );
         }
         SqliteCommand::ConversationFindById { id, resp } => {
-            let _ = resp.send(conversation_ops::find_conversation_by_id(conn, &id));
+            send_response(
+                "ConversationFindById",
+                resp,
+                conversation_ops::find_conversation_by_id(conn, &id),
+            );
         }
         SqliteCommand::ConversationList {
             status,
@@ -331,37 +397,56 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
             limit,
             resp,
         } => {
-            let _ = resp.send(conversation_ops::list_conversations(
-                conn,
-                status.as_deref(),
-                offset,
-                limit,
-            ));
+            send_response(
+                "ConversationList",
+                resp,
+                conversation_ops::list_conversations(conn, status.as_deref(), offset, limit),
+            );
         }
         SqliteCommand::ConversationCount { status, resp } => {
-            let _ = resp.send(conversation_ops::count_conversations(
-                conn,
-                status.as_deref(),
-            ));
+            send_response(
+                "ConversationCount",
+                resp,
+                conversation_ops::count_conversations(conn, status.as_deref()),
+            );
         }
         SqliteCommand::ConversationUpsert { record, resp } => {
-            let _ = resp.send(conversation_ops::upsert_conversation(conn, &record));
+            send_response(
+                "ConversationUpsert",
+                resp,
+                conversation_ops::upsert_conversation(conn, &record),
+            );
         }
         SqliteCommand::ConversationInsertOrFetchByIdempotency { record, resp } => {
-            let _ = resp
-                .send(conversation_ops::insert_or_fetch_conversation_by_idempotency(conn, &record));
+            send_response(
+                "ConversationInsertOrFetchByIdempotency",
+                resp,
+                conversation_ops::insert_or_fetch_conversation_by_idempotency(conn, &record),
+            );
         }
         SqliteCommand::JobFindById { id, resp } => {
-            let _ = resp.send(conversation_ops::find_job_by_id(conn, &id));
+            send_response(
+                "JobFindById",
+                resp,
+                conversation_ops::find_job_by_id(conn, &id),
+            );
         }
         SqliteCommand::JobUpsert { job, resp } => {
-            let _ = resp.send(conversation_ops::upsert_job(conn, &job));
+            send_response("JobUpsert", resp, conversation_ops::upsert_job(conn, &job));
         }
         SqliteCommand::EventInsert { event, resp } => {
-            let _ = resp.send(conversation_ops::insert_event(conn, &event));
+            send_response(
+                "EventInsert",
+                resp,
+                conversation_ops::insert_event(conn, &event),
+            );
         }
         SqliteCommand::EventCountsSince { since, resp } => {
-            let _ = resp.send(conversation_ops::event_counts_since(conn, since.as_deref()));
+            send_response(
+                "EventCountsSince",
+                resp,
+                conversation_ops::event_counts_since(conn, since.as_deref()),
+            );
         }
     }
 }

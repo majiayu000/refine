@@ -50,7 +50,30 @@ function toRequestBody(item: OutboxItem): CloudUploadRequest {
     title: item.payload.title,
     captured_at: new Date(item.payload.capturedAt).toISOString(),
     idempotency_key: item.idempotencyKey,
+    ingest_only: false,
+    metadata: {},
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function unwrapDataEnvelope(value: unknown): unknown {
+  if (isRecord(value) && isRecord(value.data)) {
+    return value.data
+  }
+  return value
+}
+
+function parseRecommendationResponse(value: unknown): RecommendationResponse | null {
+  if (isRecord(value) && value.success === false) return null
+  const payload = unwrapDataEnvelope(value)
+  if (!isRecord(payload)) return null
+  if (payload.success === false) return null
+  if (typeof payload.triggered !== 'boolean') return null
+  if (!Array.isArray(payload.items)) return null
+  return payload as unknown as RecommendationResponse
 }
 
 export async function checkCloudHealth(): Promise<boolean> {
@@ -89,7 +112,7 @@ export async function uploadConversation(item: OutboxItem): Promise<CloudUploadR
       data = null
     }
 
-    if (!res.ok || !data?.success) {
+    if (!res.ok || data?.success !== true) {
       return {
         success: false,
         message: data?.message || `Cloud API error (${res.status})`,
@@ -146,7 +169,7 @@ export async function fetchRecommendations(
     })
 
     if (!res.ok) return null
-    return (await res.json()) as RecommendationResponse
+    return parseRecommendationResponse(await res.json())
   } catch {
     return null
   } finally {

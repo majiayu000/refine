@@ -86,15 +86,38 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
 fn copy_all_tables(conn: &Connection, legacy_alias: &str) -> Result<usize, String> {
     let target_tables = list_base_tables(conn, "main")?;
     let legacy_tables = list_base_tables(conn, legacy_alias)?;
+    let ordered_tables = migration_copy_order(&legacy_tables);
 
     let mut total = 0usize;
-    for table in &legacy_tables {
+    for table in &ordered_tables {
         if !target_tables.contains(table) {
             continue;
         }
         total += copy_table(conn, table, legacy_alias)?;
     }
     Ok(total)
+}
+
+fn migration_copy_order(legacy_tables: &[String]) -> Vec<String> {
+    let preferred = [
+        "documents",
+        "items",
+        "conversations",
+        "extraction_jobs",
+        "events",
+    ];
+    let mut ordered = Vec::with_capacity(legacy_tables.len());
+    for table in preferred {
+        if legacy_tables.iter().any(|existing| existing == table) {
+            ordered.push(table.to_string());
+        }
+    }
+    for table in legacy_tables {
+        if !ordered.iter().any(|existing| existing == table) {
+            ordered.push(table.clone());
+        }
+    }
+    ordered
 }
 
 fn list_base_tables(conn: &Connection, db_alias: &str) -> Result<Vec<String>, String> {

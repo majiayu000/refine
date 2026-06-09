@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS items (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     document_id TEXT,
-    excerpt TEXT
+    excerpt TEXT,
+    FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_items_type ON items(item_type);
@@ -115,7 +116,8 @@ CREATE TABLE IF NOT EXISTS extraction_jobs (
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    error TEXT
+    error TEXT,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_extraction_jobs_conversation

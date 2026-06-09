@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.3] - 2026-06-09
+
+### Fixed
+- Guarded extraction job and conversation status transitions at persistence boundaries.
+- Tightened SQLite integrity with worker-backed server persistence, foreign-key schema constraints, transactional bootstrap/migrations, and atomic document item replacement in extraction.
+- Removed silent tag and SQLite worker response failures from key paths.
+- Clarified extension/server API contracts for recommendation envelopes, upload defaults, pagination cursors, and nullable document titles.
+
+### Docs
+- Documented current source-install release status, limitations, support path, and release notes location.
+
 ## [0.1.2] - 2026-03-26
 
 ### Changed
