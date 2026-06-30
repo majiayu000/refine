@@ -27,6 +27,7 @@ apps/desktop/src-tauri/target/
 
 # Runtime artifacts
 .backup/
+.omx/
 .run/*.log
 .run/*.err.log
 .run/*.out.log

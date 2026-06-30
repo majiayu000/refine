@@ -6,7 +6,10 @@ use crate::remem_sessions::load_remem_sessions;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use refine_core::error::InfraError;
-use refine_core::infra::{llm_with_retry_policy, LlmClient, LlmRetryPolicy};
+use refine_core::infra::{
+    llm_with_retry_policy, LlmClient, LlmRetryPolicy, DEFAULT_MAX_RETRIES,
+    DEFAULT_RETRY_BASE_DELAY_SECS,
+};
 use refine_core::knowledge::{Document, DocumentRepository, RestoreDocumentParams};
 use refine_core::session::{
     build_facet_prompt, chunk_session, discover_sessions, facets_to_items, needs_chunking,
@@ -606,12 +609,10 @@ async fn llm_call_with_retry(
         LlmRetryPolicy::default(),
         |attempt, max_retries, delay_secs, err| {
             let message = err.to_string();
+            let preview = log_preview(&message, 80);
             eprintln!(
                 "    ⏳ 重试 ({}/{}) 等待 {}s: {}",
-                attempt,
-                max_retries,
-                delay_secs,
-                &message[..message.len().min(80)],
+                attempt, max_retries, delay_secs, preview,
             );
         },
     )
@@ -634,8 +635,61 @@ async fn extract_and_parse_facets_with_retry(
     client: &Arc<dyn LlmClient>,
     quota_hit: &Arc<AtomicBool>,
 ) -> Result<refine_core::session::FacetResponse> {
-    let response = llm_call_with_retry(client, content, quota_hit).await?;
-    parse_facet_response(&response).map_err(|e| anyhow::anyhow!(e))
+    extract_and_parse_facets_with_retry_policy(
+        content,
+        client,
+        quota_hit,
+        DEFAULT_MAX_RETRIES,
+        DEFAULT_RETRY_BASE_DELAY_SECS,
+    )
+    .await
+}
+
+async fn extract_and_parse_facets_with_retry_policy(
+    content: &str,
+    client: &Arc<dyn LlmClient>,
+    quota_hit: &Arc<AtomicBool>,
+    max_retries: usize,
+    base_delay_secs: u64,
+) -> Result<refine_core::session::FacetResponse> {
+    let max_retries = max_retries.max(1);
+
+    for attempt in 0..max_retries {
+        let response = llm_call_with_retry(client, content, quota_hit).await?;
+        match parse_facet_response(&response) {
+            Ok(facets) => return Ok(facets),
+            Err(err) if attempt == max_retries - 1 => return Err(anyhow::anyhow!(err)),
+            Err(err) => {
+                let delay_secs = ingest_retry_delay_secs(base_delay_secs, attempt);
+                eprintln!(
+                    "    ⏳ 解析重试 ({}/{}) 等待 {}s: {}",
+                    attempt + 1,
+                    max_retries,
+                    delay_secs,
+                    log_preview(&err, 80),
+                );
+                if delay_secs > 0 {
+                    tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                }
+            }
+        }
+    }
+
+    unreachable!("parse retry loop always returns on success or failure")
+}
+
+fn ingest_retry_delay_secs(base_delay_secs: u64, attempt: usize) -> u64 {
+    let backoff_factor = 1u64.checked_shl(attempt as u32).unwrap_or(u64::MAX);
+    base_delay_secs.saturating_mul(backoff_factor)
+}
+
+fn log_preview(message: &str, max_chars: usize) -> String {
+    let mut chars = message.chars();
+    let mut preview: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        preview.push_str("...");
+    }
+    preview
 }
 
 #[cfg(test)]

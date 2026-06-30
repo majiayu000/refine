@@ -22,29 +22,25 @@ pub trait LlmClient: Send + Sync {
 ///
 /// 优先级：
 /// 1. Anthropic (`REFINE_ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`)
-/// 2. OpenAI (`REFINE_OPENAI_API_KEY` / `OPENAI_API_KEY`)
+/// 2. OpenAI-compatible (`REFINE_OPENAI_API_KEY` / `OPENAI_API_KEY` / `BASE_API_KEY`)
 pub fn build_llm_client_from_env() -> Option<Arc<dyn LlmClient>> {
-    if let Some(api_key) = env_var(&[
-        "REFINE_ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_API_KEY",
-    ]) {
-        let mut client = ClaudeClient::new(&api_key);
-        if let Some(model) = env_var(&["REFINE_ANTHROPIC_MODEL"]) {
+    if let Some(config) = anthropic_config_from_env() {
+        let mut client = ClaudeClient::new(&config.api_key);
+        if let Some(model) = config.model {
             client = client.with_model(&model);
         }
-        if let Some(base_url) = env_var(&["REFINE_ANTHROPIC_BASE_URL", "ANTHROPIC_BASE_URL"]) {
+        if let Some(base_url) = config.base_url {
             client = client.with_base_url(&base_url);
         }
         return Some(Arc::new(client));
     }
 
-    if let Some(api_key) = env_var(&["REFINE_OPENAI_API_KEY", "OPENAI_API_KEY"]) {
-        let mut client = OpenAIClient::new(&api_key);
-        if let Some(model) = env_var(&["REFINE_OPENAI_MODEL"]) {
+    if let Some(config) = openai_config_from_env() {
+        let mut client = OpenAIClient::new(&config.api_key);
+        if let Some(model) = config.model {
             client = client.with_model(&model);
         }
-        if let Some(base_url) = env_var(&["REFINE_OPENAI_BASE_URL"]) {
+        if let Some(base_url) = config.base_url {
             client = client.with_base_url(&base_url);
         }
         return Some(Arc::new(client));
@@ -170,7 +166,7 @@ impl OpenAIClient {
     }
 
     pub fn with_base_url(mut self, url: &str) -> Self {
-        self.base_url = url.to_string();
+        self.base_url = normalize_openai_base_url(url);
         self
     }
 }
@@ -250,6 +246,40 @@ fn env_var(keys: &[&str]) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
+struct LlmEnvConfig {
+    api_key: String,
+    model: Option<String>,
+    base_url: Option<String>,
+}
+
+fn anthropic_config_from_env() -> Option<LlmEnvConfig> {
+    Some(LlmEnvConfig {
+        api_key: env_var(&[
+            "REFINE_ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+        ])?,
+        model: env_var(&["REFINE_ANTHROPIC_MODEL"]),
+        base_url: env_var(&["REFINE_ANTHROPIC_BASE_URL", "ANTHROPIC_BASE_URL"]),
+    })
+}
+
+fn openai_config_from_env() -> Option<LlmEnvConfig> {
+    Some(LlmEnvConfig {
+        api_key: env_var(&["REFINE_OPENAI_API_KEY", "OPENAI_API_KEY", "BASE_API_KEY"])?,
+        model: env_var(&["REFINE_OPENAI_MODEL", "BASE_MODEL"]),
+        base_url: env_var(&["REFINE_OPENAI_BASE_URL", "BASE_URL"]),
+    })
+}
+
+fn normalize_openai_base_url(url: &str) -> String {
+    url.trim()
+        .trim_end_matches('/')
+        .strip_suffix("/v1")
+        .unwrap_or_else(|| url.trim().trim_end_matches('/'))
+        .to_string()
+}
+
 /// Mock 客户端（测试用）
 #[cfg(test)]
 pub struct MockLlmClient {
@@ -274,11 +304,112 @@ impl LlmClient for MockLlmClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    const LLM_ENV_KEYS: &[&str] = &[
+        "REFINE_ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "REFINE_ANTHROPIC_MODEL",
+        "REFINE_ANTHROPIC_BASE_URL",
+        "ANTHROPIC_BASE_URL",
+        "REFINE_OPENAI_API_KEY",
+        "OPENAI_API_KEY",
+        "REFINE_OPENAI_MODEL",
+        "REFINE_OPENAI_BASE_URL",
+        "BASE_API_KEY",
+        "BASE_MODEL",
+        "BASE_URL",
+    ];
 
     #[tokio::test]
     async fn test_mock_client() {
         let client = MockLlmClient::new("test response");
         let result = client.complete("hello", None).await.unwrap();
         assert_eq!(result, "test response");
+    }
+
+    #[test]
+    fn openai_config_accepts_base_aliases() {
+        let Ok(_env_lock) = ENV_LOCK.lock() else {
+            panic!("failed to lock env");
+        };
+        with_clean_llm_env(|| {
+            std::env::set_var("BASE_API_KEY", "base-key");
+            std::env::set_var("BASE_MODEL", "base-model");
+            std::env::set_var("BASE_URL", "https://example.test/openai");
+
+            let Some(config) = openai_config_from_env() else {
+                panic!("missing openai config");
+            };
+            assert_eq!(config.api_key, "base-key");
+            assert_eq!(config.model.as_deref(), Some("base-model"));
+            assert_eq!(
+                config.base_url.as_deref(),
+                Some("https://example.test/openai")
+            );
+        });
+    }
+
+    #[test]
+    fn refine_openai_vars_override_base_aliases() {
+        let Ok(_env_lock) = ENV_LOCK.lock() else {
+            panic!("failed to lock env");
+        };
+        with_clean_llm_env(|| {
+            std::env::set_var("REFINE_OPENAI_API_KEY", "refine-key");
+            std::env::set_var("REFINE_OPENAI_MODEL", "refine-model");
+            std::env::set_var("REFINE_OPENAI_BASE_URL", "https://refine.example.test");
+            std::env::set_var("BASE_API_KEY", "base-key");
+            std::env::set_var("BASE_MODEL", "base-model");
+            std::env::set_var("BASE_URL", "https://base.example.test");
+
+            let Some(config) = openai_config_from_env() else {
+                panic!("missing openai config");
+            };
+            assert_eq!(config.api_key, "refine-key");
+            assert_eq!(config.model.as_deref(), Some("refine-model"));
+            assert_eq!(
+                config.base_url.as_deref(),
+                Some("https://refine.example.test")
+            );
+        });
+    }
+
+    #[test]
+    fn normalize_openai_base_url_accepts_root_or_v1_endpoint() {
+        assert_eq!(
+            normalize_openai_base_url("https://api.example.test"),
+            "https://api.example.test"
+        );
+        assert_eq!(
+            normalize_openai_base_url("https://api.example.test/v1"),
+            "https://api.example.test"
+        );
+        assert_eq!(
+            normalize_openai_base_url("https://api.example.test/openai/v1/"),
+            "https://api.example.test/openai"
+        );
+    }
+
+    fn with_clean_llm_env(test: impl FnOnce()) {
+        let saved = LLM_ENV_KEYS
+            .iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect::<Vec<_>>();
+
+        for key in LLM_ENV_KEYS {
+            std::env::remove_var(key);
+        }
+
+        test();
+
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
     }
 }

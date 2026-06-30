@@ -14,6 +14,11 @@ if [ -f .env ]; then
   set +a
 fi
 
+# launchd does not inherit interactive shell variables; fall back to BASE_* from zsh.
+# shellcheck source=scripts/load-llm-env.sh
+source "${SCRIPT_DIR}/load-llm-env.sh"
+load_refine_llm_env
+
 QUOTA_FILE="$HOME/.refine/quota_exhausted_until"
 if [ -f "$QUOTA_FILE" ]; then
   UNTIL=$(cat "$QUOTA_FILE")
@@ -30,7 +35,8 @@ echo "=== $(date) ==="
 echo "Preflight: PATH=$PATH"
 echo "Preflight: refine=$(command -v refine) mirror=$(command -v mirror)"
 echo "Preflight: cwd=$(pwd)"
-echo "Preflight: env REFINE_DB_PATH=${REFINE_DB_PATH:-<unset>} REFINE_ANTHROPIC_MODEL=${REFINE_ANTHROPIC_MODEL:-<unset>}"
+echo "Preflight: env REFINE_DB_PATH=${REFINE_DB_PATH:-<unset>} REFINE_ANTHROPIC_MODEL=${REFINE_ANTHROPIC_MODEL:-<unset>} REFINE_OPENAI_MODEL=${REFINE_OPENAI_MODEL:-<unset>} BASE_MODEL=${BASE_MODEL:-<unset>}"
+echo "Preflight: keys REFINE_ANTHROPIC_API_KEY=$([ -n "${REFINE_ANTHROPIC_API_KEY:-}" ] && echo '<set>' || echo '<unset>') REFINE_OPENAI_API_KEY=$([ -n "${REFINE_OPENAI_API_KEY:-}" ] && echo '<set>' || echo '<unset>') BASE_API_KEY=$([ -n "${BASE_API_KEY:-}" ] && echo '<set>' || echo '<unset>')"
 
 # 1. Ingest new sessions (capture exit code without aborting the script)
 echo "Step 1: ingest-sessions"

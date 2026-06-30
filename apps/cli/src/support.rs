@@ -15,7 +15,9 @@ pub fn parse_item_type(raw: &str) -> Option<ItemType> {
 
 pub fn build_llm_client_from_env() -> Result<Arc<dyn LlmClient>> {
     build_core_llm_client_from_env().ok_or_else(|| {
-        anyhow!("未配置 LLM API Key，请设置 REFINE_ANTHROPIC_API_KEY 或 REFINE_OPENAI_API_KEY")
+        anyhow!(
+            "未配置 LLM API Key，请设置 REFINE_ANTHROPIC_API_KEY、REFINE_OPENAI_API_KEY 或 BASE_API_KEY"
+        )
     })
 }
 
