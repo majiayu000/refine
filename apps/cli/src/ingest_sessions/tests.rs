@@ -5,10 +5,43 @@ use refine_core::error::InfraResult;
 use refine_core::infra::SqliteStore;
 use refine_core::knowledge::{DocumentId, DocumentRepository, Item, ItemRepository, ItemType};
 use refine_core::session::discover_sessions_in;
+use std::collections::VecDeque;
 use std::fs;
+use std::sync::Mutex;
 
 struct StaticLlmClient {
     response: String,
+}
+
+struct SequenceLlmClient {
+    responses: Mutex<VecDeque<String>>,
+    calls: AtomicUsize,
+}
+
+impl SequenceLlmClient {
+    fn new(responses: Vec<String>) -> Self {
+        Self {
+            responses: Mutex::new(VecDeque::from(responses)),
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait]
+impl LlmClient for SequenceLlmClient {
+    async fn complete(&self, _prompt: &str, _system: Option<&str>) -> InfraResult<String> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Ok(self
+            .responses
+            .lock()
+            .expect("responses lock")
+            .pop_front()
+            .unwrap_or_else(|| "{}".to_string()))
+    }
 }
 
 #[tokio::test]
@@ -61,6 +94,14 @@ fn session_captured_at_prefers_session_started_at_then_file_mtime() {
 
     let fallback = session_captured_at(None, mtime);
     assert_eq!(fallback, DateTime::<Utc>::from(mtime));
+}
+
+#[test]
+fn log_preview_truncates_on_char_boundary() {
+    let preview = log_preview("无法解析 facet 响应: 回回回", 10);
+
+    assert!(preview.ends_with("..."));
+    assert!(preview.is_char_boundary(preview.len()));
 }
 
 #[test]
@@ -410,6 +451,43 @@ async fn replacement_and_legacy_cleanup_roll_back_as_one_transaction() {
         .unwrap()
         .is_none());
     assert!(!item_store.exists(item.id()).await.unwrap());
+}
+
+#[tokio::test]
+async fn facet_parse_error_retries_then_succeeds() {
+    let client = Arc::new(SequenceLlmClient::new(vec![
+        "not json".to_string(),
+        r#"{
+            "session_summary": "重试后成功",
+            "cognitive_level": "proficient",
+            "collaboration_mode": "pair_programming",
+            "decisions": [],
+            "bugs_fixed": [],
+            "patterns": [],
+            "friction": [],
+            "project_progress": [],
+            "questions": [],
+            "knowledge_gained": [],
+            "tools_discovered": [],
+            "architecture": [],
+            "code_artifacts": []
+        }"#
+        .to_string(),
+    ]));
+    let quota_hit = Arc::new(AtomicBool::new(false));
+
+    let result = extract_and_parse_facets_with_retry_policy(
+        "content",
+        &(client.clone() as Arc<dyn LlmClient>),
+        &quota_hit,
+        2,
+        0,
+    )
+    .await
+    .expect("parse retry should recover");
+
+    assert_eq!(result.session_summary, "重试后成功");
+    assert_eq!(client.calls(), 2);
 }
 
 #[tokio::test]

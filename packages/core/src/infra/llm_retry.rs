@@ -8,11 +8,13 @@ use std::time::Duration;
 
 pub const DEFAULT_MAX_RETRIES: usize = 5;
 pub const DEFAULT_RETRY_BASE_DELAY_SECS: u64 = 10;
+pub const DEFAULT_REQUEST_TIMEOUT_MILLIS: u64 = 90_000;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LlmRetryPolicy {
     pub max_retries: usize,
     pub base_delay_secs: u64,
+    pub request_timeout_millis: u64,
 }
 
 impl Default for LlmRetryPolicy {
@@ -20,6 +22,7 @@ impl Default for LlmRetryPolicy {
         Self {
             max_retries: DEFAULT_MAX_RETRIES,
             base_delay_secs: DEFAULT_RETRY_BASE_DELAY_SECS,
+            request_timeout_millis: DEFAULT_REQUEST_TIMEOUT_MILLIS,
         }
     }
 }
@@ -50,6 +53,7 @@ where
     F: FnMut(usize, usize, u64, &InfraError),
 {
     let max_retries = policy.max_retries.max(1);
+    let request_timeout = Duration::from_millis(policy.request_timeout_millis.max(1));
 
     for attempt in 0..max_retries {
         if is_quota_exhausted() {
@@ -58,7 +62,20 @@ where
             });
         }
 
-        match client.complete(prompt, Some(system)).await {
+        let result = match tokio::time::timeout(
+            request_timeout,
+            client.complete(prompt, Some(system)),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(InfraError::LlmRequest(format!(
+                "LLM 请求超时: {}ms",
+                request_timeout.as_millis()
+            ))),
+        };
+
+        match result {
             Ok(response) => return Ok(response),
             Err(err @ InfraError::RateLimited { retry_after_secs }) => {
                 set_quota_exhausted(retry_after_secs);
@@ -89,7 +106,13 @@ fn is_retryable_error(err: &InfraError) -> bool {
         || msg.contains("429")
         || msg.contains("Upstream")
         || msg.contains("timeout")
+        || msg.contains("timed out")
+        || msg.contains("请求超时")
         || msg.contains("empty response")
+        || msg.contains("stream disconnected before completion")
+        || msg.contains("stream closed before")
+        || msg.contains("INTERNAL_ERROR; received from peer")
+        || msg.contains("internal_server_error")
 }
 
 fn backoff_delay_secs(base_delay_secs: u64, attempt: usize) -> u64 {
@@ -141,6 +164,33 @@ mod tests {
         }
     }
 
+    struct SlowThenOkClient {
+        calls: AtomicUsize,
+    }
+
+    impl SlowThenOkClient {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for SlowThenOkClient {
+        async fn complete(&self, _prompt: &str, _system: Option<&str>) -> InfraResult<String> {
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            if call == 0 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Ok("ok".into())
+        }
+    }
+
     struct QuotaTestGuard {
         _dir: TempDir,
     }
@@ -177,6 +227,7 @@ mod tests {
             LlmRetryPolicy {
                 max_retries: 3,
                 base_delay_secs: 0,
+                ..LlmRetryPolicy::default()
             },
             |_attempt, _max_retries, _delay_secs, _err| {},
         )
@@ -204,6 +255,7 @@ mod tests {
             LlmRetryPolicy {
                 max_retries: 5,
                 base_delay_secs: 0,
+                ..LlmRetryPolicy::default()
             },
             |_attempt, _max_retries, _delay_secs, _err| {},
         )
@@ -213,6 +265,97 @@ mod tests {
         assert!(matches!(err, InfraError::LlmRequest(_)));
         assert!(err.to_string().contains("invalid api key"));
         assert_eq!(client.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn retries_on_stream_disconnect_then_succeeds() {
+        let _env_guard = QUOTA_TEST_LOCK.lock().await;
+        let _quota_guard = QuotaTestGuard::new();
+
+        let client = Arc::new(SequenceClient::new(vec![
+            Err(InfraError::LlmRequest(
+                "stream error: stream disconnected before completion".into(),
+            )),
+            Ok("ok".into()),
+        ]));
+
+        let result = llm_with_retry_policy(
+            &(client.clone() as Arc<dyn LlmClient>),
+            "prompt",
+            "system",
+            LlmRetryPolicy {
+                max_retries: 3,
+                base_delay_secs: 0,
+                ..LlmRetryPolicy::default()
+            },
+            |_attempt, _max, _delay, _err| {},
+        )
+        .await;
+
+        match result {
+            Ok(value) => assert_eq!(value, "ok"),
+            Err(err) => panic!("expected retry to succeed, got {err}"),
+        }
+        assert_eq!(client.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn retries_on_stream_internal_error_then_succeeds() {
+        let _env_guard = QUOTA_TEST_LOCK.lock().await;
+        let _quota_guard = QuotaTestGuard::new();
+
+        let client = Arc::new(SequenceClient::new(vec![
+            Err(InfraError::LlmRequest(
+                r#"API 错误: {"error":{"message":"stream error: stream ID 3953; INTERNAL_ERROR; received from peer","type":"server_error","param":"","code":"internal_server_error"}}"#.into(),
+            )),
+            Ok("ok".into()),
+        ]));
+
+        let result = llm_with_retry_policy(
+            &(client.clone() as Arc<dyn LlmClient>),
+            "prompt",
+            "system",
+            LlmRetryPolicy {
+                max_retries: 3,
+                base_delay_secs: 0,
+                ..LlmRetryPolicy::default()
+            },
+            |_attempt, _max, _delay, _err| {},
+        )
+        .await;
+
+        match result {
+            Ok(value) => assert_eq!(value, "ok"),
+            Err(err) => panic!("expected internal stream error retry to succeed, got {err}"),
+        }
+        assert_eq!(client.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn retries_on_request_timeout_then_succeeds() {
+        let _env_guard = QUOTA_TEST_LOCK.lock().await;
+        let _quota_guard = QuotaTestGuard::new();
+
+        let client = Arc::new(SlowThenOkClient::new());
+
+        let result = llm_with_retry_policy(
+            &(client.clone() as Arc<dyn LlmClient>),
+            "prompt",
+            "system",
+            LlmRetryPolicy {
+                max_retries: 3,
+                base_delay_secs: 0,
+                request_timeout_millis: 10,
+            },
+            |_attempt, _max, _delay, _err| {},
+        )
+        .await;
+
+        match result {
+            Ok(value) => assert_eq!(value, "ok"),
+            Err(err) => panic!("expected timeout retry to succeed, got {err}"),
+        }
+        assert_eq!(client.calls(), 2);
     }
 
     #[tokio::test]
@@ -231,6 +374,7 @@ mod tests {
             LlmRetryPolicy {
                 max_retries: 5,
                 base_delay_secs: 0,
+                ..LlmRetryPolicy::default()
             },
             |_attempt, _max_retries, _delay_secs, _err| {},
         )
