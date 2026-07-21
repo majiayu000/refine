@@ -555,7 +555,7 @@ async fn process_single_session(
         "  + [{}/{}] {} | {} items",
         ps.idx + 1,
         ps.total,
-        &facet_response.session_summary,
+        facet_response.session_summary,
         item_count,
     );
 
