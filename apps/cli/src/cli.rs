@@ -73,8 +73,8 @@ pub enum Commands {
     },
     /// 从 AI 编程会话中提取认知观测
     IngestSessions {
-        /// 来源过滤 (claude, codex)
-        #[arg(long)]
+        /// Legacy local-scan source filter (claude, codex); requires --legacy-local-scan.
+        #[arg(long, requires = "legacy_local_scan")]
         source: Option<String>,
         /// 限制处理数量（按路径顺序取前 N 个），与 --latest 互斥
         #[arg(short, long, conflicts_with = "latest")]
@@ -85,6 +85,9 @@ pub enum Commands {
         /// 仅预览，不实际处理
         #[arg(long)]
         dry_run: bool,
+        /// Temporarily use the legacy filesystem scanner instead of remem (one-release rollback).
+        #[arg(long)]
+        legacy_local_scan: bool,
     },
     /// 生成认知洞察报告
     Insights {

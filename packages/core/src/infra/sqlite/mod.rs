@@ -213,6 +213,38 @@ impl DocumentRepository for SqliteStore {
             .await
     }
 
+    async fn save_with_replaced_items_and_delete_documents(
+        &self,
+        doc: &Document,
+        items: &[Item],
+        obsolete_document_ids: &[DocumentId],
+    ) -> InfraResult<()> {
+        let doc = doc.clone();
+        let items = items.to_vec();
+        let obsolete_document_ids = obsolete_document_ids
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
+        self.request(
+            |resp| SqliteCommand::DocSaveWithReplacedItemsAndDeleteDocuments {
+                doc,
+                items,
+                obsolete_document_ids,
+                resp,
+            },
+        )
+        .await
+    }
+
+    async fn delete_documents_with_items(&self, document_ids: &[DocumentId]) -> InfraResult<()> {
+        let ids = document_ids
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
+        self.request(|resp| SqliteCommand::DocDeleteWithItems { ids, resp })
+            .await
+    }
+
     async fn delete(&self, id: &DocumentId) -> InfraResult<bool> {
         let id = id.as_str().to_string();
         self.request(|resp| SqliteCommand::DocDelete { id, resp })

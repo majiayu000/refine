@@ -8,12 +8,13 @@
 
 ### 数据源
 
-| 来源 | 位置 | 格式 |
+| 来源 | 入口 | 格式 |
 |------|------|------|
-| Claude Code 会话 | `~/.claude/projects/*/*.jsonl` | 完整对话（含 AI 回复、tool use） |
-| Codex 会话 | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` | 完整对话（session_meta + response_item） |
+| remem raw archive | `remem raw sessions/messages --json` | 完整 user/assistant 消息和精确 selector tuple |
+| 本地 Claude/Codex 文件 | `--legacy-local-scan` | 仅一个发布周期的显式回滚路径 |
 
-`~/.claude/history.jsonl` 只有用户输入摘要，不含 AI 回复，不适合深度分析。会话级 JSONL 包含完整交互，是主要数据源。
+默认路径不直接扫描文件系统。refine 逐页读取 remem 快照，并严格校验
+`source_type`、selector、排序、游标、计数和首尾时间；provider 失败或契约漂移时整次导入显式失败。
 
 ### 现有架构
 
@@ -27,7 +28,8 @@
 ### 两个 CLI 命令
 
 ```
-refine ingest-sessions [--source claude|codex|all] [--limit N] [--dry-run]
+refine ingest-sessions [--limit N | --latest N] [--dry-run]
+refine ingest-sessions --legacy-local-scan [--source claude|codex]
 refine insights [--period 30d] [--format terminal|json]
 ```
 
@@ -36,10 +38,10 @@ refine insights [--period 30d] [--format terminal|json]
 ```
 Phase 1: 发现与解析                    Phase 2: Facet 提取
 ───────────────────                   ──────────────────
-扫描 ~/.claude/ ~/.codex/              每个会话 → LLM 提取 10 维 facets
-过滤子 agent、太短的会话                存为 Document(source="claude-code-session")
-解析 JSONL → 统一 Session 结构          + Item(type=Observation) × N
-跳过已处理的（按 Document.url 去重）     缓存：已处理的 session 不再重复
+remem 枚举精确 tuple                    每个会话 → LLM 提取 10 维 facets
+读取并校验全部消息分页                   存为 Document(source="remem-raw-session")
+转换为统一 Session 结构                 + Item(type=Observation) × N
+按稳定 URL + raw_content 判断跳过或刷新  相同内容不重复，变化内容原位替换
 
 Phase 3: 聚合分析                      Phase 4: 处方生成
 ──────────────────                    ──────────────────
@@ -69,9 +71,9 @@ pub enum ItemType {
 // 统一的会话结构（跨 Claude Code / Codex）
 pub struct Session {
     pub id: String,                    // session UUID
-    pub source: SessionSource,         // ClaudeCode | Codex
+    pub source: SessionSource,         // RememRaw（默认）| ClaudeCode | Codex（回滚）
     pub project: Option<String>,       // 项目路径
-    pub file_path: String,             // 原始 JSONL 文件路径
+    pub file_path: String,             // remem 稳定 URL 或回滚路径文件名
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub messages: Vec<SessionMessage>,
@@ -79,6 +81,7 @@ pub struct Session {
 }
 
 pub enum SessionSource {
+    RememRaw,
     ClaudeCode,
     Codex,
 }
@@ -107,7 +110,10 @@ pub struct SessionMeta {
 }
 ```
 
-### JSONL 解析规则
+### Provider 与回滚解析规则
+
+默认路径只接收 remem 的 raw archive JSON 契约，不调用 JSONL parser。以下 JSONL
+规则仅适用于显式 `--legacy-local-scan` 回滚路径。
 
 #### Claude Code 会话 JSONL
 
@@ -190,9 +196,11 @@ pub struct SessionMeta {
 
 ### 去重与增量
 
-- 每个 Session 对应一个 Document，`url` 字段存 JSONL 文件路径
-- `ingest-sessions` 执行前查询已有 Document.url，跳过已处理的
-- 重新处理需要先删除对应 Document（级联删除关联 Items）
+- 每个 remem Session 对应一个 Document；`url` 为 exact tuple 的稳定十六进制编码
+- URL 已存在且 `raw_content` 相同则跳过；内容变化则保留 Document identity 并原子替换 Items
+- 对 `source_root=local`，按 session filename + 内容优先、首时间 + 内容次级匹配旧路径 Document；remem 替代项保存与旧 Document/items 删除在同一事务提交，匹配不唯一则 fail closed
+- 回滚扫描若命中已有 remem identity，则继续刷新该稳定 URL；不会恢复路径 URL 并生成第二套 facets
+- provider 失败、分页游标停滞或 selector/count/order 漂移时显式失败，不回退为本地扫描
 
 ## Files Changed
 
@@ -202,8 +210,8 @@ pub struct SessionMeta {
 |------|------|
 | `mod.rs` | 模块导出 |
 | `types.rs` | Session, SessionMessage, SessionMeta, SessionSource 类型 |
-| `discovery.rs` | 扫描 ~/.claude/ ~/.codex/ 发现会话文件 |
-| `parser.rs` | JSONL 解析器（Claude Code + Codex 两种格式） |
+| `discovery.rs` | 显式回滚路径扫描 ~/.claude/ ~/.codex/ |
+| `parser.rs` | 显式回滚路径的 JSONL 解析器（Claude Code + Codex） |
 | `filter.rs` | 过滤规则（太短、子 agent 等） |
 | `facets.rs` | Facet 提取 prompt 构建 + 响应解析 |
 | `aggregation.rs` | L1-L3 聚合计算 |
@@ -219,6 +227,7 @@ pub struct SessionMeta {
 | `packages/core/src/infra/sqlite/rows.rs` | row_to_item 支持 Observation |
 | `apps/cli/src/cli.rs` | Commands 添加 IngestSessions、Insights |
 | `apps/cli/src/handlers.rs` | 添加 handle_ingest_sessions、handle_insights |
+| `apps/cli/src/remem_sessions.rs` | remem 子进程适配、分页与契约校验、稳定 identity |
 
 ### 总计：8 个新文件 + 6 个修改文件 = 14 个文件
 
@@ -262,8 +271,9 @@ pub struct SessionMeta {
 
 ## Done-when
 
-1. `refine ingest-sessions` 能扫描、解析、提取 Claude Code + Codex 会话
+1. `refine ingest-sessions` 默认只从 remem raw archive 读取、校验并提取完整会话
 2. `refine insights` 能输出 L1-L4 四层分析报告
-3. 增量处理正常工作（第二次运行只处理新会话）
+3. 相同 raw 内容第二次运行会跳过，内容变化会原位刷新
 4. `cargo check` + `cargo test` 通过
 5. 至少 3 个真实会话的 facet 提取结果质量可接受
+6. remem 不可用或契约漂移时命令非零退出，只有显式回滚开关才扫描本地文件

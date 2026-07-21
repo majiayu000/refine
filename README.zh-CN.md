@@ -8,6 +8,15 @@
 
 ## 核心功能
 
+`refine ingest-sessions` 默认要求 `PATH` 中存在兼容的 `remem`，也可通过
+`REFINE_REMEM_BIN` 指定二进制路径。正常路径使用 `remem raw sessions --json`
+枚举精确 tuple，并读取全部 `remem raw messages --json` 快照分页；子进程失败、
+JSON/selector/order/cursor 契约异常都会显式报错，不会降级为空会话。直接扫描
+transcript 仅由临时的 `--legacy-local-scan` 回滚开关启用。切换期间，匹配的本地旧
+Document/items 删除与 remem 替代 facets 保存会在同一事务提交；身份匹配不唯一时
+命令会显式失败，避免下游重复计数或误删。回滚扫描也会复用匹配的 remem identity，
+不会重新建立第二套有效 facets。
+
 - **跨平台知识同步（主线）** — 把 ChatGPT、Claude、Gemini、Grok、Claude Code、Codex 的对话知识统一同步
 - **会话存储与可追溯** — 原文文档入库，并可回溯到对应提炼结果
 - **智能提炼（可选能力层）** — 从已同步对话中提取知识卡片、技能、代码片段
@@ -47,7 +56,7 @@ REFINE_OPENAI_BASE_URL=https://api.openai.com
 REFINE_OPENAI_MODEL=gpt-4o
 EOF
 
-# 导入会话（扫描 ~/.claude/projects/ 和 ~/.codex/sessions/）
+# 导入会话（从 remem raw archive 读取）
 refine ingest-sessions
 
 # 生成认知报告
@@ -62,10 +71,11 @@ mirror dashboard
 ### Session Insights（认知分析）
 
 ```bash
-refine ingest-sessions                  # 导入全部会话（增量，自动跳过已处理的）
-refine ingest-sessions --source claude  # 只导入 Claude Code
-refine ingest-sessions --limit 100      # 限制数量
+refine ingest-sessions                  # 从 remem raw archive 导入完整会话
+refine ingest-sessions --latest 20      # 只处理 remem 中最近的 20 个会话
 refine ingest-sessions --dry-run        # 预览，不调 LLM
+refine ingest-sessions --legacy-local-scan --source claude
+                                        # 一个发布周期内的文件扫描回滚开关
 
 refine insights                         # 生成 L1-L3 报告
 refine insights --prescription          # 含 L4 成长处方
@@ -96,11 +106,11 @@ refine doc-search "query"               # 搜索原文文档
 ## 架构
 
 ```
-Claude Code / Codex 会话文件 (.jsonl)
+remem raw archive（精确 source_root/project/session_id tuple）
     │
     ▼ refine ingest-sessions
-    解析 → 过滤 → 12 维度 facet 提取 → SQLite
-    （3 路并发，断点续传，指数退避重试）
+    契约校验 → 过滤 → 12 维度 facet 提取 → SQLite
+    （默认串行，可配置并发，指数退避重试）
     │
     ▼ refine insights
     本地聚类（按项目分组）→ 10 路并发 LLM 分析 → 合并报告
@@ -134,8 +144,8 @@ refine/
 │   ├── knowledge/       # 知识管理（Item, Document, Repository）
 │   ├── refinement/      # 知识提炼（Conversation, Extractor）
 │   ├── session/         # 会话分析
-│   │   ├── discovery.rs     # 会话文件发现
-│   │   ├── parser.rs        # JSONL 解析（Claude Code + Codex）
+│   │   ├── discovery.rs     # 临时回滚路径的会话文件发现
+│   │   ├── parser.rs        # 临时回滚路径的 JSONL 解析
 │   │   ├── facets.rs        # 12 维度 facet 提取
 │   │   ├── clustering.rs    # 本地聚类（按项目分组）
 │   │   ├── analysis_routes.rs # 10 路 LLM 分析任务

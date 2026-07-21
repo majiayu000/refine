@@ -95,6 +95,12 @@ pub(super) enum SqliteCommand {
         items: Vec<Item>,
         resp: oneshot::Sender<InfraResult<()>>,
     },
+    DocSaveWithReplacedItemsAndDeleteDocuments {
+        doc: Document,
+        items: Vec<Item>,
+        obsolete_document_ids: Vec<String>,
+        resp: oneshot::Sender<InfraResult<()>>,
+    },
     DocFindById {
         id: String,
         resp: oneshot::Sender<InfraResult<Option<Document>>>,
@@ -110,6 +116,10 @@ pub(super) enum SqliteCommand {
     DocDelete {
         id: String,
         resp: oneshot::Sender<InfraResult<bool>>,
+    },
+    DocDeleteWithItems {
+        ids: Vec<String>,
+        resp: oneshot::Sender<InfraResult<()>>,
     },
     DocSearchText {
         query: String,
@@ -345,6 +355,23 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
                 save_document_with_replaced_items(conn, &doc, &items),
             );
         }
+        SqliteCommand::DocSaveWithReplacedItemsAndDeleteDocuments {
+            doc,
+            items,
+            obsolete_document_ids,
+            resp,
+        } => {
+            send_response(
+                "DocSaveWithReplacedItemsAndDeleteDocuments",
+                resp,
+                save_document_with_replaced_items_and_delete_documents(
+                    conn,
+                    &doc,
+                    &items,
+                    &obsolete_document_ids,
+                ),
+            );
+        }
         SqliteCommand::DocFindById { id, resp } => {
             send_response("DocFindById", resp, doc_ops::find_by_id(conn, &id));
         }
@@ -364,6 +391,13 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
         }
         SqliteCommand::DocDelete { id, resp } => {
             send_response("DocDelete", resp, doc_ops::delete(conn, &id));
+        }
+        SqliteCommand::DocDeleteWithItems { ids, resp } => {
+            send_response(
+                "DocDeleteWithItems",
+                resp,
+                delete_documents_with_items(conn, &ids),
+            );
         }
         SqliteCommand::DocSearchText {
             query,
@@ -466,5 +500,50 @@ fn save_document_with_replaced_items(
     }
     tx.commit()
         .map_err(|e| InfraError::Database(e.to_string()))?;
+    Ok(())
+}
+
+fn save_document_with_replaced_items_and_delete_documents(
+    conn: &Connection,
+    doc: &Document,
+    items: &[Item],
+    obsolete_document_ids: &[String],
+) -> InfraResult<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    doc_ops::save(&tx, doc)?;
+    ops::delete_by_document_id(&tx, doc.id().as_str())?;
+    for item in items {
+        ops::save(&tx, item)?;
+    }
+    delete_documents_with_items_in_transaction(&tx, obsolete_document_ids)?;
+    tx.commit()
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    Ok(())
+}
+
+fn delete_documents_with_items(conn: &Connection, document_ids: &[String]) -> InfraResult<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    delete_documents_with_items_in_transaction(&tx, document_ids)?;
+    tx.commit()
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    Ok(())
+}
+
+fn delete_documents_with_items_in_transaction(
+    conn: &Connection,
+    document_ids: &[String],
+) -> InfraResult<()> {
+    for document_id in document_ids {
+        ops::delete_by_document_id(conn, document_id)?;
+        if !doc_ops::delete(conn, document_id)? {
+            return Err(InfraError::Database(format!(
+                "obsolete document {document_id} does not exist"
+            )));
+        }
+    }
     Ok(())
 }

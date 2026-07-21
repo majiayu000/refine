@@ -36,8 +36,15 @@ pub async fn run(
             limit,
             latest,
             dry_run,
+            legacy_local_scan,
         } => {
-            let source_filter = source.as_deref().and_then(parse_session_source);
+            let source_filter = source
+                .as_deref()
+                .map(|raw| {
+                    parse_session_source(raw)
+                        .with_context(|| format!("invalid session source {raw:?}"))
+                })
+                .transpose()?;
             let llm_client = if dry_run {
                 None
             } else {
@@ -50,6 +57,7 @@ pub async fn run(
                     limit,
                     latest,
                     dry_run,
+                    legacy_local_scan,
                 },
                 db_path,
                 doc_store,

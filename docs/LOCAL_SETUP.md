@@ -11,6 +11,12 @@ Use the installer from the repository root:
 scripts/install-local.sh
 ```
 
+Session ingestion also requires a compatible `remem` binary on `PATH` (or an
+explicit `REFINE_REMEM_BIN` path). Refine treats remem subprocess and JSON
+contract failures as ingest failures; it does not silently fall back to local
+transcript scanning. The temporary `--legacy-local-scan` option is the only
+rollback path during the one-release transition window.
+
 The installer is idempotent. It can be used for first install and for upgrades from a newer checkout.
 
 ## What The Installer Does

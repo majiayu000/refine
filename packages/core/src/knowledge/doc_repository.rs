@@ -14,6 +14,13 @@ pub trait DocumentRepository: Send + Sync {
     async fn count(&self) -> InfraResult<usize>;
     async fn save(&self, doc: &Document) -> InfraResult<()>;
     async fn save_with_replaced_items(&self, doc: &Document, items: &[Item]) -> InfraResult<()>;
+    async fn save_with_replaced_items_and_delete_documents(
+        &self,
+        doc: &Document,
+        items: &[Item],
+        obsolete_document_ids: &[DocumentId],
+    ) -> InfraResult<()>;
+    async fn delete_documents_with_items(&self, document_ids: &[DocumentId]) -> InfraResult<()>;
     async fn delete(&self, id: &DocumentId) -> InfraResult<bool>;
     async fn search_text(
         &self,
