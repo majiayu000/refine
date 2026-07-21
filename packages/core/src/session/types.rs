@@ -1,6 +1,6 @@
 //! 会话类型定义
 //!
-//! 统一表示 Claude Code 和 Codex 的会话数据
+//! 统一表示 remem raw archive 和旧 Claude Code/Codex 文件扫描的会话数据
 
 use chrono::{DateTime, Utc};
 use std::path::PathBuf;
@@ -10,6 +10,7 @@ use std::path::PathBuf;
 pub enum SessionSource {
     ClaudeCode,
     Codex,
+    RememRaw,
 }
 
 impl SessionSource {
@@ -17,6 +18,7 @@ impl SessionSource {
         match self {
             Self::ClaudeCode => "claude-code-session",
             Self::Codex => "codex-session",
+            Self::RememRaw => "remem-raw-session",
         }
     }
 }
@@ -138,5 +140,10 @@ mod tests {
             (MessageRole::User, "more"),
         ]);
         assert!(substantial.is_substantial());
+    }
+
+    #[test]
+    fn remem_raw_has_distinct_document_source() {
+        assert_eq!(SessionSource::RememRaw.as_str(), "remem-raw-session");
     }
 }

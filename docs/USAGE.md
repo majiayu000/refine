@@ -119,13 +119,21 @@ bun run package
 
 ```bash
 refine ingest-sessions
-refine ingest-sessions --source claude
-refine ingest-sessions --source codex
+refine ingest-sessions --latest 20
 refine ingest-sessions --dry-run
+
+# Temporary one-release rollback only
+refine ingest-sessions --legacy-local-scan --source claude
+refine ingest-sessions --legacy-local-scan --source codex
 refine insights --prescription
 mirror dashboard
 mirror score
 ```
+
+On the first remem-backed run, refine supersedes a matching local path-keyed
+session Document/items and saves the replacement facets in one transaction.
+Ambiguous legacy identity stops the run instead of risking duplicate
+observations or deleting the wrong history.
 
 ### Knowledge and document operations
 

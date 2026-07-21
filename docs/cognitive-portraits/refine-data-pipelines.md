@@ -10,7 +10,7 @@
 
 共识别 **9 条产出链路**，其中 **6 条调 LLM**、**5 条写 refine.db**、其余写本地文件或 stdout：
 
-- 1 条数据流入口（`refine ingest-sessions`，JSONL → refine.db）
+- 1 条数据流入口（`refine ingest-sessions`，remem raw archive → refine.db）
 - 1 条核心 LLM 聚合链路（`refine insights --prescription`，~10+1 次 LLM 并发）
 - 4 条 mirror 子命令（`score` / `motd` / `dashboard` / `weekly` / `profile`）
 - 2 条由 launchd 调度的 shell 脚本（daily/weekly）
@@ -23,8 +23,8 @@
 ## 链路全景图
 
 ```
-AI IDE JSONL 文件
- (Claude Code / Codex)
+remem raw archive
+ (完整 user/assistant 消息)
        │
        │ parse + LLM facet extract (3 并发 × 最多 5 次重试)
        ▼
@@ -94,15 +94,15 @@ AI IDE JSONL 文件
 
 | 字段 | 内容 |
 |---|---|
-| 命令入口 | `refine ingest-sessions [--source claude\|codex] [--limit N\|--latest N] [--dry-run]` |
+| 命令入口 | `refine ingest-sessions [--limit N\|--latest N] [--dry-run]`；一个发布周期内可显式使用 `--legacy-local-scan [--source claude\|codex]` |
 | 代码位置 | `apps/cli/src/cli.rs:74-88` → `apps/cli/src/handlers.rs:32-58` → `apps/cli/src/ingest_sessions.rs:41-199`（处理函数 `handle_ingest_sessions`，`process_single_session`，`llm_call_with_retry`，`extract_and_parse_facets_with_retry`）|
 | 触发方式 | 手动；由 `scripts/daily-refresh.sh` 每天 08:00 调用；由 `scripts/weekly-insights.sh` 每周一 09:00 调用 |
-| 数据来源 | `discover_sessions()` 扫描 Claude Code/Codex 的 JSONL 会话文件（路径来自 `refine_core::session::discover_sessions`）|
-| 处理步骤 | 1) 发现所有 JSONL 文件；2) 按 `--latest` (mtime 降序) 或 `--limit` (路径序) 裁剪；3) 串行去重（`doc_store.find_by_url` 查已存在 URL）+ 解析 + filter；4) `needs_chunking()` 为真时分块（每块单独 LLM 调用），否则单次调用；5) 3 路并发（`Semaphore::new(3)`）执行 LLM facet 抽取；6) `parse_facet_response` 解析 JSON；7) 保存 Document（title = session_summary），通过 `facets_to_items` 生成多条 Item 保存 |
-| LLM 调用 | **是**；每会话 1 次（或每分块 1 次，需要 chunking 时可能 N 次）+ 1 次最终合并；3 路并发；最多 5 次重试，base delay 10s，退避 `10 * 2^attempt` 秒；重试触发条件：`cooldown / service_busy / rate / 429 / Upstream / timeout / empty response` |
-| 输出目标 | **refine.db**：`documents` 表（每会话 1 行，source = `claude` 或 `codex`）+ `items` 表（每会话 N 行，`item_type='observation'`）|
-| 输出 schema | `Document { id, source, url=jsonl_path, title=session_summary, raw_content }`；`Item { id, item_type='observation', title, summary, content, tags, document_id, created_at, ... }`；字段含 `decision` / `bugfix` / `progress` / `question` / `code_artifact` / `cognitive_level` / `collaboration_mode` / `tool` / `friction` / `architecture` / `knowledge` / `pattern` 等 facet |
-| 依赖 | 无（这是唯一的数据流入口）；需要 LLM key |
+| 数据来源 | `remem raw sessions --json` 枚举 exact tuple，`remem raw messages --json` 读取完整快照分页；本地扫描只在显式回滚开关下运行 |
+| 处理步骤 | 1) 校验 session summary；2) 按 `--latest` 或 `--limit` 裁剪；3) 逐页校验 selector/order/cursor/count/epoch；4) 用稳定 URL + raw 内容跳过或刷新；5) 保守匹配本地旧路径 identity；6) filter/chunk；7) 默认串行（`REFINE_INGEST_CONCURRENCY` 可配置）执行 LLM facet 抽取；8) 在同一事务保存 remem Document/Items 并删除已取代旧 Document/items |
+| LLM 调用 | **是**；每会话 1 次（或每分块 1 次，需要 chunking 时可能 N 次）+ 1 次最终合并；默认并发度 1；最多 5 次重试，base delay 10s，退避 `10 * 2^attempt` 秒 |
+| 输出目标 | **refine.db**：`documents` 表（每会话 1 行，source = `remem-raw-session`）+ `items` 表（每会话 N 行，`item_type='observation'`）|
+| 输出 schema | `Document { id, source, url=remem-raw://v1/<hex tuple>, title, raw_content }`；`Item { id, item_type='observation', ..., document_id }`；内容变化时保留 Document identity 并替换关联 Items |
+| 依赖 | 兼容的 `remem` 二进制（`PATH` 或 `REFINE_REMEM_BIN`）和 LLM key；provider 错误会 fail closed |
 | 已知问题 | 网络波动 / API cooldown 时单会话可能耗尽 5 次重试失败；`daily-refresh.sh` 会根据 exit code 记录 `~/.refine/last-refresh-ok`，失败时不更新时间戳 |
 
 ---
@@ -247,10 +247,10 @@ AI IDE JSONL 文件
 
 ### 1. 数据流入点
 
-**只有链路 1 `refine ingest-sessions` 是数据流入口**（从 JSONL 文件 LLM 抽取）。所有其他链路（2~9）都是在 refine.db 里对已有 Observation 做聚合/加工/叙事。因此：
+**只有链路 1 `refine ingest-sessions` 是数据流入口**（默认从 remem raw archive 做 LLM 抽取）。所有其他链路（2~9）都是在 refine.db 里对已有 Observation 做聚合/加工/叙事。因此：
 
 - **链路 1 质量决定整条管道质量**。facet prompt 改动、chunking 策略、filter 策略的变化会扩散到下游所有报告。
-- 断掉链路 1（如 API key 失效、JSONL 格式变化）会让下游全部"显示空白"（`score` / `insights` / `dashboard` 都有 "暂无观测数据" 分支）。
+- 断掉链路 1（如 API key 失效、remem 不可用或契约漂移）会让导入显式失败；不会把 provider 错误降级成空输入。
 
 ### 2. LLM 成本分布
 
@@ -259,7 +259,7 @@ AI IDE JSONL 文件
 | 链路 | LLM 次数 | 并发度 | 场景 |
 |---|---|---|---|
 | 链路 2 `insights --prescription` | **≈11 次**（10 路 + 1 合并） | 10 | 最重 |
-| 链路 1 `ingest-sessions` | **每会话 1~N 次**（N = chunk 数量） | 3 | 批量时总量最大 |
+| 链路 1 `ingest-sessions` | **每会话 1~N 次**（N = chunk 数量） | 默认 1 | 批量时总量最大；可通过 env 配置 |
 | 链路 5 `weekly` | 1 次 | 1 | |
 | 链路 7 `profile` | 1 次 | 1 | |
 | 链路 3 `score` (advice) | 1 次（72h 缓存） | 1 | 命中缓存后 0 次 |
@@ -310,7 +310,7 @@ AI IDE JSONL 文件
 
 | 链路 | 使用 env |
 |---|---|
-| 链路 1 ingest-sessions | LLM key；可选 `REFINE_DB_PATH` |
+| 链路 1 ingest-sessions | `remem`（或 `REFINE_REMEM_BIN`）；LLM key；可选 `REFINE_DB_PATH`、`REFINE_INGEST_CONCURRENCY` |
 | 链路 2 insights | LLM key；可选 `REFINE_DB_PATH` |
 | 链路 3 score | 可选 LLM key（advice 可跳过）；可选 `REFINE_DB_PATH` |
 | 链路 4 dashboard | 可选 `REFINE_DB_PATH` |
