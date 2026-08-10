@@ -22,13 +22,16 @@ pub use compute::compute;
 pub use display::{indicator_display, layer_display};
 pub use persistence::{load_recent_scores, persist_score};
 pub use statusline::write_statusline;
-pub use types::{Indicator, LayerScore, ScoreResult, Signal, Trend};
+pub use types::{Indicator, LayerScore, ScoreResult, Signal};
 
 use baseline::compute_personal_trends;
 use display::print_score;
 
 #[cfg(test)]
 use baseline::{trend_from_personal, PersonalBaseline};
+
+#[cfg(test)]
+use types::Trend;
 
 #[cfg(test)]
 use compute::{
