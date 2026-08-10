@@ -151,6 +151,15 @@ fn session_needs_refresh_when_file_mtime_is_newer_than_saved_document() {
 }
 
 #[test]
+fn remem_summary_refreshes_only_when_source_is_newer_than_saved_document() {
+    let doc = Document::new("codex-session", "raw");
+    let saved_at = doc.updated_at().timestamp();
+
+    assert!(document_covers_remem_summary(&doc, saved_at));
+    assert!(!document_covers_remem_summary(&doc, saved_at + 1));
+}
+
+#[test]
 fn scoped_cursor_keeps_other_sources_discoverable() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path();

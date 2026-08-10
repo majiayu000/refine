@@ -30,7 +30,7 @@ impl InsightsCheckpoint {
     }
 
     fn load_matching_from(path: &Path, signature: DatasetSignature) -> Result<Self> {
-        let content = match std::fs::read_to_string(&path) {
+        let content = match std::fs::read_to_string(path) {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self::empty(signature));

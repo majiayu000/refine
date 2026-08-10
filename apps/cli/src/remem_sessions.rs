@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use refine_core::session::{MessageRole, Session, SessionMessage, SessionMeta, SessionSource};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -31,11 +31,15 @@ impl RememSession {
     }
 }
 
-pub(crate) fn load_remem_sessions(
+pub(crate) fn load_remem_session_summaries(
     limit: Option<usize>,
     latest: Option<usize>,
-) -> Result<Vec<RememSession>> {
-    load_remem_sessions_with_runner(&ProcessRunner, limit, latest)
+) -> Result<Vec<RememSessionSummary>> {
+    load_remem_session_summaries_with_runner(&ProcessRunner, limit, latest)
+}
+
+pub(crate) fn load_remem_session(summary: RememSessionSummary) -> Result<RememSession> {
+    load_one_session(&ProcessRunner, summary)
 }
 
 fn hex_component(value: &str) -> String {
@@ -87,20 +91,33 @@ struct SessionsEnvelope {
     project: Value,
     sample: i64,
     count: usize,
-    sessions: Vec<SessionSummary>,
+    sessions: Vec<RememSessionSummary>,
 }
 
 #[derive(Debug, Deserialize)]
-struct SessionSummary {
-    source_root: String,
-    project: String,
-    session_id: String,
-    first_epoch: i64,
-    last_epoch: i64,
-    message_count: i64,
-    user_message_count: i64,
-    assistant_message_count: i64,
-    user_message_samples: Vec<String>,
+pub(crate) struct RememSessionSummary {
+    pub source_root: String,
+    pub project: String,
+    pub session_id: String,
+    pub first_epoch: i64,
+    pub last_epoch: i64,
+    pub message_count: i64,
+    pub user_message_count: i64,
+    pub assistant_message_count: i64,
+    pub user_message_samples: Vec<String>,
+    #[serde(skip)]
+    pub legacy_identity_is_unique: bool,
+}
+
+impl RememSessionSummary {
+    pub(crate) fn stable_document_url(&self) -> String {
+        format!(
+            "remem-raw://v1/{}/{}/{}",
+            hex_component(&self.source_root),
+            hex_component(&self.project),
+            hex_component(&self.session_id)
+        )
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,11 +145,11 @@ struct RawMessage {
     created_at_epoch: i64,
 }
 
-fn load_remem_sessions_with_runner<R: Runner>(
+fn load_remem_session_summaries_with_runner<R: Runner>(
     runner: &R,
     limit: Option<usize>,
     latest: Option<usize>,
-) -> Result<Vec<RememSession>> {
+) -> Result<Vec<RememSessionSummary>> {
     ensure!(
         limit.is_none() || latest.is_none(),
         "limit and latest cannot be used together"
@@ -152,14 +169,26 @@ fn load_remem_sessions_with_runner<R: Runner>(
     if let Some(max) = latest.or(limit) {
         summaries.truncate(max);
     }
-    summaries
+    Ok(summaries)
+}
+
+#[cfg(test)]
+fn load_remem_sessions_with_runner<R: Runner>(
+    runner: &R,
+    limit: Option<usize>,
+    latest: Option<usize>,
+) -> Result<Vec<RememSession>> {
+    load_remem_session_summaries_with_runner(runner, limit, latest)?
         .into_iter()
         .map(|summary| load_one_session(runner, summary))
         .collect()
 }
 
-fn read_session_summaries<R: Runner>(runner: &R, args: &[String]) -> Result<Vec<SessionSummary>> {
-    let envelope: SessionsEnvelope = run_json(runner, args, "raw sessions")?;
+fn read_session_summaries<R: Runner>(
+    runner: &R,
+    args: &[String],
+) -> Result<Vec<RememSessionSummary>> {
+    let mut envelope: SessionsEnvelope = run_json(runner, args, "raw sessions")?;
     validate_nullable_i64(&envelope.since_epoch, "raw sessions since_epoch")?;
     validate_nullable_i64(&envelope.until_epoch, "raw sessions until_epoch")?;
     validate_nullable_string(&envelope.project, "raw sessions project")?;
@@ -210,10 +239,21 @@ fn read_session_summaries<R: Runner>(runner: &R, args: &[String]) -> Result<Vec<
             "raw sessions returned a duplicate selector tuple"
         );
     }
+    let mut identity_counts = HashMap::new();
+    for summary in &envelope.sessions {
+        *identity_counts
+            .entry((summary.source_root.clone(), summary.session_id.clone()))
+            .or_insert(0usize) += 1;
+    }
+    for summary in &mut envelope.sessions {
+        summary.legacy_identity_is_unique = identity_counts
+            .get(&(summary.source_root.clone(), summary.session_id.clone()))
+            == Some(&1);
+    }
     Ok(envelope.sessions)
 }
 
-fn load_one_session<R: Runner>(runner: &R, summary: SessionSummary) -> Result<RememSession> {
+fn load_one_session<R: Runner>(runner: &R, summary: RememSessionSummary) -> Result<RememSession> {
     let mut cursor: Option<String> = None;
     let mut seen_cursors = HashSet::new();
     let mut seen_ids = HashSet::new();
@@ -319,7 +359,7 @@ fn load_one_session<R: Runner>(runner: &R, summary: SessionSummary) -> Result<Re
     Ok(result)
 }
 
-fn validate_page(summary: &SessionSummary, envelope: &MessagesEnvelope) -> Result<()> {
+fn validate_page(summary: &RememSessionSummary, envelope: &MessagesEnvelope) -> Result<()> {
     ensure!(
         envelope.source_type == RAW_SOURCE_TYPE,
         "raw messages source_type drift"
@@ -372,7 +412,7 @@ fn validated_next_cursor(
     }
 }
 
-fn message_args(summary: &SessionSummary, cursor: Option<&str>) -> Vec<String> {
+fn message_args(summary: &RememSessionSummary, cursor: Option<&str>) -> Vec<String> {
     let mut args = strings(&[
         "raw",
         "messages",
@@ -538,6 +578,34 @@ mod tests {
             "remem-raw://v1/6c6f63616c/2f7265706f/7331"
         );
         assert!(runner.calls.borrow()[2].ends_with(&["--cursor".into(), "c1".into()]));
+    }
+
+    #[test]
+    fn summary_load_does_not_fetch_messages() {
+        let runner = FakeRunner::json(vec![sessions(1, vec![summary(3)])]);
+        let loaded = load_remem_session_summaries_with_runner(&runner, None, None).unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].message_count, 3);
+        assert_eq!(
+            loaded[0].stable_document_url(),
+            "remem-raw://v1/6c6f63616c/2f7265706f/7331"
+        );
+        assert_eq!(runner.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn legacy_identity_uniqueness_is_computed_before_selection() {
+        let first = summary(1);
+        let mut second = summary(1);
+        second["project"] = Value::String("/other".into());
+        let runner = FakeRunner::json(vec![sessions(2, vec![first, second])]);
+
+        let loaded = load_remem_session_summaries_with_runner(&runner, None, Some(1)).unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert!(!loaded[0].legacy_identity_is_unique);
+        assert_eq!(runner.calls.borrow().len(), 1);
     }
 
     #[test]

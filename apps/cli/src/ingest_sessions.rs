@@ -2,7 +2,7 @@
 //!
 //! 默认从 remem raw archive 读取；支持可配置并发、断点续传和 API 限流重试
 
-use crate::remem_sessions::load_remem_sessions;
+use crate::remem_sessions::{load_remem_session, load_remem_session_summaries};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use refine_core::error::InfraError;
@@ -15,7 +15,7 @@ use refine_core::session::{
     build_facet_prompt, chunk_session, discover_sessions, facets_to_items, needs_chunking,
     parse_facet_response, parse_session_file, FilterConfig, SessionSource, FACET_SYSTEM_PROMPT,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -82,6 +82,10 @@ fn session_captured_at(
 fn session_needs_refresh(existing_doc: &Document, file_modified_at: SystemTime) -> bool {
     let file_modified_at = DateTime::<Utc>::from(file_modified_at);
     file_modified_at > existing_doc.updated_at()
+}
+
+fn document_covers_remem_summary(document: &Document, last_epoch: i64) -> bool {
+    document.updated_at().timestamp() >= last_epoch
 }
 
 fn incremental_cursor_path(home: &Path, source: Option<&SessionSource>, db_path: &Path) -> PathBuf {
@@ -154,28 +158,68 @@ async fn handle_remem_ingest_sessions(
         );
     }
 
-    let sessions = load_remem_sessions(options.limit, options.latest)
-        .context("failed to load sessions from remem")?;
-    println!("remem 返回 {} 个会话", sessions.len());
+    let summaries = load_remem_session_summaries(options.limit, options.latest)
+        .context("failed to load session summaries from remem")?;
+    println!("remem 返回 {} 个会话摘要", summaries.len());
 
-    let total = sessions.len();
+    let total = summaries.len();
     let filter_config = FilterConfig::default();
     let document_count = doc_store.count().await?;
     let existing_documents = doc_store.find_recent(0, document_count).await?;
+    let existing_remem_documents: HashMap<&str, &Document> = existing_documents
+        .iter()
+        .filter(|document| document.source() == "remem-raw-session")
+        .map(|document| (document.url(), document))
+        .collect();
+    let legacy_document_index = legacy_migration::legacy_document_index(&existing_documents);
     let mut claimed_legacy_documents = HashSet::new();
     let mut pending = Vec::new();
     let mut skipped_dup = 0usize;
     let mut skipped_filter = 0usize;
     let mut stale_refresh = 0usize;
+    let mut fully_loaded = 0usize;
 
-    for (idx, remem_session) in sessions.into_iter().enumerate() {
-        let url = remem_session.stable_document_url();
+    for (idx, summary) in summaries.into_iter().enumerate() {
+        let url = summary.stable_document_url();
+        let existing_document = existing_remem_documents.get(url.as_str()).copied().cloned();
+        if existing_document
+            .as_ref()
+            .is_some_and(|document| document_covers_remem_summary(document, summary.last_epoch))
+        {
+            skipped_dup += 1;
+            continue;
+        }
+        if existing_document.is_none() && summary.legacy_identity_is_unique {
+            let legacy_document = legacy_migration::matching_legacy_document_for_summary(
+                &legacy_document_index,
+                &summary,
+            )?;
+            if legacy_document
+                .is_some_and(|document| document_covers_remem_summary(document, summary.last_epoch))
+            {
+                skipped_dup += 1;
+                continue;
+            }
+        }
+        if summary.user_message_count < filter_config.min_user_messages as i64 {
+            skipped_filter += 1;
+            continue;
+        }
+
+        let legacy_identity_is_unique = summary.legacy_identity_is_unique;
+        let remem_session = load_remem_session(summary)
+            .with_context(|| format!("failed to load full remem session for {url}"))?;
+        fully_loaded += 1;
         let raw_content = remem_session.session.to_document_content();
-        let legacy_documents_to_delete = legacy_migration::matching_legacy_document_ids(
-            &existing_documents,
-            &remem_session,
-            &raw_content,
-        )?;
+        let legacy_documents_to_delete = if legacy_identity_is_unique {
+            legacy_migration::matching_legacy_document_ids(
+                &existing_documents,
+                &remem_session,
+                &raw_content,
+            )?
+        } else {
+            Vec::new()
+        };
         for document_id in &legacy_documents_to_delete {
             if !claimed_legacy_documents.insert(document_id.clone()) {
                 anyhow::bail!(
@@ -183,7 +227,6 @@ async fn handle_remem_ingest_sessions(
                 );
             }
         }
-        let existing_document = doc_store.find_by_url(&url).await?;
         if let Some(existing_doc) = existing_document.as_ref() {
             if existing_doc.raw_content() == raw_content {
                 if options.dry_run && !legacy_documents_to_delete.is_empty() {
@@ -250,6 +293,8 @@ async fn handle_remem_ingest_sessions(
             legacy_documents_to_delete,
         });
     }
+
+    println!("摘要预筛选后拉取了 {fully_loaded}/{total} 个完整会话");
 
     process_pending_sessions(
         pending,
