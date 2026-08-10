@@ -29,6 +29,10 @@ const GENERIC_PATH_SEGMENTS: &[&str] = &[
     "code",
     "ai",
     "tools",
+    // "tool" 与 "tools" 都是路径层级噪声。缺了它会让 code/ai/tool/argus 归一成
+    // "tool-argus"，而 code/ai/tools/refine 归一成 "refine"，同一层级的两个目录
+    // 被切成两套命名，直接虚增项目桶数。
+    "tool",
     "agent",
     "work",
     "life",
@@ -41,6 +45,8 @@ const GENERIC_PATH_SEGMENTS: &[&str] = &[
 pub struct ProjectCluster {
     pub project_name: String,
     pub session_count: usize,
+    /// 该项目自己见过的 document id，用于 session_count 去重（不能用全局集合）
+    pub doc_ids: HashSet<String>,
     pub summary_excerpts: Vec<String>,
     pub decision_titles: Vec<String>,
     pub bugfix_titles: Vec<String>,
@@ -131,6 +137,7 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
             .or_insert_with(|| ProjectCluster {
                 project_name: project_name.clone(),
                 session_count: 0,
+                doc_ids: HashSet::new(),
                 summary_excerpts: Vec::new(),
                 decision_titles: Vec::new(),
                 bugfix_titles: Vec::new(),
@@ -146,10 +153,14 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
                 code_artifacts: Vec::new(),
             });
 
-        // 跟踪 session 数
+        // 跟踪 session 数：必须按项目各自去重。
+        // 曾经这里用全局 all_doc_ids 判重却把计数加到当前 cluster，导致同一 document
+        // 只在它第一次出现的项目里计一次，session_count 因此依赖 observation 的遍历
+        // 顺序，并让 fragmentation / deep_invest 读到不稳定的输入。
         if let Some(doc_id) = item.document_id() {
             let id_str = doc_id.as_str().to_string();
-            if all_doc_ids.insert(id_str.clone()) {
+            all_doc_ids.insert(id_str.clone());
+            if cluster.doc_ids.insert(id_str) {
                 cluster.session_count += 1;
             }
         }
@@ -250,10 +261,18 @@ fn extract_project_from_tags(tags: &[&str]) -> Option<String> {
         .max_by_key(|s| s.len())
 }
 
+/// `agent_019ec96be5fe7f53a6cca93bb6201c26` 这类 tag 是子 agent 的 session id，
+/// 不是项目名。放任不管会让每个 session id 各自成为一个项目桶。
+fn is_session_id(segment: &str) -> bool {
+    segment
+        .strip_prefix("agent_")
+        .is_some_and(|rest| rest.len() >= 16 && rest.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 pub fn normalize_project_name(raw: &str) -> Option<String> {
     let segments: Vec<&str> = raw
         .split('-')
-        .filter(|s| !s.is_empty() && !GENERIC_PATH_SEGMENTS.contains(s))
+        .filter(|s| !s.is_empty() && !GENERIC_PATH_SEGMENTS.contains(s) && !is_session_id(s))
         .collect();
     match segments.len() {
         0 => None,
@@ -335,6 +354,35 @@ mod tests {
         assert_eq!(
             normalize_project_name("-users-lifcc-desktop-code-work-life-xhh"),
             Some("xhh".into())
+        );
+        // "tool" 与 "tools" 必须归一到同一命名层级，否则同级目录被切成两套项目名
+        assert_eq!(
+            normalize_project_name("-users-lifcc-desktop-code-ai-tool-argus"),
+            Some("argus".into()),
+            "tool/ 下的项目必须与 tools/ 下的项目同样归一"
+        );
+        assert_eq!(
+            normalize_project_name("-users-lifcc-desktop-code-ai-tool-argus"),
+            normalize_project_name("-users-lifcc-desktop-code-ai-tools-argus"),
+            "tool 与 tools 必须产生同一个项目名"
+        );
+        // 子 agent 的 session id 不是项目名，必须被丢弃而不是各自成桶
+        assert_eq!(
+            normalize_project_name("agent_019ec96be5fe7f53a6cca93bb6201c26"),
+            None,
+            "session id 不得成为项目桶"
+        );
+        assert_eq!(
+            normalize_project_name(
+                "-users-lifcc-desktop-code-ai-tools-refine-agent_019ec96be5fe7f53a6cca93bb6201c26"
+            ),
+            Some("refine".into()),
+            "路径里混入 session id 时应剥离后保留真实项目名"
+        );
+        // agent_ 开头但不是 hex session id 的正常项目名不受影响
+        assert_eq!(
+            normalize_project_name("agent_harness"),
+            Some("agent_harness".into())
         );
         assert_eq!(
             normalize_project_name("-users-lifcc--claude-mem-observer-sessions"),

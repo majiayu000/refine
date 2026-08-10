@@ -319,7 +319,7 @@ pub async fn handle_profile(
 mod tests {
     use super::*;
     use refine_core::session::{ClusterResult, GlobalStats, ProjectCluster};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     fn make_cluster() -> ClusterResult {
         let mut projects = HashMap::new();
@@ -337,6 +337,7 @@ mod tests {
             ProjectCluster {
                 project_name: "proj-a".to_string(),
                 session_count: 50,
+                doc_ids: HashSet::new(),
                 summary_excerpts: vec!["s1".into(); 40],
                 decision_titles: vec!["d1".into(); 5],
                 bugfix_titles: vec!["b1".into(); 5],
@@ -366,6 +367,7 @@ mod tests {
             ProjectCluster {
                 project_name: "proj-b".to_string(),
                 session_count: 20,
+                doc_ids: HashSet::new(),
                 summary_excerpts: vec!["s2".into(); 15],
                 decision_titles: vec!["d2".into(); 3],
                 bugfix_titles: vec!["b2".into(); 2],

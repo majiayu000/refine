@@ -8,11 +8,23 @@ pub(super) enum IndicatorFormat {
     Integer,
 }
 
+/// 指标的"更好"方向。
+///
+/// `Band` 表示区间型指标（如 deep_invest 15-30% 为佳）：越高不等于越好，
+/// 因此任何"相对滑动均值"的比较对它都没有意义，必须显式表达为无趋势，
+/// 而不是当成 HigherBetter 撒谎。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Direction {
+    HigherBetter,
+    LowerBetter,
+    Band,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct IndicatorSpec {
     pub key: &'static str,
     pub format: IndicatorFormat,
-    pub higher_is_better: bool,
+    pub direction: Direction,
     aliases: &'static [&'static str],
     display_en: &'static str,
     display_zh: &'static str,
@@ -31,11 +43,11 @@ impl IndicatorSpec {
     }
 }
 
-const INDICATOR_SPECS: [IndicatorSpec; 11] = [
+const INDICATOR_SPECS: [IndicatorSpec; 8] = [
     IndicatorSpec {
         key: "dreyfus",
         format: IndicatorFormat::Fixed1,
-        higher_is_better: true,
+        direction: Direction::HigherBetter,
         aliases: &["Dreyfus"],
         display_en: "Dreyfus",
         display_zh: "Dreyfus",
@@ -43,31 +55,15 @@ const INDICATOR_SPECS: [IndicatorSpec; 11] = [
     IndicatorSpec {
         key: "decision_quality",
         format: IndicatorFormat::Percent0,
-        higher_is_better: true,
+        direction: Direction::HigherBetter,
         aliases: &["Decision Quality", "决策质量"],
         display_en: "Decision Quality",
         display_zh: "决策质量",
     },
     IndicatorSpec {
-        key: "depth_output",
-        format: IndicatorFormat::Percent0,
-        higher_is_better: true,
-        aliases: &["Depth Output", "深度产出比"],
-        display_en: "Depth Output",
-        display_zh: "深度产出比",
-    },
-    IndicatorSpec {
-        key: "knowledge_rate",
-        format: IndicatorFormat::Fixed1,
-        higher_is_better: true,
-        aliases: &["Knowledge", "知识获取"],
-        display_en: "Knowledge",
-        display_zh: "知识获取",
-    },
-    IndicatorSpec {
         key: "exploration",
         format: IndicatorFormat::Percent0,
-        higher_is_better: true,
+        direction: Direction::HigherBetter,
         aliases: &["Exploration", "探索率", "探索占比"],
         display_en: "Exploration",
         display_zh: "探索率",
@@ -75,7 +71,7 @@ const INDICATOR_SPECS: [IndicatorSpec; 11] = [
     IndicatorSpec {
         key: "deep_invest",
         format: IndicatorFormat::Percent0,
-        higher_is_better: true,
+        direction: Direction::Band,
         aliases: &["Deep Invest", "深耕率", "深挖率", "深挖占比"],
         display_en: "Deep Invest",
         display_zh: "深耕率",
@@ -83,7 +79,7 @@ const INDICATOR_SPECS: [IndicatorSpec; 11] = [
     IndicatorSpec {
         key: "fragmentation",
         format: IndicatorFormat::Percent0,
-        higher_is_better: false,
+        direction: Direction::LowerBetter,
         aliases: &["Fragmentation", "碎片化"],
         display_en: "Fragmentation",
         display_zh: "碎片化",
@@ -91,7 +87,7 @@ const INDICATOR_SPECS: [IndicatorSpec; 11] = [
     IndicatorSpec {
         key: "delegation",
         format: IndicatorFormat::Percent0,
-        higher_is_better: false,
+        direction: Direction::LowerBetter,
         aliases: &["Delegation", "delegation", "委派率", "委派比"],
         display_en: "delegation",
         display_zh: "委派率",
@@ -99,7 +95,7 @@ const INDICATOR_SPECS: [IndicatorSpec; 11] = [
     IndicatorSpec {
         key: "mode_diversity",
         format: IndicatorFormat::Integer,
-        higher_is_better: true,
+        direction: Direction::HigherBetter,
         aliases: &["Mode Diversity", "模式多样性"],
         display_en: "Mode Diversity",
         display_zh: "模式多样性",
@@ -107,18 +103,10 @@ const INDICATOR_SPECS: [IndicatorSpec; 11] = [
     IndicatorSpec {
         key: "bug_decision",
         format: IndicatorFormat::Fixed2,
-        higher_is_better: false,
+        direction: Direction::LowerBetter,
         aliases: &["Bug/Decision", "bug/decision", "bug/决策"],
         display_en: "bug/decision",
         display_zh: "bug/决策",
-    },
-    IndicatorSpec {
-        key: "friction_density",
-        format: IndicatorFormat::Fixed1,
-        higher_is_better: false,
-        aliases: &["Friction", "摩擦密度"],
-        display_en: "Friction",
-        display_zh: "摩擦密度",
     },
 ];
 
@@ -158,6 +146,6 @@ pub(super) fn format_indicator_value(name: &str, actual: f64) -> String {
     }
 }
 
-pub(super) fn indicator_higher_is_better(name: &str) -> Option<bool> {
-    indicator_spec(name).map(|spec| spec.higher_is_better)
+pub(super) fn indicator_direction(name: &str) -> Option<Direction> {
+    indicator_spec(name).map(|spec| spec.direction)
 }

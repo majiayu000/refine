@@ -1,5 +1,6 @@
 use crate::lang::t;
 
+use super::baseline::PersonalTrends;
 use super::indicators::indicator_display_name;
 use super::types::{ScoreResult, Signal};
 
@@ -20,7 +21,10 @@ pub fn indicator_display(key: &str) -> &'static str {
 
 // ── Output ──
 
-pub(super) fn print_score(result: &ScoreResult, using_personal: bool) {
+/// 打印评分。`trends` 为 None 表示历史数据不足以计算个人趋势。
+///
+/// 两个维度独立呈现：`✓/✗` 来自绝对阈值信号（与 target 同源），箭头来自个人趋势。
+pub(super) fn print_score(result: &ScoreResult, trends: Option<&PersonalTrends>) {
     println!("{}\n", t!("Mirror Cognitive Snapshot", "Mirror 认知镜像"));
     for layer in &result.layers {
         let details: Vec<String> = layer
@@ -32,11 +36,16 @@ pub(super) fn print_score(result: &ScoreResult, using_personal: bool) {
                 } else {
                     "✗"
                 };
+                let arrow = trends
+                    .and_then(|t| t.indicator(&i.name))
+                    .map(|t| t.arrow())
+                    .unwrap_or("");
                 format!(
-                    "{} {} {}",
+                    "{} {} {}{}",
                     indicator_display(&i.name),
                     i.display_value(),
-                    mark
+                    mark,
+                    arrow
                 )
             })
             .collect();
@@ -50,20 +59,20 @@ pub(super) fn print_score(result: &ScoreResult, using_personal: bool) {
     if let Some(ref tension) = result.tension {
         println!("\n  {}{}", t!("Tension: ", "张力: "), tension);
     }
-    if using_personal {
+    if trends.is_some() {
         println!(
             "  {}",
             t!(
-                "Baseline: personal (4-week rolling avg)",
-                "基线: 个人(4周均值)"
+                "✓ = meets the absolute target · arrow = vs your 4-week average",
+                "✓ = 达到绝对目标 · 箭头 = 相对你近 4 周均值"
             )
         );
     } else {
         println!(
             "  {}",
             t!(
-                "Baseline: default thresholds (insufficient data for personal baseline)",
-                "基线: 默认阈值(数据不足4周)"
+                "✓ = meets the absolute target · trend unavailable (less than 4 weeks of data)",
+                "✓ = 达到绝对目标 · 趋势不可用(数据不足4周)"
             )
         );
     }

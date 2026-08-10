@@ -1,9 +1,8 @@
 use chrono::{Duration, Utc};
 use std::collections::HashMap;
 
-use super::compute::analyze_tension;
-use super::indicators::{canonical_indicator_key, indicator_higher_is_better, indicator_specs};
-use super::types::{worst, ScoreResult, Signal};
+use super::indicators::{canonical_indicator_key, indicator_direction, indicator_specs, Direction};
+use super::types::{ScoreResult, Trend};
 
 /// Minimum number of historical scores to activate personal baseline
 const BASELINE_MIN_ENTRIES: usize = 7;
@@ -77,55 +76,115 @@ pub fn compute_personal_baseline(history: &[ScoreResult]) -> Option<PersonalBase
     Some(PersonalBaseline { averages })
 }
 
-/// Determine signal by comparing actual value against personal baseline.
-/// `higher_is_better`: true for metrics where higher = better (dreyfus, decision_quality, etc.)
-///                     false for metrics where lower = better (delegation, fragmentation, bug_decision)
-pub fn signal_from_personal(actual: f64, baseline: f64, higher_is_better: bool) -> Signal {
+/// 把"实际值 vs 个人 28 天滑动均值"折算成趋势方向。
+///
+/// 返回 `None` 表示"无法判断趋势"，而不是伪装成一个中性结果：
+/// - `baseline == 0.0`：该指标在窗口内没有历史数据；
+/// - `Direction::Band`：区间型指标，与均值比大小没有意义。
+pub fn trend_from_personal(actual: f64, baseline: f64, direction: Direction) -> Option<Trend> {
     if baseline == 0.0 {
-        return Signal::Yellow;
+        return None;
     }
     let ratio = actual / baseline;
-    if higher_is_better {
-        if ratio >= 1.05 {
-            Signal::Green
-        } else if ratio >= 0.95 {
-            Signal::Yellow
+    match direction {
+        Direction::HigherBetter => Some(if ratio >= 1.05 {
+            Trend::Up
+        } else if ratio <= 0.95 {
+            Trend::Down
         } else {
-            Signal::Red
-        }
-    } else {
-        // Lower is better: ratio < 0.95 means actual is notably below baseline = good
-        if ratio <= 0.95 {
-            Signal::Green
-        } else if ratio <= 1.05 {
-            Signal::Yellow
+            Trend::Flat
+        }),
+        Direction::LowerBetter => Some(if ratio <= 0.95 {
+            Trend::Up
+        } else if ratio >= 1.05 {
+            Trend::Down
         } else {
-            Signal::Red
-        }
+            Trend::Flat
+        }),
+        Direction::Band => None,
     }
 }
 
-/// Apply personal baseline to override signals on a ScoreResult (in-place).
-pub(super) fn apply_personal_baseline(result: &mut ScoreResult, baseline: &PersonalBaseline) {
-    for layer in &mut result.layers {
-        for indicator in &mut layer.indicators {
-            let key = canonical_indicator_key(&indicator.name);
-            let Some(higher_is_better) = indicator_higher_is_better(key) else {
-                continue;
-            };
-            let Some(baseline_value) = baseline.average(key) else {
-                continue;
-            };
+/// 一次评分的相对趋势视图（与绝对信号完全分离）。
+///
+/// 趋势是从"当前评分 + 历史均值"推导出来的，不写回 `ScoreResult`，
+/// 因此 scores.jsonl 里的 `signal` 永远只有"绝对达标"一种语义。
+#[derive(Debug, Clone, Default)]
+pub struct PersonalTrends {
+    per_indicator: HashMap<String, Trend>,
+    per_layer: [Option<Trend>; 3],
+}
 
-            indicator.signal =
-                signal_from_personal(indicator.actual, baseline_value, higher_is_better);
-        }
-
-        // Recalculate layer signal as worst of its indicators
-        let sigs: Vec<Signal> = layer.indicators.iter().map(|i| i.signal).collect();
-        layer.signal = worst(&sigs);
+impl PersonalTrends {
+    /// 按指标名（支持别名）查趋势。
+    pub fn indicator(&self, name: &str) -> Option<Trend> {
+        self.per_indicator
+            .get(canonical_indicator_key(name))
+            .copied()
     }
 
-    // Recalculate tension after signal changes
-    result.tension = analyze_tension(&result.layers);
+    /// 三层聚合出的整体趋势。
+    pub fn overall(&self) -> Option<Trend> {
+        aggregate(self.per_layer.iter().copied().flatten())
+    }
+}
+
+/// 多数方向聚合：只有 Down 记 Down，只有 Up 记 Up，其余（混合或全 Flat）记 Flat；
+/// 完全没有可判断的指标时返回 None。
+fn aggregate(trends: impl Iterator<Item = Trend>) -> Option<Trend> {
+    let mut has_up = false;
+    let mut has_down = false;
+    let mut any = false;
+    for trend in trends {
+        any = true;
+        match trend {
+            Trend::Up => has_up = true,
+            Trend::Down => has_down = true,
+            Trend::Flat => {}
+        }
+    }
+    if !any {
+        return None;
+    }
+    Some(match (has_up, has_down) {
+        (true, false) => Trend::Up,
+        (false, true) => Trend::Down,
+        _ => Trend::Flat,
+    })
+}
+
+/// 由当前评分与个人基线推导趋势。**不修改 `ScoreResult`**——
+/// 绝对信号只能由 compute.rs 的阈值判据产生。
+pub(super) fn compute_personal_trends(
+    result: &ScoreResult,
+    baseline: &PersonalBaseline,
+) -> PersonalTrends {
+    let mut per_indicator = HashMap::new();
+    let mut per_layer = [None, None, None];
+
+    for (index, layer) in result.layers.iter().enumerate() {
+        for indicator in &layer.indicators {
+            let key = canonical_indicator_key(&indicator.name);
+            let (Some(direction), Some(baseline_value)) =
+                (indicator_direction(key), baseline.average(key))
+            else {
+                continue;
+            };
+            if let Some(trend) = trend_from_personal(indicator.actual, baseline_value, direction) {
+                per_indicator.insert(key.to_string(), trend);
+            }
+        }
+
+        per_layer[index] = aggregate(
+            layer
+                .indicators
+                .iter()
+                .filter_map(|i| per_indicator.get(canonical_indicator_key(&i.name)).copied()),
+        );
+    }
+
+    PersonalTrends {
+        per_indicator,
+        per_layer,
+    }
 }

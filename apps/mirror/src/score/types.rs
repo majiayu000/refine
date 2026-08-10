@@ -59,6 +59,26 @@ impl std::fmt::Display for Signal {
     }
 }
 
+/// 相对个人 28 天滑动均值的方向，已按指标方向归一化（Up 恒表示"变好"）。
+///
+/// 与 `Signal` 正交：`Signal` 只回答"是否达到绝对目标"，`Trend` 只回答"相对自己最近是进步还是退步"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Trend {
+    Up,
+    Flat,
+    Down,
+}
+
+impl Trend {
+    pub const fn arrow(self) -> &'static str {
+        match self {
+            Trend::Up => "↑",
+            Trend::Flat => "→",
+            Trend::Down => "↓",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Indicator {
     pub name: String,

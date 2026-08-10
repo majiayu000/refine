@@ -2,10 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-REFINE_BIN="${HOME}/.cargo/bin/refine"
+REFINE_BIN="${REFINE_BIN:-${HOME}/.cargo/bin/refine}"
 PROJECT_DIR="${SCRIPT_DIR}/.."
 ENV_FILE="${PROJECT_DIR}/.env"
 LOG_PREFIX="[refine-weekly]"
+
+# 失败步骤记账：任一步骤失败都必须体现在通知文案和退出码里（U-29），
+# 不能像旧实现那样把非零退出降级成一行普通 log 后照常弹"已生成"。
+FAILED_STEPS=()
 
 log() {
   echo "${LOG_PREFIX} $(date '+%Y-%m-%d %H:%M:%S') $*"
@@ -27,6 +31,12 @@ fi
 source "${SCRIPT_DIR}/load-llm-env.sh"
 load_refine_llm_env
 
+# ingest 判定 / 日志轮转的共享函数
+# shellcheck source=scripts/ingest-lib.sh
+source "${SCRIPT_DIR}/ingest-lib.sh"
+
+rotate_log_if_needed "${REFINE_INSIGHTS_LOG:-$HOME/Library/Logs/refine-insights.log}"
+
 log "=== Weekly Insights Run Start ==="
 
 # Preflight: environment diagnostics for troubleshooting
@@ -37,23 +47,42 @@ log "Preflight: env REFINE_DB_PATH=${REFINE_DB_PATH:-<unset>} REFINE_ANTHROPIC_M
 log "Preflight: keys REFINE_ANTHROPIC_API_KEY=$([[ -n "${REFINE_ANTHROPIC_API_KEY:-}" ]] && echo '<set>' || echo '<unset>') REFINE_OPENAI_API_KEY=$([[ -n "${REFINE_OPENAI_API_KEY:-}" ]] && echo '<set>' || echo '<unset>') BASE_API_KEY=$([[ -n "${BASE_API_KEY:-}" ]] && echo '<set>' || echo '<unset>')"
 
 # Step 1: 增量导入新会话
+# ingest 失败仍继续跑 insights（ingest 可续传），但必须记账并影响最终退出码。
 log "Step 1: ingest-sessions"
-if "$REFINE_BIN" ingest-sessions 2>&1; then
-  log "Step 1: ingest-sessions completed successfully"
+INGEST_OUT=$(mktemp "${TMPDIR:-/tmp}/refine-ingest.XXXXXX")
+trap 'rm -f "$INGEST_OUT"' EXIT
+rc=0
+"$REFINE_BIN" ingest-sessions >"$INGEST_OUT" 2>&1 || rc=$?
+cat "$INGEST_OUT"
+if evaluate_ingest_result "$INGEST_OUT" "$rc"; then
+  log "Step 1: ingest-sessions completed within failure threshold"
 else
-  log "Step 1: ingest-sessions failed with exit code $?"
+  log "ERROR: Step 1 ingest-sessions failure rate exceeded threshold (raw exit code ${rc})"
+  FAILED_STEPS+=("ingest-sessions")
 fi
 
 # Step 2: 生成处方报告
 log "Step 2: insights --prescription"
-if "$REFINE_BIN" insights --prescription 2>&1; then
+rc=0
+"$REFINE_BIN" insights --prescription 2>&1 || rc=$?
+if [[ "$rc" -eq 0 ]]; then
   log "Step 2: insights --prescription completed successfully"
 else
-  log "Step 2: insights --prescription failed with exit code $?"
+  log "ERROR: Step 2 insights --prescription failed with exit code ${rc}"
+  FAILED_STEPS+=("insights --prescription")
 fi
 
-# Step 3: 发送 macOS 通知
+# Step 3: 发送 macOS 通知（按真实结果分叉，禁止无条件报成功）
 log "Step 3: notification"
-osascript -e 'display notification "Weekly insights 报告已生成" with title "Refine Weekly Insights"' 2>&1 || true
+if [[ ${#FAILED_STEPS[@]} -eq 0 ]]; then
+  osascript -e 'display notification "Weekly insights 报告已生成" with title "Refine Weekly Insights"' 2>&1 || true
+else
+  osascript -e "display notification \"失败步骤: ${FAILED_STEPS[*]}，详见 refine-insights.log\" with title \"Refine Weekly Insights 失败\"" 2>&1 || true
+fi
 
 log "=== Weekly Insights Run End ==="
+
+if [[ ${#FAILED_STEPS[@]} -gt 0 ]]; then
+  log "ERROR: run finished with failures: ${FAILED_STEPS[*]}"
+  exit 1
+fi

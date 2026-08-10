@@ -119,12 +119,6 @@ pub async fn handle_weekly(
 
     println!("{}", report);
 
-    // Save the full report as the sentinel file for the MOTD weekly reminder.
-    // The MOTD reads this on Mondays to show a one-line reminder.
-    if let Err(e) = save_last_weekly_md(&report) {
-        tracing::warn!("failed to save last-weekly.md: {}", e);
-    }
-
     save_weekly_record(&this_score)?;
     let doc_id = save_report_to_document(
         &doc_repo,
@@ -144,6 +138,11 @@ pub async fn handle_weekly(
             format!("周报已保存 (ID: {})", doc_id)
         )
     );
+
+    // 哨兵文件供 MOTD 的周一提醒读取。写失败会导致周一提醒静默消失（用户可见产出缺失），
+    // 因此必须传播错误让进程非零退出（U-29），不能降级成 warning 后继续。
+    // 放在报告正文与 document 落库之后：即使哨兵写失败，本周数据也已保存。
+    save_last_weekly_md(&report).context("周报哨兵文件写入失败，周一 MOTD 提醒将缺失")?;
 
     Ok(())
 }
@@ -205,8 +204,8 @@ fn build_weekly_report(
     lines.push(format!(
         "> {}",
         t!(
-            "Metrics-derived report — for coaching run `refine cognitive-portrait`",
-            "指标驱动报告 — 教练分析请运行 `refine cognitive-portrait`"
+            "Metrics-only report — cognitive portrait runs biweekly (manual: scripts/cognitive-portrait.sh)",
+            "纯指标报告 — 认知画像每两周自动生成（手动触发: scripts/cognitive-portrait.sh）"
         )
     ));
 
@@ -780,6 +779,44 @@ mod tests {
         assert!(
             !content.trim().is_empty(),
             "sentinel file must not be empty"
+        );
+        Ok(())
+    }
+
+    /// 哨兵写入失败必须返回 Err，不能被吞成 Ok（U-29）。
+    #[test]
+    fn test_save_last_weekly_md_to_path_propagates_write_error() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(|e| anyhow::anyhow!(e))?;
+        let path = dir.path().join("不存在的子目录").join("last-weekly.md");
+        let err = save_last_weekly_md_to_path("# Weekly Report\n", &path)
+            .expect_err("写入不存在的目录必须失败");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed to write last weekly report"),
+            "错误信息缺少上下文: {msg}"
+        );
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "错误信息缺少路径: {msg}"
+        );
+        Ok(())
+    }
+
+    /// 错误链必须可归因到具体路径，锁死契约防止未来改回 warn + Ok。
+    #[test]
+    fn test_save_last_weekly_md_to_path_error_is_not_silent() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(|e| anyhow::anyhow!(e))?;
+        let path = dir.path().join("missing").join("last-weekly.md");
+        let err = save_last_weekly_md_to_path("# Weekly Report\n", &path)
+            .expect_err("写入不存在的目录必须失败");
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains(&path.display().to_string()),
+            "错误链缺少路径信息: {chain}"
+        );
+        assert!(
+            chain.len() > "failed to write last weekly report".len(),
+            "错误链必须包含底层 io 错误原因: {chain}"
         );
         Ok(())
     }

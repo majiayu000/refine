@@ -10,6 +10,14 @@
 | [2026-03-21](./cognitive-portrait-2026-03-21-v0.md) | v0 | 1565 | 999 | ✅ | ✅ | ✅ | ✅ | 2 sub-agent (手工) | ✅ |
 | [2026-04-08](./cognitive-portrait-2026-04-08-v2.md) | v2 PoC | 3919 | 1364 | 261 | 284 | 330 | 338 | 4 sub-agent (PoC dispatcher) | ✅ |
 | [2026-04-09](./cognitive-portrait-2026-04-09-v3.md) | v3 | 3919 | 1418 | 338 | 326 | 265 | 304 | 4 sub-agent (skill auto dispatcher) | ✅ |
+| [2026-04-27](./cognitive-portrait-2026-04-27-v3.md) | v3 | 7239 | 685 | ✅ | ✅ | ✅ | ✅ | 4 sub-agent (skill auto dispatcher) | ✅ |
+| [2026-05-27](./cognitive-portrait-2026-05-27-v3.md) | v3 | 8758 | 810 | 173 | 139 | 161 | 290 | 4 sub-agent (compressed L1-L3 after timeout) | ⚠️ partial |
+| [2026-05-28](./cognitive-portrait-2026-05-28-v3.md) | v3 修正版 | 8758 | 491 | ✅ | ✅ | ✅ | ✅ | 04-27 narrative style rewrite from same data | ✅ |
+| [2026-05-31](./cognitive-portrait-2026-05-31-v3.md) | v3 Codex 试跑 | 8777 | 845 | ✅ | ✅ | ✅ | ✅ | Codex-native skill + collector/validator | ✅ |
+| [2026-06-01](./cognitive-portrait-2026-06-01-v3.md) | v3 Codex 增强 | 8777 | 858 | ✅ | ✅ | ✅ | ✅ | Codex skill + 7d delta/evidence collector | ✅ |
+| [2026-06-02](./cognitive-portrait-2026-06-02-v3.md) | v3 Codex threads | 8777 | 1343 | 284 | 278 | 390 | 284 | Codex dispatcher + 4 threads | ✅ |
+| [2026-07-26](./cognitive-portrait-2026-07-26-v3.md) | v3 Codex threads | 17929 | 1726 | 398 | 422 | 416 | 378 | Codex dispatcher + 4 threads | ✅ |
+| [2026-08-09](./cognitive-portrait-2026-08-09-v3.md) | v3 Codex agents | 18642 | 1315 | 303 | 318 | 301 | 331 | Codex dispatcher + 4 agents (3+1 staged) | ✅ |
 
 ## 关键趋势
 
@@ -32,14 +40,19 @@
 | v1 | deprecated | 单 agent 单线程 | 419 | 输出衰减，不达 600 行下限 |
 | v2 PoC | archived | 4 sub-agent + 手工 dispatcher | 1364 | 验证 multi-agent 假设 |
 | v3 | current | 4 sub-agent + skill 自动 dispatcher | 1418 | Skill 自动 dispatcher 跑通（2026-04-09） |
-| v4 | spec | v3 + launchd 自动化 | ≥ 800 | Phase 3 |
+| v4 | current | v3 + launchd 双周自动化 | ≥ 800 | Phase 3 已落地（2026-07-23），调度见下 |
 | v5 | spec | v4 + 处方追踪 + 自我演进 | ≥ 800 | Phase 4 |
 
 ## Phase 路线图
 
 - **Phase 1（已完成）**: 止血 + 建归档 — v2 PoC 跑通，1364 行 ✅
 - **Phase 2（进行中）**: 改 SKILL.md 把 PoC 固化为 v3 — 见 [SPEC.md](./SPEC.md) §4
-- **Phase 3（待启动）**: launchd 周自动化 — v3 稳定 2 周后启动
+- **Phase 3（已落地 2026-07-23）**: launchd 自动化 — `~/Library/LaunchAgents/com.lifcc.refine-cognitive-portrait.plist`
+  每周日 10:00 触发 `scripts/cognitive-portrait.sh`，脚本按最新产物日期做 13 天节流 ⇒ 实际双周一份；
+  agent 缺失或未产出新画像时 error 日志 + 通知失败 + 非零退出。
+  已于 2026-07-23 `launchctl load` 生效。agent 以 `--sandbox workspace-write` 运行（最小权限，
+  可用 `REFINE_PORTRAIT_SANDBOX` 覆盖）；plist 显式设置 PATH，因为 launchd 默认 PATH
+  不含 fnm 管理的 codex。node 版本升级后需同步更新 plist 里的两处路径。
 - **Phase 4（长期）**: 处方追踪 + 指标自校准 + 自我演进
 
 ## 命名约定

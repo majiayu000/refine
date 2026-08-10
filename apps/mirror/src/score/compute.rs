@@ -53,45 +53,9 @@ fn decision_quality_rate(cluster: &ClusterResult) -> f64 {
     with_reason as f64 / total as f64
 }
 
-fn depth_output_ratio(stats: &GlobalStats) -> f64 {
-    let deep_total = *stats.collaboration_modes.get("deep_inquiry").unwrap_or(&0);
-    let deleg_total = *stats.collaboration_modes.get("delegation").unwrap_or(&0);
-    if deep_total + deleg_total == 0 {
-        return 0.0;
-    }
-    let expert_count = *stats.cognitive_levels.get("expert").unwrap_or(&0);
-    let deep_expert_rate = if deep_total == 0 {
-        0.0
-    } else {
-        expert_count as f64 / deep_total as f64
-    };
-    let deleg_expert_rate = if deleg_total == 0 {
-        0.0
-    } else {
-        expert_count as f64 / deleg_total as f64
-    };
-    deep_expert_rate - deleg_expert_rate
-}
-
-pub(super) fn knowledge_rate(cluster: &ClusterResult) -> f64 {
-    let total_knowledge: usize = cluster
-        .projects
-        .values()
-        .map(|p| p.knowledge_gained.len())
-        .sum();
-    let total_sessions = cluster.global_stats.total_sessions;
-    if total_sessions == 0 {
-        0.0
-    } else {
-        total_knowledge as f64 / total_sessions as f64
-    }
-}
-
 pub(super) fn layer1(cluster: &ClusterResult, t: &Targets) -> LayerScore {
     let dw = dreyfus_weighted(&cluster.global_stats);
     let dq = decision_quality_rate(cluster);
-    let dor = depth_output_ratio(&cluster.global_stats);
-    let kr = knowledge_rate(cluster);
 
     let sig_dw = if dw > t.dreyfus_green {
         Signal::Green
@@ -103,20 +67,6 @@ pub(super) fn layer1(cluster: &ClusterResult, t: &Targets) -> LayerScore {
     let sig_dq = if dq > t.decision_quality_green {
         Signal::Green
     } else if dq >= t.decision_quality_yellow {
-        Signal::Yellow
-    } else {
-        Signal::Red
-    };
-    let sig_dor = if dor > t.depth_output_green {
-        Signal::Green
-    } else if dor >= t.depth_output_yellow {
-        Signal::Yellow
-    } else {
-        Signal::Red
-    };
-    let sig_kr = if kr >= t.knowledge_green {
-        Signal::Green
-    } else if kr >= t.knowledge_yellow {
         Signal::Yellow
     } else {
         Signal::Red
@@ -135,23 +85,11 @@ pub(super) fn layer1(cluster: &ClusterResult, t: &Targets) -> LayerScore {
             target: format!(">{}%", (t.decision_quality_green * 100.0) as u32),
             signal: sig_dq,
         },
-        Indicator {
-            name: "depth_output".into(),
-            actual: dor * 100.0,
-            target: format!(">{}%", (t.depth_output_green * 100.0) as u32),
-            signal: sig_dor,
-        },
-        Indicator {
-            name: "knowledge_rate".into(),
-            actual: kr,
-            target: format!(">{:.1}", t.knowledge_green),
-            signal: sig_kr,
-        },
     ];
 
     LayerScore {
         name: "depth".into(),
-        signal: worst(&[sig_dw, sig_dq, sig_dor, sig_kr]),
+        signal: worst(&[sig_dw, sig_dq]),
         indicators,
     }
 }
@@ -171,26 +109,30 @@ fn layer2(cluster: &ClusterResult, t: &Targets) -> LayerScore {
         exploration as f64 / collab_total as f64
     };
 
-    let total_projects = cluster.projects.len();
-    let deep_projects = cluster
+    // 碎片化与深耕度按"会话投入"加权，不按项目桶个数。
+    // 桶计数口径把一个只碰过一次的项目和一个投入了 400 个会话的项目当作等权，
+    // 90 天真实数据下它给出 frag=46.5%，而同一批数据按投入加权只有 0.6%——
+    // 前者度量的是"目录里有多少杂项"，后者才是"注意力有多分散"。
+    let total_sessions: usize = cluster.projects.values().map(|p| p.session_count).sum();
+    let deep_sessions: usize = cluster
         .projects
         .values()
         .filter(|p| p.session_count >= 20)
-        .count();
-    let frag_projects = cluster
+        .map(|p| p.session_count)
+        .sum();
+    let frag_sessions: usize = cluster
         .projects
         .values()
         .filter(|p| p.session_count == 1)
-        .count();
-    let deep_rate = if total_projects == 0 {
-        0.0
+        .map(|p| p.session_count)
+        .sum();
+    let (deep_rate, frag_rate) = if total_sessions == 0 {
+        (0.0, 0.0)
     } else {
-        deep_projects as f64 / total_projects as f64
-    };
-    let frag_rate = if total_projects == 0 {
-        0.0
-    } else {
-        frag_projects as f64 / total_projects as f64
+        (
+            deep_sessions as f64 / total_sessions as f64,
+            frag_sessions as f64 / total_sessions as f64,
+        )
     };
 
     let sig_exp = if exploration_rate > t.exploration_green {
@@ -249,16 +191,6 @@ fn layer2(cluster: &ClusterResult, t: &Targets) -> LayerScore {
 
 // ── Layer 3: Collaboration ──
 
-pub(super) fn friction_density(cluster: &ClusterResult) -> f64 {
-    let total_frictions: usize = cluster.projects.values().map(|p| p.frictions.len()).sum();
-    let total_sessions = cluster.global_stats.total_sessions;
-    if total_sessions == 0 {
-        0.0
-    } else {
-        total_frictions as f64 / total_sessions as f64
-    }
-}
-
 pub(super) fn layer3(cluster: &ClusterResult, t: &Targets) -> LayerScore {
     let collab_total: usize = cluster.global_stats.collaboration_modes.values().sum();
     let delegation = *cluster
@@ -307,16 +239,6 @@ pub(super) fn layer3(cluster: &ClusterResult, t: &Targets) -> LayerScore {
         Signal::Red
     };
 
-    let fd = friction_density(cluster);
-    // friction_density: lower is better
-    let sig_fd = if fd < t.friction_green {
-        Signal::Green
-    } else if fd <= t.friction_yellow {
-        Signal::Yellow
-    } else {
-        Signal::Red
-    };
-
     let indicators = vec![
         Indicator {
             name: "delegation".into(),
@@ -336,17 +258,11 @@ pub(super) fn layer3(cluster: &ClusterResult, t: &Targets) -> LayerScore {
             target: format!("<{}", t.bug_decision_green),
             signal: sig_bug,
         },
-        Indicator {
-            name: "friction_density".into(),
-            actual: fd,
-            target: format!("<{:.1}", t.friction_green),
-            signal: sig_fd,
-        },
     ];
 
     LayerScore {
         name: "collaboration".into(),
-        signal: worst(&[sig_del, sig_div, sig_bug, sig_fd]),
+        signal: worst(&[sig_del, sig_div, sig_bug]),
         indicators,
     }
 }

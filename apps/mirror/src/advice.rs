@@ -10,6 +10,8 @@ use std::sync::Arc;
 const ADVICE_CACHE_VERSION: &str = "advice-v2";
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
+/// 建议缓存超过这个时长即视为过期。
+const ADVICE_STALE_AFTER_HOURS: i64 = 72;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CachedAdvice {
@@ -25,6 +27,16 @@ pub struct CachedAdvice {
     pub model_identity: String,
 }
 
+impl CachedAdvice {
+    /// 是否已过期。过期判定只有这一处，调用方各自决定怎么处理：
+    /// 生成侧据此重新调用 LLM，展示侧据此打过期标记而不是静默显示空白。
+    pub fn is_stale(&self) -> bool {
+        (Utc::now() - self.generated_at).num_hours() >= ADVICE_STALE_AFTER_HOURS
+    }
+}
+
+/// 读取缓存，**不过滤过期**。过期的建议依然返回，由调用方决定展示还是重生成；
+/// 曾经这里对过期直接返回 None，导致 advice 停更两个月而界面上毫无痕迹。
 pub fn load_cached() -> Result<Option<CachedAdvice>> {
     let path = crate::config::mirror_dir().join("advice.json");
     load_cached_from_path(&path)
@@ -61,12 +73,12 @@ fn load_cached_matching_key(
     if expected_key.is_some_and(|key| cached.cache_key != key) {
         return Ok(None);
     }
-    let age = Utc::now() - cached.generated_at;
-    if age.num_hours() < 72 {
-        Ok(Some(cached))
-    } else {
-        Ok(None)
+    // Generation only reuses a fresh cache entry. Display callers pass no key
+    // and still receive stale advice so the UI can mark it explicitly.
+    if expected_key.is_some() && cached.is_stale() {
+        return Ok(None);
     }
+    Ok(Some(cached))
 }
 
 fn save_cached(advice: &str, short: &str, cache_key: &str, model_identity: &str) -> Result<()> {
@@ -251,14 +263,19 @@ mod tests {
     }
 
     #[test]
-    fn test_load_cached_returns_none_for_stale_cache() {
+    fn test_load_cached_returns_stale_cache_marked_stale() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("advice.json");
         let cached = cached_advice("stale", Utc::now() - Duration::hours(80));
         std::fs::write(&path, serde_json::to_string(&cached).unwrap()).unwrap();
 
-        let loaded = load_cached_from_path(&path).unwrap();
-        assert!(loaded.is_none());
+        // 过期缓存必须仍被返回并标记为 stale，展示侧才有机会打 ⚠️。
+        // 旧行为是返回 None，等于把"建议停更"伪装成"本来就没有建议"。
+        let loaded = load_cached_from_path(&path)
+            .unwrap()
+            .expect("过期缓存也必须返回，交由调用方判定");
+        assert!(loaded.is_stale(), "80 小时前的缓存必须判为过期");
+        assert_eq!(loaded.short, "stale");
     }
 
     #[test]

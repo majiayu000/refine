@@ -24,16 +24,14 @@ pub use persistence::{load_recent_scores, persist_score};
 pub use statusline::write_statusline;
 pub use types::{Indicator, LayerScore, ScoreResult, Signal};
 
-use baseline::apply_personal_baseline;
+use baseline::compute_personal_trends;
 use display::print_score;
 
 #[cfg(test)]
-use baseline::{signal_from_personal, PersonalBaseline};
+use baseline::{trend_from_personal, PersonalBaseline};
 
 #[cfg(test)]
-use compute::{
-    analyze_tension, dreyfus_weighted, friction_density, knowledge_rate, layer1, layer3,
-};
+use compute::{analyze_tension, dreyfus_weighted, layer1, layer3};
 
 #[cfg(test)]
 use persistence::load_recent_scores_from_path;
@@ -77,19 +75,21 @@ pub async fn handle_score(
         repo.find_all()
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?
-    } else if let Some(ref since_str) = since {
-        let date = chrono::NaiveDate::parse_from_str(since_str, "%Y-%m-%d")
-            .map_err(|e| anyhow::anyhow!("invalid --since date '{}': {}", since_str, e))?;
-        let cutoff = date
-            .and_hms_opt(0, 0, 0)
-            .ok_or_else(|| anyhow::anyhow!("invalid date"))?
-            .and_utc();
-        repo.find_since(cutoff)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?
     } else {
-        let cutoff = Utc::now() - chrono::Duration::days(90);
-        repo.find_since(cutoff)
+        // 按事件时间（Document.captured_at）取窗口，不用入库时间。
+        // 会话补摄入很常见：六月有 85.5% 的 observation 入库比实际发生晚 7 天以上
+        // （最大 47 天），用 created_at 会把一次历史回填整批算进当期分数。
+        // weekly.rs 早已用事件时间，score 不跟上会让日报和周报读到不同的窗口。
+        let cutoff = if let Some(ref since_str) = since {
+            chrono::NaiveDate::parse_from_str(since_str, "%Y-%m-%d")
+                .map_err(|e| anyhow::anyhow!("invalid --since date '{}': {}", since_str, e))?
+                .and_hms_opt(0, 0, 0)
+                .ok_or_else(|| anyhow::anyhow!("invalid date"))?
+                .and_utc()
+        } else {
+            Utc::now() - chrono::Duration::days(90)
+        };
+        repo.find_observations_by_event_range(cutoff, Utc::now())
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?
     };
@@ -119,19 +119,19 @@ pub async fn handle_score(
     }
     let cluster = cluster_observations(&items);
     let config = crate::config::load();
-    let mut result = compute(&cluster, &config.targets);
+    let result = compute(&cluster, &config.targets);
 
     // Try personal baseline: load history BEFORE persisting current score
     let history = load_recent_scores(365)?;
     let baseline = compute_personal_baseline(&history);
-    let using_personal = baseline.is_some();
-
-    if let Some(ref bl) = baseline {
-        apply_personal_baseline(&mut result, bl);
-    }
 
     persist_score(&result)?;
-    print_score(&result, using_personal);
+
+    // 趋势是从"当前评分 + 个人基线"推导的只读视图，绝不回写 signal。
+    let trends = baseline
+        .as_ref()
+        .map(|bl| compute_personal_trends(&result, bl));
+    print_score(&result, trends.as_ref());
 
     // Data time range
     if !items.is_empty() {
@@ -175,11 +175,12 @@ pub async fn handle_score(
     if let Some(llm) = llm {
         match crate::advice::generate_and_cache(&result, &llm).await {
             Ok(advice) => println!("\n  {} {}", crate::lang::t!("Advice:", "建议:"), advice),
-            Err(e) => tracing::debug!("advice generation skipped: {}", e),
+            // debug 级在生产上通常不开，等于没有日志：advice 曾因此停更两个月无人察觉。
+            Err(e) => tracing::error!("advice generation failed: {}", e),
         }
     }
 
-    if let Err(e) = write_statusline(&result, db_path) {
+    if let Err(e) = write_statusline(&result, db_path, trends.as_ref()) {
         tracing::warn!("failed to write statusline.txt: {}", e);
     }
     Ok(())
