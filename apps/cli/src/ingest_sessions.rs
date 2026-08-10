@@ -207,6 +207,7 @@ async fn handle_remem_ingest_sessions(
         }
 
         let legacy_identity_is_unique = summary.legacy_identity_is_unique;
+        let last_epoch = summary.last_epoch;
         let remem_session = load_remem_session(summary)
             .with_context(|| format!("failed to load full remem session for {url}"))?;
         fully_loaded += 1;
@@ -217,6 +218,14 @@ async fn handle_remem_ingest_sessions(
                 &remem_session,
                 &raw_content,
             )?
+        } else if legacy_migration::legacy_document_covers_nonunique_summary(
+            &existing_documents,
+            &remem_session,
+            &raw_content,
+            last_epoch,
+        ) {
+            skipped_dup += 1;
+            continue;
         } else {
             Vec::new()
         };

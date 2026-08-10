@@ -86,6 +86,22 @@ pub(super) fn matching_legacy_document_ids(
     Ok(Vec::new())
 }
 
+pub(super) fn legacy_document_covers_nonunique_summary(
+    documents: &[Document],
+    remem_session: &RememSession,
+    raw_content: &str,
+    last_epoch: i64,
+) -> bool {
+    remem_session.source_root == LOCAL_SOURCE_ROOT
+        && documents.iter().any(|document| {
+            LEGACY_SOURCES.contains(&document.source())
+                && url_matches_session_id(document.url(), &remem_session.session_id)
+                && (document.raw_content() == raw_content
+                    || (content_matches(document.raw_content(), raw_content)
+                        && document.updated_at().timestamp() >= last_epoch))
+        })
+}
+
 fn unique_match(matches: Vec<&Document>, remem_session: &RememSession) -> Result<Vec<DocumentId>> {
     match matches.as_slice() {
         [] => Ok(Vec::new()),
@@ -299,6 +315,31 @@ mod tests {
         let exact_documents = vec![exact];
         let exact_index = legacy_document_index(&exact_documents);
         assert_eq!(exact_index.get(session_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn nonunique_summary_uses_legacy_content_only_as_read_only_coverage() {
+        let legacy = document("codex-session", "/tmp/session-1.jsonl", "same", 10);
+        let documents = vec![legacy];
+
+        assert!(legacy_document_covers_nonunique_summary(
+            &documents,
+            &remem("local", "session-1"),
+            "same",
+            i64::MAX,
+        ));
+        assert!(!legacy_document_covers_nonunique_summary(
+            &documents,
+            &remem("local", "session-1"),
+            "same plus append",
+            i64::MAX,
+        ));
+        assert!(!legacy_document_covers_nonunique_summary(
+            &documents,
+            &remem("remote", "session-1"),
+            "same",
+            10,
+        ));
     }
 
     #[test]
