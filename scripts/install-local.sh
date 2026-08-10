@@ -147,11 +147,10 @@ EOF
 write_server_plist() {
   local path="$1"
   local cargo_bin="$2"
-  local repo="$3"
-  local path_env="$4"
-  local repo_xml server_program_xml path_xml token_xml=""
+  local path_env="$3"
+  local home_xml server_program_xml path_xml token_xml=""
   local server_program="${cargo_bin}/refine-server"
-  repo_xml="$(printf '%s' "$repo" | xml_escape)"
+  home_xml="$(printf '%s' "$HOME" | xml_escape)"
   path_xml="$(printf '%s' "$path_env" | xml_escape)"
 
   if [[ "$auth_mode" == "token" ]]; then
@@ -179,7 +178,7 @@ write_server_plist() {
     <string>${server_program_xml}</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>${repo_xml}</string>
+  <string>${home_xml}</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
@@ -210,8 +209,8 @@ write_calendar_plist() {
   local hour="$5"
   local minute="$6"
   local weekday="${7:-}"
-  local repo_xml script_xml log_xml weekday_block=""
-  repo_xml="$(printf '%s' "$repo_root" | xml_escape)"
+  local home_xml script_xml log_xml weekday_block=""
+  home_xml="$(printf '%s' "$HOME" | xml_escape)"
   script_xml="$(printf '%s' "$script_path" | xml_escape)"
   log_xml="$(printf '%s' "$log_path" | xml_escape)"
   if [[ -n "$weekday" ]]; then
@@ -232,7 +231,7 @@ write_calendar_plist() {
     <string>${script_xml}</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>${repo_xml}</string>
+  <string>${home_xml}</string>
   <key>StartCalendarInterval</key>
   <dict>
     <key>Hour</key>
@@ -255,8 +254,9 @@ write_ui_plist() {
   local bun_bin="$2"
   local path_env="$3"
   local ui_dir="${repo_root}/apps/desktop/ui"
-  local bun_xml path_xml ui_xml
+  local bun_xml home_xml path_xml ui_xml
   bun_xml="$(printf '%s' "$bun_bin" | xml_escape)"
+  home_xml="$(printf '%s' "$HOME" | xml_escape)"
   path_xml="$(printf '%s' "$path_env" | xml_escape)"
   ui_xml="$(printf '%s' "$ui_dir" | xml_escape)"
 
@@ -272,10 +272,12 @@ write_ui_plist() {
   <array>
     <string>${bun_xml}</string>
     <string>run</string>
+    <string>--cwd</string>
+    <string>${ui_xml}</string>
     <string>dev</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>${ui_xml}</string>
+  <string>${home_xml}</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
@@ -395,7 +397,7 @@ daily_plist="${launch_agents}/com.lifcc.refine-daily-ingest.plist"
 weekly_plist="${launch_agents}/com.lifcc.refine-weekly-insights.plist"
 ui_plist="${launch_agents}/com.lifcc.refine-ui-dev.plist"
 
-write_server_plist "$server_plist" "$cargo_bin" "$repo_root" "$path_env"
+write_server_plist "$server_plist" "$cargo_bin" "$path_env"
 write_calendar_plist "$daily_plist" "com.lifcc.refine-daily-ingest" "${repo_root}/scripts/daily-refresh.sh" "${HOME}/Library/Logs/refine-daily-ingest.log" 8 0
 write_calendar_plist "$weekly_plist" "com.lifcc.refine-weekly-insights" "${repo_root}/scripts/weekly-insights.sh" "${HOME}/Library/Logs/refine-insights.log" 9 0 1
 if [[ "$ui_dev_enabled" == "1" ]]; then
