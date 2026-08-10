@@ -55,6 +55,7 @@ async fn source_filter_is_rejected_without_explicit_legacy_rollback() {
             latest: None,
             dry_run: true,
             legacy_local_scan: false,
+            retry_quarantined: false,
         },
         Path::new("/tmp/refine-test.db"),
         doc_store,
@@ -495,4 +496,18 @@ async fn quota_hit_short_circuits_before_llm_call() {
         .expect_err("quota flag should skip the call");
 
     assert!(err.to_string().contains("LLM 配额已耗尽"));
+}
+
+#[test]
+fn content_rejection_survives_anyhow_context() {
+    let error = anyhow::Error::new(InfraError::LlmRejected {
+        code: "sensitive_words_detected".into(),
+        message: "blocked".into(),
+    })
+    .context("chunk 2/3 failed");
+
+    assert_eq!(
+        content_rejection(&error),
+        Some(("sensitive_words_detected".into(), "blocked".into()))
+    );
 }

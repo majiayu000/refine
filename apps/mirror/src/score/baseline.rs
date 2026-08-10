@@ -1,9 +1,8 @@
 use chrono::{Duration, Utc};
 use std::collections::HashMap;
 
-use super::compute::analyze_tension;
-use super::indicators::{canonical_indicator_key, indicator_higher_is_better, indicator_specs};
-use super::types::{worst, ScoreResult, Signal};
+use super::indicators::{canonical_indicator_key, indicator_direction, indicator_specs, Direction};
+use super::types::{ScoreResult, Trend};
 
 /// Minimum number of historical scores to activate personal baseline
 const BASELINE_MIN_ENTRIES: usize = 7;
@@ -77,55 +76,107 @@ pub fn compute_personal_baseline(history: &[ScoreResult]) -> Option<PersonalBase
     Some(PersonalBaseline { averages })
 }
 
-/// Determine signal by comparing actual value against personal baseline.
-/// `higher_is_better`: true for metrics where higher = better (dreyfus, decision_quality, etc.)
-///                     false for metrics where lower = better (delegation, fragmentation, bug_decision)
-pub fn signal_from_personal(actual: f64, baseline: f64, higher_is_better: bool) -> Signal {
+/// Compare the current value with the rolling personal baseline. Band-targeted
+/// metrics do not have a meaningful monotonic direction and return `None`.
+pub(super) fn trend_from_personal(
+    actual: f64,
+    baseline: f64,
+    direction: Direction,
+) -> Option<Trend> {
     if baseline == 0.0 {
-        return Signal::Yellow;
+        return None;
     }
     let ratio = actual / baseline;
-    if higher_is_better {
-        if ratio >= 1.05 {
-            Signal::Green
-        } else if ratio >= 0.95 {
-            Signal::Yellow
+    match direction {
+        Direction::HigherBetter => Some(if ratio >= 1.05 {
+            Trend::Up
+        } else if ratio <= 0.95 {
+            Trend::Down
         } else {
-            Signal::Red
-        }
-    } else {
-        // Lower is better: ratio < 0.95 means actual is notably below baseline = good
-        if ratio <= 0.95 {
-            Signal::Green
-        } else if ratio <= 1.05 {
-            Signal::Yellow
+            Trend::Flat
+        }),
+        Direction::LowerBetter => Some(if ratio <= 0.95 {
+            Trend::Up
+        } else if ratio >= 1.05 {
+            Trend::Down
         } else {
-            Signal::Red
-        }
+            Trend::Flat
+        }),
+        Direction::Band => None,
     }
 }
 
-/// Apply personal baseline to override signals on a ScoreResult (in-place).
-pub(super) fn apply_personal_baseline(result: &mut ScoreResult, baseline: &PersonalBaseline) {
-    for layer in &mut result.layers {
-        for indicator in &mut layer.indicators {
-            let key = canonical_indicator_key(&indicator.name);
-            let Some(higher_is_better) = indicator_higher_is_better(key) else {
-                continue;
-            };
-            let Some(baseline_value) = baseline.average(key) else {
-                continue;
-            };
+#[derive(Debug, Clone, Default)]
+pub struct PersonalTrends {
+    per_indicator: HashMap<String, Trend>,
+    per_layer: [Option<Trend>; 3],
+}
 
-            indicator.signal =
-                signal_from_personal(indicator.actual, baseline_value, higher_is_better);
-        }
-
-        // Recalculate layer signal as worst of its indicators
-        let sigs: Vec<Signal> = layer.indicators.iter().map(|i| i.signal).collect();
-        layer.signal = worst(&sigs);
+impl PersonalTrends {
+    pub fn indicator(&self, name: &str) -> Option<Trend> {
+        self.per_indicator
+            .get(canonical_indicator_key(name))
+            .copied()
     }
 
-    // Recalculate tension after signal changes
-    result.tension = analyze_tension(&result.layers);
+    pub fn overall(&self) -> Option<Trend> {
+        aggregate(self.per_layer.iter().copied().flatten())
+    }
+}
+
+fn aggregate(trends: impl Iterator<Item = Trend>) -> Option<Trend> {
+    let mut has_up = false;
+    let mut has_down = false;
+    let mut any = false;
+    for trend in trends {
+        any = true;
+        match trend {
+            Trend::Up => has_up = true,
+            Trend::Down => has_down = true,
+            Trend::Flat => {}
+        }
+    }
+    if !any {
+        return None;
+    }
+    Some(match (has_up, has_down) {
+        (true, false) => Trend::Up,
+        (false, true) => Trend::Down,
+        _ => Trend::Flat,
+    })
+}
+
+/// Derive a read-only personal trend view. Absolute target signals remain
+/// untouched and retain the same meaning in daily, weekly, and persisted data.
+pub(super) fn compute_personal_trends(
+    result: &ScoreResult,
+    baseline: &PersonalBaseline,
+) -> PersonalTrends {
+    let mut per_indicator = HashMap::new();
+    let mut per_layer = [None, None, None];
+
+    for (index, layer) in result.layers.iter().enumerate() {
+        for indicator in &layer.indicators {
+            let key = canonical_indicator_key(&indicator.name);
+            let (Some(direction), Some(baseline_value)) =
+                (indicator_direction(key), baseline.average(key))
+            else {
+                continue;
+            };
+            if let Some(trend) = trend_from_personal(indicator.actual, baseline_value, direction) {
+                per_indicator.insert(key.to_string(), trend);
+            }
+        }
+
+        per_layer[index] = aggregate(layer.indicators.iter().filter_map(|indicator| {
+            per_indicator
+                .get(canonical_indicator_key(&indicator.name))
+                .copied()
+        }));
+    }
+
+    PersonalTrends {
+        per_indicator,
+        per_layer,
+    }
 }

@@ -18,11 +18,14 @@ use refine_core::session::{
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tokio::sync::Semaphore;
 
 mod legacy_migration;
+mod quarantine;
+
+use quarantine::QuarantineStore;
 
 const DEFAULT_CONCURRENCY: usize = 1;
 
@@ -41,6 +44,7 @@ pub struct IngestOptions {
     pub latest: Option<usize>,
     pub dry_run: bool,
     pub legacy_local_scan: bool,
+    pub retry_quarantined: bool,
 }
 
 /// 待处理的会话（已通过去重和过滤）
@@ -254,6 +258,7 @@ async fn handle_remem_ingest_sessions(
         skipped_filter,
         stale_refresh,
         options.dry_run,
+        options.retry_quarantined,
         doc_store,
         llm_client,
     )
@@ -421,6 +426,7 @@ async fn handle_legacy_ingest_sessions(
         skipped_filter,
         stale_refresh,
         options.dry_run,
+        options.retry_quarantined,
         doc_store,
         llm_client,
     )
@@ -436,12 +442,13 @@ async fn handle_legacy_ingest_sessions(
 
 #[allow(clippy::too_many_arguments)]
 async fn process_pending_sessions(
-    pending: Vec<PendingSession>,
+    mut pending: Vec<PendingSession>,
     total: usize,
     skipped_dup: usize,
     skipped_filter: usize,
     stale_refresh: usize,
     dry_run: bool,
+    retry_quarantined: bool,
     doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
@@ -454,17 +461,38 @@ async fn process_pending_sessions(
         return Ok(());
     }
 
+    let mut quarantine = QuarantineStore::load()?;
+    let mut skipped_quarantined = 0usize;
+    if !retry_quarantined {
+        pending.retain(|session| {
+            if quarantine.contains(&session.url) {
+                skipped_quarantined += 1;
+                false
+            } else {
+                true
+            }
+        });
+    }
+
     let concurrency = concurrency();
     println!(
-        "待处理 {} 个会话（跳过重复 {}, 过滤 {}, 刷新过期 {}），{} 路并发...\n",
+        "待处理 {} 个会话（跳过重复 {}, 过滤 {}, 刷新过期 {}, 隔离跳过 {}），{} 路并发...\n",
         pending.len(),
         skipped_dup,
         skipped_filter,
         stale_refresh,
+        skipped_quarantined,
         concurrency,
     );
     if pending.is_empty() {
-        println!("全部已处理完毕。");
+        if quarantine.len() > 0 {
+            anyhow::bail!(
+                "仍有 {} 个会话处于隔离状态；队列: {}；确认上游策略已修复后使用 --retry-quarantined",
+                quarantine.len(),
+                quarantine.path().display()
+            );
+        }
+        println!("全部已处理完毕，隔离队列为空。");
         return Ok(());
     }
 
@@ -474,6 +502,8 @@ async fn process_pending_sessions(
     let failed = Arc::new(AtomicUsize::new(0));
     let total_items = Arc::new(AtomicUsize::new(0));
     let quota_hit = Arc::new(AtomicBool::new(false));
+    let succeeded_urls = Arc::new(Mutex::new(HashSet::<String>::new()));
+    let rejected_sessions = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
     let mut handles = Vec::new();
 
     for ps in pending {
@@ -484,16 +514,36 @@ async fn process_pending_sessions(
         let failed = failed.clone();
         let total_items = total_items.clone();
         let quota_hit = quota_hit.clone();
+        let succeeded_urls = succeeded_urls.clone();
+        let rejected_sessions = rejected_sessions.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.expect("semaphore closed");
             match process_single_session(&ps, &client, &doc_store, &quota_hit).await {
                 Ok(item_count) => {
                     processed.fetch_add(1, Ordering::Relaxed);
                     total_items.fetch_add(item_count, Ordering::Relaxed);
+                    succeeded_urls
+                        .lock()
+                        .expect("succeeded URL lock poisoned")
+                        .insert(ps.url.clone());
                 }
                 Err(error) => {
-                    eprintln!("  ✗ [{}/{}] 失败: {}", ps.idx + 1, ps.total, error);
-                    failed.fetch_add(1, Ordering::Relaxed);
+                    if let Some((code, message)) = content_rejection(&error) {
+                        eprintln!(
+                            "  ⛔ [{}/{}] 隔离: {} ({})",
+                            ps.idx + 1,
+                            ps.total,
+                            code,
+                            ps.url
+                        );
+                        rejected_sessions
+                            .lock()
+                            .expect("rejected session lock poisoned")
+                            .push((ps.url.clone(), code, message));
+                    } else {
+                        eprintln!("  ✗ [{}/{}] 失败: {}", ps.idx + 1, ps.total, error);
+                        failed.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }));
@@ -506,13 +556,46 @@ async fn process_pending_sessions(
     let processed = processed.load(Ordering::Relaxed);
     let failed = failed.load(Ordering::Relaxed);
     let total_items = total_items.load(Ordering::Relaxed);
+    for url in succeeded_urls
+        .lock()
+        .expect("succeeded URL lock poisoned")
+        .iter()
+    {
+        quarantine.resolve(url);
+    }
+    let rejected = rejected_sessions
+        .lock()
+        .expect("rejected session lock poisoned");
+    for (url, code, message) in rejected.iter() {
+        quarantine.record(url, code, message);
+    }
+    let rejected_count = rejected.len();
+    drop(rejected);
+    quarantine.save_if_dirty()?;
+    let quarantine_count = quarantine.len();
     println!(
-        "\n完成: 处理 {}, 跳过重复 {}, 过滤 {}, 刷新过期 {}, 失败 {}, 生成 {} 条观测",
-        processed, skipped_dup, skipped_filter, stale_refresh, failed, total_items
+        "\n完成: 处理 {}, 跳过重复 {}, 过滤 {}, 刷新过期 {}, 失败 {}, 新增隔离 {}, 隔离总数 {}, 生成 {} 条观测",
+        processed,
+        skipped_dup,
+        skipped_filter,
+        stale_refresh,
+        failed,
+        rejected_count,
+        quarantine_count,
+        total_items
     );
-    if failed > 0 {
-        eprintln!("提示: 重新运行即可续传失败的会话");
-        anyhow::bail!("{} 个会话提取失败", failed);
+    if failed > 0 || quarantine_count > 0 {
+        if failed > 0 {
+            eprintln!("提示: 瞬态失败会在下次运行续传");
+        }
+        if quarantine_count > 0 {
+            eprintln!(
+                "提示: {} 个确定性拒绝已隔离，不会自动重试；队列: {}",
+                quarantine_count,
+                quarantine.path().display()
+            );
+        }
+        anyhow::bail!("摄入不完整: 瞬态失败 {}, 隔离 {}", failed, quarantine_count);
     }
     Ok(())
 }
@@ -527,17 +610,16 @@ async fn process_single_session(
         let total_chunks = ps.chunks.len();
         let mut summaries = Vec::with_capacity(total_chunks);
         for (idx, chunk) in ps.chunks.iter().enumerate() {
-            match llm_call_with_retry(client, chunk, quota_hit).await {
-                Ok(text) => summaries.push(text),
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "分块 {}/{} 提取失败，整个 session 视为失败以避免数据缺失: {}",
+            let text = llm_call_with_retry(client, chunk, quota_hit)
+                .await
+                .with_context(|| {
+                    format!(
+                        "分块 {}/{} 提取失败，整个 session 视为失败以避免数据缺失",
                         idx + 1,
-                        total_chunks,
-                        e
-                    ));
-                }
-            }
+                        total_chunks
+                    )
+                })?;
+            summaries.push(text);
         }
         summaries.join("\n\n---\n\n")
     } else {
@@ -563,6 +645,17 @@ async fn process_single_session(
     );
 
     Ok(item_count)
+}
+
+fn content_rejection(error: &anyhow::Error) -> Option<(String, String)> {
+    error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<InfraError>()
+            .and_then(|infra_error| match infra_error {
+                InfraError::LlmRejected { code, message } => Some((code.clone(), message.clone())),
+                _ => None,
+            })
+    })
 }
 
 fn build_session_document(ps: &PendingSession, title: &str) -> Document {

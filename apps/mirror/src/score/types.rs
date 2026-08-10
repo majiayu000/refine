@@ -59,6 +59,25 @@ impl std::fmt::Display for Signal {
     }
 }
 
+/// Direction relative to the user's rolling 28-day average. `Up` always means
+/// improvement after accounting for whether lower or higher values are better.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Trend {
+    Up,
+    Flat,
+    Down,
+}
+
+impl Trend {
+    pub const fn arrow(self) -> &'static str {
+        match self {
+            Trend::Up => "↑",
+            Trend::Flat => "→",
+            Trend::Down => "↓",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Indicator {
     pub name: String,

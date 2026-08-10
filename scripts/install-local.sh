@@ -69,6 +69,17 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
+file_sha256() {
+  local path="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+  else
+    die "missing shasum or sha256sum; cannot write install manifest"
+  fi
+}
+
 xml_escape() {
   sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
 }
@@ -179,6 +190,9 @@ write_server_plist() {
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <!-- Avoid a tight loop if the server repeatedly fails at startup. -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
   <key>StandardOutPath</key>
   <string>${HOME}/Library/Logs/refine-server.log</string>
   <key>StandardErrorPath</key>
@@ -271,8 +285,10 @@ write_ui_plist() {
   </dict>
   <key>RunAtLoad</key>
   <true/>
-  <key>KeepAlive</key>
-  <true/>
+  <!-- A development UI is started once per login. If it exits, launchd keeps
+       the failure visible instead of entering an unbounded crash loop. -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
   <key>StandardOutPath</key>
   <string>${repo_root}/.run/launchd-refine-ui.out.log</string>
   <key>StandardErrorPath</key>
@@ -313,6 +329,11 @@ disable_plist() {
 need_cmd cargo
 
 log "repo root: $repo_root"
+source_commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+[[ "$source_commit" != "unknown" ]] || die "install source is not a Git checkout"
+[[ -z "$(git -C "$repo_root" status --porcelain 2>/dev/null || true)" ]] \
+  || die "install source must be clean; commit or stash changes first"
+
 log "installing Rust binaries"
 cargo install --path "${repo_root}/apps/cli"
 cargo install --path "${repo_root}/apps/mirror"
@@ -321,10 +342,30 @@ cargo install --path "${repo_root}/apps/server"
 cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
 path_env="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${cargo_bin}"
 
+write_install_manifest() {
+  [[ -z "$(git -C "$repo_root" status --porcelain 2>/dev/null || true)" ]] \
+    || die "installation changed tracked source files; refusing a clean-source manifest"
+  mkdir -p "${HOME}/.refine"
+  local install_manifest="${HOME}/.refine/install-manifest"
+  write_file "$install_manifest" <<EOF
+source_root=${repo_root}
+source_commit=${source_commit}
+source_dirty=0
+refine_sha256=$(file_sha256 "${cargo_bin}/refine")
+mirror_sha256=$(file_sha256 "${cargo_bin}/mirror")
+refine_server_sha256=$(file_sha256 "${cargo_bin}/refine-server")
+installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+}
+
 if [[ "$ui_dev_enabled" == "1" && -d "${repo_root}/apps/desktop/ui" ]]; then
   if command -v bun >/dev/null 2>&1; then
     log "installing desktop UI dependencies"
     (cd "${repo_root}/apps/desktop/ui" && bun install)
+    [[ -x "${repo_root}/apps/desktop/ui/node_modules/.bin/vite" ]] \
+      || die "desktop UI install completed without an executable Vite binary"
+    log "verifying desktop UI build"
+    (cd "${repo_root}/apps/desktop/ui" && bun run build)
   else
     log "Bun not found; skipping desktop UI dev service"
     ui_dev_enabled=0
@@ -332,11 +373,13 @@ if [[ "$ui_dev_enabled" == "1" && -d "${repo_root}/apps/desktop/ui" ]]; then
 fi
 
 if [[ "$launchd_enabled" != "1" ]]; then
+  write_install_manifest
   log "launchd disabled; binaries installed only"
   exit 0
 fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
+  write_install_manifest
   log "launchd is only supported on macOS; binaries installed only"
   exit 0
 fi
@@ -345,7 +388,7 @@ need_cmd launchctl
 need_cmd plutil
 
 launch_agents="${HOME}/Library/LaunchAgents"
-mkdir -p "$launch_agents" "${HOME}/Library/Logs" "${HOME}/.refine"
+mkdir -p "$launch_agents" "${HOME}/Library/Logs"
 
 server_plist="${launch_agents}/com.lifcc.refine-server.plist"
 daily_plist="${launch_agents}/com.lifcc.refine-daily-ingest.plist"
@@ -378,5 +421,6 @@ if [[ "$start_services" == "1" ]]; then
   fi
 fi
 
+write_install_manifest
 log "done"
 log "Run scripts/doctor-local.sh to verify the local stack."

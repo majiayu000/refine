@@ -268,6 +268,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn does_not_retry_content_rejection() {
+        let _env_guard = QUOTA_TEST_LOCK.lock().await;
+        let _quota_guard = QuotaTestGuard::new();
+
+        let client = Arc::new(SequenceClient::new(vec![Err(InfraError::LlmRejected {
+            code: "sensitive_words_detected".into(),
+            message: "blocked".into(),
+        })]));
+
+        let error = llm_with_retry_policy(
+            &(client.clone() as Arc<dyn LlmClient>),
+            "prompt",
+            "system",
+            LlmRetryPolicy {
+                max_retries: 5,
+                base_delay_secs: 0,
+                request_timeout_millis: 100,
+            },
+            |_attempt, _max_retries, _delay_secs, _err| {},
+        )
+        .await
+        .expect_err("content rejection must fail without retry");
+
+        assert!(matches!(error, InfraError::LlmRejected { .. }));
+        assert_eq!(client.calls(), 1);
+    }
+
+    #[tokio::test]
     async fn retries_on_stream_disconnect_then_succeeds() {
         let _env_guard = QUOTA_TEST_LOCK.lock().await;
         let _quota_guard = QuotaTestGuard::new();

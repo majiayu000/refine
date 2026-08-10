@@ -119,7 +119,7 @@ impl LlmClient for ClaudeClient {
 
         if !resp.status().is_success() {
             let err = resp.text().await.unwrap_or_default();
-            return Err(InfraError::LlmRequest(format!("API 错误: {}", err)));
+            return Err(classify_provider_error(&err));
         }
 
         let data: ClaudeResponse = resp
@@ -211,7 +211,7 @@ impl LlmClient for OpenAIClient {
 
         if !resp.status().is_success() {
             let err = resp.text().await.unwrap_or_default();
-            return Err(InfraError::LlmRequest(format!("API 错误: {}", err)));
+            return Err(classify_provider_error(&err));
         }
 
         let data: OpenAIResponse = resp
@@ -244,6 +244,40 @@ fn env_var(keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|key| std::env::var(key).ok())
         .filter(|value| !value.trim().is_empty())
+}
+
+fn classify_provider_error(body: &str) -> InfraError {
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let error = parsed.as_ref().and_then(|value| value.get("error"));
+    let code = error
+        .and_then(|value| value.get("code"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let message = error
+        .and_then(|value| value.get("message"))
+        .and_then(|value| value.as_str())
+        .unwrap_or(body)
+        .trim();
+
+    if is_content_rejection(code) || is_content_rejection(message) {
+        return InfraError::LlmRejected {
+            code: if code.is_empty() {
+                "content_rejected".to_string()
+            } else {
+                code.to_string()
+            },
+            message: message.to_string(),
+        };
+    }
+
+    InfraError::LlmRequest(format!("API 错误: {}", body))
+}
+
+fn is_content_rejection(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    normalized.contains("sensitive_words_detected")
+        || normalized.contains("content_policy")
+        || normalized.contains("moderation")
 }
 
 struct LlmEnvConfig {
@@ -391,6 +425,36 @@ mod tests {
             normalize_openai_base_url("https://api.example.test/openai/v1/"),
             "https://api.example.test/openai"
         );
+    }
+
+    #[test]
+    fn sensitive_words_error_is_structured_as_non_retryable_rejection() {
+        let error = classify_provider_error(
+            r#"{"error":{"message":"sensitive_words_detected","code":"sensitive_words_detected"}}"#,
+        );
+        assert!(matches!(
+            error,
+            InfraError::LlmRejected { ref code, .. } if code == "sensitive_words_detected"
+        ));
+    }
+
+    #[test]
+    fn sensitive_words_message_without_code_is_still_non_retryable() {
+        let error = classify_provider_error(
+            r#"{"error":{"message":"request blocked: sensitive_words_detected"}}"#,
+        );
+        assert!(matches!(
+            error,
+            InfraError::LlmRejected { ref code, .. } if code == "content_rejected"
+        ));
+    }
+
+    #[test]
+    fn unknown_provider_error_stays_request_error() {
+        let error = classify_provider_error(
+            r#"{"error":{"message":"upstream unavailable","code":"upstream_error"}}"#,
+        );
+        assert!(matches!(error, InfraError::LlmRequest(_)));
     }
 
     fn with_clean_llm_env(test: impl FnOnce()) {

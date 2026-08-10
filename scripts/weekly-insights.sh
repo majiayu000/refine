@@ -2,10 +2,11 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-REFINE_BIN="${HOME}/.cargo/bin/refine"
+REFINE_BIN="${REFINE_BIN:-${HOME}/.cargo/bin/refine}"
 PROJECT_DIR="${SCRIPT_DIR}/.."
 ENV_FILE="${PROJECT_DIR}/.env"
 LOG_PREFIX="[refine-weekly]"
+FAILED_STEPS=()
 
 log() {
   echo "${LOG_PREFIX} $(date '+%Y-%m-%d %H:%M:%S') $*"
@@ -38,22 +39,37 @@ log "Preflight: keys REFINE_ANTHROPIC_API_KEY=$([[ -n "${REFINE_ANTHROPIC_API_KE
 
 # Step 1: 增量导入新会话
 log "Step 1: ingest-sessions"
-if "$REFINE_BIN" ingest-sessions 2>&1; then
+ingest_rc=0
+"$REFINE_BIN" ingest-sessions 2>&1 || ingest_rc=$?
+if [[ "$ingest_rc" -eq 0 ]]; then
   log "Step 1: ingest-sessions completed successfully"
 else
-  log "Step 1: ingest-sessions failed with exit code $?"
+  log "ERROR: Step 1 ingest-sessions failed with exit code ${ingest_rc}"
+  FAILED_STEPS+=("ingest-sessions")
 fi
 
 # Step 2: 生成处方报告
 log "Step 2: insights --prescription"
-if "$REFINE_BIN" insights --prescription 2>&1; then
+insights_rc=0
+"$REFINE_BIN" insights --prescription 2>&1 || insights_rc=$?
+if [[ "$insights_rc" -eq 0 ]]; then
   log "Step 2: insights --prescription completed successfully"
 else
-  log "Step 2: insights --prescription failed with exit code $?"
+  log "ERROR: Step 2 insights --prescription failed with exit code ${insights_rc}"
+  FAILED_STEPS+=("insights --prescription")
 fi
 
-# Step 3: 发送 macOS 通知
+# Step 3: 发送与真实状态一致的 macOS 通知
 log "Step 3: notification"
-osascript -e 'display notification "Weekly insights 报告已生成" with title "Refine Weekly Insights"' 2>&1 || true
+if [[ ${#FAILED_STEPS[@]} -eq 0 ]]; then
+  osascript -e 'display notification "Weekly insights 报告已生成" with title "Refine Weekly Insights"' 2>&1 || true
+else
+  osascript -e "display notification \"失败步骤: ${FAILED_STEPS[*]}，详见 refine-insights.log\" with title \"Refine Weekly Insights 失败\"" 2>&1 || true
+fi
 
 log "=== Weekly Insights Run End ==="
+
+if [[ ${#FAILED_STEPS[@]} -gt 0 ]]; then
+  log "ERROR: run finished with failures: ${FAILED_STEPS[*]}"
+  exit 1
+fi

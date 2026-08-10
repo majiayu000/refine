@@ -73,6 +73,23 @@ mtime_text() {
   fi
 }
 
+file_sha256() {
+  local path="$1"
+  if have_cmd shasum; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  elif have_cmd sha256sum; then
+    sha256sum "$path" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+manifest_value() {
+  local key="$1"
+  local path="$2"
+  awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$path"
+}
+
 check_cmd() {
   local cmd="$1"
   if have_cmd "$cmd"; then
@@ -144,6 +161,39 @@ check_http() {
   else
     fail "API items endpoint failed"
   fi
+}
+
+check_install_manifest() {
+  local manifest="${HOME}/.refine/install-manifest"
+  if [[ ! -f "$manifest" ]]; then
+    fail "missing install manifest: $manifest"
+    return
+  fi
+
+  local expected_root expected_commit current_commit dirty
+  expected_root="$(manifest_value source_root "$manifest")"
+  expected_commit="$(manifest_value source_commit "$manifest")"
+  dirty="$(manifest_value source_dirty "$manifest")"
+  current_commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+
+  if [[ "$expected_root" == "$repo_root" && "$expected_commit" == "$current_commit" && "$dirty" == "0" ]]; then
+    pass "installed source matches clean checkout: ${current_commit}"
+  else
+    fail "installed source mismatch: root=${expected_root} commit=${expected_commit} dirty=${dirty}; current=${repo_root}@${current_commit}"
+  fi
+
+  local name manifest_key binary expected_hash actual_hash
+  for name in refine mirror refine-server; do
+    binary="$(command -v "$name" 2>/dev/null || true)"
+    manifest_key="${name//-/_}_sha256"
+    expected_hash="$(manifest_value "$manifest_key" "$manifest")"
+    actual_hash="$(file_sha256 "$binary" 2>/dev/null || true)"
+    if [[ -n "$binary" && -n "$expected_hash" && "$expected_hash" == "$actual_hash" ]]; then
+      pass "installed binary hash matches: $name"
+    else
+      fail "installed binary hash mismatch: $name"
+    fi
+  done
 }
 
 check_db() {
@@ -231,6 +281,15 @@ check_ui_deps() {
   fi
 }
 
+check_ui_http() {
+  local ui_url="${REFINE_UI_URL:-http://127.0.0.1:8987}"
+  if curl -fsS --max-time 3 "$ui_url" >/dev/null 2>&1; then
+    pass "desktop UI reachable: $ui_url"
+  else
+    fail "desktop UI unreachable: $ui_url"
+  fi
+}
+
 printf 'Refine local doctor\n'
 printf 'Repo: %s\n' "$repo_root"
 printf 'Server: %s\n\n' "$server_url"
@@ -238,6 +297,7 @@ printf 'Server: %s\n\n' "$server_url"
 check_cmd refine
 check_cmd mirror
 check_cmd refine-server
+check_install_manifest
 
 check_launch_agent com.lifcc.refine-server
 check_launch_agent com.lifcc.refine-daily-ingest
@@ -254,6 +314,7 @@ check_freshness
 check_logs
 if [[ "$ui_dev_enabled" == "1" ]]; then
   check_ui_deps
+  check_ui_http
 else
   pass "desktop UI dependency check skipped"
 fi

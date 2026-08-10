@@ -6,6 +6,7 @@ mod cli;
 mod handlers;
 mod ingest_sessions;
 mod insights;
+mod insights_checkpoint;
 mod remem_sessions;
 mod support;
 

@@ -88,6 +88,9 @@ pub enum Commands {
         /// Temporarily use the legacy filesystem scanner instead of remem (one-release rollback).
         #[arg(long)]
         legacy_local_scan: bool,
+        /// Explicitly retry sessions previously quarantined for deterministic provider rejection.
+        #[arg(long)]
+        retry_quarantined: bool,
     },
     /// 生成认知洞察报告
     Insights {

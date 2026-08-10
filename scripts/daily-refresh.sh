@@ -31,6 +31,8 @@ fi
 
 echo "=== $(date) ==="
 
+FAILED_STEPS=()
+
 # Preflight: environment diagnostics for troubleshooting
 echo "Preflight: PATH=$PATH"
 echo "Preflight: refine=$(command -v refine) mirror=$(command -v mirror)"
@@ -49,14 +51,34 @@ fi
 
 # 2. Refresh mirror score + LLM advice (run regardless of ingest result)
 echo "Step 2: mirror score"
-mirror score 2>&1
+score_rc=0
+mirror score 2>&1 || score_rc=$?
+if [ "$score_rc" -ne 0 ]; then
+  echo "ERROR: Step 2 mirror score failed with exit code ${score_rc}" >&2
+  FAILED_STEPS+=("mirror score")
+fi
 
 # 3. Weekly report on Sundays — generates ~/.mirror/last-weekly.md for Monday MOTD reminder.
-# Non-fatal: weekly requires LLM API access and may fail without network/key.
+# A missing weekly report is user-visible and must affect the final status.
 DOW=$(date +%u)  # 1=Monday … 7=Sunday
 if [ "$DOW" = "7" ]; then
   echo "Step 3: mirror weekly (Sunday)"
-  mirror weekly 2>&1 || echo "Step 3: mirror weekly failed (non-fatal)"
+  weekly_rc=0
+  mirror weekly 2>&1 || weekly_rc=$?
+  if [ "$weekly_rc" -ne 0 ]; then
+    echo "ERROR: Step 3 mirror weekly failed with exit code ${weekly_rc}" >&2
+    FAILED_STEPS+=("mirror weekly")
+  fi
+fi
+
+echo "Step 4: wal checkpoint"
+db_path="${REFINE_DB_PATH:-$HOME/Library/Application Support/refine/refine.db}"
+if command -v sqlite3 >/dev/null 2>&1 && [ -f "$db_path" ]; then
+  if ! sqlite3 "$db_path" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null; then
+    echo "WARN: WAL checkpoint failed: $db_path" >&2
+  fi
+else
+  echo "WARN: WAL checkpoint skipped: sqlite3 or database missing" >&2
 fi
 
 echo "Done."
@@ -67,7 +89,12 @@ if [ "$ingest_ok" -eq 1 ]; then
   date -u +%Y-%m-%dT%H:%M:%SZ > ~/.refine/last-refresh-ok
 fi
 
-# Propagate ingest failure to exit status for launchd/cron health monitoring
 if [ "$ingest_ok" -eq 0 ]; then
+  FAILED_STEPS+=("ingest-sessions")
+fi
+
+# Propagate every user-visible failure to launchd/cron monitoring.
+if [ ${#FAILED_STEPS[@]} -gt 0 ]; then
+  echo "ERROR: run finished with failures: ${FAILED_STEPS[*]}" >&2
   exit 1
 fi

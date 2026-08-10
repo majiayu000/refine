@@ -119,12 +119,6 @@ pub async fn handle_weekly(
 
     println!("{}", report);
 
-    // Save the full report as the sentinel file for the MOTD weekly reminder.
-    // The MOTD reads this on Mondays to show a one-line reminder.
-    if let Err(e) = save_last_weekly_md(&report) {
-        tracing::warn!("failed to save last-weekly.md: {}", e);
-    }
-
     save_weekly_record(&this_score)?;
     let doc_id = save_report_to_document(
         &doc_repo,
@@ -144,6 +138,9 @@ pub async fn handle_weekly(
             format!("周报已保存 (ID: {})", doc_id)
         )
     );
+
+    save_last_weekly_md(&report)
+        .context("weekly report saved, but failed to write the MOTD sentinel")?;
 
     Ok(())
 }
@@ -207,6 +204,13 @@ fn build_weekly_report(
         t!(
             "Metrics-derived report — for coaching run `refine cognitive-portrait`",
             "指标驱动报告 — 教练分析请运行 `refine cognitive-portrait`"
+        )
+    ));
+    lines.push(format!(
+        "> {}",
+        t!(
+            "Window: rolling 7 days (event time) · signals: absolute targets",
+            "窗口: 滚动 7 天(事件时间) · 信号灯: 绝对目标"
         )
     ));
 

@@ -38,6 +38,11 @@ pub enum InfraError {
     #[error("LLM 响应解析失败: {0}")]
     LlmParse(String),
 
+    /// The provider rejected the prompt for a deterministic policy reason.
+    /// Retrying the same input cannot succeed, so callers must quarantine it.
+    #[error("LLM 内容被拒绝 ({code}): {message}")]
+    LlmRejected { code: String, message: String },
+
     #[error("HTTP 错误: {0}")]
     Http(String),
 

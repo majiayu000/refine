@@ -242,30 +242,35 @@ fn test_personal_baseline_mixed_legacy_schema_repro() {
 }
 
 #[test]
-fn test_signal_from_personal() {
-    // higher_is_better = true
-    // actual = 105% of baseline → green
-    assert_eq!(signal_from_personal(10.5, 10.0, true), Signal::Green);
-    // actual = 100% of baseline → yellow (within ±5%)
-    assert_eq!(signal_from_personal(10.0, 10.0, true), Signal::Yellow);
-    // actual = 90% of baseline → red
-    assert_eq!(signal_from_personal(9.0, 10.0, true), Signal::Red);
+fn test_trend_from_personal() {
+    use crate::score::indicators::Direction;
 
-    // higher_is_better = false (lower is better)
-    // actual = 90% of baseline → green (notably lower = good)
-    assert_eq!(signal_from_personal(9.0, 10.0, false), Signal::Green);
-    // actual = 100% of baseline → yellow
-    assert_eq!(signal_from_personal(10.0, 10.0, false), Signal::Yellow);
-    // actual = 110% of baseline → red (higher = bad)
-    assert_eq!(signal_from_personal(11.0, 10.0, false), Signal::Red);
-
-    // Edge: baseline == 0 → yellow
-    assert_eq!(signal_from_personal(5.0, 0.0, true), Signal::Yellow);
-    assert_eq!(signal_from_personal(0.0, 0.0, false), Signal::Yellow);
+    assert_eq!(
+        trend_from_personal(10.5, 10.0, Direction::HigherBetter),
+        Some(Trend::Up)
+    );
+    assert_eq!(
+        trend_from_personal(10.0, 10.0, Direction::HigherBetter),
+        Some(Trend::Flat)
+    );
+    assert_eq!(
+        trend_from_personal(9.0, 10.0, Direction::HigherBetter),
+        Some(Trend::Down)
+    );
+    assert_eq!(
+        trend_from_personal(9.0, 10.0, Direction::LowerBetter),
+        Some(Trend::Up)
+    );
+    assert_eq!(
+        trend_from_personal(11.0, 10.0, Direction::LowerBetter),
+        Some(Trend::Down)
+    );
+    assert_eq!(trend_from_personal(20.0, 10.0, Direction::Band), None);
+    assert_eq!(trend_from_personal(5.0, 0.0, Direction::HigherBetter), None);
 }
 
 #[test]
-fn test_apply_personal_baseline() {
+fn test_personal_trends_do_not_override_absolute_signals() {
     let now = Utc::now();
 
     // Baseline averages
@@ -283,8 +288,7 @@ fn test_apply_personal_baseline() {
         ("friction_density", 1.0), // lower is better
     ]);
 
-    // Current score: all significantly above baseline
-    let mut result = make_score_result(
+    let result = make_score_result(
         3.5,  // dreyfus: 3.5/3.0 = 1.167 → green (higher is better)
         60.0, // dq: 60/50 = 1.20 → green
         12.0, // do: 12/10 = 1.20 → green
@@ -299,25 +303,27 @@ fn test_apply_personal_baseline() {
         now,
     );
 
-    apply_personal_baseline(&mut result, &baseline);
+    let signals_before: Vec<Signal> = result
+        .layers
+        .iter()
+        .flat_map(|layer| layer.indicators.iter().map(|indicator| indicator.signal))
+        .collect();
+    let trends = compute_personal_trends(&result, &baseline);
+    let signals_after: Vec<Signal> = result
+        .layers
+        .iter()
+        .flat_map(|layer| layer.indicators.iter().map(|indicator| indicator.signal))
+        .collect();
 
-    // All indicators should be green
-    for layer in &result.layers {
-        for indicator in &layer.indicators {
-            assert_eq!(
-                indicator.signal,
-                Signal::Green,
-                "expected green for {} (actual={})",
-                indicator.name,
-                indicator.actual,
-            );
-        }
-        assert_eq!(layer.signal, Signal::Green);
-    }
+    assert_eq!(signals_after, signals_before);
+    assert_eq!(trends.indicator("dreyfus"), Some(Trend::Up));
+    assert_eq!(trends.indicator("fragmentation"), Some(Trend::Up));
+    assert_eq!(trends.indicator("deep_invest"), None);
+    assert_eq!(trends.overall(), Some(Trend::Up));
 }
 
 #[test]
-fn test_apply_personal_baseline_regression() {
+fn test_personal_trends_detect_regression_without_recoloring() {
     let now = Utc::now();
 
     let baseline = PersonalBaseline::from_averages(&[
@@ -335,7 +341,7 @@ fn test_apply_personal_baseline_regression() {
     ]);
 
     // Current: all significantly worse than baseline
-    let mut result = make_score_result(
+    let result = make_score_result(
         3.0,  // dreyfus: 3.0/4.0 = 0.75 → red
         50.0, // dq: 50/70 = 0.71 → red
         10.0, // do: 10/15 = 0.67 → red
@@ -350,18 +356,15 @@ fn test_apply_personal_baseline_regression() {
         now,
     );
 
-    apply_personal_baseline(&mut result, &baseline);
+    let layer_signals = result.layers.clone().map(|layer| layer.signal);
+    let trends = compute_personal_trends(&result, &baseline);
 
-    for layer in &result.layers {
-        for indicator in &layer.indicators {
-            assert_eq!(
-                indicator.signal,
-                Signal::Red,
-                "expected red for {} (actual={})",
-                indicator.name,
-                indicator.actual,
-            );
-        }
-        assert_eq!(layer.signal, Signal::Red);
-    }
+    assert_eq!(
+        result.layers.clone().map(|layer| layer.signal),
+        layer_signals
+    );
+    assert_eq!(trends.indicator("dreyfus"), Some(Trend::Down));
+    assert_eq!(trends.indicator("fragmentation"), Some(Trend::Down));
+    assert_eq!(trends.indicator("deep_invest"), None);
+    assert_eq!(trends.overall(), Some(Trend::Down));
 }

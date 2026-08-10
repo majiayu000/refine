@@ -37,6 +37,7 @@ pub async fn run(
             latest,
             dry_run,
             legacy_local_scan,
+            retry_quarantined,
         } => {
             let source_filter = source
                 .as_deref()
@@ -58,6 +59,7 @@ pub async fn run(
                     latest,
                     dry_run,
                     legacy_local_scan,
+                    retry_quarantined,
                 },
                 db_path,
                 doc_store,
