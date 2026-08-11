@@ -6,14 +6,15 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 pub(super) fn save(conn: &Connection, doc: &Document) -> InfraResult<()> {
     conn.execute(
-        "INSERT INTO documents (id, title, raw_content, source, url, captured_at, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO documents (id, title, raw_content, source, url, source_version, captured_at, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(url) DO UPDATE SET
              title = CASE
                  WHEN excluded.title IS NULL OR TRIM(excluded.title) = '' THEN documents.title
                  ELSE excluded.title
              END,
              raw_content = excluded.raw_content,
+             source_version = excluded.source_version,
              captured_at = excluded.captured_at,
              updated_at = excluded.updated_at",
         params![
@@ -22,6 +23,7 @@ pub(super) fn save(conn: &Connection, doc: &Document) -> InfraResult<()> {
             doc.raw_content(),
             doc.source(),
             doc.url(),
+            doc.source_version(),
             doc.captured_at().to_rfc3339(),
             doc.created_at().to_rfc3339(),
             doc.updated_at().to_rfc3339(),
@@ -33,7 +35,7 @@ pub(super) fn save(conn: &Connection, doc: &Document) -> InfraResult<()> {
 
 pub(super) fn find_by_id(conn: &Connection, id: &str) -> InfraResult<Option<Document>> {
     let mut stmt = conn
-        .prepare("SELECT id, title, raw_content, source, url, captured_at, created_at, updated_at FROM documents WHERE id = ?1")
+        .prepare("SELECT id, title, raw_content, source, url, source_version, captured_at, created_at, updated_at FROM documents WHERE id = ?1")
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     stmt.query_row([id], |row| row_to_document(row).map_err(to_row_err))
@@ -43,7 +45,7 @@ pub(super) fn find_by_id(conn: &Connection, id: &str) -> InfraResult<Option<Docu
 
 pub(super) fn find_by_url(conn: &Connection, url: &str) -> InfraResult<Option<Document>> {
     let mut stmt = conn
-        .prepare("SELECT id, title, raw_content, source, url, captured_at, created_at, updated_at FROM documents WHERE url = ?1")
+        .prepare("SELECT id, title, raw_content, source, url, source_version, captured_at, created_at, updated_at FROM documents WHERE url = ?1")
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     stmt.query_row([url], |row| row_to_document(row).map_err(to_row_err))
@@ -60,7 +62,7 @@ pub(super) fn find_recent(
     let offset = std::cmp::min(offset, i64::MAX as usize) as i64;
 
     let mut stmt = conn
-        .prepare("SELECT id, title, raw_content, source, url, captured_at, created_at, updated_at FROM documents ORDER BY captured_at DESC, created_at DESC LIMIT ?1 OFFSET ?2")
+        .prepare("SELECT id, title, raw_content, source, url, source_version, captured_at, created_at, updated_at FROM documents ORDER BY captured_at DESC, created_at DESC LIMIT ?1 OFFSET ?2")
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     let rows = stmt
@@ -101,7 +103,7 @@ pub(super) fn search_text(
 
     let mut stmt = conn
         .prepare(
-            "SELECT d.id, d.title, d.raw_content, d.source, d.url, d.captured_at, d.created_at, d.updated_at
+            "SELECT d.id, d.title, d.raw_content, d.source, d.url, d.source_version, d.captured_at, d.created_at, d.updated_at
              FROM documents d
              JOIN documents_fts fts ON d.rowid = fts.rowid
              WHERE documents_fts MATCH ?1
@@ -150,14 +152,17 @@ fn row_to_document(row: &rusqlite::Row) -> InfraResult<Document> {
     let url: String = row
         .get(4)
         .map_err(|e| InfraError::Database(e.to_string()))?;
-    let captured_at_raw: String = row
+    let source_version: Option<String> = row
         .get(5)
         .map_err(|e| InfraError::Database(e.to_string()))?;
-    let created_at_raw: String = row
+    let captured_at_raw: String = row
         .get(6)
         .map_err(|e| InfraError::Database(e.to_string()))?;
-    let updated_at_raw: String = row
+    let created_at_raw: String = row
         .get(7)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let updated_at_raw: String = row
+        .get(8)
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     let parse_dt = |raw: &str, label: &str| -> InfraResult<DateTime<Utc>> {
@@ -172,6 +177,7 @@ fn row_to_document(row: &rusqlite::Row) -> InfraResult<Document> {
         raw_content,
         source,
         url,
+        source_version,
         captured_at: parse_dt(&captured_at_raw, "captured_at")?,
         created_at: parse_dt(&created_at_raw, "created_at")?,
         updated_at: parse_dt(&updated_at_raw, "updated_at")?,

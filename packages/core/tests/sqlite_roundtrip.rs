@@ -119,6 +119,7 @@ async fn document_save_refreshes_existing_url_content() {
     let mut second = Document::new("claude", "newer content");
     second.set_title("Newer title");
     second.set_url(url);
+    second.set_source_version(Some("source:v1:2"));
     let second_captured_at = second.captured_at();
     let second_updated_at = second.updated_at();
     refine_core::knowledge::DocumentRepository::save(&store, &second)
@@ -137,11 +138,13 @@ async fn document_save_refreshes_existing_url_content() {
     assert_eq!(by_url.id(), first.id());
     assert_eq!(by_url.title(), Some("Newer title"));
     assert_eq!(by_url.raw_content(), "newer content");
+    assert_eq!(by_url.source_version(), Some("source:v1:2"));
     assert_eq!(by_url.captured_at(), second_captured_at);
     assert_eq!(by_url.updated_at(), second_updated_at);
     assert!(by_url.updated_at() >= first_updated_at);
     assert_eq!(by_id.title(), Some("Newer title"));
     assert_eq!(by_id.raw_content(), "newer content");
+    assert_eq!(by_id.source_version(), Some("source:v1:2"));
     assert_eq!(by_id.captured_at(), second_captured_at);
     assert_eq!(by_id.updated_at(), second_updated_at);
 }
@@ -203,6 +206,7 @@ async fn document_find_recent_orders_by_latest_capture_after_duplicate_url_refre
         raw_content: "older content".to_string(),
         source: "claude".to_string(),
         url: "https://claude.ai/chat/older".to_string(),
+        source_version: None,
         captured_at: older_capture,
         created_at: older_capture,
         updated_at: older_capture,
@@ -217,6 +221,7 @@ async fn document_find_recent_orders_by_latest_capture_after_duplicate_url_refre
         raw_content: "newer content".to_string(),
         source: "claude".to_string(),
         url: "https://claude.ai/chat/newer".to_string(),
+        source_version: None,
         captured_at: middle_capture,
         created_at: middle_capture,
         updated_at: middle_capture,
@@ -231,6 +236,7 @@ async fn document_find_recent_orders_by_latest_capture_after_duplicate_url_refre
         raw_content: "recaptured content".to_string(),
         source: "claude".to_string(),
         url: older.url().to_string(),
+        source_version: None,
         captured_at: newest_capture,
         created_at: newest_capture,
         updated_at: newest_capture,

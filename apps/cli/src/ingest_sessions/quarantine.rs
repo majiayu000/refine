@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -28,7 +28,7 @@ impl QuarantineStore {
         Self::load_from(default_path()?)
     }
 
-    fn load_from(path: PathBuf) -> Result<Self> {
+    pub(super) fn load_from(path: PathBuf) -> Result<Self> {
         let content = match std::fs::read_to_string(&path) {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -66,6 +66,12 @@ impl QuarantineStore {
 
     pub(super) fn len(&self) -> usize {
         self.records.len()
+    }
+
+    pub(super) fn count_matching(&self, urls: &HashSet<String>) -> usize {
+        urls.iter()
+            .filter(|url| self.records.contains_key(url.as_str()))
+            .count()
     }
 
     pub(super) fn path(&self) -> &Path {
@@ -185,5 +191,21 @@ mod tests {
             .err()
             .expect("malformed queue must fail");
         assert!(error.to_string().contains("拒绝静默跳过"));
+    }
+
+    #[test]
+    fn matching_count_ignores_records_outside_the_current_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("queue.jsonl");
+        let mut store = QuarantineStore::load_from(path).unwrap();
+        store.record("remem://selected", "blocked", "selected");
+        store.record("file://unrelated", "blocked", "unrelated");
+
+        let selected = HashSet::from(["remem://selected".to_string()]);
+        assert_eq!(store.count_matching(&selected), 1);
+
+        let other_provider = HashSet::from(["remem://other".to_string()]);
+        assert_eq!(store.count_matching(&other_provider), 0);
+        assert_eq!(store.len(), 2);
     }
 }

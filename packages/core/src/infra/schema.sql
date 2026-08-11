@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS documents (
     raw_content TEXT NOT NULL,
     source TEXT NOT NULL,
     url TEXT NOT NULL,
+    source_version TEXT,
     captured_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL

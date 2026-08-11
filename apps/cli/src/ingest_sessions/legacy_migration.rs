@@ -90,15 +90,12 @@ pub(super) fn legacy_document_covers_nonunique_summary(
     documents: &[Document],
     remem_session: &RememSession,
     raw_content: &str,
-    last_epoch: i64,
 ) -> bool {
     remem_session.source_root == LOCAL_SOURCE_ROOT
         && documents.iter().any(|document| {
             LEGACY_SOURCES.contains(&document.source())
                 && url_matches_session_id(document.url(), &remem_session.session_id)
-                && (document.raw_content() == raw_content
-                    || (content_matches(document.raw_content(), raw_content)
-                        && document.updated_at().timestamp() >= last_epoch))
+                && document.raw_content() == raw_content
         })
 }
 
@@ -247,6 +244,7 @@ mod tests {
             raw_content: content.to_string(),
             source: source.to_string(),
             url: url.to_string(),
+            source_version: None,
             captured_at,
             created_at: original.created_at(),
             updated_at: original.updated_at(),
@@ -326,19 +324,16 @@ mod tests {
             &documents,
             &remem("local", "session-1"),
             "same",
-            i64::MAX,
         ));
         assert!(!legacy_document_covers_nonunique_summary(
             &documents,
             &remem("local", "session-1"),
             "same plus append",
-            i64::MAX,
         ));
         assert!(!legacy_document_covers_nonunique_summary(
             &documents,
             &remem("remote", "session-1"),
             "same",
-            10,
         ));
     }
 

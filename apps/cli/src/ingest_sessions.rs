@@ -81,6 +81,7 @@ struct PendingSession {
     captured_at: DateTime<Utc>,
     has_embedded_timestamp: bool,
     raw_content: String,
+    source_version: Option<String>,
     needs_chunk: bool,
     chunks: Vec<String>,
     existing_document: Option<Document>,
@@ -108,8 +109,20 @@ fn session_needs_refresh(existing_doc: &Document, file_modified_at: SystemTime) 
     file_modified_at > existing_doc.updated_at()
 }
 
-fn document_covers_remem_summary(document: &Document, last_epoch: i64) -> bool {
-    document.updated_at().timestamp() >= last_epoch
+fn remem_source_version(summary: &RememSessionSummary) -> String {
+    format!(
+        "remem:v1:{}:{}:{}:{}:{}",
+        summary.first_epoch,
+        summary.last_epoch,
+        summary.message_count,
+        summary.user_message_count,
+        summary.assistant_message_count
+    )
+}
+
+fn document_covers_remem_summary(document: &Document, summary: &RememSessionSummary) -> bool {
+    let expected = remem_source_version(summary);
+    document.source_version() == Some(expected.as_str())
 }
 
 fn incremental_cursor_path(home: &Path, source: Option<&SessionSource>, db_path: &Path) -> PathBuf {
@@ -245,10 +258,11 @@ async fn handle_remem_ingest_sessions_with_summaries(
 
     for (idx, summary) in summaries.into_iter().enumerate() {
         let url = summary.stable_document_url();
+        let source_version = remem_source_version(&summary);
         let existing_document = existing_remem_documents.get(url.as_str()).copied().cloned();
         if existing_document
             .as_ref()
-            .is_some_and(|document| document_covers_remem_summary(document, summary.last_epoch))
+            .is_some_and(|document| document_covers_remem_summary(document, &summary))
         {
             skipped_dup += 1;
             continue;
@@ -259,7 +273,7 @@ async fn handle_remem_ingest_sessions_with_summaries(
                 &summary,
             )?;
             if legacy_document
-                .is_some_and(|document| document_covers_remem_summary(document, summary.last_epoch))
+                .is_some_and(|document| document_covers_remem_summary(document, &summary))
             {
                 skipped_dup += 1;
                 continue;
@@ -271,7 +285,6 @@ async fn handle_remem_ingest_sessions_with_summaries(
         }
 
         let legacy_identity_is_unique = summary.legacy_identity_is_unique;
-        let last_epoch = summary.last_epoch;
         let remem_session = load_remem_session(summary)
             .with_context(|| format!("failed to load full remem session for {url}"))?;
         fully_loaded += 1;
@@ -286,7 +299,6 @@ async fn handle_remem_ingest_sessions_with_summaries(
             &existing_documents,
             &remem_session,
             &raw_content,
-            last_epoch,
         ) {
             skipped_dup += 1;
             continue;
@@ -309,6 +321,14 @@ async fn handle_remem_ingest_sessions_with_summaries(
                         legacy_documents_to_delete.len()
                     );
                 } else {
+                    if existing_doc.source_version() != Some(source_version.as_str()) {
+                        let mut versioned_document = existing_doc.clone();
+                        versioned_document.set_source_version(Some(&source_version));
+                        doc_store
+                            .save(&versioned_document)
+                            .await
+                            .context("save remem source snapshot metadata")?;
+                    }
                     doc_store
                         .delete_documents_with_items(&legacy_documents_to_delete)
                         .await
@@ -360,6 +380,7 @@ async fn handle_remem_ingest_sessions_with_summaries(
             captured_at,
             has_embedded_timestamp: true,
             raw_content,
+            source_version: Some(source_version),
             needs_chunk: !chunks.is_empty(),
             chunks,
             existing_document,
@@ -530,6 +551,7 @@ async fn handle_legacy_ingest_sessions(
             captured_at,
             has_embedded_timestamp,
             raw_content,
+            source_version: None,
             needs_chunk: !chunks.is_empty(),
             chunks,
             existing_document,
@@ -580,6 +602,8 @@ async fn process_pending_sessions(
     }
 
     let mut quarantine = QuarantineStore::load()?;
+    let selected_urls: HashSet<String> =
+        pending.iter().map(|session| session.url.clone()).collect();
     let mut skipped_quarantined = 0usize;
     if !retry_quarantined {
         pending.retain(|session| {
@@ -603,14 +627,22 @@ async fn process_pending_sessions(
         concurrency,
     );
     if pending.is_empty() {
-        if quarantine.len() > 0 {
+        let selected_quarantine_count = quarantine.count_matching(&selected_urls);
+        if selected_quarantine_count > 0 {
             anyhow::bail!(
-                "仍有 {} 个会话处于隔离状态；队列: {}；确认上游策略已修复后使用 --retry-quarantined",
-                quarantine.len(),
+                "本次选择中仍有 {} 个会话处于隔离状态；队列: {}；确认上游策略已修复后使用 --retry-quarantined",
+                selected_quarantine_count,
                 quarantine.path().display()
             );
         }
-        println!("全部已处理完毕，隔离队列为空。");
+        if quarantine.len() > 0 {
+            println!(
+                "全部已处理完毕；隔离队列另有 {} 个不在本次选择范围内的记录。",
+                quarantine.len()
+            );
+        } else {
+            println!("全部已处理完毕，隔离队列为空。");
+        }
         return Ok(());
     }
 
@@ -691,29 +723,35 @@ async fn process_pending_sessions(
     drop(rejected);
     quarantine.save_if_dirty()?;
     let quarantine_count = quarantine.len();
+    let selected_quarantine_count = quarantine.count_matching(&selected_urls);
     println!(
-        "\n完成: 处理 {}, 跳过重复 {}, 过滤 {}, 刷新过期 {}, 失败 {}, 新增隔离 {}, 隔离总数 {}, 生成 {} 条观测",
+        "\n完成: 处理 {}, 跳过重复 {}, 过滤 {}, 刷新过期 {}, 失败 {}, 新增隔离 {}, 本次相关隔离 {}, 隔离总数 {}, 生成 {} 条观测",
         processed,
         skipped_dup,
         skipped_filter,
         stale_refresh,
         failed,
         rejected_count,
+        selected_quarantine_count,
         quarantine_count,
         total_items
     );
-    if failed > 0 || quarantine_count > 0 {
+    if failed > 0 || selected_quarantine_count > 0 {
         if failed > 0 {
             eprintln!("提示: 瞬态失败会在下次运行续传");
         }
-        if quarantine_count > 0 {
+        if selected_quarantine_count > 0 {
             eprintln!(
-                "提示: {} 个确定性拒绝已隔离，不会自动重试；队列: {}",
-                quarantine_count,
+                "提示: 本次选择中的 {} 个确定性拒绝已隔离，不会自动重试；队列: {}",
+                selected_quarantine_count,
                 quarantine.path().display()
             );
         }
-        anyhow::bail!("摄入不完整: 瞬态失败 {}, 隔离 {}", failed, quarantine_count);
+        anyhow::bail!(
+            "摄入不完整: 瞬态失败 {}, 本次相关隔离 {}",
+            failed,
+            selected_quarantine_count
+        );
     }
     Ok(())
 }
@@ -790,6 +828,7 @@ fn build_session_document(ps: &PendingSession, title: &str) -> Document {
             raw_content: ps.raw_content.clone(),
             source: ps.source.as_str().to_string(),
             url: ps.url.clone(),
+            source_version: ps.source_version.clone(),
             captured_at,
             created_at: existing_doc.created_at(),
             updated_at: Utc::now(),
@@ -799,6 +838,7 @@ fn build_session_document(ps: &PendingSession, title: &str) -> Document {
     let mut doc = Document::new(ps.source.as_str(), &ps.raw_content);
     doc.set_title(title);
     doc.set_url(&ps.url);
+    doc.set_source_version(ps.source_version.as_deref());
     doc.set_captured_at(ps.captured_at);
     doc
 }

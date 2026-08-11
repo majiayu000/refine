@@ -261,13 +261,21 @@ refine_llm_env_validate_content() {
   done < "$path"
 }
 
-refine_llm_env_stat_value() {
-  local format="$1"
-  local path="$2"
+refine_llm_env_stat_owner_uid() {
+  local path="$1"
   if [[ "$(uname -s)" == 'Darwin' ]]; then
-    stat -f "$format" "$path"
+    stat -f '%u' "$path"
   else
-    stat -c "$format" "$path"
+    stat -c '%u' "$path"
+  fi
+}
+
+refine_llm_env_stat_mode() {
+  local path="$1"
+  if [[ "$(uname -s)" == 'Darwin' ]]; then
+    stat -f '%Lp' "$path"
+  else
+    stat -c '%a' "$path"
   fi
 }
 
@@ -284,14 +292,14 @@ refine_llm_env_validate_secure_file() {
     return 1
   fi
 
-  owner_uid="$(refine_llm_env_stat_value '%u' "$path" 2>/dev/null || true)"
+  owner_uid="$(refine_llm_env_stat_owner_uid "$path" 2>/dev/null || true)"
   current_uid="$(id -u)"
   if [[ -z "$owner_uid" || "$owner_uid" != "$current_uid" ]]; then
     refine_llm_env_error "secure LLM env file has the wrong owner (expected current user): ${path}"
     return 1
   fi
 
-  mode="$(refine_llm_env_stat_value '%Lp' "$path" 2>/dev/null || true)"
+  mode="$(refine_llm_env_stat_mode "$path" 2>/dev/null || true)"
   case "$mode" in
     ''|*[!0-7]*)
       refine_llm_env_error "cannot inspect secure LLM env file permissions: ${path}"

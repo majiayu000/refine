@@ -29,6 +29,7 @@ pub fn prepare_sqlite_db(conn: &Connection) -> InfraResult<()> {
     tx.execute_batch(include_str!("schema.sql"))
         .map_err(|e| InfraError::Database(e.to_string()))?;
     migrate_items_add_document_columns(&tx)?;
+    migrate_documents_add_source_version(&tx)?;
     migrate_documents_url_unique(&tx)?;
     migrate_items_document_fk(&tx)?;
     migrate_extraction_jobs_conversation_fk(&tx)?;
@@ -119,6 +120,14 @@ fn migrate_items_add_document_columns(conn: &Connection) -> InfraResult<()> {
     }
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_items_document ON items(document_id)")
         .map_err(|e| InfraError::Database(e.to_string()))?;
+    Ok(())
+}
+
+fn migrate_documents_add_source_version(conn: &Connection) -> InfraResult<()> {
+    if !column_exists(conn, "documents", "source_version")? {
+        conn.execute_batch("ALTER TABLE documents ADD COLUMN source_version TEXT")
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+    }
     Ok(())
 }
 
@@ -291,7 +300,7 @@ fn migrate_extraction_jobs_conversation_fk(conn: &Connection) -> InfraResult<()>
 
 #[cfg(test)]
 mod tests {
-    use super::{migrate_documents_url_unique, prepare_sqlite_db};
+    use super::{column_exists, migrate_documents_url_unique, prepare_sqlite_db};
     use rusqlite::{Connection, OpenFlags};
 
     #[test]
@@ -334,6 +343,9 @@ mod tests {
         .unwrap_or_else(|err| panic!("seed legacy schema: {err}"));
 
         prepare_sqlite_db(&conn).unwrap_or_else(|err| panic!("prepare sqlite db: {err}"));
+
+        assert!(column_exists(&conn, "documents", "source_version")
+            .expect("inspect migrated documents columns"));
 
         let document_id: Option<String> = conn
             .query_row(

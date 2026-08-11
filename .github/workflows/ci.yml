@@ -24,6 +24,13 @@ jobs:
             test -f "$f" || { echo "Missing: $f"; exit 1; }
           done
 
+  shell-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test unattended LLM credential scripts on GNU/Linux
+        run: bash scripts/test-llm-env.sh
+
   check:
     runs-on: ubuntu-latest
     steps:
