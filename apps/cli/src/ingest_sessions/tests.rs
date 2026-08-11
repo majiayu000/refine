@@ -203,6 +203,11 @@ fn remem_summary_compares_the_saved_source_snapshot_not_ingest_time() {
 
     let unversioned = Document::new("remem-raw-session", "raw");
     assert!(!document_covers_remem_summary(&unversioned, &summary));
+
+    let original_updated_at = unversioned.updated_at();
+    let backfilled = document_with_source_version(&unversioned, &remem_source_version(&summary));
+    assert_eq!(backfilled.updated_at(), original_updated_at);
+    assert!(document_covers_remem_summary(&backfilled, &summary));
 }
 
 #[test]

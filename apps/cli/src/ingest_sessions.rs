@@ -125,6 +125,20 @@ fn document_covers_remem_summary(document: &Document, summary: &RememSessionSumm
     document.source_version() == Some(expected.as_str())
 }
 
+fn document_with_source_version(document: &Document, source_version: &str) -> Document {
+    Document::restore(RestoreDocumentParams {
+        id: document.id().clone(),
+        title: document.title().map(ToOwned::to_owned),
+        raw_content: document.raw_content().to_string(),
+        source: document.source().to_string(),
+        url: document.url().to_string(),
+        source_version: Some(source_version.to_string()),
+        captured_at: document.captured_at(),
+        created_at: document.created_at(),
+        updated_at: document.updated_at(),
+    })
+}
+
 fn incremental_cursor_path(home: &Path, source: Option<&SessionSource>, db_path: &Path) -> PathBuf {
     let source_key = match source {
         Some(SessionSource::ClaudeCode) => "claude-code",
@@ -322,8 +336,8 @@ async fn handle_remem_ingest_sessions_with_summaries(
                     );
                 } else {
                     if existing_doc.source_version() != Some(source_version.as_str()) {
-                        let mut versioned_document = existing_doc.clone();
-                        versioned_document.set_source_version(Some(&source_version));
+                        let versioned_document =
+                            document_with_source_version(existing_doc, &source_version);
                         doc_store
                             .save(&versioned_document)
                             .await
