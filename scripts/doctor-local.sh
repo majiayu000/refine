@@ -170,16 +170,25 @@ check_install_manifest() {
     return
   fi
 
-  local expected_root expected_commit current_commit dirty
+  local expected_root expected_commit current_commit installed_dirty current_status current_dirty
   expected_root="$(manifest_value source_root "$manifest")"
   expected_commit="$(manifest_value source_commit "$manifest")"
-  dirty="$(manifest_value source_dirty "$manifest")"
+  installed_dirty="$(manifest_value source_dirty "$manifest")"
   current_commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+  if current_status="$(git -C "$repo_root" status --porcelain 2>/dev/null)"; then
+    if [[ -z "$current_status" ]]; then
+      current_dirty=0
+    else
+      current_dirty=1
+    fi
+  else
+    current_dirty=unknown
+  fi
 
-  if [[ "$expected_root" == "$repo_root" && "$expected_commit" == "$current_commit" && "$dirty" == "0" ]]; then
+  if [[ "$expected_root" == "$repo_root" && "$expected_commit" == "$current_commit" && "$installed_dirty" == "0" && "$current_dirty" == "0" ]]; then
     pass "installed source matches clean checkout: ${current_commit}"
   else
-    fail "installed source mismatch: root=${expected_root} commit=${expected_commit} dirty=${dirty}; current=${repo_root}@${current_commit}"
+    fail "installed source mismatch: root=${expected_root} commit=${expected_commit} installed_dirty=${installed_dirty}; current=${repo_root}@${current_commit} current_dirty=${current_dirty}"
   fi
 
   local name manifest_key binary expected_hash actual_hash

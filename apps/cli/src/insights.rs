@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 const LLM_CONCURRENCY: usize = 10;
+const INSIGHTS_PROMPT_IDENTITY: &str = "insights-v2:route-v1:final-v1";
 
 #[allow(dead_code)]
 pub struct InsightsOptions {
@@ -68,6 +69,8 @@ pub async fn handle_insights(
         observation_count: observations.len(),
         latest_updated_at,
         with_prescription: options.with_prescription,
+        llm_identity: client.cache_identity(),
+        prompt_identity: INSIGHTS_PROMPT_IDENTITY.to_string(),
     };
     let mut checkpoint = InsightsCheckpoint::load_matching(signature)?;
 

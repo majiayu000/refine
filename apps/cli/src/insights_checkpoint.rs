@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_ENV: &str = "REFINE_INSIGHTS_CHECKPOINT_PATH";
-pub(crate) const CHECKPOINT_VERSION: u32 = 1;
+pub(crate) const CHECKPOINT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DatasetSignature {
@@ -14,6 +14,10 @@ pub(crate) struct DatasetSignature {
     pub observation_count: usize,
     pub latest_updated_at: DateTime<Utc>,
     pub with_prescription: bool,
+    #[serde(default)]
+    pub llm_identity: String,
+    #[serde(default)]
+    pub prompt_identity: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -148,6 +152,8 @@ mod tests {
             observation_count: 1,
             latest_updated_at: Utc::now(),
             with_prescription: true,
+            llm_identity: "test:model-a:endpoint-a".into(),
+            prompt_identity: "insights:test-v1".into(),
         };
         let mut checkpoint = InsightsCheckpoint::empty(signature);
         checkpoint.extend([RouteResult {
@@ -173,6 +179,8 @@ mod tests {
             observation_count: 3,
             latest_updated_at: Utc::now(),
             with_prescription: true,
+            llm_identity: "test:model-a:endpoint-a".into(),
+            prompt_identity: "insights:test-v1".into(),
         };
         let mut checkpoint = InsightsCheckpoint::empty(signature.clone());
         checkpoint.extend([RouteResult {
@@ -187,9 +195,16 @@ mod tests {
 
         let mismatch = DatasetSignature {
             observation_count: 4,
-            ..signature
+            ..signature.clone()
         };
         let reset = InsightsCheckpoint::load_matching_from(&path, mismatch).unwrap();
+        assert!(reset.route_results.is_empty());
+
+        let llm_mismatch = DatasetSignature {
+            llm_identity: "test:model-b:endpoint-b".into(),
+            ..signature
+        };
+        let reset = InsightsCheckpoint::load_matching_from(&path, llm_mismatch).unwrap();
         assert!(reset.route_results.is_empty());
     }
 }
