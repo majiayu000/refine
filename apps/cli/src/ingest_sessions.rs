@@ -1,8 +1,13 @@
 //! ingest-sessions 命令实现
 //!
-//! 默认从 remem raw archive 读取；支持可配置并发、断点续传和 API 限流重试
+//! 默认优先从 remem raw archive 读取；remem 不存在时自动扫描本地会话
+//! 文件；支持可配置并发、断点续传和 API 限流重试
 
-use crate::remem_sessions::{load_remem_session, load_remem_session_summaries};
+use crate::cli::IngestProvider;
+use crate::remem_sessions::{
+    is_missing_remem_executable, load_remem_session, load_remem_session_summaries,
+    RememSessionSummary,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use refine_core::error::InfraError;
@@ -39,12 +44,31 @@ fn concurrency() -> usize {
 
 pub struct IngestOptions {
     pub source: Option<SessionSource>,
+    pub provider: IngestProvider,
     pub limit: Option<usize>,
     /// 按 mtime 降序取最近 N 个会话，与 limit 互斥
     pub latest: Option<usize>,
     pub dry_run: bool,
-    pub legacy_local_scan: bool,
     pub retry_quarantined: bool,
+}
+
+#[derive(Debug)]
+enum AutoProviderSelection<T> {
+    Remem(T),
+    LocalFallback,
+}
+
+fn select_auto_provider<T, F>(load_remem: F) -> Result<AutoProviderSelection<T>>
+where
+    F: FnOnce() -> Result<T>,
+{
+    match load_remem() {
+        Ok(value) => Ok(AutoProviderSelection::Remem(value)),
+        Err(error) if is_missing_remem_executable(&error) => {
+            Ok(AutoProviderSelection::LocalFallback)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// 待处理的会话（已通过去重和过滤）
@@ -141,10 +165,41 @@ pub async fn handle_ingest_sessions(
     doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
-    if options.legacy_local_scan {
-        return handle_legacy_ingest_sessions(options, db_path, doc_store, llm_client).await;
+    if options.source.is_some() && options.provider != IngestProvider::Local {
+        anyhow::bail!(
+            "--source requires --provider local because remem does not expose a trustworthy Claude/Codex source"
+        );
     }
-    handle_remem_ingest_sessions(options, doc_store, llm_client).await
+
+    match options.provider {
+        IngestProvider::Local => {
+            println!("provider=local");
+            handle_legacy_ingest_sessions(options, db_path, doc_store, llm_client).await
+        }
+        IngestProvider::Remem => {
+            println!("provider=remem");
+            handle_remem_ingest_sessions(options, doc_store, llm_client).await
+        }
+        IngestProvider::Auto => {
+            println!("provider=requested:auto");
+            match select_auto_provider(|| {
+                load_remem_session_summaries(options.limit, options.latest)
+            }) {
+                Ok(AutoProviderSelection::Remem(summaries)) => {
+                    println!("provider=selected:remem");
+                    handle_remem_ingest_sessions_with_summaries(
+                        options, summaries, doc_store, llm_client,
+                    )
+                    .await
+                }
+                Ok(AutoProviderSelection::LocalFallback) => {
+                    println!("provider=selected:local (auto fallback: remem executable not found)");
+                    handle_legacy_ingest_sessions(options, db_path, doc_store, llm_client).await
+                }
+                Err(error) => Err(error.context("failed to load session summaries from remem")),
+            }
+        }
+    }
 }
 
 async fn handle_remem_ingest_sessions(
@@ -152,14 +207,23 @@ async fn handle_remem_ingest_sessions(
     doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
+    let summaries = load_remem_session_summaries(options.limit, options.latest)
+        .context("failed to load session summaries from remem")?;
+    handle_remem_ingest_sessions_with_summaries(options, summaries, doc_store, llm_client).await
+}
+
+async fn handle_remem_ingest_sessions_with_summaries(
+    options: IngestOptions,
+    summaries: Vec<RememSessionSummary>,
+    doc_store: Arc<dyn DocumentRepository>,
+    llm_client: Option<Arc<dyn LlmClient>>,
+) -> Result<()> {
     if options.source.is_some() {
         anyhow::bail!(
-            "--source cannot be used with the remem provider because its contract does not expose a trustworthy Claude/Codex source; use --legacy-local-scan --source <claude|codex> only for rollback"
+            "--source requires --provider local because remem does not expose a trustworthy Claude/Codex source"
         );
     }
 
-    let summaries = load_remem_session_summaries(options.limit, options.latest)
-        .context("failed to load session summaries from remem")?;
     println!("remem 返回 {} 个会话摘要", summaries.len());
 
     let total = summaries.len();

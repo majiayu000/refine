@@ -9,6 +9,32 @@ use std::collections::VecDeque;
 use std::fs;
 use std::sync::Mutex;
 
+#[test]
+fn auto_provider_prefers_remem_when_the_probe_succeeds() {
+    let selection = select_auto_provider(|| Ok(vec!["summary"])).unwrap();
+    assert!(matches!(
+        selection,
+        AutoProviderSelection::Remem(values) if values == vec!["summary"]
+    ));
+}
+
+#[test]
+fn auto_provider_falls_back_only_for_a_missing_executable() {
+    let selection = select_auto_provider::<Vec<()>, _>(|| {
+        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "remem").into())
+    })
+    .unwrap();
+    assert!(matches!(selection, AutoProviderSelection::LocalFallback));
+}
+
+#[test]
+fn auto_provider_keeps_remem_provider_errors_strict() {
+    let result =
+        select_auto_provider::<Vec<()>, _>(|| Err(anyhow::anyhow!("raw sessions contract drift")));
+    let error = result.expect_err("contract errors must not fall back to local");
+    assert!(error.to_string().contains("contract drift"));
+}
+
 struct StaticLlmClient {
     response: String,
 }
@@ -45,16 +71,16 @@ impl LlmClient for SequenceLlmClient {
 }
 
 #[tokio::test]
-async fn source_filter_is_rejected_without_explicit_legacy_rollback() {
+async fn source_filter_requires_explicit_local_provider() {
     let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
     let doc_store: Arc<dyn DocumentRepository> = store;
     let error = handle_ingest_sessions(
         IngestOptions {
             source: Some(SessionSource::ClaudeCode),
+            provider: IngestProvider::Auto,
             limit: None,
             latest: None,
             dry_run: true,
-            legacy_local_scan: false,
             retry_quarantined: false,
         },
         Path::new("/tmp/refine-test.db"),
@@ -64,7 +90,7 @@ async fn source_filter_is_rejected_without_explicit_legacy_rollback() {
     .await
     .expect_err("source filtering must not guess a platform in remem mode");
 
-    assert!(error.to_string().contains("--legacy-local-scan"));
+    assert!(error.to_string().contains("--provider local"));
 }
 
 #[async_trait]

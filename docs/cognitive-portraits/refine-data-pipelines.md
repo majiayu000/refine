@@ -10,7 +10,7 @@
 
 共识别 **9 条产出链路**，其中 **6 条调 LLM**、**5 条写 refine.db**、其余写本地文件或 stdout：
 
-- 1 条数据流入口（`refine ingest-sessions`，remem raw archive → refine.db）
+- 1 条数据流入口（`refine ingest-sessions`，auto/remem/local provider → refine.db）
 - 1 条核心 LLM 聚合链路（`refine insights --prescription`，~10+1 次 LLM 并发）
 - 4 条 mirror 子命令（`score` / `motd` / `dashboard` / `weekly` / `profile`）
 - 2 条由 launchd 调度的 shell 脚本（daily/weekly）
@@ -23,7 +23,7 @@
 ## 链路全景图
 
 ```
-remem raw archive
+auto/remem: remem raw archive；local: filesystem scan
  (完整 user/assistant 消息)
        │
        │ parse + LLM facet extract (3 并发 × 最多 5 次重试)
@@ -94,15 +94,15 @@ remem raw archive
 
 | 字段 | 内容 |
 |---|---|
-| 命令入口 | `refine ingest-sessions [--limit N\|--latest N] [--dry-run]`；一个发布周期内可显式使用 `--legacy-local-scan [--source claude\|codex]` |
+| 命令入口 | `refine ingest-sessions [--provider auto\|remem\|local] [--limit N\|--latest N] [--dry-run]`；`--legacy-local-scan` 是 `--provider local` 的弃用别名 |
 | 代码位置 | `apps/cli/src/cli.rs:74-88` → `apps/cli/src/handlers.rs:32-58` → `apps/cli/src/ingest_sessions.rs:41-199`（处理函数 `handle_ingest_sessions`，`process_single_session`，`llm_call_with_retry`，`extract_and_parse_facets_with_retry`）|
 | 触发方式 | 手动；由 `scripts/daily-refresh.sh` 每天 08:00 调用；由 `scripts/weekly-insights.sh` 每周一 09:00 调用 |
-| 数据来源 | `remem raw sessions --json` 枚举 exact tuple，`remem raw messages --json` 读取完整快照分页；本地扫描只在显式回滚开关下运行 |
+| 数据来源 | `auto/remem` 使用 `remem raw sessions --json` 枚举 exact tuple、`remem raw messages --json` 读取完整快照分页；`local` 使用本地扫描；auto 仅在 remem 可执行文件缺失时回退到 local |
 | 处理步骤 | 1) 校验 session summary；2) 按 `--latest` 或 `--limit` 裁剪；3) 逐页校验 selector/order/cursor/count/epoch；4) 用稳定 URL + raw 内容跳过或刷新；5) 保守匹配本地旧路径 identity；6) filter/chunk；7) 默认串行（`REFINE_INGEST_CONCURRENCY` 可配置）执行 LLM facet 抽取；8) 在同一事务保存 remem Document/Items 并删除已取代旧 Document/items |
 | LLM 调用 | **是**；每会话 1 次（或每分块 1 次，需要 chunking 时可能 N 次）+ 1 次最终合并；默认并发度 1；最多 5 次重试，base delay 10s，退避 `10 * 2^attempt` 秒 |
 | 输出目标 | **refine.db**：`documents` 表（每会话 1 行，source = `remem-raw-session`）+ `items` 表（每会话 N 行，`item_type='observation'`）|
 | 输出 schema | `Document { id, source, url=remem-raw://v1/<hex tuple>, title, raw_content }`；`Item { id, item_type='observation', ..., document_id }`；内容变化时保留 Document identity 并替换关联 Items |
-| 依赖 | 兼容的 `remem` 二进制（`PATH` 或 `REFINE_REMEM_BIN`）和 LLM key；provider 错误会 fail closed |
+| 依赖 | `auto/remem` 需要兼容的 `remem` 二进制（`PATH` 或 `REFINE_REMEM_BIN`），`local` 不需要；所有 provider 都需要 LLM key；provider/契约错误会 fail closed，auto 仅对缺失可执行文件回退 |
 | 已知问题 | 网络波动 / API cooldown 时单会话可能耗尽 5 次重试失败；`daily-refresh.sh` 会根据 exit code 记录 `~/.refine/last-refresh-ok`，失败时不更新时间戳 |
 
 ---
@@ -247,10 +247,10 @@ remem raw archive
 
 ### 1. 数据流入点
 
-**只有链路 1 `refine ingest-sessions` 是数据流入口**（默认从 remem raw archive 做 LLM 抽取）。所有其他链路（2~9）都是在 refine.db 里对已有 Observation 做聚合/加工/叙事。因此：
+**只有链路 1 `refine ingest-sessions` 是数据流入口**（auto 默认探测 remem raw archive，缺少可执行文件时回退到 local；也可显式选择 remem/local）。所有其他链路（2~9）都是在 refine.db 里对已有 Observation 做聚合/加工/叙事。因此：
 
 - **链路 1 质量决定整条管道质量**。facet prompt 改动、chunking 策略、filter 策略的变化会扩散到下游所有报告。
-- 断掉链路 1（如 API key 失效、remem 不可用或契约漂移）会让导入显式失败；不会把 provider 错误降级成空输入。
+- 断掉链路 1（如 API key 失效或 provider 契约漂移）会让导入显式失败；auto 仅在 remem 可执行文件缺失时回退到 local，不会把 provider 错误降级成空输入。
 
 ### 2. LLM 成本分布
 
@@ -310,7 +310,7 @@ remem raw archive
 
 | 链路 | 使用 env |
 |---|---|
-| 链路 1 ingest-sessions | `remem`（或 `REFINE_REMEM_BIN`）；LLM key；可选 `REFINE_DB_PATH`、`REFINE_INGEST_CONCURRENCY` |
+| 链路 1 ingest-sessions | `--provider auto\|remem` 时为 `remem`（或 `REFINE_REMEM_BIN`），`--provider local` 时为本地扫描；LLM key；可选 `REFINE_DB_PATH`、`REFINE_INGEST_CONCURRENCY` |
 | 链路 2 insights | LLM key；可选 `REFINE_DB_PATH` |
 | 链路 3 score | 可选 LLM key（advice 可跳过）；可选 `REFINE_DB_PATH` |
 | 链路 4 dashboard | 可选 `REFINE_DB_PATH` |

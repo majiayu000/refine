@@ -122,13 +122,25 @@ refine ingest-sessions
 refine ingest-sessions --latest 20
 refine ingest-sessions --dry-run
 
-# Temporary one-release rollback only
+# Provider selection: auto is the default; local is a supported provider
+refine ingest-sessions --provider remem
+refine ingest-sessions --provider local
+refine ingest-sessions --provider local --source claude
+refine ingest-sessions --provider local --source codex
+# Deprecated compatibility alias for --provider local
 refine ingest-sessions --legacy-local-scan --source claude
-refine ingest-sessions --legacy-local-scan --source codex
 refine insights --prescription
 mirror dashboard
 mirror score
 ```
+
+`--provider auto` tries the remem raw archive first and falls back to local
+Claude/Codex discovery only when the remem executable cannot be launched
+because it is absent. Remem nonzero exits, malformed JSON, contract drift, and
+pagination errors fail the command instead of falling back. Use `--provider
+remem` to require remem, or `--provider local` to select local discovery
+directly. `--source` is valid with the local provider; the deprecated
+`--legacy-local-scan` flag is its backward-compatible alias.
 
 On the first remem-backed run, refine supersedes a matching local path-keyed
 session Document/items and saves the replacement facets in one transaction.

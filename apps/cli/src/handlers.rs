@@ -1,4 +1,4 @@
-use crate::cli::Commands;
+use crate::cli::{Commands, IngestProvider};
 use crate::ingest_sessions::{handle_ingest_sessions, IngestOptions};
 use crate::insights::{handle_insights, InsightsOptions};
 use crate::support::{build_llm_client_from_env, format_item, parse_item_type};
@@ -33,12 +33,14 @@ pub async fn run(
         } => handle_add(&title, &summary, &r#type, store).await,
         Commands::IngestSessions {
             source,
+            provider,
             limit,
             latest,
             dry_run,
             legacy_local_scan,
             retry_quarantined,
         } => {
+            let provider = IngestProvider::resolve(provider, legacy_local_scan)?;
             let source_filter = source
                 .as_deref()
                 .map(|raw| {
@@ -46,6 +48,14 @@ pub async fn run(
                         .with_context(|| format!("invalid session source {raw:?}"))
                 })
                 .transpose()?;
+            if source_filter.is_some() && provider != IngestProvider::Local {
+                anyhow::bail!(
+                    "--source requires --provider local because remem does not expose a trustworthy Claude/Codex source"
+                );
+            }
+            if legacy_local_scan {
+                eprintln!("warning: --legacy-local-scan is deprecated; use --provider local");
+            }
             let llm_client = if dry_run {
                 None
             } else {
@@ -55,10 +65,10 @@ pub async fn run(
             handle_ingest_sessions(
                 IngestOptions {
                     source: source_filter,
+                    provider,
                     limit,
                     latest,
                     dry_run,
-                    legacy_local_scan,
                     retry_quarantined,
                 },
                 db_path,

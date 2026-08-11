@@ -4,6 +4,7 @@ use refine_core::session::{MessageRole, Session, SessionMessage, SessionMeta, Se
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -64,6 +65,14 @@ trait Runner {
 }
 
 struct ProcessRunner;
+
+pub(crate) fn is_missing_remem_executable(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<io::Error>()
+            .is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
+    })
+}
 
 impl Runner for ProcessRunner {
     fn run(&self, args: &[String]) -> Result<CommandResult> {
@@ -627,6 +636,22 @@ mod tests {
             stderr: Vec::new(),
         });
         assert!(load_remem_sessions_with_runner(&invalid, None, None).is_err());
+    }
+
+    #[test]
+    fn only_missing_launch_errors_are_fallback_candidates() {
+        let missing = Err::<(), _>(io::Error::new(io::ErrorKind::NotFound, "remem"))
+            .with_context(|| "run remem provider binary \"remem\"")
+            .expect_err("the wrapped launch error should be preserved");
+        assert!(is_missing_remem_executable(&missing));
+
+        let denied = Err::<(), _>(io::Error::new(io::ErrorKind::PermissionDenied, "remem"))
+            .with_context(|| "run remem provider binary \"remem\"")
+            .expect_err("the wrapped launch error should be preserved");
+        assert!(!is_missing_remem_executable(&denied));
+
+        let contract = anyhow::anyhow!("raw sessions contract drift");
+        assert!(!is_missing_remem_executable(&contract));
     }
 
     #[test]
