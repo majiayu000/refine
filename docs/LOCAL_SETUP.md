@@ -27,8 +27,46 @@ The installer is idempotent. It can be used for first install and for upgrades f
 - Installs desktop UI dependencies with `bun install` when Bun is available.
 - Writes macOS user LaunchAgents under `~/Library/LaunchAgents/`.
 - Starts or reloads the local server and UI dev service.
-- Schedules daily ingest at 08:00 and weekly insights on Monday at 09:00.
+- Schedules daily ingest at 08:00 and weekly insights on Sunday at 09:00.
 - Enables local dashboard/API access with `REFINE_DEV_ANON=1` by default.
+- Creates `~/.refine` with user-only permissions. It never migrates or copies
+  LLM credentials; when they are absent it prints the read-only configure
+  command.
+
+## Configure LLM credentials for launchd
+
+The canonical unattended credential file is `~/.refine/llm.env`. It must be a
+regular, non-symlink file owned by the current user with no group/other bits
+(normally mode `0600`). Scheduled scripts do not source `~/.zshrc`.
+
+Review a migration without changing files:
+
+```bash
+bash scripts/configure-llm-env.sh --check
+```
+
+After reviewing the redacted check, perform the one-time migration of literal
+`export BASE_URL=...`, `export BASE_API_KEY=...`, and `export BASE_MODEL=...`
+definitions:
+
+```bash
+bash scripts/configure-llm-env.sh --migrate
+```
+
+If the supported variables are already exported in the current shell, the
+explicit alternative is:
+
+```bash
+bash scripts/configure-llm-env.sh --from-env
+```
+
+The loader precedence is current non-empty process credentials, then the
+secure file, then an explicitly supplied repository `.env` fallback. It
+supports the Anthropic aliases `REFINE_ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_API_KEY`; the OpenAI aliases
+`REFINE_OPENAI_API_KEY` and `OPENAI_API_KEY`; and the compatibility
+`BASE_API_KEY`, together with their URL/model variables. Values are never
+printed by the loader, migration helper, or credential preflight.
 
 ## Auth Modes
 
@@ -80,7 +118,7 @@ scripts/install-local.sh --no-start
 | --- | --- | --- | --- |
 | `com.lifcc.refine-server` | Local API/dashboard | RunAtLoad + KeepAlive | `~/Library/Logs/refine-server.log` |
 | `com.lifcc.refine-daily-ingest` | `refine ingest-sessions` + `mirror score` | Daily 08:00 | `~/Library/Logs/refine-daily-ingest.log` |
-| `com.lifcc.refine-weekly-insights` | `refine insights --prescription` | Monday 09:00 | `~/Library/Logs/refine-insights.log` |
+| `com.lifcc.refine-weekly-insights` | `refine insights --prescription` | Sunday 09:00 | `~/Library/Logs/refine-insights.log` |
 | `com.lifcc.refine-ui-dev` | Desktop UI Vite dev server | RunAtLoad + KeepAlive | `.run/launchd-refine-ui.*.log` |
 
 ## Health Check
@@ -91,7 +129,12 @@ Run:
 scripts/doctor-local.sh
 ```
 
-The doctor checks installed binaries, LaunchAgents, `/health`, a protected `/v1/*` API route, database freshness, log files, and UI dependencies. Use `scripts/doctor-local.sh --no-ui-dev` for installs that intentionally disable the desktop UI dev service.
+The doctor checks installed binaries, LaunchAgents, a launchd-like clean
+environment credential preflight, `/health`, a protected `/v1/*` API route,
+database freshness, log files, and UI dependencies. It fails when unattended
+credentials are missing or the secure file has invalid ownership, type, or
+permissions. Use `scripts/doctor-local.sh --no-ui-dev` for installs that
+intentionally disable the desktop UI dev service.
 
 Common symptoms:
 

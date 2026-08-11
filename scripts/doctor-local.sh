@@ -243,6 +243,32 @@ check_freshness() {
   fi
 }
 
+check_unattended_llm_env() {
+  local llm_env_file="${REFINE_LLM_ENV_FILE:-${HOME}/.refine/llm.env}"
+  local preflight
+
+  # Reproduce launchd's relevant property: no interactive/process credentials
+  # and no project .env fallback. The child prints status only, never values.
+  # shellcheck disable=SC2016
+  if preflight="$(env -i \
+    HOME="$HOME" \
+    PATH='/usr/bin:/bin:/usr/sbin:/sbin' \
+    REFINE_LLM_ENV_FILE="$llm_env_file" \
+    /bin/bash -c '
+      set -u
+      source "$1"
+      if ! load_refine_llm_env; then
+        exit 1
+      fi
+      printf "source=%s " "${REFINE_LLM_ENV_SOURCE:-none}"
+      refine_llm_env_status
+    ' doctor-local "$repo_root/scripts/load-llm-env.sh" 2>&1)"; then
+    pass "unattended LLM credentials: ${preflight}"
+  else
+    fail "unattended LLM credential preflight failed: ${preflight}"
+  fi
+}
+
 check_logs() {
   local log_path
   local log_paths=(
@@ -308,6 +334,7 @@ else
   pass "desktop UI dev service skipped"
 fi
 
+check_unattended_llm_env
 check_http
 check_db
 check_freshness

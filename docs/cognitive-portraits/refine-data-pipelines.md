@@ -215,13 +215,13 @@ auto/remem: remem raw archive；local: filesystem scan
 |---|---|
 | 命令入口 | `/Users/lifcc/Desktop/code/AI/tools/refine/scripts/weekly-insights.sh` |
 | 代码位置 | `scripts/weekly-insights.sh`（52 行） |
-| 触发方式 | launchd `com.lifcc.refine-weekly-insights.plist` — **每周一 09:00** |
-| 数据来源 | 依赖 `.env` 加载环境变量 |
-| 处理步骤 | 1) 加载 `.env`；2) 打印 preflight (PATH/refine/cwd/env)；3) `refine ingest-sessions`（链路 1）；4) `refine insights --prescription`（链路 2）；5) `osascript` 发送 macOS 通知 |
+| 触发方式 | launchd `com.lifcc.refine-weekly-insights.plist` — **每周日 09:00** |
+| 数据来源 | 共享 LLM loader：当前进程 → `~/.refine/llm.env` → 显式传入的仓库 `.env` fallback |
+| 处理步骤 | 1) 通过共享 loader 做凭据 preflight（不读取 `~/.zshrc`）；2) 打印仅含 `<set>/<unset>` 和来源的 preflight；3) `refine ingest-sessions`（链路 1）；4) `refine insights --prescription`（链路 2）；5) `osascript` 发送 macOS 通知 |
 | LLM 调用 | **是（间接）**：= 链路 1 + 链路 2 的总和（单会话 N 次 + insights ≈ 11 次） |
 | 输出目标 | `~/Library/Logs/refine-insights.log`（日志） + 链路 1/2 的所有写入目标 |
 | 输出 schema | 无自身 schema，复用下游 |
-| 依赖 | `.env` 内的 LLM API key；依赖 `refine` 二进制绝对路径 `/Users/lifcc/.cargo/bin/refine` |
+| 依赖 | `~/.refine/llm.env` 内的 LLM API key（开发时可显式 fallback 到 `.env`）；依赖 `refine` 二进制绝对路径 `/Users/lifcc/.cargo/bin/refine` |
 | 已知问题 | `set -euo pipefail` 但对子命令 exit code 做了 `if ... 2>&1; then ... else ... fi` 兜底，只记录日志不中断；launchd 不重试失败 |
 
 ---
@@ -265,7 +265,7 @@ auto/remem: remem raw archive；local: filesystem scan
 | 链路 3 `score` (advice) | 1 次（72h 缓存） | 1 | 命中缓存后 0 次 |
 | 链路 4 `dashboard` / 链路 6 `motd` | **0 次** | — | 纯本地 |
 
-**每周一 9:00 的 launchd 任务（链路 8）= 链路 1 + 链路 2 的合计**，是 LLM 预算最集中的时间窗口。
+**每周日 09:00 的 launchd 任务（链路 8）= 链路 1 + 链路 2 的合计**，是 LLM 预算最集中的时间窗口。
 
 ### 3. 稳定性风险
 
@@ -297,6 +297,9 @@ auto/remem: remem raw archive；local: filesystem scan
 | `REFINE_OPENAI_API_KEY` | OpenAI API key（次优先级） | 或 `OPENAI_API_KEY` |
 | `REFINE_OPENAI_MODEL` | OpenAI 模型名 | |
 | `REFINE_OPENAI_BASE_URL` | OpenAI API base URL | |
+| `BASE_API_KEY` | 兼容网关 API key | 与 `BASE_URL`、`BASE_MODEL` 配套 |
+| `BASE_URL` | 兼容网关 URL | 由共享 loader 解析 |
+| `BASE_MODEL` | 兼容网关模型名 | 由共享 loader 解析 |
 
 ### 数据库 / 路径
 
@@ -329,7 +332,7 @@ auto/remem: remem raw archive；local: filesystem scan
 | `com.lifcc.refine-server` | `~/Library/LaunchAgents/com.lifcc.refine-server.plist` | 常驻 | **PID 4706 running** |
 | `com.lifcc.refine-ui-dev` | `~/Library/LaunchAgents/com.lifcc.refine-ui-dev.plist` | 常驻 | **PID 4696 running** |
 | `com.lifcc.refine-daily-ingest` | `~/Library/LaunchAgents/com.lifcc.refine-daily-ingest.plist` | **每天 08:00** | 未运行（调度中）；**last exit=1**（最近一次 ingest 失败） |
-| `com.lifcc.refine-weekly-insights` | `~/Library/LaunchAgents/com.lifcc.refine-weekly-insights.plist` | **每周一 09:00** | 未运行（调度中）；last exit=0 |
+| `com.lifcc.refine-weekly-insights` | `~/Library/LaunchAgents/com.lifcc.refine-weekly-insights.plist` | **每周日 09:00** | 未运行（调度中）；last exit=0 |
 
 ### 任务详情
 
@@ -350,10 +353,10 @@ auto/remem: remem raw archive；local: filesystem scan
 
 - 执行：`/bin/bash /Users/lifcc/Desktop/code/AI/tools/refine/scripts/weekly-insights.sh`
 - 工作目录：`/Users/lifcc/Desktop/code/AI/tools/refine`
-- 触发：每周一 09:00（`Weekday=1`）
+- 触发：每周日 09:00（`Weekday=1`，macOS launchd）
 - 日志：`~/Library/Logs/refine-insights.log`
 - 脚本做的事：
-  1. 从 `.env` 加载 env
+  1. 通过共享 loader 加载 LLM env；缺少 unattended key 时在 ingest 前失败
   2. `refine ingest-sessions`（链路 1，补捕最近 24h 新会话）
   3. `refine insights --prescription`（链路 2）
   4. `osascript` 通知 "Weekly insights 报告已生成"

@@ -304,7 +304,8 @@ load_plist() {
   local path="$1"
   local label="$2"
   local kickstart="${3:-0}"
-  local domain="gui/$(id -u)"
+  local domain
+  domain="gui/$(id -u)"
 
   launchctl bootout "$domain" "$path" >/dev/null 2>&1 || true
   launchctl bootstrap "$domain" "$path"
@@ -316,7 +317,8 @@ load_plist() {
 disable_plist() {
   local path="$1"
   local label="$2"
-  local domain="gui/$(id -u)"
+  local domain
+  domain="gui/$(id -u)"
 
   launchctl bootout "$domain" "$path" >/dev/null 2>&1 || true
   launchctl bootout "${domain}/${label}" >/dev/null 2>&1 || true
@@ -329,6 +331,21 @@ disable_plist() {
 }
 
 need_cmd cargo
+
+refine_dir="${HOME}/.refine"
+if [[ -L "$refine_dir" ]]; then
+  die "Refine directory is a symlink and was rejected: ${refine_dir}"
+fi
+mkdir -p "$refine_dir"
+chmod 700 "$refine_dir" || die "cannot secure Refine directory: ${refine_dir}"
+
+print_llm_setup_hint() {
+  local llm_env_file="${REFINE_LLM_ENV_FILE:-${refine_dir}/llm.env}"
+  if [[ -z "${REFINE_ANTHROPIC_API_KEY:-}${ANTHROPIC_AUTH_TOKEN:-}${ANTHROPIC_API_KEY:-}${REFINE_OPENAI_API_KEY:-}${OPENAI_API_KEY:-}${BASE_API_KEY:-}" && \
+    ! -f "$llm_env_file" ]]; then
+    log "LLM credentials are not configured for unattended jobs; review then run: bash ${repo_root}/scripts/configure-llm-env.sh --check"
+  fi
+}
 
 log "repo root: $repo_root"
 source_commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || printf 'unknown')"
@@ -376,12 +393,14 @@ fi
 
 if [[ "$launchd_enabled" != "1" ]]; then
   write_install_manifest
+  print_llm_setup_hint
   log "launchd disabled; binaries installed only"
   exit 0
 fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   write_install_manifest
+  print_llm_setup_hint
   log "launchd is only supported on macOS; binaries installed only"
   exit 0
 fi
@@ -424,5 +443,6 @@ if [[ "$start_services" == "1" ]]; then
 fi
 
 write_install_manifest
+print_llm_setup_hint
 log "done"
 log "Run scripts/doctor-local.sh to verify the local stack."

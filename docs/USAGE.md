@@ -55,15 +55,19 @@ cargo install --path apps/mirror
 cargo install --path apps/server
 ```
 
-### Configure LLM (optional but recommended)
+### Configure LLM (recommended for scheduled analysis)
 
 ```bash
-cat > .env << 'EOF'
-REFINE_OPENAI_API_KEY=your_key
-REFINE_OPENAI_BASE_URL=https://api.openai.com
-REFINE_OPENAI_MODEL=gpt-4o
-EOF
+bash scripts/configure-llm-env.sh --check
+bash scripts/configure-llm-env.sh --migrate
 ```
+
+Use `bash scripts/configure-llm-env.sh --from-env` when supported variables
+are already exported in the current shell. The unattended loader reads the
+user-owned `~/.refine/llm.env` without sourcing `~/.zshrc`; process credentials
+win over that file. A repository `.env` remains an explicit development
+fallback only, and scheduled scripts pass it to the loader after the process
+and secure-file sources.
 
 ## 3. Run Sync Stack (Server + Extension)
 

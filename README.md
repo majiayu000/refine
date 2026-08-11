@@ -24,12 +24,12 @@
 # Install the local stack: CLI tools, server, launchd jobs, and optional UI dev service
 scripts/install-local.sh
 
-# Configure LLM (.env file)
-cat > .env << 'EOF'
-REFINE_OPENAI_API_KEY=your_key
-REFINE_OPENAI_BASE_URL=https://api.openai.com
-REFINE_OPENAI_MODEL=gpt-4o
-EOF
+# Configure unattended LLM credentials (review first; no values are printed)
+bash scripts/configure-llm-env.sh --check
+bash scripts/configure-llm-env.sh --migrate
+
+# If supported variables are already exported in this shell, use:
+# bash scripts/configure-llm-env.sh --from-env
 
 # Set up Claude Code skills (one-time symlink)
 ln -s "$(pwd)/skills/cognitive-portrait" ~/.claude/skills/cognitive-portrait
@@ -129,7 +129,28 @@ scripts/doctor-local.sh
 | Schedule | Task | What It Does |
 |----------|------|-------------|
 | Daily 8:00 AM | `scripts/daily-refresh.sh` | `refine ingest-sessions` → `mirror score` → writes `~/.refine/last-refresh-ok` |
-| Weekly Mon 9:00 AM | `scripts/weekly-insights.sh` | `refine insights --prescription` (10-way LLM) |
+| Weekly Sunday 09:00 | `scripts/weekly-insights.sh` | `refine insights --prescription` (10-way LLM) |
+
+### LLM credential loading
+
+Unattended jobs use `~/.refine/llm.env` (mode `0600`, owned by the current
+user) and never source `~/.zshrc`. Loading order is: non-empty credentials
+already in the process, the secure user file, then an explicit repository
+`.env` fallback used by the daily and weekly scripts for development. Lower
+priority sources never replace an already-set credential.
+
+The migration helper accepts only literal `export BASE_URL=...`,
+`export BASE_API_KEY=...`, and `export BASE_MODEL=...` definitions. It creates
+a private backup under `~/.refine/backups`, removes only those definitions,
+and adds one managed source block for interactive shells. `--check` is a
+read-only dry run; `--migrate` is the explicit write operation. The installer
+does not copy or migrate secrets. Run `scripts/doctor-local.sh` after
+configuration to verify the same clean-environment preflight used by launchd.
+
+For a manual development-only fallback, a repository `.env` may contain
+supported variables such as `REFINE_OPENAI_API_KEY`,
+`REFINE_OPENAI_BASE_URL`, and `REFINE_OPENAI_MODEL`; scheduled scripts pass
+that path explicitly to the loader rather than sourcing it automatically.
 
 ### Configuration
 

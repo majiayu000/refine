@@ -12,21 +12,14 @@ log() {
   echo "${LOG_PREFIX} $(date '+%Y-%m-%d %H:%M:%S') $*"
 }
 
-# 加载 .env 配置（不修改文件，仅 export 到当前进程）
-if [[ -f "$ENV_FILE" ]]; then
-  log "Loading env from ${ENV_FILE}"
-  set -a
-  # shellcheck source=/dev/null
-  source "$ENV_FILE"
-  set +a
-else
-  log "WARNING: env file not found: ${ENV_FILE}"
-fi
-
-# launchd does not inherit interactive shell variables; fall back to BASE_* from zsh.
+# The loader applies process -> secure user file -> explicit project fallback.
+# It never sources ~/.zshrc or evaluates either env file.
 # shellcheck source=scripts/load-llm-env.sh
 source "${SCRIPT_DIR}/load-llm-env.sh"
-load_refine_llm_env
+if ! load_refine_llm_env "$ENV_FILE"; then
+  log "ERROR: unattended LLM credentials are unavailable; refusing to start ingest"
+  exit 1
+fi
 
 log "=== Weekly Insights Run Start ==="
 
@@ -34,8 +27,7 @@ log "=== Weekly Insights Run Start ==="
 log "Preflight: PATH=$PATH"
 log "Preflight: refine=$(command -v "$REFINE_BIN" 2>/dev/null && echo "$REFINE_BIN" || echo 'NOT FOUND')"
 log "Preflight: cwd=$(pwd)"
-log "Preflight: env REFINE_DB_PATH=${REFINE_DB_PATH:-<unset>} REFINE_ANTHROPIC_MODEL=${REFINE_ANTHROPIC_MODEL:-<unset>} REFINE_OPENAI_MODEL=${REFINE_OPENAI_MODEL:-<unset>} BASE_MODEL=${BASE_MODEL:-<unset>}"
-log "Preflight: keys REFINE_ANTHROPIC_API_KEY=$([[ -n "${REFINE_ANTHROPIC_API_KEY:-}" ]] && echo '<set>' || echo '<unset>') REFINE_OPENAI_API_KEY=$([[ -n "${REFINE_OPENAI_API_KEY:-}" ]] && echo '<set>' || echo '<unset>') BASE_API_KEY=$([[ -n "${BASE_API_KEY:-}" ]] && echo '<set>' || echo '<unset>')"
+log "Preflight: LLM source=${REFINE_LLM_ENV_SOURCE:-none} $(refine_llm_env_status)"
 
 # Step 1: 增量导入新会话
 log "Step 1: ingest-sessions"
