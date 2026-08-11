@@ -125,6 +125,17 @@ fn document_covers_remem_summary(document: &Document, summary: &RememSessionSumm
     document.source_version() == Some(expected.as_str())
 }
 
+fn legacy_document_covers_remem_summary(
+    document: &Document,
+    summary: &RememSessionSummary,
+) -> bool {
+    // Legacy documents predate source_version. Keep their historical
+    // timestamp-based prefilter so a metadata migration cannot turn every
+    // legacy session into an LLM refresh. Canonical remem documents must use
+    // the exact source snapshot above instead.
+    document.updated_at().timestamp() >= summary.last_epoch
+}
+
 fn document_with_source_version(document: &Document, source_version: &str) -> Document {
     Document::restore(RestoreDocumentParams {
         id: document.id().clone(),
@@ -287,7 +298,7 @@ async fn handle_remem_ingest_sessions_with_summaries(
                 &summary,
             )?;
             if legacy_document
-                .is_some_and(|document| document_covers_remem_summary(document, &summary))
+                .is_some_and(|document| legacy_document_covers_remem_summary(document, &summary))
             {
                 skipped_dup += 1;
                 continue;
@@ -328,12 +339,17 @@ async fn handle_remem_ingest_sessions_with_summaries(
         }
         if let Some(existing_doc) = existing_document.as_ref() {
             if existing_doc.raw_content() == raw_content {
-                if options.dry_run && !legacy_documents_to_delete.is_empty() {
-                    println!(
-                        "  [dry-run] {} | would remove {} superseded legacy document(s)",
-                        url,
-                        legacy_documents_to_delete.len()
-                    );
+                if options.dry_run {
+                    if existing_doc.source_version() != Some(source_version.as_str()) {
+                        println!("  [dry-run] {url} | would backfill source snapshot metadata");
+                    }
+                    if !legacy_documents_to_delete.is_empty() {
+                        println!(
+                            "  [dry-run] {} | would remove {} superseded legacy document(s)",
+                            url,
+                            legacy_documents_to_delete.len()
+                        );
+                    }
                 } else {
                     if existing_doc.source_version() != Some(source_version.as_str()) {
                         let versioned_document =
