@@ -15,6 +15,7 @@ MIN_INTERVAL_DAYS="${REFINE_PORTRAIT_MIN_INTERVAL_DAYS:-13}"
 # --dangerously-bypass-approvals-and-sandbox：那是交互式 shell 里的个人选择，
 # 定时任务无人监督，权限必须取最小可用集。
 AGENT_SANDBOX="${REFINE_PORTRAIT_SANDBOX:-workspace-write}"
+MIRROR_DIR="${REFINE_PORTRAIT_MIRROR_DIR:-${HOME}/.mirror}"
 LOG_PREFIX="[refine-portrait]"
 INDEX_FILE="${PORTRAIT_DIR}/INDEX.md"
 
@@ -75,10 +76,17 @@ if ! command -v "$AGENT_BIN" >/dev/null 2>&1; then
   notify "agent 未找到: ${AGENT_BIN}" "Refine Cognitive Portrait 失败"
   exit 1
 fi
+if [[ -L "$MIRROR_DIR" ]]; then
+  log "ERROR: refusing symlink Mirror state directory: ${MIRROR_DIR}"
+  exit 1
+fi
+mkdir -p "$MIRROR_DIR"
+chmod 700 "$MIRROR_DIR" 2>/dev/null || true
 
 start_marker=$(mktemp "${TMPDIR:-/tmp}/refine-portrait-start.XXXXXX")
 index_snapshot=$(mktemp "${TMPDIR:-/tmp}/refine-portrait-index.XXXXXX")
 index_existed=0
+run_committed=0
 if [[ -f "$INDEX_FILE" ]]; then
   cp "$INDEX_FILE" "$index_snapshot"
   index_existed=1
@@ -103,18 +111,34 @@ restore_portrait_index() {
   fi
 }
 
-log "执行 agent: ${AGENT_BIN} exec --sandbox ${AGENT_SANDBOX}"
+cleanup_incomplete_run() {
+  local exit_status=$?
+  local candidate
+  trap - EXIT HUP INT TERM
+  if [[ "$run_committed" != "1" ]]; then
+    while IFS= read -r candidate; do
+      [[ -n "$candidate" ]] && quarantine_portrait "$candidate"
+    done < <(find "$PORTRAIT_DIR" -maxdepth 1 -name 'cognitive-portrait-*.md' -newer "$start_marker" 2>/dev/null || true)
+    restore_portrait_index
+  fi
+  rm -f "$start_marker" "$index_snapshot"
+  exit "$exit_status"
+}
+
+trap cleanup_incomplete_run EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+log "执行 agent: ${AGENT_BIN} exec --sandbox ${AGENT_SANDBOX} --add-dir ${MIRROR_DIR}"
 rc=0
-(cd "$PROJECT_DIR" && "$AGENT_BIN" exec --sandbox "$AGENT_SANDBOX" \
+(cd "$PROJECT_DIR" && "$AGENT_BIN" exec --sandbox "$AGENT_SANDBOX" --add-dir "$MIRROR_DIR" \
   "运行 cognitive-portrait 技能，生成本期认知画像") 2>&1 || rc=$?
 
 # 产物校验：必须出现一份比本次启动更新的画像文件，否则视为静默阉割（U-29）。
 new_portrait=$(find "$PORTRAIT_DIR" -maxdepth 1 -name 'cognitive-portrait-*.md' -newer "$start_marker" 2>/dev/null | head -1 || true)
-rm -f "$start_marker"
 
 if [[ -z "$new_portrait" ]]; then
-  restore_portrait_index
-  rm -f "$index_snapshot"
   log "ERROR: agent 退出但未产出新画像（agent exit code ${rc}）"
   notify "agent 退出但未产出新画像，详见 refine-portrait.log" "Refine Cognitive Portrait 失败"
   exit 1
@@ -122,9 +146,6 @@ fi
 
 if [[ "$rc" -ne 0 ]]; then
   log "ERROR: agent 以非零状态退出: ${rc}（已产出 ${new_portrait}，但结果可能不完整）"
-  quarantine_portrait "$new_portrait"
-  restore_portrait_index
-  rm -f "$index_snapshot"
   notify "agent 非零退出 (${rc})，详见 refine-portrait.log" "Refine Cognitive Portrait 失败"
   exit 1
 fi
@@ -132,14 +153,13 @@ fi
 new_base=$(basename "$new_portrait")
 if [[ ! -f "$INDEX_FILE" ]] || ! grep -Fq "(./${new_base})" "$INDEX_FILE"; then
   log "ERROR: 新画像未写入归档索引: ${new_base}"
-  quarantine_portrait "$new_portrait"
-  restore_portrait_index
-  rm -f "$index_snapshot"
   notify "新画像未写入 INDEX.md，已隔离" "Refine Cognitive Portrait 失败"
   exit 1
 fi
 
-rm -f "$index_snapshot"
+run_committed=1
+rm -f "$start_marker" "$index_snapshot"
+trap - EXIT HUP INT TERM
 log "画像已生成: ${new_portrait}"
 notify "认知画像已生成: $(basename "$new_portrait")" "Refine Cognitive Portrait"
 log "=== Cognitive Portrait Run End ==="

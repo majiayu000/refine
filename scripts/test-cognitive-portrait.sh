@@ -27,6 +27,9 @@ printf '# candidate\n' > "$portrait"
 if [[ "$FAKE_UPDATE_INDEX" == "1" ]]; then
   printf '| [2026-08-12](./cognitive-portrait-2026-08-12-v9.md) |\n' >> "${REFINE_PORTRAIT_DIR}/INDEX.md"
 fi
+if [[ -n "${FAKE_AGENT_SLEEP:-}" ]]; then
+  sleep "$FAKE_AGENT_SLEEP"
+fi
 exit "$FAKE_AGENT_EXIT"
 EOF
   chmod 700 "${bin_dir}/fake-agent"
@@ -58,5 +61,29 @@ if run_case missing-index 0 0; then
 fi
 [[ ! -f "${TEST_ROOT}/missing-index/portraits/cognitive-portrait-2026-08-12-v9.md" ]] \
   || fail 'unindexed portrait remained eligible for throttling'
+
+interrupt_root="${TEST_ROOT}/interrupted"
+mkdir -p "${interrupt_root}/portraits" "${interrupt_root}/bin" "${interrupt_root}/home"
+printf '# Index\n' > "${interrupt_root}/portraits/INDEX.md"
+cp "${TEST_ROOT}/success/bin/fake-agent" "${interrupt_root}/bin/fake-agent"
+env -i HOME="${interrupt_root}/home" PATH="${interrupt_root}/bin:/usr/bin:/bin" \
+  REFINE_PORTRAIT_DIR="${interrupt_root}/portraits" \
+  REFINE_PORTRAIT_AGENT="${interrupt_root}/bin/fake-agent" \
+  REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+  FAKE_AGENT_EXIT=0 FAKE_UPDATE_INDEX=1 FAKE_AGENT_SLEEP=10 \
+  bash "${SCRIPT_DIR}/cognitive-portrait.sh" >/dev/null 2>&1 &
+wrapper_pid=$!
+for _attempt in 1 2 3 4 5; do
+  [[ -f "${interrupt_root}/portraits/cognitive-portrait-2026-08-12-v9.md" ]] && break
+  sleep 1
+done
+kill -TERM "$wrapper_pid"
+if wait "$wrapper_pid"; then
+  fail 'interrupted portrait wrapper exited successfully'
+fi
+[[ ! -f "${interrupt_root}/portraits/cognitive-portrait-2026-08-12-v9.md" ]] \
+  || fail 'interrupted portrait remained eligible for throttling'
+[[ "$(cat "${interrupt_root}/portraits/INDEX.md")" == '# Index' ]] \
+  || fail 'interrupted run left a dangling index entry'
 
 echo 'All cognitive portrait wrapper tests passed'
