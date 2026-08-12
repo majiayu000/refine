@@ -35,13 +35,12 @@ impl Drop for MigrationSnapshot {
     }
 }
 
-/// Copies rows from any legacy databases into `target`.
+/// Copies rows from any legacy databases into `target` and renames each legacy
+/// file to `<name>.migrated` after the target transaction commits.
 ///
-/// Legacy files deliberately remain at their original paths: an older process
-/// may still hold a writable connection and append rows after this pass. Future
-/// starts safely reconcile those rows through table-specific upserts. Source
-/// deletions are not propagated because legacy schemas have no tombstones. On failure,
-/// all writes for the failing source are rolled back and an `Err` is returned.
+/// On failure, the original legacy file and its first verified backup remain
+/// available. All target writes for the failing source are rolled back before
+/// the error is returned.
 pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
     let candidates = stale_db_candidates(target);
     if candidates.is_empty() {
@@ -64,6 +63,7 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
     for candidate in &candidates {
         let signature_before = source_signature(candidate)?;
         let previous_state = migration_state(&conn, candidate)?;
+        let migrated_path = with_suffix(candidate, ".migrated");
         if !force_reconcile()
             && cheap_signature_is_authoritative()
             && previous_state
@@ -71,8 +71,10 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
                 .map(|state| state.signature.as_str())
                 == Some(signature_before.as_str())
         {
+            archive_successful_source(candidate, &migrated_path)?;
             continue;
         }
+        ensure_archive_destinations_free(candidate, &migrated_path)?;
         let bak_path = with_suffix(candidate, ".pre-migration.bak");
         let snapshot = match create_consistent_backup(candidate, &bak_path) {
             Ok(snapshot) => snapshot,
@@ -91,11 +93,12 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
                 == Some(content_hash.as_str())
         {
             save_migration_state(&conn, candidate, &signature_after_snapshot, &content_hash)?;
+            archive_successful_source(candidate, &migrated_path)?;
             continue;
         }
 
-        // Import the exact verified snapshot. Concurrent rows committed after
-        // the snapshot remain in the legacy source for the next reconciliation.
+        // Import the exact verified snapshot; the live legacy file is archived
+        // only after the target transaction commits.
         let conn = Connection::open(target)
             .map_err(|e| format!("failed to reopen target DB {}: {}", target.display(), e))?;
         crate::infra::configure_sqlite_connection(&conn)
@@ -125,6 +128,7 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
         drop(conn);
         let rows =
             result.map_err(|e| format!("migration of {} failed: {}", candidate.display(), e))?;
+        archive_successful_source(candidate, &migrated_path)?;
 
         sources.push(candidate.clone());
         total_rows += rows;
@@ -380,62 +384,128 @@ fn backup_stall_timeout() -> Duration {
         .unwrap_or_else(|| Duration::from_secs(30))
 }
 
-fn forensic_bundle_path(source: &Path, unique: uuid::Uuid) -> PathBuf {
+fn ensure_archive_destinations_free(source: &Path, destination: &Path) -> Result<(), String> {
+    for suffix in ["", "-wal", "-shm"] {
+        let from = with_suffix(source, suffix);
+        let to = with_suffix(destination, suffix);
+        if from.exists() && to.exists() {
+            return Err(format!(
+                "cannot archive {} because destination {} already exists",
+                from.display(),
+                to.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn archive_successful_source(source: &Path, destination: &Path) -> Result<(), String> {
+    ensure_archive_destinations_free(source, destination)?;
+    std::fs::rename(source, destination)
+        .map_err(|e| format!("failed to rename {}: {}", source.display(), e))?;
+
+    // Keep companion files associated with the archived database. These are
+    // best-effort because the main database has already been archived and some
+    // platforms may not leave separate companions after close/checkpoint.
+    for suffix in ["-wal", "-shm"] {
+        let companion = with_suffix(source, suffix);
+        if companion.exists() {
+            let _ = std::fs::rename(&companion, with_suffix(destination, suffix));
+        }
+    }
+    Ok(())
+}
+
+fn forensic_bundle_path(source: &Path) -> Result<PathBuf, String> {
     let parent = source.parent().unwrap_or_else(|| Path::new("."));
     let name = source
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "legacy.db".to_string());
-    parent.join(format!("{name}.pre-migration.forensic-{unique}"))
+    let signature = source_signature(source)?;
+    let mut hasher = Sha256::new();
+    hasher.update(source.to_string_lossy().as_bytes());
+    hasher.update([0]);
+    hasher.update(signature.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    Ok(parent.join(format!("{name}.pre-migration.forensic-{}", &digest[..16])))
 }
 
 fn preserve_forensic_bundle(source: &Path) -> Result<(), String> {
-    let bundle = forensic_bundle_path(source, uuid::Uuid::new_v4());
-    std::fs::create_dir(&bundle).map_err(|e| {
-        format!(
-            "failed to create forensic bundle {}: {}",
-            bundle.display(),
-            e
-        )
-    })?;
-    let mut copied = Vec::new();
-    for suffix in ["", "-wal", "-shm"] {
-        let original = with_suffix(source, suffix);
-        if !original.exists() {
-            continue;
-        }
-        let name = if suffix.is_empty() {
-            "main.db".to_string()
-        } else {
-            format!("main.db{suffix}")
-        };
-        let forensic = bundle.join(&name);
-        std::fs::copy(&original, &forensic).map_err(|e| {
+    let bundle = forensic_bundle_path(source)?;
+    if bundle.exists() {
+        return Ok(());
+    }
+    let parent = bundle.parent().unwrap_or_else(|| Path::new("."));
+    let temp_bundle = parent.join(format!(
+        ".{}.tmp-{}",
+        bundle
+            .file_name()
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_else(|| "legacy-forensic".into()),
+        uuid::Uuid::new_v4()
+    ));
+    let result: Result<(), String> = (|| {
+        std::fs::create_dir(&temp_bundle).map_err(|e| {
             format!(
-                "failed to preserve forensic copy {} as {}: {}",
-                original.display(),
-                forensic.display(),
+                "failed to create forensic bundle {}: {}",
+                temp_bundle.display(),
                 e
             )
         })?;
-        copied.push(name);
-    }
-    std::fs::write(
-        bundle.join("MANIFEST.txt"),
-        format!(
-            "source={}\ncomplete=false\nfiles={}\n",
-            source.display(),
-            copied.join(",")
-        ),
-    )
-    .map_err(|e| {
-        format!(
-            "failed to write forensic manifest {}: {}",
-            bundle.display(),
-            e
+        let mut copied = Vec::new();
+        for suffix in ["", "-wal", "-shm"] {
+            let original = with_suffix(source, suffix);
+            if !original.exists() {
+                continue;
+            }
+            let name = if suffix.is_empty() {
+                "main.db".to_string()
+            } else {
+                format!("main.db{suffix}")
+            };
+            let forensic = temp_bundle.join(&name);
+            std::fs::copy(&original, &forensic).map_err(|e| {
+                format!(
+                    "failed to preserve forensic copy {} as {}: {}",
+                    original.display(),
+                    forensic.display(),
+                    e
+                )
+            })?;
+            copied.push(name);
+        }
+        std::fs::write(
+            temp_bundle.join("MANIFEST.txt"),
+            format!(
+                "source={}\ncomplete=false\nfiles={}\n",
+                source.display(),
+                copied.join(",")
+            ),
         )
-    })?;
-    Ok(())
+        .map_err(|e| {
+            format!(
+                "failed to write forensic manifest {}: {}",
+                temp_bundle.display(),
+                e
+            )
+        })?;
+        std::fs::rename(&temp_bundle, &bundle).map_err(|e| {
+            format!(
+                "failed to publish forensic bundle {}: {}",
+                bundle.display(),
+                e
+            )
+        })?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&temp_bundle);
+    }
+    if bundle.exists() {
+        return Ok(());
+    }
+    result
 }
 
 fn copy_all_tables(conn: &Connection, legacy_alias: &str) -> Result<usize, String> {
@@ -802,9 +872,10 @@ mod tests {
             MigrationReport::Migrated { rows_copied: 3, .. }
         ));
         assert!(
-            legacy.exists(),
-            "legacy DB remains for later reconciliation"
+            with_suffix(&legacy, ".migrated").exists(),
+            "legacy DB is archived after a successful commit"
         );
+        assert!(!legacy.exists());
 
         let tc = Connection::open(&target_path).unwrap();
         let conversation_count: i64 = tc
@@ -893,16 +964,16 @@ mod tests {
     }
 
     #[test]
-    fn later_updates_to_existing_ids_reconcile_by_version_and_state() {
+    fn newer_legacy_rows_update_existing_ids_by_version_and_state() {
         let tmp = TempDir::new().unwrap();
         let target = make_target_db(tmp.path());
+        let tc = Connection::open(&target).unwrap();
+        insert_item(&tc, "mutable-item");
+        drop(tc);
+
         let legacy = make_legacy_db_with_items(tmp.path(), "server.db");
         let lc = Connection::open(&legacy).unwrap();
         insert_item(&lc, "mutable-item");
-        drop(lc);
-        migrate_stale_dbs(&target).unwrap();
-
-        let lc = Connection::open(&legacy).unwrap();
         lc.execute(
             "UPDATE items SET content='corrected', updated_at='2026-01-02T00:00:00.900Z'
              WHERE id='mutable-item'",
@@ -924,25 +995,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(corrected, "corrected");
-
-        let lc = Connection::open(&legacy).unwrap();
-        lc.execute(
-            "UPDATE items SET content='stale', updated_at='2025-12-31T23:59:59Z'
-             WHERE id='mutable-item'",
-            [],
-        )
-        .unwrap();
-        drop(lc);
-        migrate_stale_dbs(&target).unwrap();
-        let still_corrected: String = Connection::open(&target)
-            .unwrap()
-            .query_row(
-                "SELECT content FROM items WHERE id='mutable-item'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(still_corrected, "corrected");
     }
 
     #[test]
@@ -1115,7 +1167,8 @@ mod tests {
         migrate_stale_dbs(&target).unwrap();
 
         assert!(tmp.path().join("server.db.pre-migration.bak").exists());
-        assert!(tmp.path().join("server.db").exists());
+        assert!(tmp.path().join("server.db.migrated").exists());
+        assert!(!tmp.path().join("server.db").exists());
     }
 
     #[test]
@@ -1146,6 +1199,20 @@ mod tests {
                 }),
             "corrupt main file must be preserved as an explicitly raw forensic copy"
         );
+
+        let second = migrate_stale_dbs(&target);
+        assert!(second.is_err());
+        let bundle_count = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("server.db.pre-migration.forensic-")
+            })
+            .count();
+        assert_eq!(bundle_count, 1, "same corrupt generation reuses its bundle");
     }
 
     #[test]
@@ -1223,7 +1290,7 @@ mod tests {
     }
 
     #[test]
-    fn live_wal_source_is_backed_up_and_late_writes_reconcile_next_run() {
+    fn live_wal_source_is_backed_up_and_archived_after_success() {
         let tmp = TempDir::new().unwrap();
         let target = make_target_db(tmp.path());
         let legacy = make_legacy_db_with_items(tmp.path(), "server.db");
@@ -1246,9 +1313,10 @@ mod tests {
             "target import must use the verified WAL-inclusive snapshot"
         );
         assert!(
-            legacy.exists(),
-            "source stays discoverable for late writers"
+            with_suffix(&legacy, ".migrated").exists(),
+            "source is archived only after the WAL-inclusive import commits"
         );
+        assert!(!legacy.exists());
 
         let backup = Connection::open(tmp.path().join("server.db.pre-migration.bak")).unwrap();
         assert_eq!(
@@ -1257,18 +1325,6 @@ mod tests {
             "SQLite backup must include committed WAL rows"
         );
         drop(backup);
-
-        insert_item(&lc, "late-item");
-        let second = migrate_stale_dbs(&target).unwrap();
-        assert!(matches!(
-            second,
-            MigrationReport::Migrated { rows_copied: 1, .. }
-        ));
-        assert_eq!(
-            item_count(&Connection::open(&target).unwrap(), "late-item"),
-            1,
-            "a write from an already-open legacy connection must reconcile later"
-        );
         drop(lc);
     }
 
