@@ -16,6 +16,13 @@ if ! load_refine_llm_env "${PROJECT_DIR}/.env"; then
   exit 1
 fi
 
+# shellcheck source=scripts/runtime-job-lock.sh
+source "${SCRIPT_DIR}/runtime-job-lock.sh"
+if [[ "${REFINE_RUNTIME_LOCK_ACTIVE:-}" != "1" ]]; then
+  run_refine_runtime_job_locked "${SCRIPT_DIR}/daily-refresh.sh" "$@"
+  exit $?
+fi
+
 QUOTA_FILE="$HOME/.refine/quota_exhausted_until"
 if [ -f "$QUOTA_FILE" ]; then
   UNTIL=$(cat "$QUOTA_FILE")
@@ -48,7 +55,7 @@ fi
 # 2. Refresh mirror score + LLM advice (run regardless of ingest result)
 echo "Step 2: mirror score"
 score_rc=0
-mirror score 2>&1 || score_rc=$?
+mirror score --require-advice 2>&1 || score_rc=$?
 if [ "$score_rc" -ne 0 ]; then
   echo "ERROR: Step 2 mirror score failed with exit code ${score_rc}" >&2
   FAILED_STEPS+=("mirror score")
@@ -85,14 +92,14 @@ fi
 
 echo "Done."
 
-# Write success timestamp only when ingest had zero failures
-if [ "$ingest_ok" -eq 1 ]; then
-  mkdir -p ~/.refine
-  date -u +%Y-%m-%dT%H:%M:%SZ > ~/.refine/last-refresh-ok
-fi
-
 if [ "$ingest_ok" -eq 0 ]; then
   FAILED_STEPS+=("ingest-sessions")
+fi
+
+# This marker represents the complete scheduled refresh, not ingestion alone.
+if [ ${#FAILED_STEPS[@]} -eq 0 ]; then
+  mkdir -p ~/.refine
+  date -u +%Y-%m-%dT%H:%M:%SZ > ~/.refine/last-refresh-ok
 fi
 
 # Propagate every user-visible failure to launchd/cron monitoring.

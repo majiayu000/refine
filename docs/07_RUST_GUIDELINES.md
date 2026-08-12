@@ -552,7 +552,7 @@ mod tests {
 name = "refine-core"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.88"
 
 [dependencies]
 # 异步运行时

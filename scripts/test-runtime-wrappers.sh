@@ -63,4 +63,88 @@ output=$(env -i HOME="$empty_home" PATH="/usr/bin:/bin" \
 [[ "$output" == *'extraction is disabled'* ]] || fail 'server wrapper did not explain query-only mode'
 [[ "$output" == *'no-llm-server-ok'* ]] || fail 'server wrapper did not start query-only server'
 
+# Scheduled workflows must not overlap and must recover stale locks.
+# shellcheck source=scripts/runtime-job-lock.sh
+source "${SCRIPT_DIR}/runtime-job-lock.sh"
+lock_file="${TEST_ROOT}/runtime-job.lock"
+REFINE_RUNTIME_JOB_LOCK_FILE="$lock_file"
+REFINE_RUNTIME_JOB_LOCK_WAIT_SECONDS=0
+run_refine_runtime_job_locked true || fail 'runtime job lock could not run a child command'
+[[ -f "$lock_file" ]] || fail 'runtime job lock did not create its lock file'
+printf '%s\n' '99999999' > "$lock_file"
+run_refine_runtime_job_locked true || fail 'runtime job lock treated a stale file as an owner'
+if run_refine_runtime_job_locked bash -c 'exit 17'; then
+  fail 'runtime job lock discarded the child exit status'
+fi
+
+# Exercise every installed backend. Two simultaneous contenders must remain
+# strictly serialized even when a stale lock file already exists on disk.
+lock_worker="${TEST_ROOT}/runtime-lock-worker.sh"
+cat > "$lock_worker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$RUNTIME_LOCK_HELPER"
+run_refine_runtime_job_locked bash -c \
+  'printf "start %s\n" "$$" >> "$RUNTIME_CRITICAL_LOG"; sleep 1; printf "end %s\n" "$$" >> "$RUNTIME_CRITICAL_LOG"'
+EOF
+chmod 700 "$lock_worker"
+for lock_backend in flock lockf; do
+  command -v "$lock_backend" >/dev/null 2>&1 || continue
+  printf '%s\n' '99999999' > "$lock_file"
+  critical_log="${TEST_ROOT}/runtime-critical-${lock_backend}.log"
+  for _worker in 1 2; do
+    env HOME="$home" REFINE_RUNTIME_JOB_LOCK_FILE="$lock_file" \
+      REFINE_RUNTIME_JOB_LOCK_WAIT_SECONDS=10 \
+      REFINE_RUNTIME_LOCK_BACKEND="$lock_backend" \
+      RUNTIME_LOCK_HELPER="${SCRIPT_DIR}/runtime-job-lock.sh" \
+      RUNTIME_CRITICAL_LOG="$critical_log" \
+      bash "$lock_worker" &
+  done
+  wait
+  critical_shape="$(awk '{print $1}' "$critical_log" | paste -sd, -)"
+  [[ "$critical_shape" == 'start,end,start,end' ]] \
+    || fail "runtime ${lock_backend} contenders overlapped: ${critical_shape}"
+done
+
+# A successful ingest must not publish a success marker when required advice
+# fails. The scheduled command must also request strict advice semantics.
+daily_home="${TEST_ROOT}/daily-home"
+mkdir -p "${daily_home}/.refine" "${daily_home}/.cargo/bin"
+chmod 700 "${daily_home}/.refine"
+printf '%s\n' "export BASE_API_KEY='daily-secret'" > "${daily_home}/.refine/llm.env"
+chmod 600 "${daily_home}/.refine/llm.env"
+cat > "${daily_home}/.cargo/bin/refine" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "${daily_home}/.cargo/bin/mirror" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  score)
+    [[ "${2:-}" == '--require-advice' ]] || exit 9
+    exit "${FAKE_MIRROR_EXIT:-0}"
+    ;;
+  weekly)
+    exit 0
+    ;;
+  *)
+    exit 9
+    ;;
+esac
+EOF
+chmod 700 "${daily_home}/.cargo/bin/refine" "${daily_home}/.cargo/bin/mirror"
+if env -i HOME="$daily_home" PATH="/usr/bin:/bin" FAKE_MIRROR_EXIT=7 \
+  REFINE_RUNTIME_JOB_LOCK_WAIT_SECONDS=0 \
+  bash "${SCRIPT_DIR}/daily-refresh.sh" >/dev/null 2>&1; then
+  fail 'daily refresh succeeded when required advice failed'
+fi
+[[ ! -e "${daily_home}/.refine/last-refresh-ok" ]] \
+  || fail 'daily refresh wrote success marker after required advice failed'
+env -i HOME="$daily_home" PATH="/usr/bin:/bin" FAKE_MIRROR_EXIT=0 \
+  REFINE_RUNTIME_JOB_LOCK_WAIT_SECONDS=0 \
+  bash "${SCRIPT_DIR}/daily-refresh.sh" >/dev/null 2>&1 \
+  || fail 'daily refresh did not succeed with all required steps healthy'
+[[ -f "${daily_home}/.refine/last-refresh-ok" ]] \
+  || fail 'daily refresh omitted success marker after complete success'
+
 printf 'All runtime wrapper tests passed\n'

@@ -100,7 +100,7 @@ where
 
 fn is_retryable_error(err: &InfraError) -> bool {
     if let InfraError::LlmHttp { status, .. } = err {
-        return *status == 408 || *status == 425 || (500..=599).contains(status);
+        return *status == 408 || *status == 425 || *status == 429 || (500..=599).contains(status);
     }
     if matches!(err, InfraError::LlmRejected { .. }) {
         return false;
@@ -119,6 +119,7 @@ fn is_retryable_error(err: &InfraError) -> bool {
         || msg.contains("stream closed before")
         || msg.contains("INTERNAL_ERROR; received from peer")
         || msg.contains("internal_server_error")
+        || msg.contains("system_cpu_overloaded")
 }
 
 fn backoff_delay_secs(base_delay_secs: u64, attempt: usize) -> u64 {
@@ -136,10 +137,17 @@ mod tests {
             status: 503,
             message: "moderation service unavailable".into(),
         }));
+        assert!(is_retryable_error(&InfraError::LlmHttp {
+            status: 429,
+            message: "rate limited".into(),
+        }));
         assert!(!is_retryable_error(&InfraError::LlmHttp {
             status: 400,
             message: "bad request".into(),
         }));
+        assert!(is_retryable_error(&InfraError::LlmRequest(
+            "system_cpu_overloaded".into()
+        )));
     }
     use crate::infra::quota_state::{is_exhausted as is_quota_exhausted, set_quota_file_override};
     use async_trait::async_trait;
@@ -251,6 +259,37 @@ mod tests {
         )
         .await
         .expect("should succeed after retry");
+
+        assert_eq!(result, "ok");
+        assert_eq!(client.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn retries_on_typed_http_429_then_succeeds() {
+        let _env_guard = QUOTA_TEST_LOCK.lock().await;
+        let _quota_guard = QuotaTestGuard::new();
+
+        let client = Arc::new(SequenceClient::new(vec![
+            Err(InfraError::LlmHttp {
+                status: 429,
+                message: "rate limited".into(),
+            }),
+            Ok("ok".into()),
+        ]));
+
+        let result = llm_with_retry_policy(
+            &(client.clone() as Arc<dyn LlmClient>),
+            "prompt",
+            "system",
+            LlmRetryPolicy {
+                max_retries: 3,
+                base_delay_secs: 0,
+                ..LlmRetryPolicy::default()
+            },
+            |_attempt, _max_retries, _delay_secs, _err| {},
+        )
+        .await
+        .expect("typed HTTP 429 should be retried");
 
         assert_eq!(result, "ok");
         assert_eq!(client.calls(), 2);

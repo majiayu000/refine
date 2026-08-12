@@ -11,6 +11,14 @@ mod persistence;
 mod signal;
 mod streak;
 
+#[test]
+fn required_advice_rejects_empty_observations() {
+    let error = finish_without_observations(true, "no observations")
+        .expect_err("required advice must fail without observations");
+    assert!(error.to_string().contains("cannot be generated"));
+    assert!(finish_without_observations(false, "no observations").is_ok());
+}
+
 pub(super) fn make_cluster(
     cognitive: HashMap<String, usize>,
     collab: HashMap<String, usize>,

@@ -71,6 +71,7 @@ pub async fn handle_score(
     llm: Option<Arc<dyn refine_core::infra::LlmClient>>,
     since: Option<String>,
     all: bool,
+    require_advice: bool,
     db_path: &Path,
 ) -> Result<()> {
     if all && since.is_some() {
@@ -95,28 +96,26 @@ pub async fn handle_score(
             .map_err(|e| anyhow::anyhow!("{}", e))?
     };
     if items.is_empty() {
-        println!(
-            "{}",
+        return finish_without_observations(
+            require_advice,
             crate::lang::t!(
                 "No observation data. Run `refine ingest-sessions` first.",
                 "暂无观测数据。请先运行 `refine ingest-sessions` 导入会话。"
-            )
+            ),
         );
-        return Ok(());
     }
     let obs_count = items
         .iter()
         .filter(|i| i.item_type() == ItemType::Observation)
         .count();
     if obs_count == 0 {
-        println!(
-            "{}",
+        return finish_without_observations(
+            require_advice,
             crate::lang::t!(
                 "No observation data in the time window. Run `refine ingest-sessions` first.",
                 "当前时间窗口内无观测数据。请先运行 `refine ingest-sessions` 导入会话。"
-            )
+            ),
         );
-        return Ok(());
     }
     let cluster = cluster_observations(&items);
     let config = crate::config::load();
@@ -186,15 +185,36 @@ pub async fn handle_score(
         }
     }
 
+    let mut advice_error = None;
     if let Some(llm) = llm {
         match crate::advice::generate_and_cache(&result, &llm).await {
             Ok(advice) => println!("\n  {} {}", crate::lang::t!("Advice:", "建议:"), advice),
-            Err(e) => tracing::error!("advice generation failed: {}", e),
+            Err(error) => {
+                tracing::error!("advice generation failed: {}", error);
+                advice_error = Some(error);
+            }
         }
+    } else if require_advice {
+        advice_error = Some(anyhow::anyhow!(
+            "LLM advice is required but no supported API key is configured"
+        ));
     }
 
     if let Err(e) = write_statusline(&result, db_path, trends.as_ref()) {
         tracing::warn!("failed to write statusline.txt: {}", e);
+    }
+    if require_advice {
+        if let Some(error) = advice_error {
+            return Err(error.context("required mirror advice generation failed"));
+        }
+    }
+    Ok(())
+}
+
+fn finish_without_observations(require_advice: bool, message: &str) -> Result<()> {
+    println!("{message}");
+    if require_advice {
+        anyhow::bail!("required mirror advice cannot be generated without observation data");
     }
     Ok(())
 }

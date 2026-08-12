@@ -88,12 +88,12 @@ fi
 
 run bash scripts/check_port_contract.sh
 run cargo fmt --all -- --check
-run cargo check --workspace
+run cargo check --workspace --locked
 if [[ "$skip_tests" != "1" ]]; then
-  run cargo test --workspace
+  run cargo test --workspace --locked
 fi
 if [[ "$skip_clippy" != "1" ]]; then
-  run cargo clippy --workspace -- -D warnings
+  run cargo clippy --workspace --locked -- -D warnings
 fi
 
 if [[ "$skip_ui" != "1" ]]; then

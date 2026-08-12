@@ -113,15 +113,6 @@ impl LlmClient for ClaudeClient {
             .await
             .map_err(|e| InfraError::LlmRequest(e.to_string()))?;
 
-        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after_secs = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok());
-            return Err(InfraError::RateLimited { retry_after_secs });
-        }
-
         if !resp.status().is_success() {
             let status = resp.status();
             let err = resp.text().await.unwrap_or_default();
@@ -209,15 +200,6 @@ impl LlmClient for OpenAIClient {
             .send()
             .await
             .map_err(|e| InfraError::LlmRequest(e.to_string()))?;
-
-        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after_secs = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok());
-            return Err(InfraError::RateLimited { retry_after_secs });
-        }
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -483,6 +465,15 @@ mod tests {
             r#"{"error":{"message":"upstream unavailable","code":"upstream_error"}}"#,
         );
         assert!(matches!(error, InfraError::LlmHttp { status: 503, .. }));
+    }
+
+    #[test]
+    fn provider_rate_limit_stays_retryable_http_error() {
+        let error = classify_provider_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":{"message":"rate limited","code":"rate_limit"}}"#,
+        );
+        assert!(matches!(error, InfraError::LlmHttp { status: 429, .. }));
     }
 
     #[test]

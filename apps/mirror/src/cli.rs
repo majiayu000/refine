@@ -27,6 +27,9 @@ pub enum Commands {
         /// Show all observations regardless of date (overrides default 90-day window)
         #[arg(long)]
         all: bool,
+        /// Return a failure if LLM advice cannot be generated (for automation).
+        #[arg(long)]
+        require_advice: bool,
     },
     /// One-line briefing (add to .zshrc)
     Motd,
