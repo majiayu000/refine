@@ -12,9 +12,27 @@ use refine_core::session::{
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
-const LLM_CONCURRENCY: usize = 10;
+const DEFAULT_LLM_CONCURRENCY: usize = 4;
 const FINAL_REPORT_REQUEST_TIMEOUT_MILLIS: u64 = 300_000;
 const INSIGHTS_PROMPT_IDENTITY: &str = "insights-v2:route-v1:final-v1";
+
+fn llm_concurrency() -> Result<usize> {
+    match std::env::var("REFINE_INSIGHTS_CONCURRENCY") {
+        Ok(raw) => parse_llm_concurrency(&raw),
+        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_LLM_CONCURRENCY),
+        Err(error) => Err(anyhow::anyhow!(
+            "failed to read REFINE_INSIGHTS_CONCURRENCY: {error}"
+        )),
+    }
+}
+
+fn parse_llm_concurrency(raw: &str) -> Result<usize> {
+    raw.trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| anyhow::anyhow!("REFINE_INSIGHTS_CONCURRENCY must be a positive integer"))
+}
 
 fn final_report_retry_policy() -> LlmRetryPolicy {
     LlmRetryPolicy {
@@ -104,13 +122,14 @@ pub async fn handle_insights(
         .iter()
         .filter(|route| checkpoint.contains_route(route.id))
         .count();
+    let llm_concurrency = llm_concurrency()?;
     println!(
-        "规划 {} 路 LLM 分析（checkpoint 命中 {} 路）...\n",
-        route_count, cached_count
+        "规划 {} 路 LLM 分析（checkpoint 命中 {} 路，最大并发 {}）...\n",
+        route_count, cached_count, llm_concurrency
     );
 
     // Step 3: 并发执行 LLM 分析
-    let semaphore = Arc::new(Semaphore::new(LLM_CONCURRENCY));
+    let semaphore = Arc::new(Semaphore::new(llm_concurrency));
     let mut handles = Vec::new();
 
     for route in routes
@@ -238,6 +257,19 @@ pub async fn handle_insights(
 
 #[cfg(test)]
 mod tests {
+    use super::parse_llm_concurrency;
+
+    #[test]
+    fn insights_concurrency_requires_a_positive_integer() {
+        assert_eq!(parse_llm_concurrency(" 3 ").unwrap(), 3);
+        assert!(parse_llm_concurrency("0").is_err());
+        assert!(parse_llm_concurrency("many").is_err());
+    }
+
+    #[test]
+    fn insights_default_concurrency_is_provider_friendly() {
+        assert_eq!(super::DEFAULT_LLM_CONCURRENCY, 4);
+    }
     use super::{final_report_retry_policy, FINAL_REPORT_REQUEST_TIMEOUT_MILLIS};
 
     #[test]

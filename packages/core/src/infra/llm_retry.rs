@@ -100,7 +100,7 @@ where
 
 fn is_retryable_error(err: &InfraError) -> bool {
     if let InfraError::LlmHttp { status, .. } = err {
-        return *status == 408 || *status == 425 || (500..=599).contains(status);
+        return *status == 408 || *status == 425 || *status == 429 || (500..=599).contains(status);
     }
     if matches!(err, InfraError::LlmRejected { .. }) {
         return false;
@@ -119,6 +119,7 @@ fn is_retryable_error(err: &InfraError) -> bool {
         || msg.contains("stream closed before")
         || msg.contains("INTERNAL_ERROR; received from peer")
         || msg.contains("internal_server_error")
+        || msg.contains("system_cpu_overloaded")
 }
 
 fn backoff_delay_secs(base_delay_secs: u64, attempt: usize) -> u64 {
@@ -136,10 +137,17 @@ mod tests {
             status: 503,
             message: "moderation service unavailable".into(),
         }));
+        assert!(is_retryable_error(&InfraError::LlmHttp {
+            status: 429,
+            message: "rate limited".into(),
+        }));
         assert!(!is_retryable_error(&InfraError::LlmHttp {
             status: 400,
             message: "bad request".into(),
         }));
+        assert!(is_retryable_error(&InfraError::LlmRequest(
+            "system_cpu_overloaded".into()
+        )));
     }
     use crate::infra::quota_state::{is_exhausted as is_quota_exhausted, set_quota_file_override};
     use async_trait::async_trait;

@@ -7,6 +7,13 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - Switched normal session facet ingestion to remem's exact-tuple, snapshot-paginated raw archive provider; replacement facets and deletion of matching local path-keyed Documents/items now commit in one transaction, preventing duplicate downstream observations. Direct transcript scanning remains available only through the temporary `--legacy-local-scan` rollback switch.
+- Serialized daily and weekly scheduled workflows, made the refresh success marker represent the complete required workflow, and added strict advice failure propagation for automation.
+- Reduced the default insights fan-out from 10 to 4 concurrent LLM requests; `REFINE_INSIGHTS_CONCURRENCY` can override it for provider capacity.
+- Committed `Cargo.lock`, raised the verified MSRV to Rust 1.88, and added a locked MSRV CI gate.
+
+### Fixed
+
+- Retry typed HTTP 429 responses and compatible-provider `system_cpu_overloaded` failures instead of treating them as final errors.
 
 ## [0.1.3] - 2026-06-09
 

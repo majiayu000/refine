@@ -31,8 +31,7 @@ pub(super) fn persist_score_to_path(path: &Path, result: &ScoreResult) -> Result
         .with_context(|| format!("failed to acquire score lock {}", lock_path.display()))?;
 
     let write_result = persist_score_to_path_locked(path, result);
-    let unlock_result = lock_file
-        .unlock()
+    let unlock_result = fs2::FileExt::unlock(&lock_file)
         .with_context(|| format!("failed to release score lock {}", lock_path.display()));
 
     write_result?;

@@ -21,6 +21,16 @@ if ! load_refine_llm_env "$ENV_FILE"; then
   exit 1
 fi
 
+# Daily ingestion can run for hours on a backlog. Serialize whole scheduled
+# workflows so weekly analysis never competes for SQLite or LLM capacity.
+# shellcheck source=scripts/runtime-job-lock.sh
+source "${SCRIPT_DIR}/runtime-job-lock.sh"
+acquire_refine_runtime_job_lock
+trap release_refine_runtime_job_lock EXIT
+trap 'release_refine_runtime_job_lock; exit 129' HUP
+trap 'release_refine_runtime_job_lock; exit 130' INT
+trap 'release_refine_runtime_job_lock; exit 143' TERM
+
 log "=== Weekly Insights Run Start ==="
 
 # Preflight: environment diagnostics for troubleshooting

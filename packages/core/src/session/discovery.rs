@@ -44,13 +44,13 @@ pub fn discover_sessions_in(
 
     if source_filter
         .as_ref()
-        .map_or(true, |s| *s == SessionSource::ClaudeCode)
+        .is_none_or(|s| *s == SessionSource::ClaudeCode)
     {
         discover_claude_code(home, &mut results, mtime_after);
     }
     if source_filter
         .as_ref()
-        .map_or(true, |s| *s == SessionSource::Codex)
+        .is_none_or(|s| *s == SessionSource::Codex)
     {
         discover_codex(home, &mut results, mtime_after);
     }
