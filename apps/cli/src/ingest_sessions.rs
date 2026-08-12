@@ -273,12 +273,20 @@ async fn handle_remem_ingest_sessions_with_summaries(
         fully_loaded += 1;
         let raw_content = remem_session.session.to_document_content();
         let source_version = content_source_version("remem", &raw_content);
-        let mut legacy_documents_to_delete = if legacy_identity_is_unique {
-            legacy_migration::matching_legacy_document_ids(
+        let legacy_documents_to_delete = if legacy_identity_is_unique {
+            let document_ids = legacy_migration::matching_legacy_document_ids(
                 &existing_documents,
                 &remem_session,
                 &raw_content,
-            )?
+            )?;
+            for document_id in &document_ids {
+                if !claimed_legacy_documents.insert(document_id.clone()) {
+                    anyhow::bail!(
+                        "legacy document {document_id} ambiguously matches multiple remem sessions"
+                    );
+                }
+            }
+            document_ids
         } else if let Some(document_id) =
             legacy_migration::legacy_document_covering_nonunique_summary(
                 &existing_documents,
@@ -297,8 +305,6 @@ async fn handle_remem_ingest_sessions_with_summaries(
         } else {
             Vec::new()
         };
-        legacy_documents_to_delete
-            .retain(|document_id| claimed_legacy_documents.insert(document_id.clone()));
         if let Some(existing_doc) = existing_document.as_ref() {
             if existing_doc.raw_content() == raw_content {
                 if options.dry_run {
