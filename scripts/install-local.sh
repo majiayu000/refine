@@ -14,6 +14,8 @@ Options:
   --token-auth      Require REFINE_API_TOKEN instead of local dev anonymous API access.
   --cognitive-portrait
                     Install the opt-in biweekly cognitive portrait LaunchAgent.
+  --no-cognitive-portrait
+                    Disable and remove the cognitive portrait LaunchAgent.
   -h, --help        Show this help.
 
 Defaults:
@@ -50,6 +52,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --cognitive-portrait)
       cognitive_portrait_enabled=1
+      ;;
+    --no-cognitive-portrait)
+      cognitive_portrait_enabled=0
       ;;
     -h|--help)
       usage
@@ -421,7 +426,7 @@ EOF
 }
 
 if [[ "$launchd_enabled" != "1" || "$(uname -s)" != "Darwin" ]]; then
-  resolve_cognitive_portrait_setting
+  cognitive_portrait_enabled=0
   write_install_manifest
   print_llm_setup_hint
   if [[ "$launchd_enabled" != "1" ]]; then
@@ -469,7 +474,14 @@ fi
 if [[ "$cognitive_portrait_enabled" == "1" ]]; then
   need_cmd codex
   portrait_agent_bin="$(command -v codex)"
-  write_portrait_plist "$portrait_plist" "$portrait_agent_bin" "$(dirname "$portrait_agent_bin"):${path_env}"
+  if command -v realpath >/dev/null 2>&1; then
+    portrait_agent_bin="$(realpath "$portrait_agent_bin")"
+  fi
+  portrait_node_bin="$(command -v node || true)"
+  if [[ -n "$portrait_node_bin" ]] && command -v realpath >/dev/null 2>&1; then
+    portrait_node_bin="$(realpath "$portrait_node_bin")"
+  fi
+  write_portrait_plist "$portrait_plist" "$portrait_agent_bin" "$(dirname "$portrait_node_bin"):${path_env}"
 fi
 
 for plist in "$server_plist" "$daily_plist" "$weekly_plist"; do
@@ -482,6 +494,8 @@ else
 fi
 if [[ "$cognitive_portrait_enabled" == "1" ]]; then
   plutil -lint "$portrait_plist" >/dev/null
+else
+  disable_plist "$portrait_plist" "com.lifcc.refine-cognitive-portrait"
 fi
 
 if [[ "$start_services" == "1" ]]; then
