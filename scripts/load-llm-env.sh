@@ -355,31 +355,35 @@ refine_llm_env_load_file() {
 load_refine_llm_env_impl() {
   local project_file="${1:-}"
   local require_key="${2:-1}"
-  local secure_file secure_has_key project_has_key
+  local secure_file secure_has_key project_has_key process_has_key
   local secure_exists=0 project_exists=0
 
   if refine_llm_env_has_api_key; then
-    REFINE_LLM_ENV_SOURCE='process'
-    export REFINE_LLM_ENV_SOURCE
-    return 0
+    process_has_key=1
+  else
+    process_has_key=0
   fi
 
   if ! secure_file="$(refine_llm_env_file_path)"; then
-    refine_llm_env_error 'HOME is not set; cannot determine the secure LLM env file'
-    return 1
+    if [[ "$process_has_key" == '1' ]]; then
+      secure_file=''
+    else
+      refine_llm_env_error 'HOME is not set; cannot determine the secure LLM env file'
+      return 1
+    fi
   fi
 
   secure_has_key=0
   project_has_key=0
   REFINE_LLM_ENV_SOURCE='none'
 
-  if [[ -L "$secure_file" || -e "$secure_file" ]]; then
+  if [[ -n "$secure_file" && ( -L "$secure_file" || -e "$secure_file" ) ]]; then
     secure_exists=1
     if ! refine_llm_env_validate_secure_file "$secure_file"; then
       return 1
     fi
     secure_has_key="$REFINE_LLM_ENV_FILE_HAS_API_KEY"
-    if ! refine_llm_env_load_file "$secure_file" 1 0; then
+    if ! refine_llm_env_load_file "$secure_file" 1 "$process_has_key"; then
       return 1
     fi
   fi
@@ -390,7 +394,7 @@ load_refine_llm_env_impl() {
       return 1
     fi
     project_has_key="$REFINE_LLM_ENV_FILE_HAS_API_KEY"
-    if [[ "$secure_has_key" == '1' ]]; then
+    if [[ "$process_has_key" == '1' || "$secure_has_key" == '1' ]]; then
       if ! refine_llm_env_load_file "$project_file" 0 1; then
         return 1
       fi
@@ -399,7 +403,9 @@ load_refine_llm_env_impl() {
     fi
   fi
 
-  if [[ "$secure_has_key" == '1' ]]; then
+  if [[ "$process_has_key" == '1' ]]; then
+    REFINE_LLM_ENV_SOURCE='process'
+  elif [[ "$secure_has_key" == '1' ]]; then
     REFINE_LLM_ENV_SOURCE='secure-file'
   elif [[ "$project_has_key" == '1' ]]; then
     REFINE_LLM_ENV_SOURCE='project-env'

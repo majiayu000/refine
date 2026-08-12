@@ -92,17 +92,28 @@ pub(super) fn matching_legacy_document_ids(
     Ok(Vec::new())
 }
 
-pub(super) fn legacy_document_covers_nonunique_summary(
+pub(super) fn legacy_document_covering_nonunique_summary(
     documents: &[Document],
     remem_session: &RememSession,
     raw_content: &str,
-) -> bool {
-    remem_session.source_root == LOCAL_SOURCE_ROOT
-        && documents.iter().any(|document| {
-            LEGACY_SOURCES.contains(&document.source())
-                && url_matches_session_id(document.url(), &remem_session.session_id)
-                && document.raw_content() == raw_content
+) -> Option<DocumentId> {
+    (remem_session.source_root == LOCAL_SOURCE_ROOT)
+        .then(|| {
+            documents.iter().find(|document| {
+                LEGACY_SOURCES.contains(&document.source())
+                    && url_matches_session_id(document.url(), &remem_session.session_id)
+                    && document.raw_content() == raw_content
+            })
         })
+        .flatten()
+        .map(|document| document.id().clone())
+}
+
+pub(super) fn claim_legacy_coverage_once(
+    claimed: &mut HashSet<DocumentId>,
+    document_id: Option<DocumentId>,
+) -> bool {
+    document_id.is_some_and(|document_id| claimed.insert(document_id))
 }
 
 fn unique_match(matches: Vec<&Document>, remem_session: &RememSession) -> Result<Vec<DocumentId>> {
@@ -326,21 +337,40 @@ mod tests {
         let legacy = document("codex-session", "/tmp/session-1.jsonl", "same", 10);
         let documents = vec![legacy];
 
-        assert!(legacy_document_covers_nonunique_summary(
+        assert!(legacy_document_covering_nonunique_summary(
             &documents,
             &remem("local", "session-1"),
             "same",
-        ));
-        assert!(!legacy_document_covers_nonunique_summary(
+        )
+        .is_some());
+        assert!(legacy_document_covering_nonunique_summary(
             &documents,
             &remem("local", "session-1"),
             "same plus append",
-        ));
-        assert!(!legacy_document_covers_nonunique_summary(
+        )
+        .is_none());
+        assert!(legacy_document_covering_nonunique_summary(
             &documents,
             &remem("remote", "session-1"),
             "same",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn nonunique_legacy_coverage_can_only_be_claimed_once() {
+        let legacy = document("codex-session", "/tmp/session-1.jsonl", "same", 10);
+        let mut claimed = HashSet::new();
+
+        assert!(claim_legacy_coverage_once(
+            &mut claimed,
+            Some(legacy.id().clone())
         ));
+        assert!(!claim_legacy_coverage_once(
+            &mut claimed,
+            Some(legacy.id().clone())
+        ));
+        assert!(!claim_legacy_coverage_once(&mut claimed, None));
     }
 
     #[test]

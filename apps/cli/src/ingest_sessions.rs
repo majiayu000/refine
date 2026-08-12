@@ -273,29 +273,32 @@ async fn handle_remem_ingest_sessions_with_summaries(
         fully_loaded += 1;
         let raw_content = remem_session.session.to_document_content();
         let source_version = content_source_version("remem", &raw_content);
-        let legacy_documents_to_delete = if legacy_identity_is_unique {
+        let mut legacy_documents_to_delete = if legacy_identity_is_unique {
             legacy_migration::matching_legacy_document_ids(
                 &existing_documents,
                 &remem_session,
                 &raw_content,
             )?
-        } else if legacy_migration::legacy_document_covers_nonunique_summary(
-            &existing_documents,
-            &remem_session,
-            &raw_content,
-        ) {
-            skipped_dup += 1;
-            continue;
+        } else if let Some(document_id) =
+            legacy_migration::legacy_document_covering_nonunique_summary(
+                &existing_documents,
+                &remem_session,
+                &raw_content,
+            )
+        {
+            if legacy_migration::claim_legacy_coverage_once(
+                &mut claimed_legacy_documents,
+                Some(document_id),
+            ) {
+                skipped_dup += 1;
+                continue;
+            }
+            Vec::new()
         } else {
             Vec::new()
         };
-        for document_id in &legacy_documents_to_delete {
-            if !claimed_legacy_documents.insert(document_id.clone()) {
-                anyhow::bail!(
-                    "legacy document {document_id} matched more than one remem tuple; refusing destructive cleanup"
-                );
-            }
-        }
+        legacy_documents_to_delete
+            .retain(|document_id| claimed_legacy_documents.insert(document_id.clone()));
         if let Some(existing_doc) = existing_document.as_ref() {
             if existing_doc.raw_content() == raw_content {
                 if options.dry_run {

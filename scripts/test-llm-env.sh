@@ -81,22 +81,41 @@ run_config() {
 
 printf 'Testing shared LLM env loader and migration helper\n'
 
-# Process credentials remain authoritative over an insecure secure-file and a
-# conflicting project fallback, and no credential value is printed by probe.
+# Process credentials remain authoritative while unset companion settings are
+# loaded from lower-priority files, and no credential value is printed.
 home="$(new_home process-priority)"
-write_text "${home}/.refine/llm.env" "export BASE_API_KEY='secure-secret'"
-chmod 644 "${home}/.refine/llm.env"
-write_text "${home}/project.env" "export BASE_API_KEY='project-secret'"
+write_text "${home}/.refine/llm.env" "export BASE_API_KEY='secure-secret'
+export BASE_URL='https://secure.example.invalid'"
+chmod 600 "${home}/.refine/llm.env"
+write_text "${home}/project.env" "export BASE_API_KEY='project-secret'
+export BASE_MODEL='project-model'"
 process_output="$(env HOME="$home" \
   REFINE_LLM_ENV_FILE="${home}/.refine/llm.env" \
   REFINE_LOADER="$LOADER" \
   REFINE_PROJECT="${home}/project.env" \
-  bash -c "${unset_supported_command}; export BASE_API_KEY='process-secret'; source \"\$REFINE_LOADER\"; load_refine_llm_env \"\$REFINE_PROJECT\"; [[ \"\$BASE_API_KEY\" == 'process-secret' && \"\$REFINE_LLM_ENV_SOURCE\" == 'process' ]]; printf 'process-priority-ok\\n'" 2>&1)" || fail 'process-priority probe failed'
+  bash -c "${unset_supported_command}; export BASE_API_KEY='process-secret'; source \"\$REFINE_LOADER\"; load_refine_llm_env \"\$REFINE_PROJECT\"; [[ \"\$BASE_API_KEY\" == 'process-secret' && \"\$BASE_URL\" == 'https://secure.example.invalid' && \"\$BASE_MODEL\" == 'project-model' && \"\$REFINE_LLM_ENV_SOURCE\" == 'process' ]]; printf 'process-priority-ok\\n'" 2>&1)" || fail 'process-priority probe failed'
 assert_contains "$process_output" 'process-priority-ok' 'process priority result missing'
 assert_not_contains "$process_output" 'process-secret' 'process secret appeared in output'
 assert_not_contains "$process_output" 'secure-secret' 'secure secret appeared in output'
 assert_not_contains "$process_output" 'project-secret' 'project secret appeared in output'
 printf 'PASS process environment priority\n'
+
+# Lower-priority files are validated before their companion settings are used.
+home="$(new_home process-insecure-lower)"
+write_text "${home}/.refine/llm.env" "export BASE_URL='https://insecure.example.invalid'"
+chmod 644 "${home}/.refine/llm.env"
+if env HOME="$home" REFINE_LLM_ENV_FILE="${home}/.refine/llm.env" REFINE_LOADER="$LOADER" \
+  bash -c "${unset_supported_command}; export BASE_API_KEY='process-secret'; source \"\$REFINE_LOADER\"; load_refine_llm_env" >/dev/null 2>&1; then
+  fail 'process key accepted companion settings from an insecure file'
+fi
+printf 'PASS process companion settings remain fail-closed\n'
+
+process_only_output="$(env -i PATH="$PATH" REFINE_LOADER="$LOADER" BASE_API_KEY='process-only-secret' \
+  bash -c 'source "$REFINE_LOADER"; load_refine_llm_env; [[ "$REFINE_LLM_ENV_SOURCE" == process ]]; printf "process-only-ok\n"' 2>&1)" \
+  || fail 'process-only credentials unexpectedly required HOME'
+assert_contains "$process_only_output" 'process-only-ok' 'process-only result missing'
+assert_not_contains "$process_only_output" 'process-only-secret' 'process-only secret appeared in output'
+printf 'PASS process-only credentials without HOME\n'
 
 # Server startup may run without an LLM for query-only operation, while still
 # rejecting malformed credential files.

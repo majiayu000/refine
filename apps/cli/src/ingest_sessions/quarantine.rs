@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
@@ -25,6 +26,7 @@ pub(super) struct QuarantineStore {
     path: PathBuf,
     records: BTreeMap<String, QuarantineRecord>,
     dirty: bool,
+    _lock_file: std::fs::File,
 }
 
 impl QuarantineStore {
@@ -33,6 +35,28 @@ impl QuarantineStore {
     }
 
     pub(super) fn load_from(path: PathBuf) -> Result<Self> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("隔离队列路径没有父目录: {}", path.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("创建 ingest 隔离目录失败: {}", parent.display()))?;
+        secure_default_parent(parent)?;
+        let lock_path = path.with_extension("lock");
+        let mut lock_options = std::fs::OpenOptions::new();
+        lock_options
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false);
+        #[cfg(unix)]
+        lock_options.mode(0o600);
+        let lock_file = lock_options
+            .open(&lock_path)
+            .with_context(|| format!("打开 ingest 隔离锁失败: {}", lock_path.display()))?;
+        lock_file
+            .lock_exclusive()
+            .with_context(|| format!("获取 ingest 隔离锁失败: {}", lock_path.display()))?;
+
         let content = match std::fs::read_to_string(&path) {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -64,6 +88,7 @@ impl QuarantineStore {
             path,
             records,
             dirty: false,
+            _lock_file: lock_file,
         })
     }
 
@@ -223,6 +248,7 @@ mod tests {
             "blocked again",
         );
         store.save_if_dirty().unwrap();
+        drop(store);
 
         let loaded = QuarantineStore::load_from(path).unwrap();
         assert_eq!(loaded.len(), 1);
@@ -230,6 +256,38 @@ mod tests {
             loaded.records[&record_key("remem://one", Some("v1"))].attempts,
             2
         );
+    }
+
+    #[test]
+    fn concurrent_read_modify_write_preserves_both_updates() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("queue.jsonl");
+        let first_path = path.clone();
+        let second_path = path.clone();
+        let (locked_tx, locked_rx) = mpsc::channel();
+
+        let first = thread::spawn(move || {
+            let mut store = QuarantineStore::load_from(first_path).unwrap();
+            store.record("remem://one", Some("v1"), "blocked", "one");
+            locked_tx.send(()).unwrap();
+            thread::sleep(Duration::from_millis(100));
+            store.save_if_dirty().unwrap();
+        });
+        locked_rx.recv().unwrap();
+        let second = thread::spawn(move || {
+            let mut store = QuarantineStore::load_from(second_path).unwrap();
+            store.record("remem://two", Some("v1"), "blocked", "two");
+            store.save_if_dirty().unwrap();
+        });
+
+        first.join().unwrap();
+        second.join().unwrap();
+        let loaded = QuarantineStore::load_from(path).unwrap();
+        assert_eq!(loaded.len(), 2);
     }
 
     #[test]
