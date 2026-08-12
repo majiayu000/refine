@@ -22,6 +22,11 @@ struct MigrationSnapshot {
     remove_on_drop: bool,
 }
 
+struct MigrationState {
+    signature: String,
+    content_hash: String,
+}
+
 impl Drop for MigrationSnapshot {
     fn drop(&mut self) {
         if self.remove_on_drop {
@@ -58,8 +63,13 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
 
     for candidate in &candidates {
         let signature_before = source_signature(candidate)?;
+        let previous_state = migration_state(&conn, candidate)?;
         if !force_reconcile()
-            && migration_signature(&conn, candidate)?.as_deref() == Some(&signature_before)
+            && cheap_signature_is_authoritative()
+            && previous_state
+                .as_ref()
+                .map(|state| state.signature.as_str())
+                == Some(signature_before.as_str())
         {
             continue;
         }
@@ -71,6 +81,18 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
                 return Err(error);
             }
         };
+        let content_hash = hash_file(&snapshot.path)?;
+        let signature_after_snapshot = source_signature(candidate)?;
+        if !force_reconcile()
+            && signature_after_snapshot == signature_before
+            && previous_state
+                .as_ref()
+                .map(|state| state.content_hash.as_str())
+                == Some(content_hash.as_str())
+        {
+            save_migration_state(&conn, candidate, &signature_after_snapshot, &content_hash)?;
+            continue;
+        }
 
         // Import the exact verified snapshot. Concurrent rows committed after
         // the snapshot remain in the legacy source for the next reconciliation.
@@ -94,7 +116,7 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
             let rows = copy_all_tables(&tx, "refine_migration_src")?;
             let signature_after = source_signature(candidate)?;
             if signature_after == signature_before {
-                save_migration_signature(&tx, candidate, &signature_after)?;
+                save_migration_state(&tx, candidate, &signature_after, &content_hash)?;
             }
             tx.commit()
                 .map_err(|e| format!("failed to commit migration transaction: {e}"))?;
@@ -123,35 +145,55 @@ fn prepare_migration_state(conn: &Connection) -> Result<(), String> {
         "CREATE TABLE IF NOT EXISTS refine_legacy_migration_state (
             source_path TEXT PRIMARY KEY,
             signature TEXT NOT NULL,
+            content_hash TEXT NOT NULL DEFAULT '',
             migrated_at TEXT NOT NULL
         )",
     )
-    .map_err(|e| format!("failed to prepare legacy migration state: {e}"))
+    .map_err(|e| format!("failed to prepare legacy migration state: {e}"))?;
+    let columns = table_columns(conn, "main", "refine_legacy_migration_state")?;
+    if !columns.iter().any(|column| column == "content_hash") {
+        conn.execute_batch(
+            "ALTER TABLE refine_legacy_migration_state
+             ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
+        )
+        .map_err(|e| format!("failed to upgrade legacy migration state: {e}"))?;
+    }
+    Ok(())
 }
 
-fn migration_signature(conn: &Connection, source: &Path) -> Result<Option<String>, String> {
+fn migration_state(conn: &Connection, source: &Path) -> Result<Option<MigrationState>, String> {
     conn.query_row(
-        "SELECT signature FROM refine_legacy_migration_state WHERE source_path=?1",
+        "SELECT signature, content_hash FROM refine_legacy_migration_state WHERE source_path=?1",
         [source.to_string_lossy().as_ref()],
-        |row| row.get(0),
+        |row| {
+            Ok(MigrationState {
+                signature: row.get(0)?,
+                content_hash: row.get(1)?,
+            })
+        },
     )
     .optional()
     .map_err(|e| format!("failed to read legacy migration state: {e}"))
 }
 
-fn save_migration_signature(
+fn save_migration_state(
     conn: &Connection,
     source: &Path,
     signature: &str,
+    content_hash: &str,
 ) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO refine_legacy_migration_state (source_path, signature, migrated_at)
-         VALUES (?1, ?2, ?3)
+        "INSERT INTO refine_legacy_migration_state
+           (source_path, signature, content_hash, migrated_at)
+         VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(source_path) DO UPDATE SET
-           signature=excluded.signature, migrated_at=excluded.migrated_at",
+           signature=excluded.signature,
+           content_hash=excluded.content_hash,
+           migrated_at=excluded.migrated_at",
         params![
             source.to_string_lossy().as_ref(),
             signature,
+            content_hash,
             chrono::Utc::now().to_rfc3339()
         ],
     )
@@ -170,24 +212,23 @@ fn source_signature(source: &Path) -> Result<String, String> {
                     .map_err(|e| format!("failed to read mtime for {}: {e}", path.display()))?
                     .duration_since(UNIX_EPOCH)
                     .map_err(|e| format!("invalid mtime for {}: {e}", path.display()))?;
-                let mut file = std::fs::File::open(&path)
-                    .map_err(|e| format!("failed to open {} for signature: {e}", path.display()))?;
-                let mut hasher = Sha256::new();
-                let mut buffer = [0u8; 64 * 1024];
-                loop {
-                    let read = file.read(&mut buffer).map_err(|e| {
-                        format!("failed to hash legacy source {}: {e}", path.display())
-                    })?;
-                    if read == 0 {
-                        break;
-                    }
-                    hasher.update(&buffer[..read]);
-                }
+                #[cfg(unix)]
+                let identity = {
+                    use std::os::unix::fs::MetadataExt;
+                    format!(
+                        ":{}:{}:{}",
+                        metadata.ino(),
+                        metadata.ctime(),
+                        metadata.ctime_nsec()
+                    )
+                };
+                #[cfg(not(unix))]
+                let identity = String::new();
                 parts.push(format!(
-                    "{suffix}:{}:{}:{:x}",
+                    "{suffix}:{}:{}{}",
                     metadata.len(),
                     modified.as_nanos(),
-                    hasher.finalize()
+                    identity
                 ));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -197,6 +238,37 @@ fn source_signature(source: &Path) -> Result<String, String> {
         }
     }
     Ok(parts.join("|"))
+}
+
+#[cfg(unix)]
+fn cheap_signature_is_authoritative() -> bool {
+    true
+}
+
+#[cfg(not(unix))]
+fn cheap_signature_is_authoritative() -> bool {
+    false
+}
+
+fn hash_file(path: &Path) -> Result<String, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| {
+        format!(
+            "failed to open snapshot {} for hashing: {e}",
+            path.display()
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| format!("failed to hash snapshot {}: {e}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn force_reconcile() -> bool {
@@ -229,7 +301,7 @@ fn create_consistent_backup(
         {
             let backup = Backup::new(&source_conn, &mut destination_conn)
                 .map_err(|e| format!("failed to start backup of {}: {}", source.display(), e))?;
-            run_backup_with_deadline(&backup, source, Duration::from_secs(5))?;
+            run_backup_with_deadline(&backup, source, backup_stall_timeout())?;
         }
         let integrity: String = destination_conn
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
@@ -276,27 +348,36 @@ fn run_backup_with_deadline(
     source: &Path,
     timeout: Duration,
 ) -> Result<(), String> {
-    let started = Instant::now();
+    let mut last_progress = Instant::now();
     loop {
         let step = backup
             .step(128)
             .map_err(|e| format!("failed to backup {}: {}", source.display(), e))?;
         match step {
             StepResult::Done => return Ok(()),
+            StepResult::More => last_progress = Instant::now(),
             StepResult::Busy | StepResult::Locked => {
+                if last_progress.elapsed() >= timeout {
+                    return Err(format!(
+                        "backup made no progress for {}ms while reading {}",
+                        timeout.as_millis(),
+                        source.display()
+                    ));
+                }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            StepResult::More => {}
             _ => {}
         }
-        if started.elapsed() >= timeout {
-            return Err(format!(
-                "timed out after {}ms backing up {}",
-                timeout.as_millis(),
-                source.display()
-            ));
-        }
     }
+}
+
+fn backup_stall_timeout() -> Duration {
+    std::env::var("REFINE_LEGACY_BACKUP_STALL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(30))
 }
 
 fn forensic_bundle_path(source: &Path, unique: uuid::Uuid) -> PathBuf {
@@ -516,7 +597,21 @@ fn copy_table(conn: &Connection, table: &str, legacy_alias: &str) -> Result<usiz
         .collect::<Vec<_>>()
         .join(", ");
     let conflict = match table {
-        "items" | "documents" | "extraction_jobs" if common.iter().any(|c| c == "updated_at") => {
+        "documents" if common.iter().any(|c| c == "updated_at") => {
+            "ON CONFLICT(id) DO UPDATE SET \
+                   title=CASE \
+                     WHEN TRIM(COALESCE(excluded.title, '')) = '' THEN documents.title \
+                     ELSE excluded.title END, \
+                   raw_content=excluded.raw_content, \
+                   source_version=excluded.source_version, \
+                   captured_at=excluded.captured_at, \
+                   updated_at=excluded.updated_at \
+                 WHERE julianday(excluded.updated_at) > julianday(documents.updated_at) \
+                    OR (julianday(excluded.updated_at) = julianday(documents.updated_at) \
+                        AND excluded.updated_at > documents.updated_at)"
+                .to_string()
+        }
+        "items" | "extraction_jobs" if common.iter().any(|c| c == "updated_at") => {
             format!(
                 "ON CONFLICT(id) DO UPDATE SET {assignments} \
                  WHERE julianday(excluded.updated_at) > julianday({table}.updated_at) \
@@ -882,7 +977,7 @@ mod tests {
                (id, title, raw_content, source, url, source_version,
                 captured_at, created_at, updated_at)
              VALUES
-               ('source-doc', 'New', 'new', 'legacy', 'https://example.com/shared', 'v2',
+               ('source-doc', '', 'new', 'other-source', 'https://example.com/shared', 'v2',
                 '2026-01-02T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z');
              INSERT INTO items
                (id, item_type, title, summary, content, tags, created_at, updated_at, document_id)
@@ -911,14 +1006,32 @@ mod tests {
         migrate_stale_dbs(&target).unwrap();
 
         let tc = Connection::open(&target).unwrap();
-        let document: (String, String) = tc
+        let document: (String, String, String, String, String) = tc
             .query_row(
-                "SELECT id, raw_content FROM documents WHERE url='https://example.com/shared'",
+                "SELECT id, title, raw_content, source, created_at
+                 FROM documents WHERE url='https://example.com/shared'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .unwrap();
-        assert_eq!(document, ("target-doc".into(), "new".into()));
+        assert_eq!(
+            document,
+            (
+                "target-doc".into(),
+                "Old".into(),
+                "new".into(),
+                "legacy".into(),
+                "2026-01-01T00:00:00Z".into()
+            )
+        );
         let item_document: String = tc
             .query_row(
                 "SELECT document_id FROM items WHERE id='mapped-item'",
@@ -968,11 +1081,14 @@ mod tests {
         filetime::set_file_mtime(&source, fixed).unwrap();
         let after = source_signature(&source).unwrap();
 
+        #[cfg(unix)]
         assert_ne!(before, after);
+        #[cfg(not(unix))]
+        assert_eq!(before, after);
     }
 
     #[test]
-    fn backup_deadline_covers_progressing_more_steps() {
+    fn progressing_backup_is_not_stopped_by_stall_timeout() {
         let tmp = TempDir::new().unwrap();
         let source = Connection::open(tmp.path().join("large.db")).unwrap();
         source
@@ -987,9 +1103,7 @@ mod tests {
         let mut destination = Connection::open(tmp.path().join("backup.db")).unwrap();
         let backup = Backup::new(&source, &mut destination).unwrap();
 
-        let result = run_backup_with_deadline(&backup, Path::new("large.db"), Duration::ZERO);
-
-        assert!(result.unwrap_err().contains("timed out"));
+        run_backup_with_deadline(&backup, Path::new("large.db"), Duration::ZERO).unwrap();
     }
 
     #[test]
