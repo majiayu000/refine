@@ -208,7 +208,7 @@ Write to: `docs/cognitive-portraits/cognitive-portrait-{date}-v3.md`
 Append a row to `docs/cognitive-portraits/INDEX.md`:
 
 ```
-| {date} | {sessions_count} | {total_lines} | {L1_lines} | {L2_lines} | {L3_lines} | {L4_lines} | {pass/fail} |
+| [{date}](./cognitive-portrait-{date}-v3.md) | v3 | {sessions_count} | {total_lines} | {L1_lines} | {L2_lines} | {L3_lines} | {L4_lines} | {generation_mode} | {pass/fail} |
 ```
 
 ---

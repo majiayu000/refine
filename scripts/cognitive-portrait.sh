@@ -87,6 +87,7 @@ start_marker=$(mktemp "${TMPDIR:-/tmp}/refine-portrait-start.XXXXXX")
 index_snapshot=$(mktemp "${TMPDIR:-/tmp}/refine-portrait-index.XXXXXX")
 index_existed=0
 run_committed=0
+agent_pid=""
 if [[ -f "$INDEX_FILE" ]]; then
   cp "$INDEX_FILE" "$index_snapshot"
   index_existed=1
@@ -125,15 +126,27 @@ cleanup_incomplete_run() {
   exit "$exit_status"
 }
 
+forward_agent_signal() {
+  local signal="$1"
+  local exit_status="$2"
+  if [[ -n "$agent_pid" ]]; then
+    kill -"$signal" -- "-$agent_pid" 2>/dev/null || kill -"$signal" "$agent_pid" 2>/dev/null || true
+  fi
+  exit "$exit_status"
+}
+
 trap cleanup_incomplete_run EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'forward_agent_signal HUP 129' HUP
+trap 'forward_agent_signal INT 130' INT
+trap 'forward_agent_signal TERM 143' TERM
 
 log "执行 agent: ${AGENT_BIN} exec --sandbox ${AGENT_SANDBOX} --add-dir ${MIRROR_DIR}"
 rc=0
-(cd "$PROJECT_DIR" && "$AGENT_BIN" exec --sandbox "$AGENT_SANDBOX" --add-dir "$MIRROR_DIR" \
-  "运行 cognitive-portrait 技能，生成本期认知画像") 2>&1 || rc=$?
+(cd "$PROJECT_DIR" && exec "$AGENT_BIN" exec --sandbox "$AGENT_SANDBOX" --add-dir "$MIRROR_DIR" \
+  "运行 cognitive-portrait 技能，生成本期认知画像") 2>&1 &
+agent_pid=$!
+wait "$agent_pid" || rc=$?
+agent_pid=""
 
 # 产物校验：必须出现一份比本次启动更新的画像文件，否则视为静默阉割（U-29）。
 new_portrait=$(find "$PORTRAIT_DIR" -maxdepth 1 -name 'cognitive-portrait-*.md' -newer "$start_marker" 2>/dev/null | head -1 || true)
@@ -151,7 +164,8 @@ if [[ "$rc" -ne 0 ]]; then
 fi
 
 new_base=$(basename "$new_portrait")
-if [[ ! -f "$INDEX_FILE" ]] || ! grep -Fq "(./${new_base})" "$INDEX_FILE"; then
+new_date=$(sed -n 's/^cognitive-portrait-\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\)-.*$/\1/p' <<<"$new_base")
+if [[ ! -f "$INDEX_FILE" ]] || ! grep -Eq "^\|[[:space:]]*(\\[)?${new_date}([[:space:]]|\\]|\\()" "$INDEX_FILE"; then
   log "ERROR: 新画像未写入归档索引: ${new_base}"
   notify "新画像未写入 INDEX.md，已隔离" "Refine Cognitive Portrait 失败"
   exit 1

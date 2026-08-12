@@ -25,7 +25,7 @@ set -euo pipefail
 portrait="${REFINE_PORTRAIT_DIR}/cognitive-portrait-2026-08-12-v9.md"
 printf '# candidate\n' > "$portrait"
 if [[ "$FAKE_UPDATE_INDEX" == "1" ]]; then
-  printf '| [2026-08-12](./cognitive-portrait-2026-08-12-v9.md) |\n' >> "${REFINE_PORTRAIT_DIR}/INDEX.md"
+  printf '| 2026-08-12 | sessions | lines |\n' >> "${REFINE_PORTRAIT_DIR}/INDEX.md"
 fi
 if [[ -n "${FAKE_AGENT_SLEEP:-}" ]]; then
   sleep "$FAKE_AGENT_SLEEP"
@@ -77,10 +77,13 @@ for _attempt in 1 2 3 4 5; do
   [[ -f "${interrupt_root}/portraits/cognitive-portrait-2026-08-12-v9.md" ]] && break
   sleep 1
 done
+interrupt_started=$(date +%s)
 kill -TERM "$wrapper_pid"
 if wait "$wrapper_pid"; then
   fail 'interrupted portrait wrapper exited successfully'
 fi
+interrupt_elapsed=$(( $(date +%s) - interrupt_started ))
+[[ "$interrupt_elapsed" -lt 5 ]] || fail "interrupted wrapper waited ${interrupt_elapsed}s for the child"
 [[ ! -f "${interrupt_root}/portraits/cognitive-portrait-2026-08-12-v9.md" ]] \
   || fail 'interrupted portrait remained eligible for throttling'
 [[ "$(cat "${interrupt_root}/portraits/INDEX.md")" == '# Index' ]] \
