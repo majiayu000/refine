@@ -142,7 +142,8 @@ trap 'forward_agent_signal TERM 143' TERM
 
 log "执行 agent: ${AGENT_BIN} exec --sandbox ${AGENT_SANDBOX} --add-dir ${MIRROR_DIR}"
 rc=0
-(cd "$PROJECT_DIR" && exec "$AGENT_BIN" exec --sandbox "$AGENT_SANDBOX" --add-dir "$MIRROR_DIR" \
+(cd "$PROJECT_DIR" && exec /usr/bin/perl -MPOSIX=setsid -e 'setsid() or die "setsid failed: $!"; exec @ARGV or die "exec failed: $!"' -- \
+  "$AGENT_BIN" exec --sandbox "$AGENT_SANDBOX" --add-dir "$MIRROR_DIR" \
   "运行 cognitive-portrait 技能，生成本期认知画像") 2>&1 &
 agent_pid=$!
 wait "$agent_pid" || rc=$?

@@ -28,7 +28,8 @@ if [[ "$FAKE_UPDATE_INDEX" == "1" ]]; then
   printf '| 2026-08-12 | sessions | lines |\n' >> "${REFINE_PORTRAIT_DIR}/INDEX.md"
 fi
 if [[ -n "${FAKE_AGENT_SLEEP:-}" ]]; then
-  sleep "$FAKE_AGENT_SLEEP"
+  (sleep "$FAKE_AGENT_SLEEP"; printf 'descendant-survived\n' > "${REFINE_PORTRAIT_DIR}/descendant.txt") &
+  wait
 fi
 exit "$FAKE_AGENT_EXIT"
 EOF
@@ -88,5 +89,8 @@ interrupt_elapsed=$(( $(date +%s) - interrupt_started ))
   || fail 'interrupted portrait remained eligible for throttling'
 [[ "$(cat "${interrupt_root}/portraits/INDEX.md")" == '# Index' ]] \
   || fail 'interrupted run left a dangling index entry'
+sleep 1
+[[ ! -e "${interrupt_root}/portraits/descendant.txt" ]] \
+  || fail 'interrupted wrapper left an agent descendant running'
 
 echo 'All cognitive portrait wrapper tests passed'
