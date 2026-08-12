@@ -1,6 +1,6 @@
 use rusqlite::{backup::Backup, backup::StepResult, params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -173,22 +173,15 @@ fn source_signature(source: &Path) -> Result<String, String> {
                 let mut file = std::fs::File::open(&path)
                     .map_err(|e| format!("failed to open {} for signature: {e}", path.display()))?;
                 let mut hasher = Sha256::new();
-                let mut sample = vec![0u8; 4096.min(metadata.len() as usize)];
-                if !sample.is_empty() {
-                    file.read_exact(&mut sample).map_err(|e| {
-                        format!("failed to read signature sample {}: {e}", path.display())
+                let mut buffer = [0u8; 64 * 1024];
+                loop {
+                    let read = file.read(&mut buffer).map_err(|e| {
+                        format!("failed to hash legacy source {}: {e}", path.display())
                     })?;
-                    hasher.update(&sample);
-                    if metadata.len() > sample.len() as u64 {
-                        file.seek(SeekFrom::End(-(sample.len() as i64)))
-                            .map_err(|e| {
-                                format!("failed to seek signature sample {}: {e}", path.display())
-                            })?;
-                        file.read_exact(&mut sample).map_err(|e| {
-                            format!("failed to read tail signature {}: {e}", path.display())
-                        })?;
-                        hasher.update(&sample);
+                    if read == 0 {
+                        break;
                     }
+                    hasher.update(&buffer[..read]);
                 }
                 parts.push(format!(
                     "{suffix}:{}:{}:{:x}",
@@ -290,18 +283,18 @@ fn run_backup_with_deadline(
             .map_err(|e| format!("failed to backup {}: {}", source.display(), e))?;
         match step {
             StepResult::Done => return Ok(()),
-            StepResult::More => {}
             StepResult::Busy | StepResult::Locked => {
-                if started.elapsed() >= timeout {
-                    return Err(format!(
-                        "timed out after {}ms backing up {}",
-                        timeout.as_millis(),
-                        source.display()
-                    ));
-                }
                 std::thread::sleep(Duration::from_millis(10));
             }
+            StepResult::More => {}
             _ => {}
+        }
+        if started.elapsed() >= timeout {
+            return Err(format!(
+                "timed out after {}ms backing up {}",
+                timeout.as_millis(),
+                source.display()
+            ));
         }
     }
 }
@@ -369,6 +362,8 @@ fn copy_all_tables(conn: &Connection, legacy_alias: &str) -> Result<usize, Strin
     let legacy_tables = list_base_tables(conn, legacy_alias)?;
     let ordered_tables = migration_copy_order(&legacy_tables);
 
+    create_identity_maps(conn, legacy_alias, &legacy_tables)?;
+
     let mut total = 0usize;
     for table in &ordered_tables {
         if !target_tables.contains(table) {
@@ -387,18 +382,61 @@ fn migration_copy_order(legacy_tables: &[String]) -> Vec<String> {
         "extraction_jobs",
         "events",
     ];
-    let mut ordered = Vec::with_capacity(legacy_tables.len());
+    let mut ordered = Vec::with_capacity(preferred.len());
     for table in preferred {
         if legacy_tables.iter().any(|existing| existing == table) {
             ordered.push(table.to_string());
         }
     }
-    for table in legacy_tables {
-        if !ordered.iter().any(|existing| existing == table) {
-            ordered.push(table.clone());
-        }
-    }
     ordered
+}
+
+fn create_identity_maps(
+    conn: &Connection,
+    legacy_alias: &str,
+    legacy_tables: &[String],
+) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS refine_document_id_map (
+            source_id TEXT PRIMARY KEY, canonical_id TEXT NOT NULL
+         );
+         DELETE FROM refine_document_id_map;
+         CREATE TEMP TABLE IF NOT EXISTS refine_conversation_id_map (
+            source_id TEXT PRIMARY KEY, canonical_id TEXT NOT NULL
+         );
+         DELETE FROM refine_conversation_id_map;",
+    )
+    .map_err(|e| format!("failed to prepare legacy identity maps: {e}"))?;
+
+    if legacy_tables.iter().any(|table| table == "documents") {
+        conn.execute_batch(&format!(
+            "INSERT INTO refine_document_id_map (source_id, canonical_id)
+             SELECT src.id, COALESCE(
+               target.id,
+               (SELECT first.id FROM {legacy_alias}.documents AS first
+                WHERE first.url = src.url ORDER BY first.rowid LIMIT 1)
+             )
+             FROM {legacy_alias}.documents AS src
+             LEFT JOIN main.documents AS target ON target.url = src.url"
+        ))
+        .map_err(|e| format!("failed to map legacy document identities: {e}"))?;
+    }
+    if legacy_tables.iter().any(|table| table == "conversations") {
+        conn.execute_batch(&format!(
+            "INSERT INTO refine_conversation_id_map (source_id, canonical_id)
+             SELECT src.id, COALESCE(
+               target.id,
+               (SELECT first.id FROM {legacy_alias}.conversations AS first
+                WHERE first.idempotency_key = src.idempotency_key
+                ORDER BY first.rowid LIMIT 1)
+             )
+             FROM {legacy_alias}.conversations AS src
+             LEFT JOIN main.conversations AS target
+               ON target.idempotency_key = src.idempotency_key"
+        ))
+        .map_err(|e| format!("failed to map legacy conversation identities: {e}"))?;
+    }
+    Ok(())
 }
 
 fn list_base_tables(conn: &Connection, db_alias: &str) -> Result<Vec<String>, String> {
@@ -440,6 +478,34 @@ fn copy_table(conn: &Connection, table: &str, legacy_alias: &str) -> Result<usiz
         return Ok(0);
     }
     let col_list = common.join(", ");
+    let select_list = common
+        .iter()
+        .map(|column| match (table, column.as_str()) {
+            ("documents", "id") => "doc_map.canonical_id".to_string(),
+            ("items", "document_id") => {
+                "COALESCE(doc_map.canonical_id, src.document_id)".to_string()
+            }
+            ("conversations", "id") => "conv_map.canonical_id".to_string(),
+            ("extraction_jobs", "conversation_id") => {
+                "COALESCE(conv_map.canonical_id, src.conversation_id)".to_string()
+            }
+            _ => format!("src.{column}"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let joins = match table {
+        "documents" => "JOIN refine_document_id_map AS doc_map ON doc_map.source_id = src.id",
+        "items" if common.iter().any(|column| column == "document_id") => {
+            "LEFT JOIN refine_document_id_map AS doc_map ON doc_map.source_id = src.document_id"
+        }
+        "conversations" => {
+            "JOIN refine_conversation_id_map AS conv_map ON conv_map.source_id = src.id"
+        }
+        "extraction_jobs" if common.iter().any(|column| column == "conversation_id") => {
+            "LEFT JOIN refine_conversation_id_map AS conv_map ON conv_map.source_id = src.conversation_id"
+        }
+        _ => "",
+    };
     let update_columns: Vec<&String> = common
         .iter()
         .filter(|column| column.as_str() != "id")
@@ -470,7 +536,7 @@ fn copy_table(conn: &Connection, table: &str, legacy_alias: &str) -> Result<usiz
     };
     let sql = format!(
         "INSERT INTO {table} ({col_list}) \
-         SELECT {col_list} FROM {legacy_alias}.{table} WHERE true {conflict}"
+         SELECT {select_list} FROM {legacy_alias}.{table} AS src {joins} WHERE true {conflict}"
     );
     conn.execute(&sql, [])
         .map_err(|e| format!("failed to copy table {table}: {e}"))
@@ -782,6 +848,148 @@ mod tests {
             )
             .unwrap();
         assert_eq!(still_corrected, "corrected");
+    }
+
+    #[test]
+    fn business_keys_remap_parent_ids_and_internal_tables_are_ignored() {
+        let tmp = TempDir::new().unwrap();
+        let target = make_target_db(tmp.path());
+        let tc = Connection::open(&target).unwrap();
+        tc.execute_batch(
+            "INSERT INTO documents
+               (id, title, raw_content, source, url, source_version,
+                captured_at, created_at, updated_at)
+             VALUES
+               ('target-doc', 'Old', 'old', 'legacy', 'https://example.com/shared', 'v1',
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+             INSERT INTO conversations
+               (id, user_id, source, url, raw_content, captured_at, created_at,
+                status, idempotency_key, item_ids)
+             VALUES
+               ('target-conv', 'u', 'legacy', 'https://example.com/conversation', 'old',
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'queued',
+                'shared-idempotency-key', '[]');",
+        )
+        .unwrap();
+        drop(tc);
+
+        let legacy = tmp.path().join("server.db");
+        let lc = Connection::open(&legacy).unwrap();
+        crate::infra::prepare_sqlite_db(&lc).unwrap();
+        prepare_migration_state(&lc).unwrap();
+        lc.execute_batch(
+            "INSERT INTO documents
+               (id, title, raw_content, source, url, source_version,
+                captured_at, created_at, updated_at)
+             VALUES
+               ('source-doc', 'New', 'new', 'legacy', 'https://example.com/shared', 'v2',
+                '2026-01-02T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z');
+             INSERT INTO items
+               (id, item_type, title, summary, content, tags, created_at, updated_at, document_id)
+             VALUES
+               ('mapped-item', 'knowledge', 'T', 'S', 'C', '[]',
+                '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', 'source-doc');
+             INSERT INTO conversations
+               (id, user_id, source, url, raw_content, captured_at, created_at,
+                status, idempotency_key, item_ids)
+             VALUES
+               ('source-conv', 'u', 'legacy', 'https://example.com/conversation', 'new',
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'processed',
+                'shared-idempotency-key', '[\"mapped-item\"]');
+             INSERT INTO extraction_jobs
+               (id, conversation_id, mode, status, created_at, updated_at)
+             VALUES
+               ('mapped-job', 'source-conv', 'auto', 'succeeded',
+                '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z');
+             INSERT INTO refine_legacy_migration_state
+               (source_path, signature, migrated_at)
+             VALUES ('internal', 'must-not-copy', '2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+        drop(lc);
+
+        migrate_stale_dbs(&target).unwrap();
+
+        let tc = Connection::open(&target).unwrap();
+        let document: (String, String) = tc
+            .query_row(
+                "SELECT id, raw_content FROM documents WHERE url='https://example.com/shared'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(document, ("target-doc".into(), "new".into()));
+        let item_document: String = tc
+            .query_row(
+                "SELECT document_id FROM items WHERE id='mapped-item'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(item_document, "target-doc");
+        let conversation: (String, String) = tc
+            .query_row(
+                "SELECT id, status FROM conversations WHERE idempotency_key='shared-idempotency-key'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(conversation, ("target-conv".into(), "processed".into()));
+        let job_conversation: String = tc
+            .query_row(
+                "SELECT conversation_id FROM extraction_jobs WHERE id='mapped-job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(job_conversation, "target-conv");
+        let internal_count: i64 = tc
+            .query_row(
+                "SELECT COUNT(*) FROM refine_legacy_migration_state WHERE source_path='internal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(internal_count, 0);
+    }
+
+    #[test]
+    fn signature_detects_middle_change_with_same_size_and_mtime() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("server.db");
+        std::fs::write(&source, vec![b'a'; 16 * 1024]).unwrap();
+        let fixed = filetime::FileTime::from_unix_time(1_700_000_000, 123_000_000);
+        filetime::set_file_mtime(&source, fixed).unwrap();
+        let before = source_signature(&source).unwrap();
+
+        let mut bytes = std::fs::read(&source).unwrap();
+        bytes[8 * 1024] = b'b';
+        std::fs::write(&source, bytes).unwrap();
+        filetime::set_file_mtime(&source, fixed).unwrap();
+        let after = source_signature(&source).unwrap();
+
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn backup_deadline_covers_progressing_more_steps() {
+        let tmp = TempDir::new().unwrap();
+        let source = Connection::open(tmp.path().join("large.db")).unwrap();
+        source
+            .execute_batch("CREATE TABLE payload (value BLOB NOT NULL)")
+            .unwrap();
+        source
+            .execute(
+                "INSERT INTO payload (value) VALUES (?1)",
+                [vec![0x5a; 2 * 1024 * 1024]],
+            )
+            .unwrap();
+        let mut destination = Connection::open(tmp.path().join("backup.db")).unwrap();
+        let backup = Backup::new(&source, &mut destination).unwrap();
+
+        let result = run_backup_with_deadline(&backup, Path::new("large.db"), Duration::ZERO);
+
+        assert!(result.unwrap_err().contains("timed out"));
     }
 
     #[test]
