@@ -1,5 +1,6 @@
-use rusqlite::Connection;
+use rusqlite::{backup::Backup, Connection};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::paths::stale_db_candidates;
 
@@ -42,8 +43,10 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
 
     for candidate in &candidates {
         let bak_path = with_suffix(candidate, ".pre-migration.bak");
-        std::fs::copy(candidate, &bak_path)
-            .map_err(|e| format!("failed to backup {}: {}", candidate.display(), e))?;
+        let source_conn = create_consistent_backup(candidate, &bak_path)?;
+        checkpoint_source_for_archive(&source_conn, candidate)?;
+        drop(source_conn);
+        ensure_no_live_companions(candidate)?;
 
         // Scope one target connection and one transaction to each source. When
         // this block exits, SQLite also releases the attachment before the
@@ -79,14 +82,6 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
         std::fs::rename(candidate, &migrated_path)
             .map_err(|e| format!("failed to rename {}: {}", candidate.display(), e))?;
 
-        // Move companion WAL/SHM files so they stay associated with the renamed DB.
-        for ext in ["-wal", "-shm"] {
-            let companion = with_suffix(candidate, ext);
-            if companion.exists() {
-                let _ = std::fs::rename(&companion, with_suffix(&migrated_path, ext));
-            }
-        }
-
         sources.push(candidate.clone());
         total_rows += rows;
     }
@@ -95,6 +90,67 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
         sources,
         rows_copied: total_rows,
     })
+}
+
+fn create_consistent_backup(source: &Path, destination: &Path) -> Result<Connection, String> {
+    let source_conn = Connection::open(source)
+        .map_err(|e| format!("failed to open legacy DB {}: {}", source.display(), e))?;
+    let mut destination_conn = Connection::open(destination).map_err(|e| {
+        format!(
+            "failed to create backup {} for {}: {}",
+            destination.display(),
+            source.display(),
+            e
+        )
+    })?;
+    {
+        let backup = Backup::new(&source_conn, &mut destination_conn)
+            .map_err(|e| format!("failed to start backup of {}: {}", source.display(), e))?;
+        backup
+            .run_to_completion(128, Duration::from_millis(10), None)
+            .map_err(|e| format!("failed to backup {}: {}", source.display(), e))?;
+    }
+    let integrity: String = destination_conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|e| format!("failed to verify backup of {}: {}", source.display(), e))?;
+    if integrity != "ok" {
+        return Err(format!(
+            "backup integrity check failed for {}: {}",
+            source.display(),
+            integrity
+        ));
+    }
+    drop(destination_conn);
+    Ok(source_conn)
+}
+
+fn checkpoint_source_for_archive(conn: &Connection, source: &Path) -> Result<(), String> {
+    let (busy, log_frames, checkpointed_frames): (i64, i64, i64) = conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(|e| format!("failed to checkpoint {}: {}", source.display(), e))?;
+    if busy != 0 || log_frames != checkpointed_frames {
+        return Err(format!(
+            "cannot archive {} while its WAL is busy ({checkpointed_frames}/{log_frames} frames checkpointed)",
+            source.display()
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_no_live_companions(source: &Path) -> Result<(), String> {
+    for ext in ["-wal", "-shm"] {
+        let companion = with_suffix(source, ext);
+        if companion.exists() {
+            return Err(format!(
+                "cannot archive {} while companion file {} is still active",
+                source.display(),
+                companion.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn copy_all_tables(conn: &Connection, legacy_alias: &str) -> Result<usize, String> {
@@ -539,6 +595,43 @@ mod tests {
             "failure backup must remain available"
         );
         assert!(!tmp.path().join("server.db.migrated").exists());
+    }
+
+    #[test]
+    fn live_wal_source_is_backed_up_before_target_writes_and_left_retryable() {
+        let tmp = TempDir::new().unwrap();
+        let target = make_target_db(tmp.path());
+        let legacy = make_legacy_db_with_items(tmp.path(), "server.db");
+        let lc = Connection::open(&legacy).unwrap();
+        lc.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+            .unwrap();
+        insert_item(&lc, "item-from-wal");
+        assert!(
+            with_suffix(&legacy, "-wal").exists(),
+            "fixture must keep committed rows in a live WAL"
+        );
+
+        let result = migrate_stale_dbs(&target);
+        assert!(
+            result.is_err(),
+            "an actively held WAL must prevent source archival"
+        );
+        assert_eq!(
+            item_count(&Connection::open(&target).unwrap(), "item-from-wal"),
+            0,
+            "archive preflight must fail before target writes"
+        );
+        assert!(legacy.exists(), "live source must remain retryable");
+        assert!(!tmp.path().join("server.db.migrated").exists());
+
+        let backup = Connection::open(tmp.path().join("server.db.pre-migration.bak")).unwrap();
+        assert_eq!(
+            item_count(&backup, "item-from-wal"),
+            1,
+            "SQLite backup must include committed WAL rows"
+        );
+        drop(backup);
+        drop(lc);
     }
 
     #[test]
