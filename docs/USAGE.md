@@ -55,15 +55,19 @@ cargo install --path apps/mirror
 cargo install --path apps/server
 ```
 
-### Configure LLM (optional but recommended)
+### Configure LLM (recommended for scheduled analysis)
 
 ```bash
-cat > .env << 'EOF'
-REFINE_OPENAI_API_KEY=your_key
-REFINE_OPENAI_BASE_URL=https://api.openai.com
-REFINE_OPENAI_MODEL=gpt-4o
-EOF
+bash scripts/configure-llm-env.sh --check
+bash scripts/configure-llm-env.sh --migrate
 ```
+
+Use `bash scripts/configure-llm-env.sh --from-env` when supported variables
+are already exported in the current shell. The unattended loader reads the
+user-owned `~/.refine/llm.env` without sourcing `~/.zshrc`; process credentials
+win over that file. A repository `.env` remains an explicit development
+fallback only, and scheduled scripts pass it to the loader after the process
+and secure-file sources.
 
 ## 3. Run Sync Stack (Server + Extension)
 
@@ -122,13 +126,25 @@ refine ingest-sessions
 refine ingest-sessions --latest 20
 refine ingest-sessions --dry-run
 
-# Temporary one-release rollback only
+# Provider selection: auto is the default; local is a supported provider
+refine ingest-sessions --provider remem
+refine ingest-sessions --provider local
+refine ingest-sessions --provider local --source claude
+refine ingest-sessions --provider local --source codex
+# Deprecated compatibility alias for --provider local
 refine ingest-sessions --legacy-local-scan --source claude
-refine ingest-sessions --legacy-local-scan --source codex
 refine insights --prescription
 mirror dashboard
 mirror score
 ```
+
+`--provider auto` tries the remem raw archive first and falls back to local
+Claude/Codex discovery only when the remem executable cannot be launched
+because it is absent. Remem nonzero exits, malformed JSON, contract drift, and
+pagination errors fail the command instead of falling back. Use `--provider
+remem` to require remem, or `--provider local` to select local discovery
+directly. `--source` is valid with the local provider; the deprecated
+`--legacy-local-scan` flag is its backward-compatible alias.
 
 On the first remem-backed run, refine supersedes a matching local path-keyed
 session Document/items and saves the replacement facets in one transaction.

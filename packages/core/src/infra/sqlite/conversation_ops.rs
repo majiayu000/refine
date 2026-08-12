@@ -530,6 +530,7 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use tokio::sync::Barrier;
     use uuid::Uuid;
 
     fn temp_db_path() -> PathBuf {
@@ -770,17 +771,22 @@ mod tests {
 
         let path1 = path.clone();
         let path2 = path.clone();
+        let barrier = Arc::new(Barrier::new(2));
 
+        let barrier1 = barrier.clone();
         let h1 = tokio::spawn(async move {
             let store = SqliteStore::open(&path1).expect("store 1");
             let store: Arc<dyn ConversationRepository> = Arc::new(store);
+            barrier1.wait().await;
             store
                 .insert_or_fetch_conversation_by_idempotency(&record1)
                 .await
         });
+        let barrier2 = barrier;
         let h2 = tokio::spawn(async move {
             let store = SqliteStore::open(&path2).expect("store 2");
             let store: Arc<dyn ConversationRepository> = Arc::new(store);
+            barrier2.wait().await;
             store
                 .insert_or_fetch_conversation_by_idempotency(&record2)
                 .await

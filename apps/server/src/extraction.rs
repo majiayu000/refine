@@ -149,6 +149,7 @@ async fn canonicalize_document(
         raw_content: doc.raw_content().to_string(),
         source: doc.source().to_string(),
         url: doc.url().to_string(),
+        source_version: doc.source_version().map(ToOwned::to_owned),
         captured_at: doc.captured_at(),
         created_at: existing.created_at(),
         updated_at: doc.updated_at(),

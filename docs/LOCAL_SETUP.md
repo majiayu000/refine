@@ -11,22 +11,68 @@ Use the installer from the repository root:
 scripts/install-local.sh
 ```
 
-Session ingestion also requires a compatible `remem` binary on `PATH` (or an
-explicit `REFINE_REMEM_BIN` path). Refine treats remem subprocess and JSON
-contract failures as ingest failures; it does not silently fall back to local
-transcript scanning. The temporary `--legacy-local-scan` option is the only
-rollback path during the one-release transition window.
+Session ingestion defaults to `--provider auto`: it prefers a compatible
+`remem` binary on `PATH` (or an explicit `REFINE_REMEM_BIN` path), and uses the
+local Claude/Codex scanner only when that executable is absent. Remem
+subprocess, malformed JSON, contract, and pagination failures are ingest
+failures and never silently fall back. Use `--provider remem` for strict remem
+operation or `--provider local` for supported local discovery; the deprecated
+`--legacy-local-scan` option remains an alias for `--provider local`.
 
 The installer is idempotent. It can be used for first install and for upgrades from a newer checkout.
 
 ## What The Installer Does
 
-- Installs `refine`, `mirror`, and `refine-server` with `cargo install --path`.
+- Installs `refine`, `mirror`, and `refine-server` with `cargo install --locked --path`.
 - Installs desktop UI dependencies with `bun install` when Bun is available.
 - Writes macOS user LaunchAgents under `~/Library/LaunchAgents/`.
-- Starts or reloads the local server and UI dev service.
-- Schedules daily ingest at 08:00 and weekly insights on Monday at 09:00.
+- Starts or reloads the local server and UI dev service. The server uses the
+  same validated LLM credential loader as scheduled jobs.
+- Schedules daily ingest at 08:00 and weekly insights on Sunday at 09:00.
 - Enables local dashboard/API access with `REFINE_DEV_ANON=1` by default.
+- Creates `~/.refine` with user-only permissions. It never migrates or copies
+  LLM credentials; when they are absent it prints the read-only configure
+  command.
+
+## Configure LLM credentials for launchd
+
+The canonical unattended credential file is `~/.refine/llm.env`. It must be a
+regular, non-symlink file owned by the current user with no group/other bits
+(normally mode `0600`). Scheduled scripts do not source `~/.zshrc`.
+
+Review a migration without changing files:
+
+```bash
+bash scripts/configure-llm-env.sh --check
+```
+
+After reviewing the redacted check, perform the one-time migration of literal
+`export BASE_URL=...`, `export BASE_API_KEY=...`, and `export BASE_MODEL=...`
+definitions:
+
+```bash
+bash scripts/configure-llm-env.sh --migrate
+```
+
+If the supported variables are already exported in the current shell, the
+explicit alternative is:
+
+```bash
+bash scripts/configure-llm-env.sh --from-env
+```
+
+The loader precedence is current non-empty process credentials, then the
+secure file, then an explicitly supplied repository `.env` fallback. It
+supports the Anthropic aliases `REFINE_ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_API_KEY`; the OpenAI aliases
+`REFINE_OPENAI_API_KEY` and `OPENAI_API_KEY`; and the compatibility
+`BASE_API_KEY`, together with their URL/model variables. Values are never
+printed by the loader, migration helper, or credential preflight.
+
+The server health response includes `llm_configured` so `doctor-local.sh` can
+detect a query-only server that would reject extraction jobs. Its append-only
+logs include a timestamped startup boundary, making errors from an earlier
+process distinguishable from the current run.
 
 ## Auth Modes
 
@@ -44,7 +90,10 @@ Token mode:
 REFINE_API_TOKEN=your-token scripts/install-local.sh --token-auth
 ```
 
-Token mode writes the token to `~/.refine/refine-server.token` with mode `0600` and points the server LaunchAgent at `~/.refine/run-refine-server.sh`. The token is not written into the plist. Clients must send `Authorization: Bearer <token>`.
+Token mode writes the token to `~/.refine/refine-server.token` with mode `0600`
+and passes only that file path to the shared server startup wrapper. The token
+value is not written into the plist. Clients must send
+`Authorization: Bearer <token>`.
 
 ## Useful Variants
 
@@ -78,7 +127,7 @@ scripts/install-local.sh --no-start
 | --- | --- | --- | --- |
 | `com.lifcc.refine-server` | Local API/dashboard | RunAtLoad + KeepAlive | `~/Library/Logs/refine-server.log` |
 | `com.lifcc.refine-daily-ingest` | `refine ingest-sessions` + `mirror score` | Daily 08:00 | `~/Library/Logs/refine-daily-ingest.log` |
-| `com.lifcc.refine-weekly-insights` | `refine insights --prescription` | Monday 09:00 | `~/Library/Logs/refine-insights.log` |
+| `com.lifcc.refine-weekly-insights` | `refine insights --prescription` | Sunday 09:00 | `~/Library/Logs/refine-insights.log` |
 | `com.lifcc.refine-ui-dev` | Desktop UI Vite dev server | RunAtLoad + KeepAlive | `.run/launchd-refine-ui.*.log` |
 
 ## Health Check
@@ -89,7 +138,12 @@ Run:
 scripts/doctor-local.sh
 ```
 
-The doctor checks installed binaries, LaunchAgents, `/health`, a protected `/v1/*` API route, database freshness, log files, and UI dependencies. Use `scripts/doctor-local.sh --no-ui-dev` for installs that intentionally disable the desktop UI dev service.
+The doctor checks installed binaries, LaunchAgents, a launchd-like clean
+environment credential preflight, `/health`, a protected `/v1/*` API route,
+database freshness, log files, and UI dependencies. It fails when unattended
+credentials are missing or the secure file has invalid ownership, type, or
+permissions. Use `scripts/doctor-local.sh --no-ui-dev` for installs that
+intentionally disable the desktop UI dev service.
 
 Common symptoms:
 

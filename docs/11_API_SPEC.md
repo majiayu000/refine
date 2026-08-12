@@ -131,9 +131,15 @@ GET /health
 ```json
 {
   "success": true,
-  "message": "Refine cloud API (Rust) is running"
+  "message": "Refine cloud API (Rust) is running",
+  "contract_version": "1.0",
+  "llm_configured": true
 }
 ```
+
+`llm_configured` is a non-secret readiness flag. When it is `false`, query
+routes remain available but strict extraction jobs will fail until the server
+is restarted with an LLM credential source.
 
 **超出免费额度（403）**：
 ```json

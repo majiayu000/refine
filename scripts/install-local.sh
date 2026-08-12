@@ -69,12 +69,19 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
-xml_escape() {
-  sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+file_sha256() {
+  local path="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+  else
+    die "missing shasum or sha256sum; cannot write install manifest"
+  fi
 }
 
-shell_quote() {
-  printf '%q' "$1"
+xml_escape() {
+  sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
 }
 
 write_file() {
@@ -101,60 +108,30 @@ EOF
   chmod 600 "$path"
 }
 
-write_server_token_wrapper() {
-  local path="$1"
-  local token_path="$2"
-  local server_bin="$3"
-  local token_path_sh server_bin_sh
-  token_path_sh="$(shell_quote "$token_path")"
-  server_bin_sh="$(shell_quote "$server_bin")"
-
-  write_file "$path" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-
-token_file=${token_path_sh}
-server_bin=${server_bin_sh}
-
-if [[ ! -f "\$token_file" ]]; then
-  echo "[refine-server] missing token file: \$token_file" >&2
-  exit 1
-fi
-
-IFS= read -r token < "\$token_file" || true
-if [[ -z "\$token" ]]; then
-  echo "[refine-server] token file is empty: \$token_file" >&2
-  exit 1
-fi
-
-export REFINE_API_TOKEN="\$token"
-exec "\$server_bin"
-EOF
-  chmod 700 "$path"
-}
-
 write_server_plist() {
   local path="$1"
   local cargo_bin="$2"
-  local repo="$3"
-  local path_env="$4"
-  local repo_xml server_program_xml path_xml token_xml=""
-  local server_program="${cargo_bin}/refine-server"
-  repo_xml="$(printf '%s' "$repo" | xml_escape)"
+  local path_env="$3"
+  local home_xml server_bin_xml wrapper_xml project_env_xml path_xml token_xml=""
+  local server_bin="${cargo_bin}/refine-server"
+  local wrapper="${repo_root}/scripts/run-refine-server.sh"
+  local project_env="${repo_root}/.env"
+  home_xml="$(printf '%s' "$HOME" | xml_escape)"
   path_xml="$(printf '%s' "$path_env" | xml_escape)"
 
   if [[ "$auth_mode" == "token" ]]; then
     local token_file="${HOME}/.refine/refine-server.token"
-    local wrapper_file="${HOME}/.refine/run-refine-server.sh"
     write_server_token_file "$token_file"
-    write_server_token_wrapper "$wrapper_file" "$token_file" "$server_program"
-    server_program="$wrapper_file"
+    token_xml="<key>REFINE_API_TOKEN_FILE</key>
+    <string>$(printf '%s' "$token_file" | xml_escape)</string>"
   else
     rm -f "${HOME}/.refine/refine-server.token" "${HOME}/.refine/run-refine-server.sh"
     token_xml="<key>REFINE_DEV_ANON</key>
     <string>1</string>"
   fi
-  server_program_xml="$(printf '%s' "$server_program" | xml_escape)"
+  server_bin_xml="$(printf '%s' "$server_bin" | xml_escape)"
+  wrapper_xml="$(printf '%s' "$wrapper" | xml_escape)"
+  project_env_xml="$(printf '%s' "$project_env" | xml_escape)"
 
   write_file "$path" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -165,10 +142,13 @@ write_server_plist() {
   <string>com.lifcc.refine-server</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${server_program_xml}</string>
+    <string>/bin/bash</string>
+    <string>${wrapper_xml}</string>
+    <string>${server_bin_xml}</string>
+    <string>${project_env_xml}</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>${repo_xml}</string>
+  <string>${home_xml}</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
@@ -179,6 +159,9 @@ write_server_plist() {
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <!-- Avoid a tight loop if the server repeatedly fails at startup. -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
   <key>StandardOutPath</key>
   <string>${HOME}/Library/Logs/refine-server.log</string>
   <key>StandardErrorPath</key>
@@ -196,8 +179,8 @@ write_calendar_plist() {
   local hour="$5"
   local minute="$6"
   local weekday="${7:-}"
-  local repo_xml script_xml log_xml weekday_block=""
-  repo_xml="$(printf '%s' "$repo_root" | xml_escape)"
+  local home_xml script_xml log_xml weekday_block=""
+  home_xml="$(printf '%s' "$HOME" | xml_escape)"
   script_xml="$(printf '%s' "$script_path" | xml_escape)"
   log_xml="$(printf '%s' "$log_path" | xml_escape)"
   if [[ -n "$weekday" ]]; then
@@ -218,7 +201,7 @@ write_calendar_plist() {
     <string>${script_xml}</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>${repo_xml}</string>
+  <string>${home_xml}</string>
   <key>StartCalendarInterval</key>
   <dict>
     <key>Hour</key>
@@ -241,8 +224,9 @@ write_ui_plist() {
   local bun_bin="$2"
   local path_env="$3"
   local ui_dir="${repo_root}/apps/desktop/ui"
-  local bun_xml path_xml ui_xml
+  local bun_xml home_xml path_xml ui_xml
   bun_xml="$(printf '%s' "$bun_bin" | xml_escape)"
+  home_xml="$(printf '%s' "$HOME" | xml_escape)"
   path_xml="$(printf '%s' "$path_env" | xml_escape)"
   ui_xml="$(printf '%s' "$ui_dir" | xml_escape)"
 
@@ -258,10 +242,12 @@ write_ui_plist() {
   <array>
     <string>${bun_xml}</string>
     <string>run</string>
+    <string>--cwd</string>
+    <string>${ui_xml}</string>
     <string>dev</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>${ui_xml}</string>
+  <string>${home_xml}</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
@@ -271,8 +257,10 @@ write_ui_plist() {
   </dict>
   <key>RunAtLoad</key>
   <true/>
-  <key>KeepAlive</key>
-  <true/>
+  <!-- A development UI is started once per login. If it exits, launchd keeps
+       the failure visible instead of entering an unbounded crash loop. -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
   <key>StandardOutPath</key>
   <string>${repo_root}/.run/launchd-refine-ui.out.log</string>
   <key>StandardErrorPath</key>
@@ -286,7 +274,8 @@ load_plist() {
   local path="$1"
   local label="$2"
   local kickstart="${3:-0}"
-  local domain="gui/$(id -u)"
+  local domain
+  domain="gui/$(id -u)"
 
   launchctl bootout "$domain" "$path" >/dev/null 2>&1 || true
   launchctl bootstrap "$domain" "$path"
@@ -298,7 +287,8 @@ load_plist() {
 disable_plist() {
   local path="$1"
   local label="$2"
-  local domain="gui/$(id -u)"
+  local domain
+  domain="gui/$(id -u)"
 
   launchctl bootout "$domain" "$path" >/dev/null 2>&1 || true
   launchctl bootout "${domain}/${label}" >/dev/null 2>&1 || true
@@ -312,49 +302,90 @@ disable_plist() {
 
 need_cmd cargo
 
+refine_dir="${HOME}/.refine"
+if [[ -L "$refine_dir" ]]; then
+  die "Refine directory is a symlink and was rejected: ${refine_dir}"
+fi
+mkdir -p "$refine_dir"
+chmod 700 "$refine_dir" || die "cannot secure Refine directory: ${refine_dir}"
+
+print_llm_setup_hint() {
+  local llm_env_file="${REFINE_LLM_ENV_FILE:-${refine_dir}/llm.env}"
+  if [[ -z "${REFINE_ANTHROPIC_API_KEY:-}${ANTHROPIC_AUTH_TOKEN:-}${ANTHROPIC_API_KEY:-}${REFINE_OPENAI_API_KEY:-}${OPENAI_API_KEY:-}${BASE_API_KEY:-}" && \
+    ! -f "$llm_env_file" ]]; then
+    log "LLM credentials are not configured for unattended jobs; review then run: bash ${repo_root}/scripts/configure-llm-env.sh --check"
+  fi
+}
+
 log "repo root: $repo_root"
+source_commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+[[ "$source_commit" != "unknown" ]] || die "install source is not a Git checkout"
+[[ -z "$(git -C "$repo_root" status --porcelain 2>/dev/null || true)" ]] \
+  || die "install source must be clean; commit or stash changes first"
+
 log "installing Rust binaries"
-cargo install --path "${repo_root}/apps/cli"
-cargo install --path "${repo_root}/apps/mirror"
-cargo install --path "${repo_root}/apps/server"
+cargo install --locked --path "${repo_root}/apps/cli"
+cargo install --locked --path "${repo_root}/apps/mirror"
+cargo install --locked --path "${repo_root}/apps/server"
 
 cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
 path_env="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${cargo_bin}"
 
+write_install_manifest() {
+  [[ -z "$(git -C "$repo_root" status --porcelain 2>/dev/null || true)" ]] \
+    || die "installation changed tracked source files; refusing a clean-source manifest"
+  mkdir -p "${HOME}/.refine"
+  local install_manifest="${HOME}/.refine/install-manifest"
+  write_file "$install_manifest" <<EOF
+source_root=${repo_root}
+source_commit=${source_commit}
+source_dirty=0
+refine_sha256=$(file_sha256 "${cargo_bin}/refine")
+mirror_sha256=$(file_sha256 "${cargo_bin}/mirror")
+refine_server_sha256=$(file_sha256 "${cargo_bin}/refine-server")
+installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+}
+
+if [[ "$launchd_enabled" != "1" || "$(uname -s)" != "Darwin" ]]; then
+  write_install_manifest
+  print_llm_setup_hint
+  if [[ "$launchd_enabled" != "1" ]]; then
+    log "launchd disabled; binaries installed only"
+  else
+    log "launchd is only supported on macOS; binaries installed only"
+  fi
+  exit 0
+fi
+
 if [[ "$ui_dev_enabled" == "1" && -d "${repo_root}/apps/desktop/ui" ]]; then
   if command -v bun >/dev/null 2>&1; then
     log "installing desktop UI dependencies"
-    (cd "${repo_root}/apps/desktop/ui" && bun install)
+    (cd "${repo_root}/apps/desktop/ui" && bun install --frozen-lockfile)
+    [[ -x "${repo_root}/apps/desktop/ui/node_modules/.bin/vite" ]] \
+      || die "desktop UI install completed without an executable Vite binary"
+    log "verifying desktop UI build"
+    (cd "${repo_root}/apps/desktop/ui" && bun run build)
   else
     log "Bun not found; skipping desktop UI dev service"
     ui_dev_enabled=0
   fi
 fi
 
-if [[ "$launchd_enabled" != "1" ]]; then
-  log "launchd disabled; binaries installed only"
-  exit 0
-fi
-
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  log "launchd is only supported on macOS; binaries installed only"
-  exit 0
-fi
-
 need_cmd launchctl
 need_cmd plutil
 
 launch_agents="${HOME}/Library/LaunchAgents"
-mkdir -p "$launch_agents" "${HOME}/Library/Logs" "${HOME}/.refine"
+mkdir -p "$launch_agents" "${HOME}/Library/Logs"
 
 server_plist="${launch_agents}/com.lifcc.refine-server.plist"
 daily_plist="${launch_agents}/com.lifcc.refine-daily-ingest.plist"
 weekly_plist="${launch_agents}/com.lifcc.refine-weekly-insights.plist"
 ui_plist="${launch_agents}/com.lifcc.refine-ui-dev.plist"
 
-write_server_plist "$server_plist" "$cargo_bin" "$repo_root" "$path_env"
+write_server_plist "$server_plist" "$cargo_bin" "$path_env"
 write_calendar_plist "$daily_plist" "com.lifcc.refine-daily-ingest" "${repo_root}/scripts/daily-refresh.sh" "${HOME}/Library/Logs/refine-daily-ingest.log" 8 0
-write_calendar_plist "$weekly_plist" "com.lifcc.refine-weekly-insights" "${repo_root}/scripts/weekly-insights.sh" "${HOME}/Library/Logs/refine-insights.log" 9 0 1
+write_calendar_plist "$weekly_plist" "com.lifcc.refine-weekly-insights" "${repo_root}/scripts/weekly-insights.sh" "${HOME}/Library/Logs/refine-insights.log" 9 0 0
 if [[ "$ui_dev_enabled" == "1" ]]; then
   write_ui_plist "$ui_plist" "$(command -v bun)" "$path_env"
 fi
@@ -378,5 +409,7 @@ if [[ "$start_services" == "1" ]]; then
   fi
 fi
 
+write_install_manifest
+print_llm_setup_hint
 log "done"
 log "Run scripts/doctor-local.sh to verify the local stack."

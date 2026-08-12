@@ -25,6 +25,18 @@ pub(crate) fn configure_connection(conn: &Connection, in_memory: bool) -> InfraR
     Ok(())
 }
 
+pub(crate) fn configure_read_only_connection(conn: &Connection) -> InfraResult<()> {
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         PRAGMA temp_store = MEMORY;
+         PRAGMA query_only = ON;",
+    )
+    .map_err(|e| InfraError::Database(e.to_string()))?;
+    Ok(())
+}
+
 pub(super) fn to_fts_query(query: &str) -> Option<String> {
     let terms: Vec<String> = query
         .split_whitespace()

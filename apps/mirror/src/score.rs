@@ -24,11 +24,14 @@ pub use persistence::{load_recent_scores, persist_score};
 pub use statusline::write_statusline;
 pub use types::{Indicator, LayerScore, ScoreResult, Signal};
 
-use baseline::apply_personal_baseline;
+use baseline::compute_personal_trends;
 use display::print_score;
 
 #[cfg(test)]
-use baseline::{signal_from_personal, PersonalBaseline};
+use baseline::{trend_from_personal, PersonalBaseline};
+
+#[cfg(test)]
+use types::Trend;
 
 #[cfg(test)]
 use compute::{
@@ -77,19 +80,17 @@ pub async fn handle_score(
         repo.find_all()
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?
-    } else if let Some(ref since_str) = since {
-        let date = chrono::NaiveDate::parse_from_str(since_str, "%Y-%m-%d")
-            .map_err(|e| anyhow::anyhow!("invalid --since date '{}': {}", since_str, e))?;
-        let cutoff = date
-            .and_hms_opt(0, 0, 0)
-            .ok_or_else(|| anyhow::anyhow!("invalid date"))?
-            .and_utc();
-        repo.find_since(cutoff)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?
     } else {
-        let cutoff = Utc::now() - chrono::Duration::days(90);
-        repo.find_since(cutoff)
+        let cutoff = if let Some(ref since_str) = since {
+            chrono::NaiveDate::parse_from_str(since_str, "%Y-%m-%d")
+                .map_err(|e| anyhow::anyhow!("invalid --since date '{}': {}", since_str, e))?
+                .and_hms_opt(0, 0, 0)
+                .ok_or_else(|| anyhow::anyhow!("invalid date"))?
+                .and_utc()
+        } else {
+            Utc::now() - chrono::Duration::days(90)
+        };
+        repo.find_observations_by_event_range(cutoff, Utc::now())
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?
     };
@@ -119,21 +120,34 @@ pub async fn handle_score(
     }
     let cluster = cluster_observations(&items);
     let config = crate::config::load();
-    let mut result = compute(&cluster, &config.targets);
+    let result = compute(&cluster, &config.targets);
 
     // Try personal baseline: load history BEFORE persisting current score
     let history = load_recent_scores(365)?;
     let baseline = compute_personal_baseline(&history);
-    let using_personal = baseline.is_some();
-
-    if let Some(ref bl) = baseline {
-        apply_personal_baseline(&mut result, bl);
-    }
-
     persist_score(&result)?;
-    print_score(&result, using_personal);
+    let trends = baseline
+        .as_ref()
+        .map(|baseline| compute_personal_trends(&result, baseline));
+    print_score(&result, trends.as_ref());
 
-    // Data time range
+    let window = if all {
+        crate::lang::t!("all observations", "全部观测").to_string()
+    } else if let Some(since_date) = since.as_deref() {
+        crate::lang::t!(
+            format!("since {} (event time)", since_date),
+            format!("自 {} 起(事件时间)", since_date)
+        )
+    } else {
+        crate::lang::t!(
+            "rolling 90 days (event time)".to_string(),
+            "滚动 90 天(事件时间)".to_string()
+        )
+    };
+    println!("  {} {}", crate::lang::t!("Window:", "窗口:"), window);
+
+    // Items expose persistence timestamps here; the selection window above is
+    // based on the source document's event timestamp.
     if !items.is_empty() {
         let (min_t, max_t) = items.iter().fold(
             (DateTime::<Utc>::MAX_UTC, DateTime::<Utc>::MIN_UTC),
@@ -144,7 +158,7 @@ pub async fn handle_score(
         );
         println!(
             "  {} {} ~ {}",
-            crate::lang::t!("Data range:", "数据范围:"),
+            crate::lang::t!("Stored item range:", "入库条目范围:"),
             min_t.format("%Y-%m-%d"),
             max_t.format("%Y-%m-%d"),
         );
@@ -175,11 +189,11 @@ pub async fn handle_score(
     if let Some(llm) = llm {
         match crate::advice::generate_and_cache(&result, &llm).await {
             Ok(advice) => println!("\n  {} {}", crate::lang::t!("Advice:", "建议:"), advice),
-            Err(e) => tracing::debug!("advice generation skipped: {}", e),
+            Err(e) => tracing::error!("advice generation failed: {}", e),
         }
     }
 
-    if let Err(e) = write_statusline(&result, db_path) {
+    if let Err(e) = write_statusline(&result, db_path, trends.as_ref()) {
         tracing::warn!("failed to write statusline.txt: {}", e);
     }
     Ok(())

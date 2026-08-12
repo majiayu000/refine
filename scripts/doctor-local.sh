@@ -73,6 +73,23 @@ mtime_text() {
   fi
 }
 
+file_sha256() {
+  local path="$1"
+  if have_cmd shasum; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  elif have_cmd sha256sum; then
+    sha256sum "$path" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+manifest_value() {
+  local key="$1"
+  local path="$2"
+  awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$path"
+}
+
 check_cmd() {
   local cmd="$1"
   if have_cmd "$cmd"; then
@@ -133,6 +150,12 @@ check_http() {
     return
   fi
 
+  if grep -q '"llm_configured":true' <<<"$health"; then
+    pass "server LLM extraction configured"
+  else
+    fail "server is healthy but LLM extraction is not configured; reinstall to refresh the server wrapper"
+  fi
+
   local items
   items="$(curl -sS --max-time 3 "${server_url}/v1/items?cursor=0&limit=1" 2>/dev/null || true)"
   if grep -q '"success":true' <<<"$items"; then
@@ -144,6 +167,48 @@ check_http() {
   else
     fail "API items endpoint failed"
   fi
+}
+
+check_install_manifest() {
+  local manifest="${HOME}/.refine/install-manifest"
+  if [[ ! -f "$manifest" ]]; then
+    fail "missing install manifest: $manifest"
+    return
+  fi
+
+  local expected_root expected_commit current_commit installed_dirty current_status current_dirty
+  expected_root="$(manifest_value source_root "$manifest")"
+  expected_commit="$(manifest_value source_commit "$manifest")"
+  installed_dirty="$(manifest_value source_dirty "$manifest")"
+  current_commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+  if current_status="$(git -C "$repo_root" status --porcelain 2>/dev/null)"; then
+    if [[ -z "$current_status" ]]; then
+      current_dirty=0
+    else
+      current_dirty=1
+    fi
+  else
+    current_dirty=unknown
+  fi
+
+  if [[ "$expected_root" == "$repo_root" && "$expected_commit" == "$current_commit" && "$installed_dirty" == "0" && "$current_dirty" == "0" ]]; then
+    pass "installed source matches clean checkout: ${current_commit}"
+  else
+    fail "installed source mismatch: root=${expected_root} commit=${expected_commit} installed_dirty=${installed_dirty}; current=${repo_root}@${current_commit} current_dirty=${current_dirty}"
+  fi
+
+  local name manifest_key binary expected_hash actual_hash
+  for name in refine mirror refine-server; do
+    binary="$(command -v "$name" 2>/dev/null || true)"
+    manifest_key="${name//-/_}_sha256"
+    expected_hash="$(manifest_value "$manifest_key" "$manifest")"
+    actual_hash="$(file_sha256 "$binary" 2>/dev/null || true)"
+    if [[ -n "$binary" && -n "$expected_hash" && "$expected_hash" == "$actual_hash" ]]; then
+      pass "installed binary hash matches: $name"
+    else
+      fail "installed binary hash mismatch: $name"
+    fi
+  done
 }
 
 check_db() {
@@ -193,6 +258,32 @@ check_freshness() {
   fi
 }
 
+check_unattended_llm_env() {
+  local llm_env_file="${REFINE_LLM_ENV_FILE:-${HOME}/.refine/llm.env}"
+  local preflight
+
+  # Reproduce launchd's relevant property: no interactive/process credentials
+  # while using the same project .env fallback as scheduled jobs.
+  # shellcheck disable=SC2016
+  if preflight="$(env -i \
+    HOME="$HOME" \
+    PATH='/usr/bin:/bin:/usr/sbin:/sbin' \
+    REFINE_LLM_ENV_FILE="$llm_env_file" \
+    /bin/bash -c '
+      set -u
+      source "$1"
+      if ! load_refine_llm_env "$2"; then
+        exit 1
+      fi
+      printf "source=%s " "${REFINE_LLM_ENV_SOURCE:-none}"
+      refine_llm_env_status
+    ' doctor-local "$repo_root/scripts/load-llm-env.sh" "$repo_root/.env" 2>&1)"; then
+    pass "unattended LLM credentials: ${preflight}"
+  else
+    fail "unattended LLM credential preflight failed: ${preflight}"
+  fi
+}
+
 check_logs() {
   local log_path
   local log_paths=(
@@ -231,6 +322,15 @@ check_ui_deps() {
   fi
 }
 
+check_ui_http() {
+  local ui_url="${REFINE_UI_URL:-http://127.0.0.1:8987}"
+  if curl -fsS --max-time 3 "$ui_url" >/dev/null 2>&1; then
+    pass "desktop UI reachable: $ui_url"
+  else
+    fail "desktop UI unreachable: $ui_url"
+  fi
+}
+
 printf 'Refine local doctor\n'
 printf 'Repo: %s\n' "$repo_root"
 printf 'Server: %s\n\n' "$server_url"
@@ -238,6 +338,7 @@ printf 'Server: %s\n\n' "$server_url"
 check_cmd refine
 check_cmd mirror
 check_cmd refine-server
+check_install_manifest
 
 check_launch_agent com.lifcc.refine-server
 check_launch_agent com.lifcc.refine-daily-ingest
@@ -248,12 +349,14 @@ else
   pass "desktop UI dev service skipped"
 fi
 
+check_unattended_llm_env
 check_http
 check_db
 check_freshness
 check_logs
 if [[ "$ui_dev_enabled" == "1" ]]; then
   check_ui_deps
+  check_ui_http
 else
   pass "desktop UI dependency check skipped"
 fi

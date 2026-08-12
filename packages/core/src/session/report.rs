@@ -3,11 +3,12 @@
 //! 将 10 路 LLM 分析结果合并为最终报告
 
 use super::clustering::GlobalStats;
+use serde::{Deserialize, Serialize};
 
 const MAX_FINAL_CONTEXT: usize = 30_000;
 
 /// 单路分析结果
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteResult {
     pub route_id: usize,
     pub route_title: String,

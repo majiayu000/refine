@@ -13,6 +13,7 @@ pub struct RestoreDocumentParams {
     pub raw_content: String,
     pub source: String,
     pub url: String,
+    pub source_version: Option<String>,
     pub captured_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -26,6 +27,8 @@ pub struct Document {
     raw_content: String,
     source: String,
     url: String,
+    #[serde(default)]
+    source_version: Option<String>,
     captured_at: DateTime<Utc>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -40,6 +43,7 @@ impl Document {
             raw_content: raw_content.to_string(),
             source: source.to_string(),
             url: String::new(),
+            source_version: None,
             captured_at: now,
             created_at: now,
             updated_at: now,
@@ -53,6 +57,7 @@ impl Document {
             raw_content: params.raw_content,
             source: params.source,
             url: params.url,
+            source_version: params.source_version,
             captured_at: params.captured_at,
             created_at: params.created_at,
             updated_at: params.updated_at,
@@ -76,6 +81,9 @@ impl Document {
     pub fn url(&self) -> &str {
         &self.url
     }
+    pub fn source_version(&self) -> Option<&str> {
+        self.source_version.as_deref()
+    }
     pub fn captured_at(&self) -> DateTime<Utc> {
         self.captured_at
     }
@@ -95,6 +103,11 @@ impl Document {
 
     pub fn set_url(&mut self, url: &str) {
         self.url = url.to_string();
+        self.updated_at = Utc::now();
+    }
+
+    pub fn set_source_version(&mut self, source_version: Option<&str>) {
+        self.source_version = source_version.map(ToOwned::to_owned);
         self.updated_at = Utc::now();
     }
 

@@ -24,19 +24,19 @@
 # Install the local stack: CLI tools, server, launchd jobs, and optional UI dev service
 scripts/install-local.sh
 
-# Configure LLM (.env file)
-cat > .env << 'EOF'
-REFINE_OPENAI_API_KEY=your_key
-REFINE_OPENAI_BASE_URL=https://api.openai.com
-REFINE_OPENAI_MODEL=gpt-4o
-EOF
+# Configure unattended LLM credentials (review first; no values are printed)
+bash scripts/configure-llm-env.sh --check
+bash scripts/configure-llm-env.sh --migrate
+
+# If supported variables are already exported in this shell, use:
+# bash scripts/configure-llm-env.sh --from-env
 
 # Set up Claude Code skills (one-time symlink)
 ln -s "$(pwd)/skills/cognitive-portrait" ~/.claude/skills/cognitive-portrait
 # If ~/.claude/skills/cognitive-portrait already exists as a directory (old copy),
 # delete it first: rm -rf ~/.claude/skills/cognitive-portrait
 
-# Import sessions from remem's raw archive
+# Import sessions (auto prefers remem and falls back to local when remem is absent)
 refine ingest-sessions
 
 # See your cognitive snapshot
@@ -129,7 +129,28 @@ scripts/doctor-local.sh
 | Schedule | Task | What It Does |
 |----------|------|-------------|
 | Daily 8:00 AM | `scripts/daily-refresh.sh` | `refine ingest-sessions` → `mirror score` → writes `~/.refine/last-refresh-ok` |
-| Weekly Mon 9:00 AM | `scripts/weekly-insights.sh` | `refine insights --prescription` (10-way LLM) |
+| Weekly Sunday 09:00 | `scripts/weekly-insights.sh` | `refine insights --prescription` (10-way LLM) |
+
+### LLM credential loading
+
+Unattended jobs use `~/.refine/llm.env` (mode `0600`, owned by the current
+user) and never source `~/.zshrc`. Loading order is: non-empty credentials
+already in the process, the secure user file, then an explicit repository
+`.env` fallback used by the daily and weekly scripts for development. Lower
+priority sources never replace an already-set credential.
+
+The migration helper accepts only literal `export BASE_URL=...`,
+`export BASE_API_KEY=...`, and `export BASE_MODEL=...` definitions. It creates
+a private backup under `~/.refine/backups`, removes only those definitions,
+and adds one managed source block for interactive shells. `--check` is a
+read-only dry run; `--migrate` is the explicit write operation. The installer
+does not copy or migrate secrets. Run `scripts/doctor-local.sh` after
+configuration to verify the same clean-environment preflight used by launchd.
+
+For a manual development-only fallback, a repository `.env` may contain
+supported variables such as `REFINE_OPENAI_API_KEY`,
+`REFINE_OPENAI_BASE_URL`, and `REFINE_OPENAI_MODEL`; scheduled scripts pass
+that path explicitly to the loader rather than sourcing it automatically.
 
 ### Configuration
 
@@ -145,9 +166,9 @@ friction_green = 1.0         # friction < 1.0/session = green
 ### Data Flow
 
 ```
-remem raw sessions/messages         ← Claude Code + Codex raw archive
+remem raw sessions/messages         ← preferred Claude Code + Codex raw archive
     │
-    ▼ refine ingest-sessions        (12-dimension facet extraction via LLM)
+    ▼ refine ingest-sessions        (auto: remem, or local discovery if remem is absent)
     │
 SQLite (observations, documents)    ← Shared data store
     │
@@ -160,24 +181,29 @@ SQLite (observations, documents)    ← Shared data store
 
 ## Refine CLI Commands
 
-`refine ingest-sessions` requires a compatible `remem` binary on `PATH`. Set
-`REFINE_REMEM_BIN` to an explicit binary path when needed. The normal path
-enumerates exact tuples with `remem raw sessions --json`, reads every snapshot-
-paginated `remem raw messages --json` page, and fails visibly on provider or
-contract errors. During the switch, a matching local path-keyed Document/items
-and its remem replacement facets are changed in one transaction;
-ambiguous legacy identity fails closed. Direct transcript scanning is disabled by default;
-`--legacy-local-scan` is a temporary one-release rollback switch and reuses a
-matching remem identity instead of creating a second active facet set.
+`refine ingest-sessions` defaults to `--provider auto`: it prefers a compatible
+`remem` binary on `PATH` (or the path in `REFINE_REMEM_BIN`) and falls back to
+the local Claude/Codex session scanner only when that executable is absent.
+`--provider remem` is strict and fails visibly on subprocess, JSON, contract,
+or pagination errors; those errors never trigger a local fallback.
+`--provider local` is a supported provider and accepts `--source claude|codex`.
+The deprecated `--legacy-local-scan` flag remains an alias for
+`--provider local`. A matching local path-keyed Document/items and its remem
+replacement facets are changed in one transaction; ambiguous legacy identity
+fails closed and the remem identity is reused instead of creating a second
+active facet set.
 
 ### Session Analysis
 
 ```bash
-refine ingest-sessions                  # Import complete sessions from remem
-refine ingest-sessions --latest 20      # Most recent 20 remem sessions
+refine ingest-sessions                  # auto: remem, then local only if remem is absent
+refine ingest-sessions --provider remem # Strict remem raw archive provider
+refine ingest-sessions --provider local # Supported local Claude/Codex scanner
+refine ingest-sessions --provider local --source claude
+refine ingest-sessions --latest 20      # Most recent sessions from the selected provider
 refine ingest-sessions --dry-run        # Preview without LLM calls
 refine ingest-sessions --legacy-local-scan --source claude
-                                        # One-release rollback to filesystem discovery
+                                        # Deprecated alias for --provider local
 refine insights --prescription          # L1-L4 cognitive report
 mirror dashboard                        # Cognitive growth dashboard
 ```

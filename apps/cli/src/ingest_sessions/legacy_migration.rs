@@ -1,13 +1,55 @@
 use crate::remem_sessions::RememSession;
+#[cfg(test)]
+use crate::remem_sessions::RememSessionSummary;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use refine_core::knowledge::{Document, DocumentId};
+#[cfg(test)]
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
 
 const LOCAL_SOURCE_ROOT: &str = "local";
 const LOCAL_SOURCE_ROOT_HEX: &str = "6c6f63616c";
 const LEGACY_SOURCES: [&str; 2] = ["claude-code-session", "codex-session"];
+
+#[cfg(test)]
+pub(super) fn legacy_document_index(documents: &[Document]) -> HashMap<String, Vec<&Document>> {
+    let mut index = HashMap::new();
+    for document in documents
+        .iter()
+        .filter(|document| LEGACY_SOURCES.contains(&document.source()))
+    {
+        for session_id in session_id_candidates(Path::new(document.url())) {
+            index
+                .entry(session_id)
+                .or_insert_with(Vec::new)
+                .push(document);
+        }
+    }
+    index
+}
+
+#[cfg(test)]
+pub(super) fn matching_legacy_document_for_summary<'doc>(
+    index: &HashMap<String, Vec<&'doc Document>>,
+    summary: &RememSessionSummary,
+) -> Result<Option<&'doc Document>> {
+    if summary.source_root != LOCAL_SOURCE_ROOT {
+        return Ok(None);
+    }
+    match index.get(&summary.session_id).map(Vec::as_slice) {
+        None | Some([]) => Ok(None),
+        Some([document]) => Ok(Some(*document)),
+        Some(matches) => bail!(
+            "ambiguous legacy filename identity for remem tuple ({:?}, {:?}, {:?}): {} candidates",
+            summary.source_root,
+            summary.project,
+            summary.session_id,
+            matches.len()
+        ),
+    }
+}
 
 pub(super) fn matching_legacy_document_ids(
     documents: &[Document],
@@ -48,6 +90,30 @@ pub(super) fn matching_legacy_document_ids(
     }
 
     Ok(Vec::new())
+}
+
+pub(super) fn legacy_document_covering_nonunique_summary(
+    documents: &[Document],
+    remem_session: &RememSession,
+    raw_content: &str,
+) -> Option<DocumentId> {
+    (remem_session.source_root == LOCAL_SOURCE_ROOT)
+        .then(|| {
+            documents.iter().find(|document| {
+                LEGACY_SOURCES.contains(&document.source())
+                    && url_matches_session_id(document.url(), &remem_session.session_id)
+                    && document.raw_content() == raw_content
+            })
+        })
+        .flatten()
+        .map(|document| document.id().clone())
+}
+
+pub(super) fn claim_legacy_coverage_once(
+    claimed: &mut HashSet<DocumentId>,
+    document_id: Option<DocumentId>,
+) -> bool {
+    document_id.is_some_and(|document_id| claimed.insert(document_id))
 }
 
 fn unique_match(matches: Vec<&Document>, remem_session: &RememSession) -> Result<Vec<DocumentId>> {
@@ -96,7 +162,7 @@ pub(super) fn matching_remem_document(
             session_ids
                 .iter()
                 .any(|session_id| document.url().ends_with(&hex_component(session_id)))
-                && contents_overlap(document.raw_content(), raw_content)
+                && canonical_contains_local(document.raw_content(), raw_content)
         })
         .collect();
     if !url_and_content.is_empty() {
@@ -108,7 +174,7 @@ pub(super) fn matching_remem_document(
         .copied()
         .filter(|document| {
             document.captured_at().timestamp() == captured_at.timestamp()
-                && contents_overlap(document.raw_content(), raw_content)
+                && canonical_contains_local(document.raw_content(), raw_content)
         })
         .collect();
     unique_remem_match(epoch_and_content, legacy_path)
@@ -148,7 +214,8 @@ fn session_id_candidates(path: &Path) -> Vec<String> {
     let mut candidates = vec![stem.to_string()];
     if stem.len() >= 36 {
         let suffix = &stem[stem.len() - 36..];
-        if suffix.as_bytes().get(8) == Some(&b'-')
+        if suffix != stem
+            && suffix.as_bytes().get(8) == Some(&b'-')
             && suffix.as_bytes().get(13) == Some(&b'-')
             && suffix.as_bytes().get(18) == Some(&b'-')
             && suffix.as_bytes().get(23) == Some(&b'-')
@@ -167,8 +234,8 @@ fn hex_component(value: &str) -> String {
         .collect()
 }
 
-fn contents_overlap(left: &str, right: &str) -> bool {
-    left == right || left.starts_with(right) || right.starts_with(left)
+fn canonical_contains_local(canonical: &str, local: &str) -> bool {
+    canonical == local || canonical.starts_with(local)
 }
 
 fn is_local_remem_url(url: &str) -> bool {
@@ -194,6 +261,7 @@ mod tests {
             raw_content: content.to_string(),
             source: source.to_string(),
             url: url.to_string(),
+            source_version: None,
             captured_at,
             created_at: original.created_at(),
             updated_at: original.updated_at(),
@@ -215,6 +283,96 @@ mod tests {
         }
     }
 
+    fn summary(source_root: &str, session_id: &str) -> RememSessionSummary {
+        RememSessionSummary {
+            source_root: source_root.to_string(),
+            project: "/repo".to_string(),
+            session_id: session_id.to_string(),
+            first_epoch: 10,
+            last_epoch: 20,
+            message_count: 2,
+            user_message_count: 1,
+            assistant_message_count: 1,
+            user_message_samples: Vec::new(),
+            legacy_identity_is_unique: true,
+        }
+    }
+
+    #[test]
+    fn summary_lookup_uses_unique_legacy_filename_without_content_loading() {
+        let session_id = "12345678-1234-1234-1234-123456789abc";
+        let legacy = document(
+            "codex-session",
+            &format!("/tmp/rollout-prefix-{session_id}.jsonl"),
+            "old",
+            10,
+        );
+        let documents = vec![legacy.clone()];
+        let index = legacy_document_index(&documents);
+
+        let matched =
+            matching_legacy_document_for_summary(&index, &summary(LOCAL_SOURCE_ROOT, session_id))
+                .unwrap()
+                .unwrap();
+        assert_eq!(matched.id(), legacy.id());
+        assert!(
+            matching_legacy_document_for_summary(&index, &summary("remote", session_id))
+                .unwrap()
+                .is_none()
+        );
+
+        let exact = document(
+            "claude-code-session",
+            &format!("/tmp/{session_id}.jsonl"),
+            "old",
+            10,
+        );
+        let exact_documents = vec![exact];
+        let exact_index = legacy_document_index(&exact_documents);
+        assert_eq!(exact_index.get(session_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn nonunique_summary_uses_legacy_content_only_as_read_only_coverage() {
+        let legacy = document("codex-session", "/tmp/session-1.jsonl", "same", 10);
+        let documents = vec![legacy];
+
+        assert!(legacy_document_covering_nonunique_summary(
+            &documents,
+            &remem("local", "session-1"),
+            "same",
+        )
+        .is_some());
+        assert!(legacy_document_covering_nonunique_summary(
+            &documents,
+            &remem("local", "session-1"),
+            "same plus append",
+        )
+        .is_none());
+        assert!(legacy_document_covering_nonunique_summary(
+            &documents,
+            &remem("remote", "session-1"),
+            "same",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn nonunique_legacy_coverage_can_only_be_claimed_once() {
+        let legacy = document("codex-session", "/tmp/session-1.jsonl", "same", 10);
+        let mut claimed = HashSet::new();
+
+        assert!(claim_legacy_coverage_once(
+            &mut claimed,
+            Some(legacy.id().clone())
+        ));
+        assert!(!claim_legacy_coverage_once(
+            &mut claimed,
+            Some(legacy.id().clone())
+        ));
+        assert!(!claim_legacy_coverage_once(&mut claimed, None));
+    }
+
     #[test]
     fn matches_local_filename_or_epoch_content_but_not_remote() {
         let filename = document("claude-code-session", "/tmp/session-1.jsonl", "old", 5);
@@ -227,7 +385,7 @@ mod tests {
         assert_eq!(matched, vec![filename.id().clone()]);
 
         let matched = matching_legacy_document_ids(
-            &[epoch.clone()],
+            std::slice::from_ref(&epoch),
             &remem("local", "canonical-id"),
             "prefix plus append",
         )
@@ -274,7 +432,7 @@ mod tests {
             "/tmp/rollout-2026-07-20T00-00-00-12345678-1234-1234-1234-123456789abc.jsonl",
         );
         let matched = matching_remem_document(
-            &[remem_doc.clone()],
+            std::slice::from_ref(&remem_doc),
             path,
             Utc.timestamp_opt(10, 0).unwrap(),
             raw,
@@ -282,6 +440,33 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(matched.id(), remem_doc.id());
+    }
+
+    #[test]
+    fn longer_local_snapshot_cannot_claim_or_overwrite_canonical_remem() {
+        let session_id = "12345678-1234-1234-1234-123456789abc";
+        let remem_doc = document(
+            "remem-raw-session",
+            &format!(
+                "remem-raw://v1/{}/{}/{}",
+                LOCAL_SOURCE_ROOT_HEX,
+                hex_component("/repo"),
+                hex_component(session_id)
+            ),
+            "User: canonical prefix\n",
+            10,
+        );
+        let path = Path::new(
+            "/tmp/rollout-2026-07-20T00-00-00-12345678-1234-1234-1234-123456789abc.jsonl",
+        );
+        let matched = matching_remem_document(
+            &[remem_doc],
+            path,
+            Utc.timestamp_opt(10, 0).unwrap(),
+            "User: canonical prefix\nAssistant: local-only suffix\n",
+        )
+        .unwrap();
+        assert!(matched.is_none());
     }
 
     #[test]

@@ -3,15 +3,17 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${HOME}/.cargo/bin:$PATH"
-cd "${SCRIPT_DIR}/.."
+PROJECT_DIR="${SCRIPT_DIR}/.."
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${HOME}/.cargo/bin:${PATH:-}"
+cd "$PROJECT_DIR"
 
-# Load .env for LLM API keys
-if [ -f .env ]; then
-  set -a
-  # shellcheck source=/dev/null
-  source .env
-  set +a
+# The loader applies process -> secure user file -> explicit project fallback.
+# It never sources ~/.zshrc or evaluates either env file.
+# shellcheck source=scripts/load-llm-env.sh
+source "${SCRIPT_DIR}/load-llm-env.sh"
+if ! load_refine_llm_env "${PROJECT_DIR}/.env"; then
+  echo "ERROR: unattended LLM credentials are unavailable; refusing to start ingest" >&2
+  exit 1
 fi
 
 QUOTA_FILE="$HOME/.refine/quota_exhausted_until"
@@ -26,11 +28,13 @@ fi
 
 echo "=== $(date) ==="
 
+FAILED_STEPS=()
+
 # Preflight: environment diagnostics for troubleshooting
 echo "Preflight: PATH=$PATH"
 echo "Preflight: refine=$(command -v refine) mirror=$(command -v mirror)"
 echo "Preflight: cwd=$(pwd)"
-echo "Preflight: env REFINE_DB_PATH=${REFINE_DB_PATH:-<unset>} REFINE_ANTHROPIC_MODEL=${REFINE_ANTHROPIC_MODEL:-<unset>}"
+echo "Preflight: LLM source=${REFINE_LLM_ENV_SOURCE:-none} $(refine_llm_env_status)"
 
 # 1. Ingest new sessions (capture exit code without aborting the script)
 echo "Step 1: ingest-sessions"
@@ -43,14 +47,40 @@ fi
 
 # 2. Refresh mirror score + LLM advice (run regardless of ingest result)
 echo "Step 2: mirror score"
-mirror score 2>&1
+score_rc=0
+mirror score 2>&1 || score_rc=$?
+if [ "$score_rc" -ne 0 ]; then
+  echo "ERROR: Step 2 mirror score failed with exit code ${score_rc}" >&2
+  FAILED_STEPS+=("mirror score")
+fi
 
 # 3. Weekly report on Sundays — generates ~/.mirror/last-weekly.md for Monday MOTD reminder.
-# Non-fatal: weekly requires LLM API access and may fail without network/key.
+# A missing weekly report is user-visible and must affect the final status.
 DOW=$(date +%u)  # 1=Monday … 7=Sunday
 if [ "$DOW" = "7" ]; then
   echo "Step 3: mirror weekly (Sunday)"
-  mirror weekly 2>&1 || echo "Step 3: mirror weekly failed (non-fatal)"
+  weekly_rc=0
+  mirror weekly 2>&1 || weekly_rc=$?
+  if [ "$weekly_rc" -ne 0 ]; then
+    echo "ERROR: Step 3 mirror weekly failed with exit code ${weekly_rc}" >&2
+    FAILED_STEPS+=("mirror weekly")
+  fi
+fi
+
+echo "Step 4: wal checkpoint"
+if [ -n "${REFINE_DB_PATH:-}" ]; then
+  db_path="$REFINE_DB_PATH"
+elif [ "$(uname -s)" = "Darwin" ]; then
+  db_path="$HOME/Library/Application Support/refine/refine.db"
+else
+  db_path="${XDG_DATA_HOME:-$HOME/.local/share}/refine/refine.db"
+fi
+if command -v sqlite3 >/dev/null 2>&1 && [ -f "$db_path" ]; then
+  if ! sqlite3 "$db_path" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null; then
+    echo "WARN: WAL checkpoint failed: $db_path" >&2
+  fi
+else
+  echo "WARN: WAL checkpoint skipped: sqlite3 or database missing" >&2
 fi
 
 echo "Done."
@@ -61,7 +91,12 @@ if [ "$ingest_ok" -eq 1 ]; then
   date -u +%Y-%m-%dT%H:%M:%SZ > ~/.refine/last-refresh-ok
 fi
 
-# Propagate ingest failure to exit status for launchd/cron health monitoring
 if [ "$ingest_ok" -eq 0 ]; then
+  FAILED_STEPS+=("ingest-sessions")
+fi
+
+# Propagate every user-visible failure to launchd/cron monitoring.
+if [ ${#FAILED_STEPS[@]} -gt 0 ]; then
+  echo "ERROR: run finished with failures: ${FAILED_STEPS[*]}" >&2
   exit 1
 fi

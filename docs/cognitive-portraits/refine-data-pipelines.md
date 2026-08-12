@@ -10,7 +10,7 @@
 
 共识别 **9 条产出链路**，其中 **6 条调 LLM**、**5 条写 refine.db**、其余写本地文件或 stdout：
 
-- 1 条数据流入口（`refine ingest-sessions`，remem raw archive → refine.db）
+- 1 条数据流入口（`refine ingest-sessions`，auto/remem/local provider → refine.db）
 - 1 条核心 LLM 聚合链路（`refine insights --prescription`，~10+1 次 LLM 并发）
 - 4 条 mirror 子命令（`score` / `motd` / `dashboard` / `weekly` / `profile`）
 - 2 条由 launchd 调度的 shell 脚本（daily/weekly）
@@ -23,7 +23,7 @@
 ## 链路全景图
 
 ```
-remem raw archive
+auto/remem: remem raw archive；local: filesystem scan
  (完整 user/assistant 消息)
        │
        │ parse + LLM facet extract (3 并发 × 最多 5 次重试)
@@ -94,15 +94,15 @@ remem raw archive
 
 | 字段 | 内容 |
 |---|---|
-| 命令入口 | `refine ingest-sessions [--limit N\|--latest N] [--dry-run]`；一个发布周期内可显式使用 `--legacy-local-scan [--source claude\|codex]` |
+| 命令入口 | `refine ingest-sessions [--provider auto\|remem\|local] [--limit N\|--latest N] [--dry-run]`；`--legacy-local-scan` 是 `--provider local` 的弃用别名 |
 | 代码位置 | `apps/cli/src/cli.rs:74-88` → `apps/cli/src/handlers.rs:32-58` → `apps/cli/src/ingest_sessions.rs:41-199`（处理函数 `handle_ingest_sessions`，`process_single_session`，`llm_call_with_retry`，`extract_and_parse_facets_with_retry`）|
 | 触发方式 | 手动；由 `scripts/daily-refresh.sh` 每天 08:00 调用；由 `scripts/weekly-insights.sh` 每周一 09:00 调用 |
-| 数据来源 | `remem raw sessions --json` 枚举 exact tuple，`remem raw messages --json` 读取完整快照分页；本地扫描只在显式回滚开关下运行 |
+| 数据来源 | `auto/remem` 使用 `remem raw sessions --json` 枚举 exact tuple、`remem raw messages --json` 读取完整快照分页；`local` 使用本地扫描；auto 仅在 remem 可执行文件缺失时回退到 local |
 | 处理步骤 | 1) 校验 session summary；2) 按 `--latest` 或 `--limit` 裁剪；3) 逐页校验 selector/order/cursor/count/epoch；4) 用稳定 URL + raw 内容跳过或刷新；5) 保守匹配本地旧路径 identity；6) filter/chunk；7) 默认串行（`REFINE_INGEST_CONCURRENCY` 可配置）执行 LLM facet 抽取；8) 在同一事务保存 remem Document/Items 并删除已取代旧 Document/items |
 | LLM 调用 | **是**；每会话 1 次（或每分块 1 次，需要 chunking 时可能 N 次）+ 1 次最终合并；默认并发度 1；最多 5 次重试，base delay 10s，退避 `10 * 2^attempt` 秒 |
 | 输出目标 | **refine.db**：`documents` 表（每会话 1 行，source = `remem-raw-session`）+ `items` 表（每会话 N 行，`item_type='observation'`）|
 | 输出 schema | `Document { id, source, url=remem-raw://v1/<hex tuple>, title, raw_content }`；`Item { id, item_type='observation', ..., document_id }`；内容变化时保留 Document identity 并替换关联 Items |
-| 依赖 | 兼容的 `remem` 二进制（`PATH` 或 `REFINE_REMEM_BIN`）和 LLM key；provider 错误会 fail closed |
+| 依赖 | `auto/remem` 需要兼容的 `remem` 二进制（`PATH` 或 `REFINE_REMEM_BIN`），`local` 不需要；所有 provider 都需要 LLM key；provider/契约错误会 fail closed，auto 仅对缺失可执行文件回退 |
 | 已知问题 | 网络波动 / API cooldown 时单会话可能耗尽 5 次重试失败；`daily-refresh.sh` 会根据 exit code 记录 `~/.refine/last-refresh-ok`，失败时不更新时间戳 |
 
 ---
@@ -113,9 +113,9 @@ remem raw archive
 |---|---|
 | 命令入口 | `refine insights [--period N] [--prescription]` |
 | 代码位置 | `apps/cli/src/cli.rs:89-97` → `apps/cli/src/handlers.rs:59-76` → `apps/cli/src/insights.rs:24-125`（`handle_insights`，`llm_with_retry`）；路由规划在 `packages/core/src/session/analysis_routes.rs:18` 的 `plan_routes` |
-| 触发方式 | 手动；由 `scripts/weekly-insights.sh` 每周一 09:00 通过 launchd 自动触发 |
+| 触发方式 | 手动；由 `scripts/weekly-insights.sh` 每周日 09:00 通过 launchd 自动触发 |
 | 数据来源 | `item_store.find_by_type(ItemType::Observation)` — 全量 Observation（当前实现**未按 `--period` 过滤**时间窗口） |
-| 处理步骤 | 1) 加载所有 Observation；2) `cluster_observations()` 纯 Rust 本地聚类（按 project + facet 汇总）；3) `plan_routes()` 规划 N 路分析路由（项目总览 / 决策模式 / bug 模式 / 认知演化 / 技术雷达 / AI 协作 / 工作流 / 各项目深挖 / 知识网络 / 摩擦深挖，最少补齐到 10 路）；4) **10 路并发** LLM 调用 (`Semaphore::new(10)`)，system prompt = `ROUTE_SYSTEM_PROMPT`；5) `merge_route_results()` 合并；6) 调 1 次 LLM 做最终报告（system prompt = `INSIGHTS_SYSTEM_PROMPT`，是否含 L4 处方由 `with_prescription` 决定）；7) 保存 |
+| 处理步骤 | 1) 加载所有 Observation；2) `cluster_observations()` 纯 Rust 本地聚类（按 project + facet 汇总）；3) `plan_routes()` 规划 N 路分析路由（项目总览 / 决策模式 / bug 模式 / 认知演化 / 技术雷达 / AI 协作 / 工作流 / 各项目深挖 / 知识网络 / 摩擦深挖，最少补齐到 10 路）；4) **10 路并发** LLM 调用 (`Semaphore::new(10)`)，system prompt = `ROUTE_SYSTEM_PROMPT`；5) `merge_route_results()` 合并；6) 调 1 次 LLM 做最终报告（system prompt = `INSIGHTS_SYSTEM_PROMPT`，是否含 L4 处方由 `with_prescription` 决定；大上下文合并请求的单次超时为 300 秒）；7) 保存 |
 | LLM 调用 | **是**；一次运行 ≈ **N+1 次**（N 通常为 10 路）；并发度 10；每次独立 5 次重试（和链路 1 同样的 exponential backoff 策略） |
 | 输出目标 | **stdout**（完整 markdown 报告）+ **refine.db** `documents` 表 (source=`session-insights-v2`，URL = `insights-v2://<rfc3339>`) |
 | 输出 schema | Markdown 文档；`Document.title = "Session Insights v2 YYYY-MM-DD HH:MM"`；`raw_content` 为完整的合并报告 |
@@ -215,13 +215,13 @@ remem raw archive
 |---|---|
 | 命令入口 | `/Users/lifcc/Desktop/code/AI/tools/refine/scripts/weekly-insights.sh` |
 | 代码位置 | `scripts/weekly-insights.sh`（52 行） |
-| 触发方式 | launchd `com.lifcc.refine-weekly-insights.plist` — **每周一 09:00** |
-| 数据来源 | 依赖 `.env` 加载环境变量 |
-| 处理步骤 | 1) 加载 `.env`；2) 打印 preflight (PATH/refine/cwd/env)；3) `refine ingest-sessions`（链路 1）；4) `refine insights --prescription`（链路 2）；5) `osascript` 发送 macOS 通知 |
+| 触发方式 | launchd `com.lifcc.refine-weekly-insights.plist` — **每周日 09:00** |
+| 数据来源 | 共享 LLM loader：当前进程 → `~/.refine/llm.env` → 显式传入的仓库 `.env` fallback |
+| 处理步骤 | 1) 通过共享 loader 做凭据 preflight（不读取 `~/.zshrc`）；2) 打印仅含 `<set>/<unset>` 和来源的 preflight；3) `refine ingest-sessions`（链路 1）；4) `refine insights --prescription`（链路 2）；5) `osascript` 发送 macOS 通知 |
 | LLM 调用 | **是（间接）**：= 链路 1 + 链路 2 的总和（单会话 N 次 + insights ≈ 11 次） |
 | 输出目标 | `~/Library/Logs/refine-insights.log`（日志） + 链路 1/2 的所有写入目标 |
 | 输出 schema | 无自身 schema，复用下游 |
-| 依赖 | `.env` 内的 LLM API key；依赖 `refine` 二进制绝对路径 `/Users/lifcc/.cargo/bin/refine` |
+| 依赖 | `~/.refine/llm.env` 内的 LLM API key（开发时可显式 fallback 到 `.env`）；依赖 `refine` 二进制绝对路径 `/Users/lifcc/.cargo/bin/refine` |
 | 已知问题 | `set -euo pipefail` 但对子命令 exit code 做了 `if ... 2>&1; then ... else ... fi` 兜底，只记录日志不中断；launchd 不重试失败 |
 
 ---
@@ -247,10 +247,10 @@ remem raw archive
 
 ### 1. 数据流入点
 
-**只有链路 1 `refine ingest-sessions` 是数据流入口**（默认从 remem raw archive 做 LLM 抽取）。所有其他链路（2~9）都是在 refine.db 里对已有 Observation 做聚合/加工/叙事。因此：
+**只有链路 1 `refine ingest-sessions` 是数据流入口**（auto 默认探测 remem raw archive，缺少可执行文件时回退到 local；也可显式选择 remem/local）。所有其他链路（2~9）都是在 refine.db 里对已有 Observation 做聚合/加工/叙事。因此：
 
 - **链路 1 质量决定整条管道质量**。facet prompt 改动、chunking 策略、filter 策略的变化会扩散到下游所有报告。
-- 断掉链路 1（如 API key 失效、remem 不可用或契约漂移）会让导入显式失败；不会把 provider 错误降级成空输入。
+- 断掉链路 1（如 API key 失效或 provider 契约漂移）会让导入显式失败；auto 仅在 remem 可执行文件缺失时回退到 local，不会把 provider 错误降级成空输入。
 
 ### 2. LLM 成本分布
 
@@ -265,7 +265,7 @@ remem raw archive
 | 链路 3 `score` (advice) | 1 次（72h 缓存） | 1 | 命中缓存后 0 次 |
 | 链路 4 `dashboard` / 链路 6 `motd` | **0 次** | — | 纯本地 |
 
-**每周一 9:00 的 launchd 任务（链路 8）= 链路 1 + 链路 2 的合计**，是 LLM 预算最集中的时间窗口。
+**每周日 09:00 的 launchd 任务（链路 8）= 链路 1 + 链路 2 的合计**，是 LLM 预算最集中的时间窗口。
 
 ### 3. 稳定性风险
 
@@ -297,6 +297,9 @@ remem raw archive
 | `REFINE_OPENAI_API_KEY` | OpenAI API key（次优先级） | 或 `OPENAI_API_KEY` |
 | `REFINE_OPENAI_MODEL` | OpenAI 模型名 | |
 | `REFINE_OPENAI_BASE_URL` | OpenAI API base URL | |
+| `BASE_API_KEY` | 兼容网关 API key | 与 `BASE_URL`、`BASE_MODEL` 配套 |
+| `BASE_URL` | 兼容网关 URL | 由共享 loader 解析 |
+| `BASE_MODEL` | 兼容网关模型名 | 由共享 loader 解析 |
 
 ### 数据库 / 路径
 
@@ -310,7 +313,7 @@ remem raw archive
 
 | 链路 | 使用 env |
 |---|---|
-| 链路 1 ingest-sessions | `remem`（或 `REFINE_REMEM_BIN`）；LLM key；可选 `REFINE_DB_PATH`、`REFINE_INGEST_CONCURRENCY` |
+| 链路 1 ingest-sessions | `--provider auto\|remem` 时为 `remem`（或 `REFINE_REMEM_BIN`），`--provider local` 时为本地扫描；LLM key；可选 `REFINE_DB_PATH`、`REFINE_INGEST_CONCURRENCY` |
 | 链路 2 insights | LLM key；可选 `REFINE_DB_PATH` |
 | 链路 3 score | 可选 LLM key（advice 可跳过）；可选 `REFINE_DB_PATH` |
 | 链路 4 dashboard | 可选 `REFINE_DB_PATH` |
@@ -329,7 +332,7 @@ remem raw archive
 | `com.lifcc.refine-server` | `~/Library/LaunchAgents/com.lifcc.refine-server.plist` | 常驻 | **PID 4706 running** |
 | `com.lifcc.refine-ui-dev` | `~/Library/LaunchAgents/com.lifcc.refine-ui-dev.plist` | 常驻 | **PID 4696 running** |
 | `com.lifcc.refine-daily-ingest` | `~/Library/LaunchAgents/com.lifcc.refine-daily-ingest.plist` | **每天 08:00** | 未运行（调度中）；**last exit=1**（最近一次 ingest 失败） |
-| `com.lifcc.refine-weekly-insights` | `~/Library/LaunchAgents/com.lifcc.refine-weekly-insights.plist` | **每周一 09:00** | 未运行（调度中）；last exit=0 |
+| `com.lifcc.refine-weekly-insights` | `~/Library/LaunchAgents/com.lifcc.refine-weekly-insights.plist` | **每周日 09:00** | 未运行（调度中）；last exit=0 |
 
 ### 任务详情
 
@@ -350,10 +353,10 @@ remem raw archive
 
 - 执行：`/bin/bash /Users/lifcc/Desktop/code/AI/tools/refine/scripts/weekly-insights.sh`
 - 工作目录：`/Users/lifcc/Desktop/code/AI/tools/refine`
-- 触发：每周一 09:00（`Weekday=1`）
+- 触发：每周日 09:00（`Weekday=0`，macOS launchd）
 - 日志：`~/Library/Logs/refine-insights.log`
 - 脚本做的事：
-  1. 从 `.env` 加载 env
+  1. 通过共享 loader 加载 LLM env；缺少 unattended key 时在 ingest 前失败
   2. `refine ingest-sessions`（链路 1，补捕最近 24h 新会话）
   3. `refine insights --prescription`（链路 2）
   4. `osascript` 通知 "Weekly insights 报告已生成"

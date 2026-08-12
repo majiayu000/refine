@@ -11,10 +11,12 @@
 | 来源 | 入口 | 格式 |
 |------|------|------|
 | remem raw archive | `remem raw sessions/messages --json` | 完整 user/assistant 消息和精确 selector tuple |
-| 本地 Claude/Codex 文件 | `--legacy-local-scan` | 仅一个发布周期的显式回滚路径 |
+| 本地 Claude/Codex 文件 | `--provider local` | 本地文件发现与 JSONL 解析 |
 
-默认路径不直接扫描文件系统。refine 逐页读取 remem 快照，并严格校验
-`source_type`、selector、排序、游标、计数和首尾时间；provider 失败或契约漂移时整次导入显式失败。
+默认 `auto` 路径优先逐页读取 remem 快照，并严格校验 `source_type`、
+selector、排序、游标、计数和首尾时间；只有 remem 可执行文件不存在时才
+自动选择本地文件发现。provider 失败或契约漂移时整次导入显式失败，不会
+静默切换到本地扫描。
 
 ### 现有架构
 
@@ -28,9 +30,10 @@
 ### 两个 CLI 命令
 
 ```
-refine ingest-sessions [--limit N | --latest N] [--dry-run]
-refine ingest-sessions --legacy-local-scan [--source claude|codex]
-refine insights [--period 30d] [--format terminal|json]
+refine ingest-sessions [--provider auto|remem|local] [--limit N | --latest N] [--dry-run]
+refine ingest-sessions --provider local [--source claude|codex]
+refine ingest-sessions --legacy-local-scan [--source claude|codex]  # deprecated alias
+refine insights [--period 30]
 ```
 
 ### 数据流
@@ -71,9 +74,9 @@ pub enum ItemType {
 // 统一的会话结构（跨 Claude Code / Codex）
 pub struct Session {
     pub id: String,                    // session UUID
-    pub source: SessionSource,         // RememRaw（默认）| ClaudeCode | Codex（回滚）
+    pub source: SessionSource,         // RememRaw（auto 首选）| ClaudeCode | Codex
     pub project: Option<String>,       // 项目路径
-    pub file_path: String,             // remem 稳定 URL 或回滚路径文件名
+    pub file_path: String,             // remem 稳定 URL 或本地扫描路径文件名
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub messages: Vec<SessionMessage>,
@@ -110,10 +113,11 @@ pub struct SessionMeta {
 }
 ```
 
-### Provider 与回滚解析规则
+### Provider 解析规则
 
-默认路径只接收 remem 的 raw archive JSON 契约，不调用 JSONL parser。以下 JSONL
-规则仅适用于显式 `--legacy-local-scan` 回滚路径。
+`auto` 和 `remem` 的 remem 路径只接收 raw archive JSON 契约，不调用 JSONL
+parser；`local` 路径使用以下 JSONL 规则。`--legacy-local-scan` 只是
+`--provider local` 的兼容别名，不代表临时回滚。
 
 #### Claude Code 会话 JSONL
 
@@ -199,8 +203,8 @@ pub struct SessionMeta {
 - 每个 remem Session 对应一个 Document；`url` 为 exact tuple 的稳定十六进制编码
 - URL 已存在且 `raw_content` 相同则跳过；内容变化则保留 Document identity 并原子替换 Items
 - 对 `source_root=local`，按 session filename + 内容优先、首时间 + 内容次级匹配旧路径 Document；remem 替代项保存与旧 Document/items 删除在同一事务提交，匹配不唯一则 fail closed
-- 回滚扫描若命中已有 remem identity，则继续刷新该稳定 URL；不会恢复路径 URL 并生成第二套 facets
-- provider 失败、分页游标停滞或 selector/count/order 漂移时显式失败，不回退为本地扫描
+- local 扫描若命中已有 remem identity，则继续刷新该稳定 URL；不会恢复路径 URL 并生成第二套 facets
+- auto 仅在 remem 可执行文件不存在时选择 local；provider 失败、分页游标停滞或 selector/count/order 漂移时显式失败，不回退为本地扫描
 
 ## Files Changed
 
@@ -271,9 +275,9 @@ pub struct SessionMeta {
 
 ## Done-when
 
-1. `refine ingest-sessions` 默认只从 remem raw archive 读取、校验并提取完整会话
+1. `refine ingest-sessions` 默认使用 auto：优先读取并校验 remem raw archive，remem 可执行文件不存在时扫描本地会话
 2. `refine insights` 能输出 L1-L4 四层分析报告
 3. 相同 raw 内容第二次运行会跳过，内容变化会原位刷新
 4. `cargo check` + `cargo test` 通过
 5. 至少 3 个真实会话的 facet 提取结果质量可接受
-6. remem 不可用或契约漂移时命令非零退出，只有显式回滚开关才扫描本地文件
+6. remem 非零退出、契约漂移或分页错误时命令非零退出；只有 remem 可执行文件不存在时 auto 才扫描本地文件，`--provider local` 可显式选择本地路径

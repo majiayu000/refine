@@ -40,6 +40,14 @@ impl SqliteStore {
         Ok(Self { worker })
     }
 
+    /// Open an existing database without running migrations or allowing writes.
+    /// Used by preview commands whose read-only promise must include startup.
+    pub fn open_read_only(path: impl AsRef<Path>) -> InfraResult<Self> {
+        let mode = OpenMode::ReadOnlyFile(PathBuf::from(path.as_ref()));
+        let worker = start_worker(mode)?;
+        Ok(Self { worker })
+    }
+
     /// 内存数据库（测试用）
     pub fn in_memory() -> InfraResult<Self> {
         let worker = start_worker(OpenMode::InMemory)?;

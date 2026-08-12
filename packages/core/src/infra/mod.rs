@@ -29,6 +29,7 @@ pub fn prepare_sqlite_db(conn: &Connection) -> InfraResult<()> {
     tx.execute_batch(include_str!("schema.sql"))
         .map_err(|e| InfraError::Database(e.to_string()))?;
     migrate_items_add_document_columns(&tx)?;
+    migrate_documents_add_source_version(&tx)?;
     migrate_documents_url_unique(&tx)?;
     migrate_items_document_fk(&tx)?;
     migrate_extraction_jobs_conversation_fk(&tx)?;
@@ -122,7 +123,28 @@ fn migrate_items_add_document_columns(conn: &Connection) -> InfraResult<()> {
     Ok(())
 }
 
+fn migrate_documents_add_source_version(conn: &Connection) -> InfraResult<()> {
+    if !column_exists(conn, "documents", "source_version")? {
+        conn.execute_batch("ALTER TABLE documents ADD COLUMN source_version TEXT")
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+    }
+    Ok(())
+}
+
 fn migrate_documents_url_unique(conn: &Connection) -> InfraResult<()> {
+    let unique_index_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM pragma_index_list('documents')
+             WHERE name = 'idx_documents_url' AND \"unique\" = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    if unique_index_exists > 0 {
+        return Ok(());
+    }
+
     conn.execute_batch(
         "UPDATE items
          SET document_id = (
@@ -278,8 +300,8 @@ fn migrate_extraction_jobs_conversation_fk(conn: &Connection) -> InfraResult<()>
 
 #[cfg(test)]
 mod tests {
-    use super::prepare_sqlite_db;
-    use rusqlite::Connection;
+    use super::{column_exists, migrate_documents_url_unique, prepare_sqlite_db};
+    use rusqlite::{Connection, OpenFlags};
 
     #[test]
     fn prepare_sqlite_db_rebuilds_legacy_items_with_document_fk() {
@@ -322,6 +344,9 @@ mod tests {
 
         prepare_sqlite_db(&conn).unwrap_or_else(|err| panic!("prepare sqlite db: {err}"));
 
+        assert!(column_exists(&conn, "documents", "source_version")
+            .expect("inspect migrated documents columns"));
+
         let document_id: Option<String> = conn
             .query_row(
                 "SELECT document_id FROM items WHERE id = 'orphan'",
@@ -356,6 +381,21 @@ mod tests {
             err.to_string().contains("FOREIGN KEY constraint failed"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn documents_url_migration_is_read_only_after_unique_index_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("refine.db");
+        {
+            let conn = Connection::open(&path).expect("open writable database");
+            prepare_sqlite_db(&conn).expect("prepare database");
+        }
+
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open read-only database");
+        migrate_documents_url_unique(&conn)
+            .expect("an already-migrated database must not require writes");
     }
 
     #[test]

@@ -17,6 +17,7 @@ tracing.workspace = true
 reqwest.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+sha2.workspace = true
 dirs = "5"
 
 [dev-dependencies]

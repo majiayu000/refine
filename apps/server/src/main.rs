@@ -25,7 +25,11 @@ const MAX_FALLBACK_ATTEMPTS: usize = FALLBACK_PORTS.len();
 
 #[tokio::main]
 async fn main() {
-    let _ = dotenvy::dotenv();
+    if let Err(error) = dotenvy::dotenv() {
+        if !error.not_found() {
+            eprintln!("Warning: failed to load .env ({error})");
+        }
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter("refine_server=info,refine_core=info")
@@ -219,7 +223,7 @@ fn requires_api_token_for_bind(addr: &SocketAddr) -> bool {
 mod tests {
     use super::{build_app, parse_bind_addr, requires_api_token_for_bind, DEFAULT_SERVER_PORT};
     use crate::state::{AppState, AuthConfig};
-    use axum::body::Body;
+    use axum::body::{to_bytes, Body};
     use axum::http::{header, HeaderValue, Method, Request, StatusCode};
     use axum::Router;
     use serde_json::json;
@@ -280,6 +284,13 @@ mod tests {
             .expect("dispatch health request");
 
         assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read health response");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("health response is JSON");
+        assert_eq!(payload.get("success"), Some(&json!(true)));
+        assert_eq!(payload.get("llm_configured"), Some(&json!(false)));
     }
 
     #[tokio::test]

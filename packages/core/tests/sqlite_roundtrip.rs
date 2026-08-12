@@ -12,6 +12,40 @@ use serde_json::json;
 use std::collections::HashSet;
 
 #[tokio::test]
+async fn read_only_store_never_runs_schema_migrations_or_accepts_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE marker (value TEXT NOT NULL);
+             INSERT INTO marker VALUES ('unchanged');",
+        )
+        .unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+    let store = SqliteStore::open_read_only(&path).unwrap();
+    let item = Item::new_knowledge("must fail", "read only");
+    assert!(store.save(&item).await.is_err());
+    drop(store);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT value FROM marker", [], |row| row
+            .get::<_, String>(0))
+            .unwrap(),
+        "unchanged"
+    );
+    assert!(conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='documents'",
+            [],
+            |_| Ok(())
+        )
+        .is_err());
+}
+
+#[tokio::test]
 async fn roundtrip_preserves_timestamps_and_content() {
     let store = SqliteStore::in_memory().expect("failed to create sqlite store");
 
@@ -119,6 +153,7 @@ async fn document_save_refreshes_existing_url_content() {
     let mut second = Document::new("claude", "newer content");
     second.set_title("Newer title");
     second.set_url(url);
+    second.set_source_version(Some("source:v1:2"));
     let second_captured_at = second.captured_at();
     let second_updated_at = second.updated_at();
     refine_core::knowledge::DocumentRepository::save(&store, &second)
@@ -137,11 +172,13 @@ async fn document_save_refreshes_existing_url_content() {
     assert_eq!(by_url.id(), first.id());
     assert_eq!(by_url.title(), Some("Newer title"));
     assert_eq!(by_url.raw_content(), "newer content");
+    assert_eq!(by_url.source_version(), Some("source:v1:2"));
     assert_eq!(by_url.captured_at(), second_captured_at);
     assert_eq!(by_url.updated_at(), second_updated_at);
     assert!(by_url.updated_at() >= first_updated_at);
     assert_eq!(by_id.title(), Some("Newer title"));
     assert_eq!(by_id.raw_content(), "newer content");
+    assert_eq!(by_id.source_version(), Some("source:v1:2"));
     assert_eq!(by_id.captured_at(), second_captured_at);
     assert_eq!(by_id.updated_at(), second_updated_at);
 }
@@ -203,6 +240,7 @@ async fn document_find_recent_orders_by_latest_capture_after_duplicate_url_refre
         raw_content: "older content".to_string(),
         source: "claude".to_string(),
         url: "https://claude.ai/chat/older".to_string(),
+        source_version: None,
         captured_at: older_capture,
         created_at: older_capture,
         updated_at: older_capture,
@@ -217,6 +255,7 @@ async fn document_find_recent_orders_by_latest_capture_after_duplicate_url_refre
         raw_content: "newer content".to_string(),
         source: "claude".to_string(),
         url: "https://claude.ai/chat/newer".to_string(),
+        source_version: None,
         captured_at: middle_capture,
         created_at: middle_capture,
         updated_at: middle_capture,
@@ -231,6 +270,7 @@ async fn document_find_recent_orders_by_latest_capture_after_duplicate_url_refre
         raw_content: "recaptured content".to_string(),
         source: "claude".to_string(),
         url: older.url().to_string(),
+        source_version: None,
         captured_at: newest_capture,
         created_at: newest_capture,
         updated_at: newest_capture,
