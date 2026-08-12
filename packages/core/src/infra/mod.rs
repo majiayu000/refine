@@ -145,6 +145,12 @@ fn migrate_documents_url_unique(conn: &Connection) -> InfraResult<()> {
         return Ok(());
     }
 
+    // The legacy schema has no URL index. Build a temporary migration index
+    // before running the correlated merge queries so upgrade cost scales with
+    // duplicate groups rather than repeatedly scanning the whole table.
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_documents_url_migration ON documents(url)")
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+
     // Preserve the first document identity for compatibility with the normal
     // `ON CONFLICT(url)` save path, but merge in the newest authoritative
     // snapshot before removing duplicates. `rowid` is only a deterministic
@@ -158,8 +164,10 @@ fn migrate_documents_url_unique(conn: &Connection) -> InfraResult<()> {
                      WHERE d_title.url = d_keep.url
                        AND d_title.title IS NOT NULL
                        AND TRIM(d_title.title) != ''
-                     ORDER BY datetime(d_title.updated_at) DESC,
-                              datetime(d_title.captured_at) DESC,
+                     ORDER BY julianday(d_title.updated_at) DESC,
+                              d_title.updated_at DESC,
+                              julianday(d_title.captured_at) DESC,
+                              d_title.captured_at DESC,
                               d_title.rowid DESC
                      LIMIT 1
                  ),
@@ -169,8 +177,10 @@ fn migrate_documents_url_unique(conn: &Connection) -> InfraResult<()> {
                  SELECT d_latest.raw_content
                  FROM documents AS d_latest
                  WHERE d_latest.url = d_keep.url
-                 ORDER BY datetime(d_latest.updated_at) DESC,
-                          datetime(d_latest.captured_at) DESC,
+                 ORDER BY julianday(d_latest.updated_at) DESC,
+                          d_latest.updated_at DESC,
+                          julianday(d_latest.captured_at) DESC,
+                          d_latest.captured_at DESC,
                           d_latest.rowid DESC
                  LIMIT 1
              ),
@@ -178,8 +188,10 @@ fn migrate_documents_url_unique(conn: &Connection) -> InfraResult<()> {
                  SELECT d_latest.source_version
                  FROM documents AS d_latest
                  WHERE d_latest.url = d_keep.url
-                 ORDER BY datetime(d_latest.updated_at) DESC,
-                          datetime(d_latest.captured_at) DESC,
+                 ORDER BY julianday(d_latest.updated_at) DESC,
+                          d_latest.updated_at DESC,
+                          julianday(d_latest.captured_at) DESC,
+                          d_latest.captured_at DESC,
                           d_latest.rowid DESC
                  LIMIT 1
              ),
@@ -187,8 +199,10 @@ fn migrate_documents_url_unique(conn: &Connection) -> InfraResult<()> {
                  SELECT d_latest.captured_at
                  FROM documents AS d_latest
                  WHERE d_latest.url = d_keep.url
-                 ORDER BY datetime(d_latest.updated_at) DESC,
-                          datetime(d_latest.captured_at) DESC,
+                 ORDER BY julianday(d_latest.updated_at) DESC,
+                          d_latest.updated_at DESC,
+                          julianday(d_latest.captured_at) DESC,
+                          d_latest.captured_at DESC,
                           d_latest.rowid DESC
                  LIMIT 1
              ),
@@ -196,8 +210,10 @@ fn migrate_documents_url_unique(conn: &Connection) -> InfraResult<()> {
                  SELECT d_latest.updated_at
                  FROM documents AS d_latest
                  WHERE d_latest.url = d_keep.url
-                 ORDER BY datetime(d_latest.updated_at) DESC,
-                          datetime(d_latest.captured_at) DESC,
+                 ORDER BY julianday(d_latest.updated_at) DESC,
+                          d_latest.updated_at DESC,
+                          julianday(d_latest.captured_at) DESC,
+                          d_latest.captured_at DESC,
                           d_latest.rowid DESC
                  LIMIT 1
              )
@@ -235,6 +251,8 @@ fn migrate_documents_url_unique(conn: &Connection) -> InfraResult<()> {
     )
     .map_err(|e| InfraError::Database(e.to_string()))?;
     conn.execute_batch("DROP INDEX IF EXISTS idx_documents_url")
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    conn.execute_batch("DROP INDEX IF EXISTS idx_documents_url_migration")
         .map_err(|e| InfraError::Database(e.to_string()))?;
     conn.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_url ON documents(url)")
         .map_err(|e| InfraError::Database(e.to_string()))?;
@@ -602,6 +620,61 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
             .expect("count documents after rollback");
         assert_eq!(document_count, 2);
+    }
+
+    #[test]
+    fn documents_url_migration_preserves_subsecond_timestamp_order_over_rowid_order() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        seed_duplicate_url_schema(&conn);
+        conn.execute_batch(
+            r#"
+            INSERT INTO documents
+              (id, title, raw_content, source, url, source_version,
+               captured_at, created_at, updated_at)
+            VALUES
+              ('doc-newer', 'Newer', 'newer content', 'claude', 'https://example.com/subsecond', 'v2',
+               '2026-01-01T00:00:00.900Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00.900Z'),
+              ('doc-older', 'Older', 'older content', 'claude', 'https://example.com/subsecond', 'v1',
+               '2026-01-01T00:00:00.100Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00.100Z');
+            "#,
+        )
+        .expect("seed reverse-rowid subsecond fixture");
+
+        prepare_sqlite_db(&conn).expect("migrate subsecond fixture");
+
+        let snapshot = conn
+            .query_row(
+                "SELECT id, title, raw_content, source_version, captured_at, updated_at
+                 FROM documents WHERE url = 'https://example.com/subsecond'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .expect("read subsecond migration result");
+        assert_eq!(snapshot.0, "doc-newer");
+        assert_eq!(snapshot.1.as_deref(), Some("Newer"));
+        assert_eq!(snapshot.2, "newer content");
+        assert_eq!(snapshot.3.as_deref(), Some("v2"));
+        assert_eq!(snapshot.4, "2026-01-01T00:00:00.900Z");
+        assert_eq!(snapshot.5, "2026-01-01T00:00:00.900Z");
+
+        let migration_index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_index_list('documents')
+                 WHERE name = 'idx_documents_url_migration'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("inspect temporary migration index");
+        assert_eq!(migration_index_count, 0);
     }
 
     fn seed_duplicate_url_schema(conn: &Connection) {
