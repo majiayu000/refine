@@ -50,6 +50,8 @@ fi
   || fail 'failed portrait remained eligible for throttling'
 find "${TEST_ROOT}/nonzero/portraits/.failed" -type f -name '*.failed' | grep -q . \
   || fail 'failed portrait was not quarantined'
+[[ "$(cat "${TEST_ROOT}/nonzero/portraits/INDEX.md")" == '# Index' ]] \
+  || fail 'failed run left a dangling index entry'
 
 if run_case missing-index 0 0; then
   fail 'unindexed portrait was accepted'

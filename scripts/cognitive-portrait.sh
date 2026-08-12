@@ -77,6 +77,12 @@ if ! command -v "$AGENT_BIN" >/dev/null 2>&1; then
 fi
 
 start_marker=$(mktemp "${TMPDIR:-/tmp}/refine-portrait-start.XXXXXX")
+index_snapshot=$(mktemp "${TMPDIR:-/tmp}/refine-portrait-index.XXXXXX")
+index_existed=0
+if [[ -f "$INDEX_FILE" ]]; then
+  cp "$INDEX_FILE" "$index_snapshot"
+  index_existed=1
+fi
 
 quarantine_portrait() {
   local portrait="$1"
@@ -89,6 +95,14 @@ quarantine_portrait() {
   log "隔离未完成画像: ${destination}"
 }
 
+restore_portrait_index() {
+  if [[ "$index_existed" == "1" ]]; then
+    cp "$index_snapshot" "$INDEX_FILE"
+  else
+    rm -f "$INDEX_FILE"
+  fi
+}
+
 log "执行 agent: ${AGENT_BIN} exec --sandbox ${AGENT_SANDBOX}"
 rc=0
 (cd "$PROJECT_DIR" && "$AGENT_BIN" exec --sandbox "$AGENT_SANDBOX" \
@@ -99,6 +113,8 @@ new_portrait=$(find "$PORTRAIT_DIR" -maxdepth 1 -name 'cognitive-portrait-*.md' 
 rm -f "$start_marker"
 
 if [[ -z "$new_portrait" ]]; then
+  restore_portrait_index
+  rm -f "$index_snapshot"
   log "ERROR: agent 退出但未产出新画像（agent exit code ${rc}）"
   notify "agent 退出但未产出新画像，详见 refine-portrait.log" "Refine Cognitive Portrait 失败"
   exit 1
@@ -107,6 +123,8 @@ fi
 if [[ "$rc" -ne 0 ]]; then
   log "ERROR: agent 以非零状态退出: ${rc}（已产出 ${new_portrait}，但结果可能不完整）"
   quarantine_portrait "$new_portrait"
+  restore_portrait_index
+  rm -f "$index_snapshot"
   notify "agent 非零退出 (${rc})，详见 refine-portrait.log" "Refine Cognitive Portrait 失败"
   exit 1
 fi
@@ -115,10 +133,13 @@ new_base=$(basename "$new_portrait")
 if [[ ! -f "$INDEX_FILE" ]] || ! grep -Fq "(./${new_base})" "$INDEX_FILE"; then
   log "ERROR: 新画像未写入归档索引: ${new_base}"
   quarantine_portrait "$new_portrait"
+  restore_portrait_index
+  rm -f "$index_snapshot"
   notify "新画像未写入 INDEX.md，已隔离" "Refine Cognitive Portrait 失败"
   exit 1
 fi
 
+rm -f "$index_snapshot"
 log "画像已生成: ${new_portrait}"
 notify "认知画像已生成: $(basename "$new_portrait")" "Refine Cognitive Portrait"
 log "=== Cognitive Portrait Run End ==="
