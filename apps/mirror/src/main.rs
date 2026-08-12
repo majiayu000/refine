@@ -19,8 +19,10 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    if let Err(e) = dotenvy::dotenv() {
-        eprintln!("Note: .env not loaded ({})", e);
+    if let Err(error) = dotenvy::dotenv() {
+        if should_report_dotenv_error(&error) {
+            eprintln!("Warning: failed to load .env ({error})");
+        }
     }
 
     tracing_subscriber::fmt()
@@ -56,5 +58,24 @@ async fn main() -> Result<()> {
             })?;
             profile::handle_profile(store.clone(), store, llm).await
         }
+    }
+}
+
+fn should_report_dotenv_error(error: &dotenvy::Error) -> bool {
+    !error.not_found()
+}
+
+#[cfg(test)]
+mod dotenv_tests {
+    use super::should_report_dotenv_error;
+    use std::io;
+
+    #[test]
+    fn missing_dotenv_is_silent_but_real_io_errors_are_reported() {
+        let missing = dotenvy::Error::Io(io::ErrorKind::NotFound.into());
+        let denied = dotenvy::Error::Io(io::ErrorKind::PermissionDenied.into());
+
+        assert!(!should_report_dotenv_error(&missing));
+        assert!(should_report_dotenv_error(&denied));
     }
 }

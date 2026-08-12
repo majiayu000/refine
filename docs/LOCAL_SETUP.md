@@ -26,7 +26,8 @@ The installer is idempotent. It can be used for first install and for upgrades f
 - Installs `refine`, `mirror`, and `refine-server` with `cargo install --locked --path`.
 - Installs desktop UI dependencies with `bun install` when Bun is available.
 - Writes macOS user LaunchAgents under `~/Library/LaunchAgents/`.
-- Starts or reloads the local server and UI dev service.
+- Starts or reloads the local server and UI dev service. The server uses the
+  same validated LLM credential loader as scheduled jobs.
 - Schedules daily ingest at 08:00 and weekly insights on Sunday at 09:00.
 - Enables local dashboard/API access with `REFINE_DEV_ANON=1` by default.
 - Creates `~/.refine` with user-only permissions. It never migrates or copies
@@ -68,6 +69,11 @@ supports the Anthropic aliases `REFINE_ANTHROPIC_API_KEY`,
 `BASE_API_KEY`, together with their URL/model variables. Values are never
 printed by the loader, migration helper, or credential preflight.
 
+The server health response includes `llm_configured` so `doctor-local.sh` can
+detect a query-only server that would reject extraction jobs. Its append-only
+logs include a timestamped startup boundary, making errors from an earlier
+process distinguishable from the current run.
+
 ## Auth Modes
 
 Default local mode:
@@ -84,7 +90,10 @@ Token mode:
 REFINE_API_TOKEN=your-token scripts/install-local.sh --token-auth
 ```
 
-Token mode writes the token to `~/.refine/refine-server.token` with mode `0600` and points the server LaunchAgent at `~/.refine/run-refine-server.sh`. The token is not written into the plist. Clients must send `Authorization: Bearer <token>`.
+Token mode writes the token to `~/.refine/refine-server.token` with mode `0600`
+and passes only that file path to the shared server startup wrapper. The token
+value is not written into the plist. Clients must send
+`Authorization: Bearer <token>`.
 
 ## Useful Variants
 

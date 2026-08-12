@@ -113,9 +113,9 @@ auto/remem: remem raw archive；local: filesystem scan
 |---|---|
 | 命令入口 | `refine insights [--period N] [--prescription]` |
 | 代码位置 | `apps/cli/src/cli.rs:89-97` → `apps/cli/src/handlers.rs:59-76` → `apps/cli/src/insights.rs:24-125`（`handle_insights`，`llm_with_retry`）；路由规划在 `packages/core/src/session/analysis_routes.rs:18` 的 `plan_routes` |
-| 触发方式 | 手动；由 `scripts/weekly-insights.sh` 每周一 09:00 通过 launchd 自动触发 |
+| 触发方式 | 手动；由 `scripts/weekly-insights.sh` 每周日 09:00 通过 launchd 自动触发 |
 | 数据来源 | `item_store.find_by_type(ItemType::Observation)` — 全量 Observation（当前实现**未按 `--period` 过滤**时间窗口） |
-| 处理步骤 | 1) 加载所有 Observation；2) `cluster_observations()` 纯 Rust 本地聚类（按 project + facet 汇总）；3) `plan_routes()` 规划 N 路分析路由（项目总览 / 决策模式 / bug 模式 / 认知演化 / 技术雷达 / AI 协作 / 工作流 / 各项目深挖 / 知识网络 / 摩擦深挖，最少补齐到 10 路）；4) **10 路并发** LLM 调用 (`Semaphore::new(10)`)，system prompt = `ROUTE_SYSTEM_PROMPT`；5) `merge_route_results()` 合并；6) 调 1 次 LLM 做最终报告（system prompt = `INSIGHTS_SYSTEM_PROMPT`，是否含 L4 处方由 `with_prescription` 决定）；7) 保存 |
+| 处理步骤 | 1) 加载所有 Observation；2) `cluster_observations()` 纯 Rust 本地聚类（按 project + facet 汇总）；3) `plan_routes()` 规划 N 路分析路由（项目总览 / 决策模式 / bug 模式 / 认知演化 / 技术雷达 / AI 协作 / 工作流 / 各项目深挖 / 知识网络 / 摩擦深挖，最少补齐到 10 路）；4) **10 路并发** LLM 调用 (`Semaphore::new(10)`)，system prompt = `ROUTE_SYSTEM_PROMPT`；5) `merge_route_results()` 合并；6) 调 1 次 LLM 做最终报告（system prompt = `INSIGHTS_SYSTEM_PROMPT`，是否含 L4 处方由 `with_prescription` 决定；大上下文合并请求的单次超时为 300 秒）；7) 保存 |
 | LLM 调用 | **是**；一次运行 ≈ **N+1 次**（N 通常为 10 路）；并发度 10；每次独立 5 次重试（和链路 1 同样的 exponential backoff 策略） |
 | 输出目标 | **stdout**（完整 markdown 报告）+ **refine.db** `documents` 表 (source=`session-insights-v2`，URL = `insights-v2://<rfc3339>`) |
 | 输出 schema | Markdown 文档；`Document.title = "Session Insights v2 YYYY-MM-DD HH:MM"`；`raw_content` 为完整的合并报告 |

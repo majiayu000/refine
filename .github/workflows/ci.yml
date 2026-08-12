@@ -29,7 +29,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Test unattended LLM credential scripts on GNU/Linux
-        run: bash scripts/test-llm-env.sh
+        run: |
+          bash scripts/test-llm-env.sh
+          bash scripts/test-runtime-wrappers.sh
 
   check:
     runs-on: ubuntu-latest

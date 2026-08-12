@@ -13,7 +13,15 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 const LLM_CONCURRENCY: usize = 10;
+const FINAL_REPORT_REQUEST_TIMEOUT_MILLIS: u64 = 300_000;
 const INSIGHTS_PROMPT_IDENTITY: &str = "insights-v2:route-v1:final-v1";
+
+fn final_report_retry_policy() -> LlmRetryPolicy {
+    LlmRetryPolicy {
+        request_timeout_millis: FINAL_REPORT_REQUEST_TIMEOUT_MILLIS,
+        ..LlmRetryPolicy::default()
+    }
+}
 
 #[allow(dead_code)]
 pub struct InsightsOptions {
@@ -193,7 +201,7 @@ pub async fn handle_insights(
         &client,
         &final_prompt,
         INSIGHTS_SYSTEM_PROMPT,
-        LlmRetryPolicy::default(),
+        final_report_retry_policy(),
         |attempt, max_retries, delay_secs, _err| {
             eprintln!(
                 "    ⏳ 重试 ({}/{}) 等待 {}s...",
@@ -226,4 +234,19 @@ pub async fn handle_insights(
     println!("\n报告已保存 (ID: {})", doc.id());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{final_report_retry_policy, FINAL_REPORT_REQUEST_TIMEOUT_MILLIS};
+
+    #[test]
+    fn final_report_allows_slow_large_synthesis_requests() {
+        let policy = final_report_retry_policy();
+        assert_eq!(policy.request_timeout_millis, 300_000);
+        assert_eq!(
+            policy.request_timeout_millis,
+            FINAL_REPORT_REQUEST_TIMEOUT_MILLIS
+        );
+    }
 }

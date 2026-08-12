@@ -352,8 +352,9 @@ refine_llm_env_load_file() {
   done < "$path"
 }
 
-load_refine_llm_env() {
+load_refine_llm_env_impl() {
   local project_file="${1:-}"
+  local require_key="${2:-1}"
   local secure_file secure_has_key project_has_key
   local secure_exists=0 project_exists=0
 
@@ -406,6 +407,9 @@ load_refine_llm_env() {
   export REFINE_LLM_ENV_SOURCE
 
   if ! refine_llm_env_has_api_key; then
+    if [[ "$require_key" != '1' ]]; then
+      return 0
+    fi
     local project_description='disabled'
     if [[ "$project_exists" == '1' ]]; then
       project_description="$project_file"
@@ -418,4 +422,12 @@ load_refine_llm_env() {
     return 1
   fi
   return 0
+}
+
+load_refine_llm_env() {
+  load_refine_llm_env_impl "${1:-}" 1
+}
+
+load_refine_llm_env_optional() {
+  load_refine_llm_env_impl "${1:-}" 0
 }

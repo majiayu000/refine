@@ -37,10 +37,11 @@ use crate::state::AppState;
 // Only `/`, `/dashboard`, and `/health` are public. Every `/v1/*` handler must
 // keep `AuthenticatedUser` in its signature so request_guard.rs remains the
 // single auth boundary.
-pub async fn health() -> impl IntoResponse {
+pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     ok(json!({
         "message": "Refine cloud API (Rust) is running",
-        "contract_version": SERVER_CONTRACT_VERSION
+        "contract_version": SERVER_CONTRACT_VERSION,
+        "llm_configured": state.llm_client.is_some()
     }))
 }
 

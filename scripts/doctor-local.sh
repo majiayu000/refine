@@ -150,6 +150,12 @@ check_http() {
     return
   fi
 
+  if grep -q '"llm_configured":true' <<<"$health"; then
+    pass "server LLM extraction configured"
+  else
+    fail "server is healthy but LLM extraction is not configured; reinstall to refresh the server wrapper"
+  fi
+
   local items
   items="$(curl -sS --max-time 3 "${server_url}/v1/items?cursor=0&limit=1" 2>/dev/null || true)"
   if grep -q '"success":true' <<<"$items"; then

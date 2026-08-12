@@ -98,6 +98,19 @@ assert_not_contains "$process_output" 'secure-secret' 'secure secret appeared in
 assert_not_contains "$process_output" 'project-secret' 'project secret appeared in output'
 printf 'PASS process environment priority\n'
 
+# Server startup may run without an LLM for query-only operation, while still
+# rejecting malformed credential files.
+home="$(new_home optional-empty)"
+optional_output="$(env -i HOME="$home" PATH="$PATH" REFINE_LOADER="$LOADER" bash -c 'source "$REFINE_LOADER"; load_refine_llm_env_optional; [[ "$REFINE_LLM_ENV_SOURCE" == none ]]; printf "optional-empty-ok\n"' 2>&1)" \
+  || fail 'optional loader rejected an absent credential file'
+assert_contains "$optional_output" 'optional-empty-ok' 'optional loader result missing'
+write_text "${home}/.refine/llm.env" 'export BASE_API_KEY=$(not-literal)'
+chmod 600 "${home}/.refine/llm.env"
+if env -i HOME="$home" PATH="$PATH" REFINE_LOADER="$LOADER" bash -c 'source "$REFINE_LOADER"; load_refine_llm_env_optional' >/dev/null 2>&1; then
+  fail 'optional loader accepted malformed credentials'
+fi
+printf 'PASS optional server credential loading\n'
+
 # Every supported alias is loaded as a literal assignment. This exercises the
 # allowlist through the loader rather than only inspecting its implementation.
 home="$(new_home allowlist)"

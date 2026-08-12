@@ -23,8 +23,10 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    if let Err(e) = dotenvy::dotenv() {
-        eprintln!("提示: 未加载 .env 文件 ({})", e);
+    if let Err(error) = dotenvy::dotenv() {
+        if should_report_dotenv_error(&error) {
+            eprintln!("警告: 加载 .env 失败 ({error})");
+        }
     }
 
     tracing_subscriber::fmt()
@@ -72,4 +74,23 @@ async fn main() -> Result<()> {
     let engine = Arc::new(SearchEngine::new(repo));
 
     handlers::run(cli.command, store, engine, &db_path).await
+}
+
+fn should_report_dotenv_error(error: &dotenvy::Error) -> bool {
+    !error.not_found()
+}
+
+#[cfg(test)]
+mod dotenv_tests {
+    use super::should_report_dotenv_error;
+    use std::io;
+
+    #[test]
+    fn missing_dotenv_is_silent_but_real_io_errors_are_reported() {
+        let missing = dotenvy::Error::Io(io::ErrorKind::NotFound.into());
+        let denied = dotenvy::Error::Io(io::ErrorKind::PermissionDenied.into());
+
+        assert!(!should_report_dotenv_error(&missing));
+        assert!(should_report_dotenv_error(&denied));
+    }
 }

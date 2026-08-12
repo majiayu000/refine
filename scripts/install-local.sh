@@ -84,10 +84,6 @@ xml_escape() {
   sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
 }
 
-shell_quote() {
-  printf '%q' "$1"
-}
-
 write_file() {
   local path="$1"
   local tmp
@@ -112,59 +108,30 @@ EOF
   chmod 600 "$path"
 }
 
-write_server_token_wrapper() {
-  local path="$1"
-  local token_path="$2"
-  local server_bin="$3"
-  local token_path_sh server_bin_sh
-  token_path_sh="$(shell_quote "$token_path")"
-  server_bin_sh="$(shell_quote "$server_bin")"
-
-  write_file "$path" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-
-token_file=${token_path_sh}
-server_bin=${server_bin_sh}
-
-if [[ ! -f "\$token_file" ]]; then
-  echo "[refine-server] missing token file: \$token_file" >&2
-  exit 1
-fi
-
-IFS= read -r token < "\$token_file" || true
-if [[ -z "\$token" ]]; then
-  echo "[refine-server] token file is empty: \$token_file" >&2
-  exit 1
-fi
-
-export REFINE_API_TOKEN="\$token"
-exec "\$server_bin"
-EOF
-  chmod 700 "$path"
-}
-
 write_server_plist() {
   local path="$1"
   local cargo_bin="$2"
   local path_env="$3"
-  local home_xml server_program_xml path_xml token_xml=""
-  local server_program="${cargo_bin}/refine-server"
+  local home_xml server_bin_xml wrapper_xml project_env_xml path_xml token_xml=""
+  local server_bin="${cargo_bin}/refine-server"
+  local wrapper="${repo_root}/scripts/run-refine-server.sh"
+  local project_env="${repo_root}/.env"
   home_xml="$(printf '%s' "$HOME" | xml_escape)"
   path_xml="$(printf '%s' "$path_env" | xml_escape)"
 
   if [[ "$auth_mode" == "token" ]]; then
     local token_file="${HOME}/.refine/refine-server.token"
-    local wrapper_file="${HOME}/.refine/run-refine-server.sh"
     write_server_token_file "$token_file"
-    write_server_token_wrapper "$wrapper_file" "$token_file" "$server_program"
-    server_program="$wrapper_file"
+    token_xml="<key>REFINE_API_TOKEN_FILE</key>
+    <string>$(printf '%s' "$token_file" | xml_escape)</string>"
   else
     rm -f "${HOME}/.refine/refine-server.token" "${HOME}/.refine/run-refine-server.sh"
     token_xml="<key>REFINE_DEV_ANON</key>
     <string>1</string>"
   fi
-  server_program_xml="$(printf '%s' "$server_program" | xml_escape)"
+  server_bin_xml="$(printf '%s' "$server_bin" | xml_escape)"
+  wrapper_xml="$(printf '%s' "$wrapper" | xml_escape)"
+  project_env_xml="$(printf '%s' "$project_env" | xml_escape)"
 
   write_file "$path" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -175,7 +142,10 @@ write_server_plist() {
   <string>com.lifcc.refine-server</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${server_program_xml}</string>
+    <string>/bin/bash</string>
+    <string>${wrapper_xml}</string>
+    <string>${server_bin_xml}</string>
+    <string>${project_env_xml}</string>
   </array>
   <key>WorkingDirectory</key>
   <string>${home_xml}</string>
