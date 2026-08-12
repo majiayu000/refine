@@ -18,9 +18,9 @@ pub enum MigrationReport {
 /// file to `<name>.migrated` so the migration only runs once.
 ///
 /// On success the legacy files no longer exist at their original paths.
-/// On failure the legacy files are left intact and an `Err` is returned —
-/// the caller should warn the user but must not abort startup, because the
-/// primary database is never written to destructively (only `INSERT OR IGNORE`).
+/// On failure the legacy files and their pre-migration backups are left intact,
+/// all writes for the failing source are rolled back, and an `Err` is returned.
+/// The caller should warn the user but must not abort startup.
 pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
     let candidates = stale_db_candidates(target);
     if candidates.is_empty() {
@@ -35,6 +35,7 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
 
     crate::infra::prepare_sqlite_db(&conn)
         .map_err(|e| format!("failed to initialise target schema: {}", e))?;
+    drop(conn);
 
     let mut sources = Vec::new();
     let mut total_rows = 0usize;
@@ -44,22 +45,35 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
         std::fs::copy(candidate, &bak_path)
             .map_err(|e| format!("failed to backup {}: {}", candidate.display(), e))?;
 
+        // Scope one target connection and one transaction to each source. When
+        // this block exits, SQLite also releases the attachment before the
+        // legacy file is renamed.
+        let conn = Connection::open(target)
+            .map_err(|e| format!("failed to reopen target DB {}: {}", target.display(), e))?;
+        crate::infra::configure_sqlite_connection(&conn)
+            .map_err(|e| format!("failed to configure target connection: {}", e))?;
+
         let attach_sql = format!(
             "ATTACH DATABASE '{}' AS refine_migration_src",
             candidate.to_string_lossy().replace('\'', "''")
         );
         if let Err(e) = conn.execute_batch(&attach_sql) {
-            let _ = std::fs::remove_file(&bak_path);
             return Err(format!("failed to attach {}: {}", candidate.display(), e));
         }
 
-        let result = copy_all_tables(&conn, "refine_migration_src");
-        let _ = conn.execute_batch("DETACH DATABASE refine_migration_src");
+        let result: Result<usize, String> = (|| {
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|e| format!("failed to start migration transaction: {e}"))?;
+            let rows = copy_all_tables(&tx, "refine_migration_src")?;
+            tx.commit()
+                .map_err(|e| format!("failed to commit migration transaction: {e}"))?;
+            Ok(rows)
+        })();
+        drop(conn);
 
-        let rows = result.map_err(|e| {
-            let _ = std::fs::remove_file(&bak_path);
-            format!("migration of {} failed: {}", candidate.display(), e)
-        })?;
+        let rows =
+            result.map_err(|e| format!("migration of {} failed: {}", candidate.display(), e))?;
 
         let migrated_path = with_suffix(candidate, ".migrated");
         std::fs::rename(candidate, &migrated_path)
@@ -446,6 +460,85 @@ mod tests {
         let result = migrate_stale_dbs(&target);
         assert!(result.is_err());
         assert!(corrupt.exists(), "corrupt source must be left intact");
+        assert!(
+            tmp.path().join("server.db.pre-migration.bak").exists(),
+            "failure backup must be preserved"
+        );
+    }
+
+    #[test]
+    fn later_table_failure_rolls_back_all_rows_for_candidate() {
+        let tmp = TempDir::new().unwrap();
+        let target = make_target_db(tmp.path());
+        let legacy = tmp.path().join("server.db");
+        let lc = Connection::open(&legacy).unwrap();
+        lc.execute_batch(
+            "CREATE TABLE conversations (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                url TEXT NOT NULL,
+                title TEXT,
+                raw_content TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                captured_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                item_ids TEXT NOT NULL,
+                last_error TEXT
+            );
+            CREATE TABLE extraction_jobs (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                error TEXT
+            );
+            INSERT INTO conversations
+              (id, user_id, source, url, raw_content, captured_at, created_at,
+               status, idempotency_key, item_ids)
+            VALUES
+              ('conv-rollback', 'user-1', 'extension', 'https://example.com/rollback',
+               'raw', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+               'captured', 'idem-rollback', '[]');
+            INSERT INTO extraction_jobs
+              (id, conversation_id, mode, status, created_at, updated_at)
+            VALUES
+              ('job-orphan', 'missing-conversation', 'auto', 'pending',
+               '2026-01-01T00:01:00Z', '2026-01-01T00:01:00Z');",
+        )
+        .unwrap();
+        drop(lc);
+
+        let result = migrate_stale_dbs(&target);
+        assert!(result.is_err(), "orphan job must fail the candidate import");
+
+        let tc = Connection::open(&target).unwrap();
+        let conversation_count: i64 = tc
+            .query_row(
+                "SELECT COUNT(*) FROM conversations WHERE id='conv-rollback'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let job_count: i64 = tc
+            .query_row(
+                "SELECT COUNT(*) FROM extraction_jobs WHERE id='job-orphan'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(conversation_count, 0, "earlier table copy must roll back");
+        assert_eq!(job_count, 0);
+        assert!(legacy.exists(), "failed source must remain retryable");
+        assert!(
+            tmp.path().join("server.db.pre-migration.bak").exists(),
+            "failure backup must remain available"
+        );
+        assert!(!tmp.path().join("server.db.migrated").exists());
     }
 
     #[test]
