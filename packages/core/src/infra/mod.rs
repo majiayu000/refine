@@ -145,6 +145,92 @@ fn migrate_documents_url_unique(conn: &Connection) -> InfraResult<()> {
         return Ok(());
     }
 
+    // The legacy schema has no URL index. Build a temporary migration index
+    // before running the correlated merge queries so upgrade cost scales with
+    // duplicate groups rather than repeatedly scanning the whole table.
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_documents_url_migration ON documents(url)")
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+
+    // Preserve the first document identity for compatibility with the normal
+    // `ON CONFLICT(url)` save path, but merge in the newest authoritative
+    // snapshot before removing duplicates. `rowid` is only a deterministic
+    // tie-breaker; freshness is defined by the persisted document timestamps.
+    conn.execute_batch(
+        "UPDATE documents AS d_keep
+         SET title = COALESCE(
+                 (
+                     SELECT d_title.title
+                     FROM documents AS d_title
+                     WHERE d_title.url = d_keep.url
+                       AND d_title.title IS NOT NULL
+                       AND TRIM(d_title.title) != ''
+                     ORDER BY julianday(d_title.updated_at) DESC,
+                              d_title.updated_at DESC,
+                              julianday(d_title.captured_at) DESC,
+                              d_title.captured_at DESC,
+                              d_title.rowid DESC
+                     LIMIT 1
+                 ),
+                 d_keep.title
+             ),
+             raw_content = (
+                 SELECT d_latest.raw_content
+                 FROM documents AS d_latest
+                 WHERE d_latest.url = d_keep.url
+                 ORDER BY julianday(d_latest.updated_at) DESC,
+                          d_latest.updated_at DESC,
+                          julianday(d_latest.captured_at) DESC,
+                          d_latest.captured_at DESC,
+                          d_latest.rowid DESC
+                 LIMIT 1
+             ),
+             source_version = (
+                 SELECT d_latest.source_version
+                 FROM documents AS d_latest
+                 WHERE d_latest.url = d_keep.url
+                 ORDER BY julianday(d_latest.updated_at) DESC,
+                          d_latest.updated_at DESC,
+                          julianday(d_latest.captured_at) DESC,
+                          d_latest.captured_at DESC,
+                          d_latest.rowid DESC
+                 LIMIT 1
+             ),
+             captured_at = (
+                 SELECT d_latest.captured_at
+                 FROM documents AS d_latest
+                 WHERE d_latest.url = d_keep.url
+                 ORDER BY julianday(d_latest.updated_at) DESC,
+                          d_latest.updated_at DESC,
+                          julianday(d_latest.captured_at) DESC,
+                          d_latest.captured_at DESC,
+                          d_latest.rowid DESC
+                 LIMIT 1
+             ),
+             updated_at = (
+                 SELECT d_latest.updated_at
+                 FROM documents AS d_latest
+                 WHERE d_latest.url = d_keep.url
+                 ORDER BY julianday(d_latest.updated_at) DESC,
+                          d_latest.updated_at DESC,
+                          julianday(d_latest.captured_at) DESC,
+                          d_latest.captured_at DESC,
+                          d_latest.rowid DESC
+                 LIMIT 1
+             )
+         WHERE d_keep.rowid = (
+             SELECT MIN(d_first.rowid)
+             FROM documents AS d_first
+             WHERE d_first.url = d_keep.url
+         )
+           AND EXISTS (
+             SELECT 1
+             FROM documents AS d_duplicate
+             WHERE d_duplicate.url = d_keep.url
+               AND d_duplicate.rowid != d_keep.rowid
+         )",
+    )
+    .map_err(|e| InfraError::Database(e.to_string()))?;
+
     conn.execute_batch(
         "UPDATE items
          SET document_id = (
@@ -165,6 +251,8 @@ fn migrate_documents_url_unique(conn: &Connection) -> InfraResult<()> {
     )
     .map_err(|e| InfraError::Database(e.to_string()))?;
     conn.execute_batch("DROP INDEX IF EXISTS idx_documents_url")
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    conn.execute_batch("DROP INDEX IF EXISTS idx_documents_url_migration")
         .map_err(|e| InfraError::Database(e.to_string()))?;
     conn.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_url ON documents(url)")
         .map_err(|e| InfraError::Database(e.to_string()))?;
@@ -396,6 +484,202 @@ mod tests {
             .expect("open read-only database");
         migrate_documents_url_unique(&conn)
             .expect("an already-migrated database must not require writes");
+    }
+
+    #[test]
+    fn documents_url_migration_merges_latest_snapshot_into_stable_identity() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        seed_duplicate_url_schema(&conn);
+        conn.execute_batch(
+            r#"
+            INSERT INTO documents
+              (id, title, raw_content, source, url, source_version,
+               captured_at, created_at, updated_at)
+            VALUES
+              ('doc-old', 'Old title', 'old content', 'claude', 'https://example.com/thread', 'v1',
+               '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+              ('doc-titled', 'Current title', 'middle content', 'claude', 'https://example.com/thread', 'v2',
+               '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z'),
+              ('doc-latest', '   ', 'latest complete content', 'claude', 'https://example.com/thread', 'v3',
+               '2026-01-03T00:00:00Z', '2026-01-03T00:00:00Z', '2026-01-03T00:00:00Z');
+            INSERT INTO items
+              (id, item_type, title, summary, content, tags, source,
+               created_at, updated_at, document_id, excerpt)
+            VALUES
+              ('item-old', 'knowledge', 'Old', 'S', 'C', '[]', NULL,
+               '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'doc-old', NULL),
+              ('item-middle', 'knowledge', 'Middle', 'S', 'C', '[]', NULL,
+               '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', 'doc-titled', NULL),
+              ('item-latest', 'knowledge', 'Latest', 'S', 'C', '[]', NULL,
+               '2026-01-03T00:00:00Z', '2026-01-03T00:00:00Z', 'doc-latest', NULL);
+            "#,
+        )
+        .expect("seed duplicate documents");
+
+        prepare_sqlite_db(&conn).expect("migrate duplicate documents");
+
+        let document = conn
+            .query_row(
+                "SELECT id, title, raw_content, source_version, captured_at, created_at, updated_at
+                 FROM documents WHERE url = 'https://example.com/thread'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .expect("read migrated document");
+        assert_eq!(document.0, "doc-old", "stable document identity changed");
+        assert_eq!(document.1.as_deref(), Some("Current title"));
+        assert_eq!(document.2, "latest complete content");
+        assert_eq!(document.3.as_deref(), Some("v3"));
+        assert_eq!(document.4, "2026-01-03T00:00:00Z");
+        assert_eq!(document.5, "2026-01-01T00:00:00Z");
+        assert_eq!(document.6, "2026-01-03T00:00:00Z");
+
+        let document_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+            .expect("count documents");
+        assert_eq!(document_count, 1);
+        let reattached_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM items WHERE document_id = 'doc-old'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count reattached items");
+        assert_eq!(reattached_count, 3);
+        let unique_index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_index_list('documents')
+                 WHERE name = 'idx_documents_url' AND \"unique\" = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("inspect URL index");
+        assert_eq!(unique_index_count, 1);
+    }
+
+    #[test]
+    fn duplicate_url_migration_failure_rolls_back_merged_fields_and_item_links() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        seed_duplicate_url_schema(&conn);
+        conn.execute_batch(
+            r#"
+            INSERT INTO documents
+              (id, title, raw_content, source, url, source_version,
+               captured_at, created_at, updated_at)
+            VALUES
+              ('doc-old', 'Old', 'old content', 'claude', 'https://example.com/thread', 'v1',
+               '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+              ('doc-new', 'New', 'new content', 'claude', 'https://example.com/thread', 'v2',
+               '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z');
+            INSERT INTO items
+              (id, item_type, title, summary, content, tags, source,
+               created_at, updated_at, document_id, excerpt)
+            VALUES
+              ('item-new', 'knowledge', 'T', 'S', 'C', '[]', NULL,
+               '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', 'doc-new', NULL);
+            CREATE TRIGGER reject_duplicate_document_delete
+            BEFORE DELETE ON documents
+            WHEN OLD.id = 'doc-new'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected migration failure');
+            END;
+            "#,
+        )
+        .expect("seed rollback fixture");
+
+        let error = prepare_sqlite_db(&conn).expect_err("injected delete must fail migration");
+        assert!(error.to_string().contains("injected migration failure"));
+
+        let old_content: String = conn
+            .query_row(
+                "SELECT raw_content FROM documents WHERE id = 'doc-old'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read stable document after rollback");
+        assert_eq!(old_content, "old content");
+        let item_document_id: String = conn
+            .query_row(
+                "SELECT document_id FROM items WHERE id = 'item-new'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read item link after rollback");
+        assert_eq!(item_document_id, "doc-new");
+        let document_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+            .expect("count documents after rollback");
+        assert_eq!(document_count, 2);
+    }
+
+    #[test]
+    fn documents_url_migration_preserves_subsecond_timestamp_order_over_rowid_order() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        seed_duplicate_url_schema(&conn);
+        conn.execute_batch(
+            r#"
+            INSERT INTO documents
+              (id, title, raw_content, source, url, source_version,
+               captured_at, created_at, updated_at)
+            VALUES
+              ('doc-newer', 'Newer', 'newer content', 'claude', 'https://example.com/subsecond', 'v2',
+               '2026-01-01T00:00:00.900Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00.900Z'),
+              ('doc-older', 'Older', 'older content', 'claude', 'https://example.com/subsecond', 'v1',
+               '2026-01-01T00:00:00.100Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00.100Z');
+            "#,
+        )
+        .expect("seed reverse-rowid subsecond fixture");
+
+        prepare_sqlite_db(&conn).expect("migrate subsecond fixture");
+
+        let snapshot = conn
+            .query_row(
+                "SELECT id, title, raw_content, source_version, captured_at, updated_at
+                 FROM documents WHERE url = 'https://example.com/subsecond'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .expect("read subsecond migration result");
+        assert_eq!(snapshot.0, "doc-newer");
+        assert_eq!(snapshot.1.as_deref(), Some("Newer"));
+        assert_eq!(snapshot.2, "newer content");
+        assert_eq!(snapshot.3.as_deref(), Some("v2"));
+        assert_eq!(snapshot.4, "2026-01-01T00:00:00.900Z");
+        assert_eq!(snapshot.5, "2026-01-01T00:00:00.900Z");
+
+        let migration_index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_index_list('documents')
+                 WHERE name = 'idx_documents_url_migration'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("inspect temporary migration index");
+        assert_eq!(migration_index_count, 0);
+    }
+
+    fn seed_duplicate_url_schema(conn: &Connection) {
+        conn.execute_batch(include_str!("schema.sql"))
+            .expect("seed duplicate URL schema");
     }
 
     #[test]
