@@ -63,7 +63,7 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
     for candidate in &candidates {
         let signature_before = source_signature(candidate)?;
         let previous_state = migration_state(&conn, candidate)?;
-        let migrated_path = with_suffix(candidate, ".migrated");
+        let migrated_path = archive_destination(candidate, &signature_before)?;
         if !force_reconcile()
             && cheap_signature_is_authoritative()
             && previous_state
@@ -74,7 +74,6 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
             archive_successful_source(candidate, &migrated_path)?;
             continue;
         }
-        ensure_archive_destinations_free(candidate, &migrated_path)?;
         let bak_path = with_suffix(candidate, ".pre-migration.bak");
         let snapshot = match create_consistent_backup(candidate, &bak_path) {
             Ok(snapshot) => snapshot,
@@ -118,9 +117,13 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
                 .map_err(|e| format!("failed to start migration transaction: {e}"))?;
             let rows = copy_all_tables(&tx, "refine_migration_src")?;
             let signature_after = source_signature(candidate)?;
-            if signature_after == signature_before {
-                save_migration_state(&tx, candidate, &signature_after, &content_hash)?;
+            if signature_after != signature_before {
+                return Err(format!(
+                    "legacy DB {} changed while its migration snapshot was imported; retry migration",
+                    candidate.display()
+                ));
             }
+            save_migration_state(&tx, candidate, &signature_after, &content_hash)?;
             tx.commit()
                 .map_err(|e| format!("failed to commit migration transaction: {e}"))?;
             Ok(rows)
@@ -319,26 +322,28 @@ fn create_consistent_backup(
         }
         drop(destination_conn);
 
-        // Keep the first recovery point immutable. Later reconciliation runs
-        // import from a verified temporary snapshot and remove it on drop.
-        if destination.exists() {
-            Ok(MigrationSnapshot {
-                path: temporary.clone(),
-                remove_on_drop: true,
-            })
-        } else {
-            std::fs::rename(&temporary, destination).map_err(|e| {
-                format!(
-                    "failed to publish backup {} for {}: {}",
-                    destination.display(),
-                    source.display(),
-                    e
-                )
-            })?;
-            Ok(MigrationSnapshot {
-                path: destination.to_path_buf(),
-                remove_on_drop: false,
-            })
+        // Keep the first recovery point immutable. A hard link publishes the
+        // verified temp file without replacing another process's first backup.
+        match std::fs::hard_link(&temporary, destination) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&temporary);
+                Ok(MigrationSnapshot {
+                    path: destination.to_path_buf(),
+                    remove_on_drop: false,
+                })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Ok(MigrationSnapshot {
+                    path: temporary.clone(),
+                    remove_on_drop: true,
+                })
+            }
+            Err(error) => Err(format!(
+                "failed to publish backup {} for {}: {}",
+                destination.display(),
+                source.display(),
+                error
+            )),
         }
     })();
     if result.is_err() {
@@ -384,6 +389,39 @@ fn backup_stall_timeout() -> Duration {
         .unwrap_or_else(|| Duration::from_secs(30))
 }
 
+fn archive_destination(source: &Path, signature: &str) -> Result<PathBuf, String> {
+    let default = with_suffix(source, ".migrated");
+    if archive_destinations_are_free(source, &default) {
+        return Ok(default);
+    }
+
+    let digest = signature_digest(source, signature);
+    for attempt in 0..100 {
+        let suffix = if attempt == 0 {
+            format!(".migrated-{}", &digest[..16])
+        } else {
+            format!(".migrated-{}-{attempt}", &digest[..16])
+        };
+        let candidate = with_suffix(source, &suffix);
+        if archive_destinations_are_free(source, &candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!(
+        "cannot archive {} because all generation-specific destinations are occupied",
+        source.display()
+    ))
+}
+
+fn archive_destinations_are_free(source: &Path, destination: &Path) -> bool {
+    ["", "-wal", "-shm"].into_iter().all(|suffix| {
+        let from = with_suffix(source, suffix);
+        let to = with_suffix(destination, suffix);
+        !from.exists() || !to.exists()
+    })
+}
+
 fn ensure_archive_destinations_free(source: &Path, destination: &Path) -> Result<(), String> {
     for suffix in ["", "-wal", "-shm"] {
         let from = with_suffix(source, suffix);
@@ -423,12 +461,16 @@ fn forensic_bundle_path(source: &Path) -> Result<PathBuf, String> {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "legacy.db".to_string());
     let signature = source_signature(source)?;
+    let digest = signature_digest(source, &signature);
+    Ok(parent.join(format!("{name}.pre-migration.forensic-{}", &digest[..16])))
+}
+
+fn signature_digest(source: &Path, signature: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(source.to_string_lossy().as_bytes());
     hasher.update([0]);
     hasher.update(signature.as_bytes());
-    let digest = format!("{:x}", hasher.finalize());
-    Ok(parent.join(format!("{name}.pre-migration.forensic-{}", &digest[..16])))
+    format!("{:x}", hasher.finalize())
 }
 
 fn preserve_forensic_bundle(source: &Path) -> Result<(), String> {
@@ -667,20 +709,7 @@ fn copy_table(conn: &Connection, table: &str, legacy_alias: &str) -> Result<usiz
         .collect::<Vec<_>>()
         .join(", ");
     let conflict = match table {
-        "documents" if common.iter().any(|c| c == "updated_at") => {
-            "ON CONFLICT(id) DO UPDATE SET \
-                   title=CASE \
-                     WHEN TRIM(COALESCE(excluded.title, '')) = '' THEN documents.title \
-                     ELSE excluded.title END, \
-                   raw_content=excluded.raw_content, \
-                   source_version=excluded.source_version, \
-                   captured_at=excluded.captured_at, \
-                   updated_at=excluded.updated_at \
-                 WHERE julianday(excluded.updated_at) > julianday(documents.updated_at) \
-                    OR (julianday(excluded.updated_at) = julianday(documents.updated_at) \
-                        AND excluded.updated_at > documents.updated_at)"
-                .to_string()
-        }
+        "documents" if common.iter().any(|c| c == "updated_at") => document_conflict(&common),
         "items" | "extraction_jobs" if common.iter().any(|c| c == "updated_at") => {
             format!(
                 "ON CONFLICT(id) DO UPDATE SET {assignments} \
@@ -705,6 +734,38 @@ fn copy_table(conn: &Connection, table: &str, legacy_alias: &str) -> Result<usiz
     );
     conn.execute(&sql, [])
         .map_err(|e| format!("failed to copy table {table}: {e}"))
+}
+
+fn document_conflict(common: &[String]) -> String {
+    let has_column = |name: &str| common.iter().any(|column| column == name);
+    let mut assignments = Vec::new();
+
+    if has_column("title") {
+        assignments.push(
+            "title=CASE \
+               WHEN TRIM(COALESCE(excluded.title, '')) = '' THEN documents.title \
+               ELSE excluded.title END"
+                .to_string(),
+        );
+    }
+    if has_column("raw_content") {
+        assignments.push("raw_content=excluded.raw_content".to_string());
+    }
+    if has_column("source_version") {
+        assignments.push("source_version=excluded.source_version".to_string());
+    }
+    if has_column("captured_at") {
+        assignments.push("captured_at=excluded.captured_at".to_string());
+    }
+    assignments.push("updated_at=excluded.updated_at".to_string());
+
+    format!(
+        "ON CONFLICT(id) DO UPDATE SET {} \
+         WHERE julianday(excluded.updated_at) > julianday(documents.updated_at) \
+            OR (julianday(excluded.updated_at) = julianday(documents.updated_at) \
+                AND excluded.updated_at > documents.updated_at)",
+        assignments.join(", ")
+    )
 }
 
 fn is_safe_identifier(name: &str) -> bool {
@@ -964,6 +1025,45 @@ mod tests {
     }
 
     #[test]
+    fn recreated_legacy_source_uses_generation_specific_archive() {
+        let tmp = TempDir::new().unwrap();
+        let target = make_target_db(tmp.path());
+        let legacy = make_legacy_db_with_items(tmp.path(), "server.db");
+        let lc = Connection::open(&legacy).unwrap();
+        insert_item(&lc, "first-generation");
+        drop(lc);
+
+        migrate_stale_dbs(&target).unwrap();
+        assert!(tmp.path().join("server.db.migrated").exists());
+
+        let legacy = make_legacy_db_with_items(tmp.path(), "server.db");
+        let lc = Connection::open(&legacy).unwrap();
+        insert_item(&lc, "second-generation");
+        drop(lc);
+
+        let report = migrate_stale_dbs(&target).unwrap();
+        assert!(matches!(
+            report,
+            MigrationReport::Migrated { rows_copied: 1, .. }
+        ));
+        assert_eq!(
+            item_count(&Connection::open(&target).unwrap(), "second-generation"),
+            1
+        );
+        assert!(!legacy.exists());
+        assert!(
+            std::fs::read_dir(tmp.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("server.db.migrated-")),
+            "recreated source must not overwrite the first archive"
+        );
+    }
+
+    #[test]
     fn newer_legacy_rows_update_existing_ids_by_version_and_state() {
         let tmp = TempDir::new().unwrap();
         let target = make_target_db(tmp.path());
@@ -995,6 +1095,65 @@ mod tests {
             )
             .unwrap();
         assert_eq!(corrected, "corrected");
+    }
+
+    #[test]
+    fn document_merge_preserves_source_version_when_legacy_lacks_column() {
+        let tmp = TempDir::new().unwrap();
+        let target = make_target_db(tmp.path());
+        let tc = Connection::open(&target).unwrap();
+        tc.execute_batch(
+            "INSERT INTO documents
+               (id, title, raw_content, source, url, source_version,
+                captured_at, created_at, updated_at)
+             VALUES
+               ('target-doc', 'Old title', 'old body', 'canonical',
+                'https://example.com/no-source-version', 'v-target',
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                '2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+        drop(tc);
+
+        let legacy = tmp.path().join("server.db");
+        let lc = Connection::open(&legacy).unwrap();
+        lc.execute_batch(
+            "CREATE TABLE documents (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                raw_content TEXT NOT NULL,
+                source TEXT NOT NULL,
+                url TEXT NOT NULL UNIQUE,
+                captured_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO documents
+              (id, title, raw_content, source, url, captured_at, created_at, updated_at)
+            VALUES
+              ('legacy-doc', 'New title', 'new body', 'legacy',
+               'https://example.com/no-source-version',
+               '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z',
+               '2026-01-02T00:00:00Z');",
+        )
+        .unwrap();
+        drop(lc);
+
+        migrate_stale_dbs(&target).unwrap();
+
+        let document: (String, String, String) = Connection::open(&target)
+            .unwrap()
+            .query_row(
+                "SELECT title, raw_content, source_version
+                 FROM documents WHERE id='target-doc'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            document,
+            ("New title".into(), "new body".into(), "v-target".into())
+        );
     }
 
     #[test]
