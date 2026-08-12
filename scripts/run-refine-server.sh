@@ -30,7 +30,11 @@ if [[ -n "${REFINE_API_TOKEN_FILE:-}" ]]; then
     printf '[refine-server] invalid token file: %s\n' "$token_file" >&2
     exit 1
   fi
-  token_mode=$(stat -f '%Lp' "$token_file" 2>/dev/null || stat -c '%a' "$token_file" 2>/dev/null || true)
+  if [[ "$(uname -s)" == 'Darwin' ]]; then
+    token_mode=$(stat -f '%Lp' "$token_file" 2>/dev/null || true)
+  else
+    token_mode=$(stat -c '%a' "$token_file" 2>/dev/null || true)
+  fi
   if [[ -z "$token_mode" || $((8#$token_mode & 077)) -ne 0 ]]; then
     printf '[refine-server] token file must have no group/other permission bits: %s\n' "$token_file" >&2
     exit 1
