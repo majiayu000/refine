@@ -348,6 +348,10 @@ if [[ "$ui_dev_enabled" == "1" ]]; then
 else
   pass "desktop UI dev service skipped"
 fi
+install_manifest="${HOME}/.refine/install-manifest"
+if [[ -f "$install_manifest" && "$(manifest_value cognitive_portrait_enabled "$install_manifest")" == "1" ]]; then
+  check_launch_agent com.lifcc.refine-cognitive-portrait
+fi
 
 check_unattended_llm_env
 check_http

@@ -1,5 +1,6 @@
 # Rust
 target/
+docs/cognitive-portraits/.failed/
 
 # Node
 node_modules/
