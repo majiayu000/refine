@@ -265,6 +265,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retries_on_typed_http_429_then_succeeds() {
+        let _env_guard = QUOTA_TEST_LOCK.lock().await;
+        let _quota_guard = QuotaTestGuard::new();
+
+        let client = Arc::new(SequenceClient::new(vec![
+            Err(InfraError::LlmHttp {
+                status: 429,
+                message: "rate limited".into(),
+            }),
+            Ok("ok".into()),
+        ]));
+
+        let result = llm_with_retry_policy(
+            &(client.clone() as Arc<dyn LlmClient>),
+            "prompt",
+            "system",
+            LlmRetryPolicy {
+                max_retries: 3,
+                base_delay_secs: 0,
+                ..LlmRetryPolicy::default()
+            },
+            |_attempt, _max_retries, _delay_secs, _err| {},
+        )
+        .await
+        .expect("typed HTTP 429 should be retried");
+
+        assert_eq!(result, "ok");
+        assert_eq!(client.calls(), 2);
+    }
+
+    #[tokio::test]
     async fn does_not_retry_non_retryable_error() {
         let _env_guard = QUOTA_TEST_LOCK.lock().await;
         let _quota_guard = QuotaTestGuard::new();

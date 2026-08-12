@@ -1,86 +1,64 @@
 #!/usr/bin/env bash
 
-# Shared lock for scheduled Refine jobs. Source this file, then call
-# acquire_refine_runtime_job_lock before starting expensive work.
+# Shared lock for scheduled Refine jobs. BSD lockf and Linux flock both hold
+# an open file descriptor for the complete workflow, so stale PID reclamation
+# is delegated to the kernel instead of implemented with racy path deletion.
 
 release_refine_runtime_job_lock() {
-  if [[ -n "${REFINE_RUNTIME_LOCK_HELD:-}" ]]; then
-    rm -f "${REFINE_RUNTIME_LOCK_HELD}/pid"
-    rmdir "${REFINE_RUNTIME_LOCK_HELD}" 2>/dev/null || true
-    REFINE_RUNTIME_LOCK_HELD=""
-  fi
-}
-
-runtime_lock_mtime_epoch() {
-  local path="$1"
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    stat -f %m "$path"
-  else
-    stat -c %Y "$path"
-  fi
+  case "${REFINE_RUNTIME_LOCK_MODE:-}" in
+    flock)
+      flock -u 9 2>/dev/null || true
+      exec 9>&-
+      ;;
+    lockf)
+      exec 9>&-
+      ;;
+  esac
+  REFINE_RUNTIME_LOCK_MODE=""
+  REFINE_RUNTIME_LOCK_FILE=""
 }
 
 acquire_refine_runtime_job_lock() {
-  local lock_dir="${REFINE_RUNTIME_JOB_LOCK_DIR:-${HOME}/.refine/runtime-job.lock}"
+  local lock_file="${REFINE_RUNTIME_JOB_LOCK_FILE:-${HOME}/.refine/runtime-job.lock}"
   local wait_seconds="${REFINE_RUNTIME_JOB_LOCK_WAIT_SECONDS:-14400}"
-  local poll_seconds="${REFINE_RUNTIME_JOB_LOCK_POLL_SECONDS:-30}"
-  local deadline owner lock_age lock_mtime now
 
   [[ "$wait_seconds" =~ ^[0-9]+$ ]] || {
     echo "ERROR: REFINE_RUNTIME_JOB_LOCK_WAIT_SECONDS must be a non-negative integer" >&2
     return 1
   }
-  [[ "$poll_seconds" =~ ^[1-9][0-9]*$ ]] || {
-    echo "ERROR: REFINE_RUNTIME_JOB_LOCK_POLL_SECONDS must be a positive integer" >&2
+  if [[ -L "$lock_file" ]]; then
+    echo "ERROR: refusing symlink runtime lock: $lock_file" >&2
     return 1
-  }
+  fi
 
-  mkdir -p "$(dirname "$lock_dir")"
-  chmod 700 "$(dirname "$lock_dir")" 2>/dev/null || true
-  deadline=$(( $(date +%s) + wait_seconds ))
+  mkdir -p "$(dirname "$lock_file")"
+  chmod 700 "$(dirname "$lock_file")" 2>/dev/null || true
 
-  while ! mkdir "$lock_dir" 2>/dev/null; do
-    if [[ -L "$lock_dir" ]]; then
-      echo "ERROR: refusing symlink runtime lock: $lock_dir" >&2
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$lock_file"
+    chmod 600 "$lock_file" 2>/dev/null || true
+    if ! flock -w "$wait_seconds" 9; then
+      exec 9>&-
+      echo "ERROR: timed out waiting for Refine runtime job lock" >&2
       return 1
     fi
-    if [[ ! -d "$lock_dir" ]]; then
-      echo "ERROR: runtime lock path is not a directory: $lock_dir" >&2
-      return 1
-    fi
-    owner="$(cat "$lock_dir/pid" 2>/dev/null || true)"
-    if [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null; then
-      if (( $(date +%s) >= deadline )); then
-        echo "ERROR: timed out waiting for Refine runtime job pid $owner" >&2
-        return 1
-      fi
-      echo "Waiting for Refine runtime job pid $owner..." >&2
-      sleep "$poll_seconds"
-      continue
-    fi
+    REFINE_RUNTIME_LOCK_MODE="flock"
+    REFINE_RUNTIME_LOCK_FILE="$lock_file"
+    return 0
+  fi
 
-    # mkdir is the atomic ownership boundary. Give a just-created directory
-    # time to receive its pid before deciding it is stale.
-    now="$(date +%s)"
-    lock_mtime="$(runtime_lock_mtime_epoch "$lock_dir" 2>/dev/null || printf '%s' "$now")"
-    lock_age=$(( now - lock_mtime ))
-    if [[ -z "$owner" && "$lock_age" -lt 5 ]]; then
-      if (( now >= deadline )); then
-        echo "ERROR: timed out waiting for Refine runtime job lock initialization" >&2
-        return 1
-      fi
-      sleep "$poll_seconds"
-      continue
-    fi
+  if ! command -v lockf >/dev/null 2>&1; then
+    echo "ERROR: neither flock nor lockf is available for runtime serialization" >&2
+    return 1
+  fi
 
-    rm -f "$lock_dir/pid"
-    if ! rmdir "$lock_dir" 2>/dev/null; then
-      echo "ERROR: refusing non-empty runtime lock directory: $lock_dir" >&2
-      return 1
-    fi
-  done
-
-  printf '%s\n' "$$" > "$lock_dir/pid"
-  chmod 600 "$lock_dir/pid" 2>/dev/null || true
-  REFINE_RUNTIME_LOCK_HELD="$lock_dir"
+  exec 9>"$lock_file"
+  if ! lockf -s -t "$wait_seconds" 9; then
+    exec 9>&-
+    echo "ERROR: timed out waiting for Refine runtime job lock" >&2
+    return 1
+  fi
+  chmod 600 "$lock_file" 2>/dev/null || true
+  REFINE_RUNTIME_LOCK_MODE="lockf"
+  REFINE_RUNTIME_LOCK_FILE="$lock_file"
 }

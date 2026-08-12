@@ -66,36 +66,31 @@ output=$(env -i HOME="$empty_home" PATH="/usr/bin:/bin" \
 # Scheduled workflows must not overlap and must recover stale locks.
 # shellcheck source=scripts/runtime-job-lock.sh
 source "${SCRIPT_DIR}/runtime-job-lock.sh"
-lock_dir="${TEST_ROOT}/runtime-job.lock"
-REFINE_RUNTIME_JOB_LOCK_DIR="$lock_dir"
+lock_file="${TEST_ROOT}/runtime-job.lock"
+REFINE_RUNTIME_JOB_LOCK_FILE="$lock_file"
 REFINE_RUNTIME_JOB_LOCK_WAIT_SECONDS=0
-REFINE_RUNTIME_JOB_LOCK_POLL_SECONDS=1
 acquire_refine_runtime_job_lock || fail 'runtime job lock could not be acquired'
-[[ -f "$lock_dir/pid" ]] || fail 'runtime job lock did not record its owner'
+[[ -f "$lock_file" ]] || fail 'runtime job lock did not create its lock file'
 release_refine_runtime_job_lock
-mkdir "$lock_dir"
-printf '%s\n' '99999999' > "$lock_dir/pid"
+printf '%s\n' '99999999' > "$lock_file"
 acquire_refine_runtime_job_lock || fail 'runtime job lock did not recover a stale owner'
 release_refine_runtime_job_lock
-mkdir "$lock_dir"
-printf '%s\n' "$$" > "$lock_dir/pid"
-if acquire_refine_runtime_job_lock >/dev/null 2>&1; then
-  fail 'runtime job lock allowed a live owner to overlap'
-fi
-rm -f "$lock_dir/pid"
-rmdir "$lock_dir"
-printf '%s\n' 'not-a-lock-directory' > "$lock_dir"
-if acquire_refine_runtime_job_lock >/dev/null 2>&1; then
-  fail 'runtime job lock accepted a non-directory lock path'
-fi
-rm -f "$lock_dir"
-mkdir "$lock_dir"
-printf '%s\n' 'unexpected' > "$lock_dir/extra"
-if acquire_refine_runtime_job_lock >/dev/null 2>&1; then
-  fail 'runtime job lock removed a non-empty stale directory'
-fi
-rm -f "$lock_dir/extra"
-rmdir "$lock_dir"
+
+# Two simultaneous contenders must remain strictly serialized even when a
+# stale lock file already exists on disk.
+printf '%s\n' '99999999' > "$lock_file"
+critical_log="${TEST_ROOT}/runtime-critical.log"
+for _worker in 1 2; do
+  env HOME="$home" REFINE_RUNTIME_JOB_LOCK_FILE="$lock_file" \
+    REFINE_RUNTIME_JOB_LOCK_WAIT_SECONDS=10 \
+    RUNTIME_LOCK_HELPER="${SCRIPT_DIR}/runtime-job-lock.sh" \
+    RUNTIME_CRITICAL_LOG="$critical_log" \
+    bash -c 'source "$RUNTIME_LOCK_HELPER"; acquire_refine_runtime_job_lock; printf "start %s\n" "$$" >> "$RUNTIME_CRITICAL_LOG"; sleep 1; printf "end %s\n" "$$" >> "$RUNTIME_CRITICAL_LOG"; release_refine_runtime_job_lock' &
+done
+wait
+critical_shape="$(awk '{print $1}' "$critical_log" | paste -sd, -)"
+[[ "$critical_shape" == 'start,end,start,end' ]] \
+  || fail "runtime stale reclaimers overlapped: ${critical_shape}"
 
 # A successful ingest must not publish a success marker when required advice
 # fails. The scheduled command must also request strict advice semantics.
