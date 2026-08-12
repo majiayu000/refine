@@ -71,7 +71,7 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
                 .map(|state| state.signature.as_str())
                 == Some(signature_before.as_str())
         {
-            archive_successful_source(candidate, &migrated_path)?;
+            archive_successful_source(candidate, &migrated_path, &signature_before)?;
             continue;
         }
         let bak_path = with_suffix(candidate, ".pre-migration.bak");
@@ -92,7 +92,7 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
                 == Some(content_hash.as_str())
         {
             save_migration_state(&conn, candidate, &signature_after_snapshot, &content_hash)?;
-            archive_successful_source(candidate, &migrated_path)?;
+            archive_successful_source(candidate, &migrated_path, &signature_after_snapshot)?;
             continue;
         }
 
@@ -111,7 +111,7 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
             return Err(format!("failed to attach {}: {}", candidate.display(), e));
         }
 
-        let result: Result<usize, String> = (|| {
+        let result: Result<(usize, String), String> = (|| {
             let tx = conn
                 .unchecked_transaction()
                 .map_err(|e| format!("failed to start migration transaction: {e}"))?;
@@ -126,12 +126,12 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
             save_migration_state(&tx, candidate, &signature_after, &content_hash)?;
             tx.commit()
                 .map_err(|e| format!("failed to commit migration transaction: {e}"))?;
-            Ok(rows)
+            Ok((rows, signature_after))
         })();
         drop(conn);
-        let rows =
+        let (rows, signature_after) =
             result.map_err(|e| format!("migration of {} failed: {}", candidate.display(), e))?;
-        archive_successful_source(candidate, &migrated_path)?;
+        archive_successful_source(candidate, &migrated_path, &signature_after)?;
 
         sources.push(candidate.clone());
         total_rows += rows;
@@ -437,8 +437,68 @@ fn ensure_archive_destinations_free(source: &Path, destination: &Path) -> Result
     Ok(())
 }
 
-fn archive_successful_source(source: &Path, destination: &Path) -> Result<(), String> {
+fn archive_successful_source(
+    source: &Path,
+    destination: &Path,
+    expected_signature: &str,
+) -> Result<(), String> {
     ensure_archive_destinations_free(source, destination)?;
+    let source_lock = lock_source_for_archive(source)?;
+    let current_signature = source_signature(source)?;
+    if current_signature != expected_signature {
+        return Err(format!(
+            "legacy DB {} changed before archival; retry migration",
+            source.display()
+        ));
+    }
+
+    // Windows cannot reliably rename an open SQLite database. The signature is
+    // checked again after the move so a writer that sneaks into the narrow
+    // unlock-to-rename gap does not disappear from the stale source path.
+    #[cfg(windows)]
+    drop(source_lock);
+
+    rename_archived_source(source, destination)?;
+
+    #[cfg(windows)]
+    {
+        let archived_signature = source_signature(destination)?;
+        if archived_signature != expected_signature {
+            restore_archived_source(source, destination)?;
+            return Err(format!(
+                "legacy DB {} changed during archival; retry migration",
+                source.display()
+            ));
+        }
+    }
+
+    #[cfg(not(windows))]
+    drop(source_lock);
+
+    Ok(())
+}
+
+fn lock_source_for_archive(source: &Path) -> Result<Connection, String> {
+    let conn = Connection::open(source).map_err(|e| {
+        format!(
+            "failed to open legacy DB {} before archive: {}",
+            source.display(),
+            e
+        )
+    })?;
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|e| format!("failed to configure legacy DB {}: {}", source.display(), e))?;
+    conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| {
+        format!(
+            "failed to lock legacy DB {} before archive: {}",
+            source.display(),
+            e
+        )
+    })?;
+    Ok(conn)
+}
+
+fn rename_archived_source(source: &Path, destination: &Path) -> Result<(), String> {
     std::fs::rename(source, destination)
         .map_err(|e| format!("failed to rename {}: {}", source.display(), e))?;
 
@@ -450,6 +510,29 @@ fn archive_successful_source(source: &Path, destination: &Path) -> Result<(), St
         if companion.exists() {
             let _ = std::fs::rename(&companion, with_suffix(destination, suffix));
         }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn restore_archived_source(source: &Path, destination: &Path) -> Result<(), String> {
+    for suffix in ["-shm", "-wal", ""] {
+        let archived = with_suffix(destination, suffix);
+        if !archived.exists() {
+            continue;
+        }
+        let original = with_suffix(source, suffix);
+        if original.exists() {
+            continue;
+        }
+        std::fs::rename(&archived, &original).map_err(|e| {
+            format!(
+                "failed to restore archived legacy DB {} to {}: {}",
+                archived.display(),
+                original.display(),
+                e
+            )
+        })?;
     }
     Ok(())
 }
@@ -1453,6 +1536,36 @@ mod tests {
         assert_ne!(before, after);
         #[cfg(not(unix))]
         assert_eq!(before, after);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_rechecks_source_signature_before_renaming() {
+        let tmp = TempDir::new().unwrap();
+        let legacy = make_legacy_db_with_items(tmp.path(), "server.db");
+        let lc = Connection::open(&legacy).unwrap();
+        insert_item(&lc, "before-archive");
+        drop(lc);
+        let signature_before = source_signature(&legacy).unwrap();
+
+        let lc = Connection::open(&legacy).unwrap();
+        insert_item(&lc, "late-write");
+        drop(lc);
+        assert_ne!(signature_before, source_signature(&legacy).unwrap());
+
+        let migrated = with_suffix(&legacy, ".migrated");
+        let error = archive_successful_source(&legacy, &migrated, &signature_before).unwrap_err();
+
+        assert!(
+            error.contains("changed before archival"),
+            "unexpected error: {error}"
+        );
+        assert!(legacy.exists(), "changed source must remain retryable");
+        assert!(!migrated.exists(), "changed source must not be archived");
+        assert_eq!(
+            item_count(&Connection::open(&legacy).unwrap(), "late-write"),
+            1
+        );
     }
 
     #[test]
