@@ -64,8 +64,8 @@ and the relevant `~/.refine` log snippet if available.
   OpenAI-compatible or Anthropic-compatible API key.
 - Browser extension support is still a developer preview and should be tested
   against the local API before relying on it for unattended capture.
-- Mirror personal baselines need enough history; before four weeks of data,
-  signal lights use fixed thresholds instead of your own baseline.
+- Mirror personal trend arrows need enough history; before enough recent daily
+  scores exist, only fixed-threshold signal lights are shown.
 - No hosted multi-user service or migration SLA is claimed by this repository.
 
 ## Mirror — Cognitive Growth Tracker
@@ -91,17 +91,17 @@ mirror profile                      # Cognitive portrait narrative (requires LLM
 
 ### What Mirror Tracks
 
-**3 Layers × 11 Indicators:**
+**3 Layers × 8 Indicators:**
 
 | Layer | Indicators | What It Measures |
 |-------|-----------|-----------------|
-| **Depth** | Dreyfus level, Decision quality, Depth output, Knowledge rate | Are you thinking at a higher level? |
+| **Depth** | Dreyfus level, Decision quality | Are you thinking at a higher level? |
 | **Breadth** | Exploration rate, Deep invest, Fragmentation | Are you investing wisely across projects? |
-| **Collaboration** | Delegation rate, Mode diversity, Bug/decision ratio, Friction density | Is your AI collaboration healthy? |
+| **Collaboration** | Delegation rate, Mode diversity, Bug/decision ratio | Is your AI collaboration healthy? |
 
 **Signal Lights:** 🟢 Green (healthy) / 🟡 Yellow (watch) / 🔴 Red (act now)
 
-**Personal Baseline:** After 4 weeks, signals are relative to your own average, not fixed thresholds.
+**Personal Baseline:** After enough recent history, arrows show change versus your 4-week average. Signal colors still use fixed targets.
 
 ### Terminal Integration
 
@@ -159,8 +159,6 @@ that path explicitly to the loader rather than sourcing it automatically.
 [targets]
 delegation_green = 0.40      # delegation < 40% = green
 exploration_green = 0.15     # exploration > 15% = green
-knowledge_green = 0.5        # knowledge rate > 0.5/session = green
-friction_green = 1.0         # friction < 1.0/session = green
 ```
 
 ### Data Flow
@@ -236,7 +234,7 @@ refine/
 ├── apps/
 │   ├── cli/                # refine command (ingest, insights, search, growth)
 │   ├── mirror/             # mirror command (score, motd, dashboard, weekly, profile)
-│   │   └── src/score/      # Signal light engine (11 indicators, personal baseline)
+│   │   └── src/score/      # Signal light engine (8 indicators, personal trends)
 │   ├── server/             # API server (Axum)
 │   ├── desktop/            # Desktop app (Tauri)
 │   └── extension/          # Browser extension (Plasmo)

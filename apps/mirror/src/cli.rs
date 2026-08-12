@@ -19,7 +19,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Compute 3-layer signal lights + 9 indicators + tension analysis
+    /// Compute 3-layer signal lights + 8 indicators + tension analysis
     Score {
         /// Filter observations since date (YYYY-MM-DD), default: last 90 days
         #[arg(long)]

@@ -29,6 +29,7 @@ const GENERIC_PATH_SEGMENTS: &[&str] = &[
     "code",
     "ai",
     "tools",
+    "tool",
     "agent",
     "work",
     "life",
@@ -41,6 +42,7 @@ const GENERIC_PATH_SEGMENTS: &[&str] = &[
 pub struct ProjectCluster {
     pub project_name: String,
     pub session_count: usize,
+    pub doc_ids: HashSet<String>,
     pub summary_excerpts: Vec<String>,
     pub decision_titles: Vec<String>,
     pub bugfix_titles: Vec<String>,
@@ -131,6 +133,7 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
             .or_insert_with(|| ProjectCluster {
                 project_name: project_name.clone(),
                 session_count: 0,
+                doc_ids: HashSet::new(),
                 summary_excerpts: Vec::new(),
                 decision_titles: Vec::new(),
                 bugfix_titles: Vec::new(),
@@ -146,10 +149,12 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
                 code_artifacts: Vec::new(),
             });
 
-        // 跟踪 session 数
+        // Count sessions per project, while still keeping a global unique
+        // session count for the overall denominator.
         if let Some(doc_id) = item.document_id() {
             let id_str = doc_id.as_str().to_string();
-            if all_doc_ids.insert(id_str.clone()) {
+            all_doc_ids.insert(id_str.clone());
+            if cluster.doc_ids.insert(id_str) {
                 cluster.session_count += 1;
             }
         }
@@ -250,10 +255,16 @@ fn extract_project_from_tags(tags: &[&str]) -> Option<String> {
         .max_by_key(|s| s.len())
 }
 
+fn is_session_id(segment: &str) -> bool {
+    segment
+        .strip_prefix("agent_")
+        .is_some_and(|rest| rest.len() >= 16 && rest.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 pub fn normalize_project_name(raw: &str) -> Option<String> {
     let segments: Vec<&str> = raw
         .split('-')
-        .filter(|s| !s.is_empty() && !GENERIC_PATH_SEGMENTS.contains(s))
+        .filter(|s| !s.is_empty() && !GENERIC_PATH_SEGMENTS.contains(s) && !is_session_id(s))
         .collect();
     match segments.len() {
         0 => None,
@@ -321,6 +332,26 @@ fn is_collab_mode(tag: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::knowledge::{DocumentId, ItemId, RestoreParams, Tag};
+    use chrono::Utc;
+
+    fn observation(id: &str, doc_id: &str, tags: &[&str]) -> Item {
+        let now = Utc::now();
+        Item::restore(RestoreParams {
+            id: ItemId::from(id),
+            item_type: ItemType::Observation,
+            title: id.to_string(),
+            summary: String::new(),
+            content: "进展:\n- shipped one step\n\n问题:\n- what next?".to_string(),
+            tags: tags.iter().map(|tag| Tag::new(tag).unwrap()).collect(),
+            source: None,
+            document_id: Some(DocumentId::from(doc_id)),
+            excerpt: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap()
+    }
 
     #[test]
     fn normalize_project_name_extracts_meaningful_segments() {
@@ -345,6 +376,28 @@ mod tests {
         assert_eq!(
             normalize_project_name("-users-lifcc-desktop-code-work-life"),
             None
+        );
+        assert_eq!(
+            normalize_project_name("-users-lifcc-desktop-code-ai-tool-argus"),
+            Some("argus".into())
+        );
+        assert_eq!(
+            normalize_project_name("-users-lifcc-desktop-code-ai-tool-argus"),
+            normalize_project_name("-users-lifcc-desktop-code-ai-tools-argus")
+        );
+        assert_eq!(
+            normalize_project_name("agent_019ec96be5fe7f53a6cca93bb6201c26"),
+            None
+        );
+        assert_eq!(
+            normalize_project_name(
+                "-users-lifcc-desktop-code-ai-tools-refine-agent_019ec96be5fe7f53a6cca93bb6201c26"
+            ),
+            Some("refine".into())
+        );
+        assert_eq!(
+            normalize_project_name("agent_harness"),
+            Some("agent_harness".into())
         );
     }
 
@@ -380,5 +433,18 @@ mod tests {
         assert_eq!(progress, vec!["step1", "step2"]);
         assert_eq!(questions, vec!["如何优化？"]);
         assert_eq!(artifacts, vec!["main.rs"]);
+    }
+
+    #[test]
+    fn cluster_observations_counts_sessions_per_project() {
+        let cluster = cluster_observations(&[
+            observation("a1", "doc-1", &["project-a"]),
+            observation("b1", "doc-1", &["project-b"]),
+            observation("b2", "doc-2", &["project-b"]),
+        ]);
+
+        assert_eq!(cluster.global_stats.total_sessions, 2);
+        assert_eq!(cluster.projects["project-a"].session_count, 1);
+        assert_eq!(cluster.projects["project-b"].session_count, 2);
     }
 }

@@ -272,11 +272,11 @@ pub fn handle_motd() -> Result<()> {
         .map(|(d, _, _)| d)
         .unwrap_or_else(|| "general".to_string());
 
-    // Prefer LLM-generated advice if cached, fallback to static tips
+    let mut advice_stale = false;
     let tip = match crate::advice::load_cached() {
-        Ok(Some(cached)) => cached.advice,
-        Err(e) => {
-            tracing::warn!("failed to load cached advice: {}", e);
+        Ok(Some(cached)) if !cached.is_stale() => cached.advice,
+        Ok(Some(_)) => {
+            advice_stale = true;
             let tips = ensure_tips()?;
             select_tip(&tips, &dim)
         }
@@ -284,6 +284,16 @@ pub fn handle_motd() -> Result<()> {
             let tips = ensure_tips()?;
             select_tip(&tips, &dim)
         }
+        Err(e) => {
+            eprintln!("[mirror] error: failed to load cached advice: {}", e);
+            let tips = ensure_tips()?;
+            select_tip(&tips, &dim)
+        }
+    };
+    let advice_stale_suffix = if advice_stale {
+        t!(" ⚠️ advice stale", " ⚠️ 建议已过期")
+    } else {
+        ""
     };
 
     // Check data freshness: warn if latest score is older than 48 hours
@@ -304,7 +314,7 @@ pub fn handle_motd() -> Result<()> {
         .unwrap_or_default();
 
     println!(
-        "🪞 {d}{de}{dt} {b}{be}{bt} {c}{ce}{ct}{streak} | {tip}{stale}",
+        "🪞 {d}{de}{dt} {b}{be}{bt} {c}{ce}{ct}{streak} | {tip}{advice_stale}{stale}",
         d = t!("Depth", "深度"),
         de = depth_e,
         dt = depth_t,
@@ -316,6 +326,7 @@ pub fn handle_motd() -> Result<()> {
         ct = collab_t,
         streak = streak_suffix,
         tip = tip,
+        advice_stale = advice_stale_suffix,
         stale = stale_suffix,
     );
     if let Some(milestone) = crate::score::streak::milestone_message(streak) {

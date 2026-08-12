@@ -446,8 +446,8 @@ mod tests {
     use super::*;
     use crate::score::{Indicator, Signal};
     use refine_core::knowledge::{Item, ItemId, ItemType, RestoreParams, Tag};
-    use refine_core::session::GlobalStats;
-    use std::collections::HashMap;
+    use refine_core::session::{GlobalStats, ProjectCluster};
+    use std::collections::{HashMap, HashSet};
 
     fn make_weekly_record(seed: usize) -> WeeklyRecord {
         WeeklyRecord {
@@ -512,6 +512,46 @@ mod tests {
                 collaboration_modes: HashMap::new(),
                 tool_frequency: HashMap::new(),
                 project_ranking: Vec::new(),
+            },
+            untagged_count: 0,
+        }
+    }
+
+    fn cluster_with_project_evidence() -> ClusterResult {
+        let mut projects = HashMap::new();
+        projects.insert(
+            "codex-tool".to_string(),
+            ProjectCluster {
+                project_name: "codex-tool".to_string(),
+                session_count: 1,
+                doc_ids: HashSet::new(),
+                summary_excerpts: Vec::new(),
+                decision_titles: Vec::new(),
+                bugfix_titles: Vec::new(),
+                cognitive_levels: HashMap::new(),
+                collaboration_modes: HashMap::new(),
+                tools: Vec::new(),
+                frictions: Vec::new(),
+                architectures: Vec::new(),
+                knowledge_gained: Vec::new(),
+                patterns: Vec::new(),
+                progress_items: Vec::new(),
+                question_items: vec!["validate Codex session attribution".to_string()],
+                code_artifacts: Vec::new(),
+            },
+        );
+
+        ClusterResult {
+            projects,
+            global_stats: GlobalStats {
+                total_sessions: 1,
+                total_decisions: 0,
+                total_bugfixes: 0,
+                total_summaries: 1,
+                cognitive_levels: HashMap::new(),
+                collaboration_modes: HashMap::new(),
+                tool_frequency: HashMap::new(),
+                project_ranking: vec![("codex-tool".to_string(), 1)],
             },
             untagged_count: 0,
         }
@@ -611,6 +651,56 @@ mod tests {
             "indicator values must appear in report"
         );
         assert!(report.contains("tension") || report.contains("张力"));
+    }
+
+    #[test]
+    fn test_build_weekly_report_includes_action_card_from_same_cluster() {
+        let score = ScoreResult {
+            layers: [
+                LayerScore {
+                    name: "depth".into(),
+                    signal: Signal::Green,
+                    indicators: Vec::new(),
+                },
+                LayerScore {
+                    name: "breadth".into(),
+                    signal: Signal::Red,
+                    indicators: vec![
+                        Indicator {
+                            name: "exploration".into(),
+                            actual: 5.2,
+                            target: ">15%".into(),
+                            signal: Signal::Red,
+                        },
+                        Indicator {
+                            name: "deep_invest".into(),
+                            actual: 19.0,
+                            target: "15-30%".into(),
+                            signal: Signal::Yellow,
+                        },
+                        Indicator {
+                            name: "fragmentation".into(),
+                            actual: 26.0,
+                            target: "<20%".into(),
+                            signal: Signal::Red,
+                        },
+                    ],
+                },
+                LayerScore {
+                    name: "collaboration".into(),
+                    signal: Signal::Green,
+                    indicators: Vec::new(),
+                },
+            ],
+            tension: None,
+            timestamp: Utc::now(),
+        };
+
+        let report = build_weekly_report(&score, None, &cluster_with_project_evidence());
+
+        assert!(report.contains("Weekly Action Card"));
+        assert!(report.contains("codex-tool"));
+        assert!(report.contains("validate Codex session attribution"));
     }
 
     #[test]
