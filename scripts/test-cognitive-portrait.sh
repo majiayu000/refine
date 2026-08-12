@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+TEST_ROOT=$(mktemp -d)
+trap 'rm -rf "$TEST_ROOT"' EXIT
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+run_case() {
+  local case_name="$1"
+  local agent_exit="$2"
+  local update_index="$3"
+  local case_root="${TEST_ROOT}/${case_name}"
+  local portrait_dir="${case_root}/portraits"
+  local bin_dir="${case_root}/bin"
+  mkdir -p "$portrait_dir" "$bin_dir" "${case_root}/home"
+  printf '# Index\n' > "${portrait_dir}/INDEX.md"
+  cat > "${bin_dir}/fake-agent" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+portrait="${REFINE_PORTRAIT_DIR}/cognitive-portrait-2026-08-12-v9.md"
+printf '# candidate\n' > "$portrait"
+if [[ "$FAKE_UPDATE_INDEX" == "1" ]]; then
+  printf '| [2026-08-12](./cognitive-portrait-2026-08-12-v9.md) |\n' >> "${REFINE_PORTRAIT_DIR}/INDEX.md"
+fi
+exit "$FAKE_AGENT_EXIT"
+EOF
+  chmod 700 "${bin_dir}/fake-agent"
+
+  env -i HOME="${case_root}/home" PATH="${bin_dir}:/usr/bin:/bin" \
+    REFINE_PORTRAIT_DIR="$portrait_dir" \
+    REFINE_PORTRAIT_AGENT="${bin_dir}/fake-agent" \
+    REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+    FAKE_AGENT_EXIT="$agent_exit" FAKE_UPDATE_INDEX="$update_index" \
+    bash "${SCRIPT_DIR}/cognitive-portrait.sh"
+}
+
+run_case success 0 1 || fail 'complete indexed portrait was rejected'
+[[ -f "${TEST_ROOT}/success/portraits/cognitive-portrait-2026-08-12-v9.md" ]] \
+  || fail 'complete portrait was not retained'
+
+if run_case nonzero 7 1; then
+  fail 'nonzero agent run was accepted'
+fi
+[[ ! -f "${TEST_ROOT}/nonzero/portraits/cognitive-portrait-2026-08-12-v9.md" ]] \
+  || fail 'failed portrait remained eligible for throttling'
+find "${TEST_ROOT}/nonzero/portraits/.failed" -type f -name '*.failed' | grep -q . \
+  || fail 'failed portrait was not quarantined'
+
+if run_case missing-index 0 0; then
+  fail 'unindexed portrait was accepted'
+fi
+[[ ! -f "${TEST_ROOT}/missing-index/portraits/cognitive-portrait-2026-08-12-v9.md" ]] \
+  || fail 'unindexed portrait remained eligible for throttling'
+
+echo 'All cognitive portrait wrapper tests passed'

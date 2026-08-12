@@ -16,6 +16,7 @@ MIN_INTERVAL_DAYS="${REFINE_PORTRAIT_MIN_INTERVAL_DAYS:-13}"
 # 定时任务无人监督，权限必须取最小可用集。
 AGENT_SANDBOX="${REFINE_PORTRAIT_SANDBOX:-workspace-write}"
 LOG_PREFIX="[refine-portrait]"
+INDEX_FILE="${PORTRAIT_DIR}/INDEX.md"
 
 log() {
   echo "${LOG_PREFIX} $(date '+%Y-%m-%d %H:%M:%S') $*"
@@ -77,6 +78,17 @@ fi
 
 start_marker=$(mktemp "${TMPDIR:-/tmp}/refine-portrait-start.XXXXXX")
 
+quarantine_portrait() {
+  local portrait="$1"
+  local failed_dir="${PORTRAIT_DIR}/.failed"
+  local destination
+  mkdir -p "$failed_dir"
+  chmod 700 "$failed_dir" 2>/dev/null || true
+  destination="${failed_dir}/$(basename "$portrait").$(date -u +%Y%m%dT%H%M%SZ).failed"
+  mv "$portrait" "$destination"
+  log "隔离未完成画像: ${destination}"
+}
+
 log "执行 agent: ${AGENT_BIN} exec --sandbox ${AGENT_SANDBOX}"
 rc=0
 (cd "$PROJECT_DIR" && "$AGENT_BIN" exec --sandbox "$AGENT_SANDBOX" \
@@ -94,7 +106,16 @@ fi
 
 if [[ "$rc" -ne 0 ]]; then
   log "ERROR: agent 以非零状态退出: ${rc}（已产出 ${new_portrait}，但结果可能不完整）"
+  quarantine_portrait "$new_portrait"
   notify "agent 非零退出 (${rc})，详见 refine-portrait.log" "Refine Cognitive Portrait 失败"
+  exit 1
+fi
+
+new_base=$(basename "$new_portrait")
+if [[ ! -f "$INDEX_FILE" ]] || ! grep -Fq "(./${new_base})" "$INDEX_FILE"; then
+  log "ERROR: 新画像未写入归档索引: ${new_base}"
+  quarantine_portrait "$new_portrait"
+  notify "新画像未写入 INDEX.md，已隔离" "Refine Cognitive Portrait 失败"
   exit 1
 fi
 
