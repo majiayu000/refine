@@ -15,13 +15,25 @@ pub enum MigrationReport {
     },
 }
 
-/// Copies rows from any legacy databases into `target` and renames each legacy
-/// file to `<name>.migrated` so the migration only runs once.
+struct MigrationSnapshot {
+    path: PathBuf,
+    remove_on_drop: bool,
+}
+
+impl Drop for MigrationSnapshot {
+    fn drop(&mut self) {
+        if self.remove_on_drop {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Copies rows from any legacy databases into `target`.
 ///
-/// On success the legacy files no longer exist at their original paths.
-/// On failure the legacy files and their pre-migration backups are left intact,
-/// all writes for the failing source are rolled back, and an `Err` is returned.
-/// The caller should warn the user but must not abort startup.
+/// Legacy files deliberately remain at their original paths: an older process
+/// may still hold a writable connection and append rows after this pass. Future
+/// starts safely reconcile those rows through `INSERT OR IGNORE`. On failure,
+/// all writes for the failing source are rolled back and an `Err` is returned.
 pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
     let candidates = stale_db_candidates(target);
     if candidates.is_empty() {
@@ -43,19 +55,16 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
 
     for candidate in &candidates {
         let bak_path = with_suffix(candidate, ".pre-migration.bak");
-        let migrated_path = with_suffix(candidate, ".migrated");
-        ensure_archive_destinations_free(candidate, &migrated_path)?;
-        let (source_conn, snapshot_path) = match create_consistent_backup(candidate, &bak_path) {
+        let snapshot = match create_consistent_backup(candidate, &bak_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                preserve_forensic_backup(candidate, &bak_path)?;
+                preserve_forensic_bundle(candidate)?;
                 return Err(error);
             }
         };
 
-        // Import the immutable, verified snapshot while the source write lock
-        // remains held. A legacy writer cannot race a new WAL commit between
-        // backup and archival.
+        // Import the exact verified snapshot. Concurrent rows committed after
+        // the snapshot remain in the legacy source for the next reconciliation.
         let conn = Connection::open(target)
             .map_err(|e| format!("failed to reopen target DB {}: {}", target.display(), e))?;
         crate::infra::configure_sqlite_connection(&conn)
@@ -63,30 +72,24 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
 
         let attach_sql = format!(
             "ATTACH DATABASE '{}' AS refine_migration_src",
-            snapshot_path.to_string_lossy().replace('\'', "''")
+            snapshot.path.to_string_lossy().replace('\'', "''")
         );
         if let Err(e) = conn.execute_batch(&attach_sql) {
             return Err(format!("failed to attach {}: {}", candidate.display(), e));
         }
 
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(|e| format!("failed to start migration transaction: {e}"))?;
-        let rows = copy_all_tables(&tx, "refine_migration_src")
-            .map_err(|e| format!("migration of {} failed: {}", candidate.display(), e))?;
-
-        // Archive while the source write lock and target transaction are both
-        // active. A target commit failure restores the source filenames before
-        // reporting failure, so an error never leaves only one side committed.
-        let archived = archive_locked_source(candidate, &migrated_path)?;
-        if let Err(error) = tx.commit() {
-            let restore_note = restore_archived_source(&archived);
-            return Err(format!(
-                "failed to commit migration transaction: {error}{restore_note}"
-            ));
-        }
+        let result: Result<usize, String> = (|| {
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|e| format!("failed to start migration transaction: {e}"))?;
+            let rows = copy_all_tables(&tx, "refine_migration_src")?;
+            tx.commit()
+                .map_err(|e| format!("failed to commit migration transaction: {e}"))?;
+            Ok(rows)
+        })();
         drop(conn);
-        drop(source_conn);
+        let rows =
+            result.map_err(|e| format!("migration of {} failed: {}", candidate.display(), e))?;
 
         sources.push(candidate.clone());
         total_rows += rows;
@@ -101,15 +104,12 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
 fn create_consistent_backup(
     source: &Path,
     destination: &Path,
-) -> Result<(Connection, PathBuf), String> {
+) -> Result<MigrationSnapshot, String> {
     let source_conn = Connection::open(source)
         .map_err(|e| format!("failed to open legacy DB {}: {}", source.display(), e))?;
     source_conn
         .busy_timeout(Duration::from_secs(5))
         .map_err(|e| format!("failed to configure legacy DB {}: {}", source.display(), e))?;
-    let version_before: i64 = source_conn
-        .pragma_query_value(None, "data_version", |row| row.get(0))
-        .map_err(|e| format!("failed to inspect legacy DB {}: {}", source.display(), e))?;
     let unique = uuid::Uuid::new_v4();
     let temporary = with_suffix(destination, &format!(".tmp-{unique}"));
     let result = (|| {
@@ -140,150 +140,63 @@ fn create_consistent_backup(
         }
         drop(destination_conn);
 
-        // Keep an earlier recovery point immutable. A retry publishes a
-        // versioned snapshot and imports from that exact verified file.
-        let published = if destination.exists() {
-            with_suffix(destination, &format!(".{unique}"))
+        // Keep the first recovery point immutable. Later reconciliation runs
+        // import from a verified temporary snapshot and remove it on drop.
+        if destination.exists() {
+            Ok(MigrationSnapshot {
+                path: temporary.clone(),
+                remove_on_drop: true,
+            })
         } else {
-            destination.to_path_buf()
-        };
-        std::fs::rename(&temporary, &published).map_err(|e| {
-            format!(
-                "failed to publish backup {} for {}: {}",
-                published.display(),
-                source.display(),
-                e
-            )
-        })?;
-        source_conn
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(|e| format!("failed to lock legacy DB {}: {}", source.display(), e))?;
-        let version_after: i64 = source_conn
-            .pragma_query_value(None, "data_version", |row| row.get(0))
-            .map_err(|e| format!("failed to recheck legacy DB {}: {}", source.display(), e))?;
-        if version_after != version_before {
-            return Err(format!(
-                "legacy DB {} changed while its migration snapshot was created; retry migration",
-                source.display()
-            ));
+            std::fs::rename(&temporary, destination).map_err(|e| {
+                format!(
+                    "failed to publish backup {} for {}: {}",
+                    destination.display(),
+                    source.display(),
+                    e
+                )
+            })?;
+            Ok(MigrationSnapshot {
+                path: destination.to_path_buf(),
+                remove_on_drop: false,
+            })
         }
-        Ok((source_conn, published))
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
-        preserve_forensic_backup(source, destination)?;
     }
     result
 }
 
-fn preserve_forensic_backup(source: &Path, destination: &Path) -> Result<(), String> {
-    if destination.exists() {
-        return Ok(());
-    }
-    let temporary = with_suffix(destination, &format!(".raw-tmp-{}", uuid::Uuid::new_v4()));
-    std::fs::copy(source, &temporary).map_err(|e| {
-        format!(
-            "failed to preserve forensic backup of {} as {}: {}",
-            source.display(),
-            destination.display(),
-            e
-        )
-    })?;
-    if let Err(error) = std::fs::rename(&temporary, destination) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(format!(
-            "failed to publish forensic backup {}: {}",
-            destination.display(),
-            error
-        ));
-    }
-    Ok(())
-}
-
-fn ensure_archive_destinations_free(source: &Path, destination: &Path) -> Result<(), String> {
-    for (from, to) in archive_paths(source, destination) {
-        if from.exists() && to.exists() {
-            return Err(format!(
-                "cannot archive {} because destination {} already exists",
-                source.display(),
-                to.display()
-            ));
+fn preserve_forensic_bundle(source: &Path) -> Result<(), String> {
+    for suffix in ["", "-wal", "-shm"] {
+        let original = with_suffix(source, suffix);
+        if !original.exists() {
+            continue;
         }
-    }
-    Ok(())
-}
-
-fn archive_locked_source(
-    source: &Path,
-    destination: &Path,
-) -> Result<Vec<(PathBuf, PathBuf)>, String> {
-    let paths: Vec<(PathBuf, PathBuf)> = archive_paths(source, destination)
-        .into_iter()
-        .filter(|(from, _)| from.exists())
-        .collect();
-    let mut renamed: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for (from, to) in paths {
-        if let Err(error) = std::fs::rename(&from, &to) {
-            let mut rollback_errors = Vec::new();
-            for (original, archived) in renamed.iter().rev() {
-                if let Err(rollback_error) = std::fs::rename(archived, original) {
-                    rollback_errors.push(rollback_error.to_string());
-                }
-            }
-            let rollback_note = if rollback_errors.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "; archive rollback also failed: {}",
-                    rollback_errors.join(", ")
-                )
-            };
-            return Err(format!(
-                "failed to archive {} as {}: {}{}",
-                from.display(),
-                to.display(),
-                error,
-                rollback_note
-            ));
+        let forensic = with_suffix(source, &format!(".pre-migration.forensic{suffix}"));
+        if forensic.exists() {
+            continue;
         }
-        renamed.push((from, to));
-    }
-    Ok(renamed)
-}
-
-fn restore_archived_source(archived: &[(PathBuf, PathBuf)]) -> String {
-    let mut errors = Vec::new();
-    for (original, destination) in archived.iter().rev() {
-        if let Err(error) = std::fs::rename(destination, original) {
-            errors.push(format!(
-                "{} -> {}: {}",
-                destination.display(),
+        let temporary = with_suffix(&forensic, &format!(".tmp-{}", uuid::Uuid::new_v4()));
+        std::fs::copy(&original, &temporary).map_err(|e| {
+            format!(
+                "failed to preserve forensic copy {} as {}: {}",
                 original.display(),
+                forensic.display(),
+                e
+            )
+        })?;
+        if let Err(error) = std::fs::rename(&temporary, &forensic) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(format!(
+                "failed to publish forensic copy {}: {}",
+                forensic.display(),
                 error
             ));
         }
     }
-    if errors.is_empty() {
-        String::new()
-    } else {
-        format!("; source restore also failed: {}", errors.join(", "))
-    }
-}
-
-fn archive_paths(source: &Path, destination: &Path) -> Vec<(PathBuf, PathBuf)> {
-    ["-wal", "-shm", ""]
-        .into_iter()
-        .map(|suffix| {
-            if suffix.is_empty() {
-                (source.to_path_buf(), destination.to_path_buf())
-            } else {
-                (
-                    with_suffix(source, suffix),
-                    with_suffix(destination, suffix),
-                )
-            }
-        })
-        .collect()
+    Ok(())
 }
 
 fn copy_all_tables(conn: &Connection, legacy_alias: &str) -> Result<usize, String> {
@@ -535,10 +448,9 @@ mod tests {
             MigrationReport::Migrated { rows_copied: 3, .. }
         ));
         assert!(
-            !legacy.exists(),
-            "legacy DB should be renamed after success"
+            legacy.exists(),
+            "legacy DB remains for later reconciliation"
         );
-        assert!(tmp.path().join("server.db.migrated").exists());
 
         let tc = Connection::open(&target_path).unwrap();
         let conversation_count: i64 = tc
@@ -619,7 +531,10 @@ mod tests {
 
         migrate_stale_dbs(&target).unwrap();
         let report = migrate_stale_dbs(&target).unwrap();
-        assert!(matches!(report, MigrationReport::NoOp));
+        assert!(matches!(
+            report,
+            MigrationReport::Migrated { rows_copied: 0, .. }
+        ));
         assert_eq!(
             item_count(&Connection::open(&target).unwrap(), "item-002"),
             1
@@ -635,8 +550,7 @@ mod tests {
         migrate_stale_dbs(&target).unwrap();
 
         assert!(tmp.path().join("server.db.pre-migration.bak").exists());
-        assert!(tmp.path().join("server.db.migrated").exists());
-        assert!(!tmp.path().join("server.db").exists());
+        assert!(tmp.path().join("server.db").exists());
     }
 
     #[test]
@@ -650,8 +564,12 @@ mod tests {
         assert!(result.is_err());
         assert!(corrupt.exists(), "corrupt source must be left intact");
         assert!(
-            tmp.path().join("server.db.pre-migration.bak").exists(),
-            "failure backup must be preserved"
+            !tmp.path().join("server.db.pre-migration.bak").exists(),
+            "an unverifiable raw copy must not masquerade as a valid backup"
+        );
+        assert!(
+            tmp.path().join("server.db.pre-migration.forensic").exists(),
+            "corrupt main file must be preserved as an explicitly raw forensic copy"
         );
     }
 
@@ -727,11 +645,10 @@ mod tests {
             tmp.path().join("server.db.pre-migration.bak").exists(),
             "failure backup must remain available"
         );
-        assert!(!tmp.path().join("server.db.migrated").exists());
     }
 
     #[test]
-    fn live_wal_source_is_backed_up_and_archived_with_companions() {
+    fn live_wal_source_is_backed_up_and_late_writes_reconcile_next_run() {
         let tmp = TempDir::new().unwrap();
         let target = make_target_db(tmp.path());
         let legacy = make_legacy_db_with_items(tmp.path(), "server.db");
@@ -743,9 +660,6 @@ mod tests {
             with_suffix(&legacy, "-wal").exists(),
             "fixture must keep committed rows in a live WAL"
         );
-        let had_wal = with_suffix(&legacy, "-wal").exists();
-        let had_shm = with_suffix(&legacy, "-shm").exists();
-
         let result = migrate_stale_dbs(&target).unwrap();
         assert!(matches!(
             result,
@@ -756,19 +670,9 @@ mod tests {
             1,
             "target import must use the verified WAL-inclusive snapshot"
         );
-        assert!(!legacy.exists());
-        assert!(tmp.path().join("server.db.migrated").exists());
-        assert!(!with_suffix(&legacy, "-wal").exists());
-        assert!(!with_suffix(&legacy, "-shm").exists());
-        assert_eq!(
-            tmp.path().join("server.db.migrated-wal").exists(),
-            had_wal,
-            "WAL must move with the archived source when present"
-        );
-        assert_eq!(
-            tmp.path().join("server.db.migrated-shm").exists(),
-            had_shm,
-            "SHM must move with the archived source when present"
+        assert!(
+            legacy.exists(),
+            "source stays discoverable for late writers"
         );
 
         let backup = Connection::open(tmp.path().join("server.db.pre-migration.bak")).unwrap();
@@ -778,6 +682,18 @@ mod tests {
             "SQLite backup must include committed WAL rows"
         );
         drop(backup);
+
+        insert_item(&lc, "late-item");
+        let second = migrate_stale_dbs(&target).unwrap();
+        assert!(matches!(
+            second,
+            MigrationReport::Migrated { rows_copied: 1, .. }
+        ));
+        assert_eq!(
+            item_count(&Connection::open(&target).unwrap(), "late-item"),
+            1,
+            "a write from an already-open legacy connection must reconcile later"
+        );
         drop(lc);
     }
 
@@ -807,17 +723,17 @@ mod tests {
             .query_row("SELECT value FROM marker", [], |row| row.get(0))
             .unwrap();
         assert_eq!(old_value, "old");
-        let versioned_backups = std::fs::read_dir(tmp.path())
+        let leftover_snapshots = std::fs::read_dir(tmp.path())
             .unwrap()
             .filter_map(Result::ok)
             .filter(|entry| {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("server.db.pre-migration.bak.")
+                    .starts_with("server.db.pre-migration.bak.tmp-")
             })
             .count();
-        assert_eq!(versioned_backups, 1);
+        assert_eq!(leftover_snapshots, 0);
     }
 
     #[test]
