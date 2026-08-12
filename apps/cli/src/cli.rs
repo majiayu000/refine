@@ -164,6 +164,12 @@ pub enum Commands {
     DeepInquiry,
 }
 
+impl Commands {
+    pub(crate) fn is_read_only_preview(&self) -> bool {
+        matches!(self, Self::IngestSessions { dry_run: true, .. })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

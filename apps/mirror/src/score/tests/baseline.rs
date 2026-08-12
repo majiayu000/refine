@@ -150,6 +150,30 @@ fn test_personal_baseline_insufficient_data() {
 }
 
 #[test]
+fn repeated_scores_on_one_day_do_not_manufacture_a_baseline() {
+    let now = Utc::now();
+    let history = (0..10)
+        .map(|seconds| {
+            make_score_result(
+                3.5,
+                60.0,
+                10.0,
+                0.5,
+                20.0,
+                25.0,
+                15.0,
+                30.0,
+                4.0,
+                0.2,
+                0.8,
+                now - Duration::seconds(seconds),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(compute_personal_baseline(&history).is_none());
+}
+
+#[test]
 fn test_personal_baseline_old_data_excluded() {
     let now = Utc::now();
     // 10 entries but all older than 28 days

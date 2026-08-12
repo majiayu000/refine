@@ -257,7 +257,7 @@ check_unattended_llm_env() {
   local preflight
 
   # Reproduce launchd's relevant property: no interactive/process credentials
-  # and no project .env fallback. The child prints status only, never values.
+  # while using the same project .env fallback as scheduled jobs.
   # shellcheck disable=SC2016
   if preflight="$(env -i \
     HOME="$HOME" \
@@ -266,12 +266,12 @@ check_unattended_llm_env() {
     /bin/bash -c '
       set -u
       source "$1"
-      if ! load_refine_llm_env; then
+      if ! load_refine_llm_env "$2"; then
         exit 1
       fi
       printf "source=%s " "${REFINE_LLM_ENV_SOURCE:-none}"
       refine_llm_env_status
-    ' doctor-local "$repo_root/scripts/load-llm-env.sh" 2>&1)"; then
+    ' doctor-local "$repo_root/scripts/load-llm-env.sh" "$repo_root/.env" 2>&1)"; then
     pass "unattended LLM credentials: ${preflight}"
   else
     fail "unattended LLM credential preflight failed: ${preflight}"

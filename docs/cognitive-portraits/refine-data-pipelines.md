@@ -353,7 +353,7 @@ auto/remem: remem raw archive；local: filesystem scan
 
 - 执行：`/bin/bash /Users/lifcc/Desktop/code/AI/tools/refine/scripts/weekly-insights.sh`
 - 工作目录：`/Users/lifcc/Desktop/code/AI/tools/refine`
-- 触发：每周日 09:00（`Weekday=1`，macOS launchd）
+- 触发：每周日 09:00（`Weekday=0`，macOS launchd）
 - 日志：`~/Library/Logs/refine-insights.log`
 - 脚本做的事：
   1. 通过共享 loader 加载 LLM env；缺少 unattended key 时在 ingest 前失败

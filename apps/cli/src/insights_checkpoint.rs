@@ -3,6 +3,8 @@ use chrono::{DateTime, Utc};
 use refine_core::session::RouteResult;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_ENV: &str = "REFINE_INSIGHTS_CHECKPOINT_PATH";
@@ -14,6 +16,8 @@ pub(crate) struct DatasetSignature {
     pub observation_count: usize,
     pub latest_updated_at: DateTime<Utc>,
     pub with_prescription: bool,
+    #[serde(default)]
+    pub period_days: Option<usize>,
     #[serde(default)]
     pub llm_identity: String,
     #[serde(default)]
@@ -114,13 +118,19 @@ fn atomic_write_json(path: &Path, value: &impl Serialize) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("checkpoint 路径没有父目录: {}", path.display()))?;
     std::fs::create_dir_all(parent)
         .with_context(|| format!("创建 checkpoint 目录失败: {}", parent.display()))?;
+    secure_default_parent(parent)?;
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("insights-checkpoint.json");
     let temp_path = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
     let result = (|| -> Result<()> {
-        let mut file = std::fs::File::create(&temp_path)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(&temp_path)
             .with_context(|| format!("创建 checkpoint 临时文件失败: {}", temp_path.display()))?;
         serde_json::to_writer_pretty(&mut file, value)
             .context("序列化 insights checkpoint 失败")?;
@@ -141,6 +151,16 @@ fn atomic_write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     result
 }
 
+fn secure_default_parent(parent: &Path) -> Result<()> {
+    #[cfg(unix)]
+    if dirs::home_dir().as_deref().map(|home| home.join(".refine")) == Some(parent.to_path_buf()) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("收紧 checkpoint 目录权限失败: {}", parent.display()))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +172,7 @@ mod tests {
             observation_count: 1,
             latest_updated_at: Utc::now(),
             with_prescription: true,
+            period_days: None,
             llm_identity: "test:model-a:endpoint-a".into(),
             prompt_identity: "insights:test-v1".into(),
         };
@@ -179,6 +200,7 @@ mod tests {
             observation_count: 3,
             latest_updated_at: Utc::now(),
             with_prescription: true,
+            period_days: None,
             llm_identity: "test:model-a:endpoint-a".into(),
             prompt_identity: "insights:test-v1".into(),
         };
@@ -206,5 +228,27 @@ mod tests {
         };
         let reset = InsightsCheckpoint::load_matching_from(&path, llm_mismatch).unwrap();
         assert!(reset.route_results.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("checkpoint.json");
+        let signature = DatasetSignature {
+            checkpoint_version: CHECKPOINT_VERSION,
+            observation_count: 1,
+            latest_updated_at: Utc::now(),
+            with_prescription: false,
+            period_days: Some(30),
+            llm_identity: "private-provider".into(),
+            prompt_identity: "prompt".into(),
+        };
+        atomic_write_json(&path, &InsightsCheckpoint::empty(signature)).unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

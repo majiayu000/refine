@@ -3,6 +3,7 @@
 use crate::error::{InfraError, InfraResult};
 use async_trait::async_trait;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 /// LLM 客户端接口
@@ -83,7 +84,11 @@ impl ClaudeClient {
 #[async_trait]
 impl LlmClient for ClaudeClient {
     fn cache_identity(&self) -> String {
-        format!("anthropic:{}:{}", self.model, self.base_url)
+        format!(
+            "anthropic:{}:{}",
+            self.model,
+            endpoint_identity(&self.base_url)
+        )
     }
 
     async fn complete(&self, prompt: &str, system: Option<&str>) -> InfraResult<String> {
@@ -118,8 +123,9 @@ impl LlmClient for ClaudeClient {
         }
 
         if !resp.status().is_success() {
+            let status = resp.status();
             let err = resp.text().await.unwrap_or_default();
-            return Err(classify_provider_error(&err));
+            return Err(classify_provider_error(status, &err));
         }
 
         let data: ClaudeResponse = resp
@@ -173,7 +179,11 @@ impl OpenAIClient {
 #[async_trait]
 impl LlmClient for OpenAIClient {
     fn cache_identity(&self) -> String {
-        format!("openai:{}:{}", self.model, self.base_url)
+        format!(
+            "openai:{}:{}",
+            self.model,
+            endpoint_identity(&self.base_url)
+        )
     }
 
     async fn complete(&self, prompt: &str, system: Option<&str>) -> InfraResult<String> {
@@ -210,8 +220,9 @@ impl LlmClient for OpenAIClient {
         }
 
         if !resp.status().is_success() {
+            let status = resp.status();
             let err = resp.text().await.unwrap_or_default();
-            return Err(classify_provider_error(&err));
+            return Err(classify_provider_error(status, &err));
         }
 
         let data: OpenAIResponse = resp
@@ -246,7 +257,7 @@ fn env_var(keys: &[&str]) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-fn classify_provider_error(body: &str) -> InfraError {
+fn classify_provider_error(status: reqwest::StatusCode, body: &str) -> InfraError {
     let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
     let error = parsed.as_ref().and_then(|value| value.get("error"));
     let code = error
@@ -259,7 +270,10 @@ fn classify_provider_error(body: &str) -> InfraError {
         .unwrap_or(body)
         .trim();
 
-    if is_content_rejection(code) || is_content_rejection(message) {
+    if status.is_client_error()
+        && status != reqwest::StatusCode::REQUEST_TIMEOUT
+        && is_content_rejection(code, message)
+    {
         return InfraError::LlmRejected {
             code: if code.is_empty() {
                 "content_rejected".to_string()
@@ -270,14 +284,25 @@ fn classify_provider_error(body: &str) -> InfraError {
         };
     }
 
-    InfraError::LlmRequest(format!("API 错误: {}", body))
+    InfraError::LlmHttp {
+        status: status.as_u16(),
+        message: body.to_string(),
+    }
 }
 
-fn is_content_rejection(value: &str) -> bool {
-    let normalized = value.to_ascii_lowercase();
-    normalized.contains("sensitive_words_detected")
-        || normalized.contains("content_policy")
-        || normalized.contains("moderation")
+fn is_content_rejection(code: &str, message: &str) -> bool {
+    let code = code.trim().to_ascii_lowercase();
+    matches!(
+        code.as_str(),
+        "sensitive_words_detected" | "content_filter" | "content_policy_violation"
+    ) || message
+        .to_ascii_lowercase()
+        .contains("sensitive_words_detected")
+}
+
+fn endpoint_identity(endpoint: &str) -> String {
+    let digest = Sha256::digest(endpoint.as_bytes());
+    format!("endpoint-sha256:{digest:x}")
 }
 
 struct LlmEnvConfig {
@@ -430,6 +455,7 @@ mod tests {
     #[test]
     fn sensitive_words_error_is_structured_as_non_retryable_rejection() {
         let error = classify_provider_error(
+            reqwest::StatusCode::BAD_REQUEST,
             r#"{"error":{"message":"sensitive_words_detected","code":"sensitive_words_detected"}}"#,
         );
         assert!(matches!(
@@ -441,6 +467,7 @@ mod tests {
     #[test]
     fn sensitive_words_message_without_code_is_still_non_retryable() {
         let error = classify_provider_error(
+            reqwest::StatusCode::BAD_REQUEST,
             r#"{"error":{"message":"request blocked: sensitive_words_detected"}}"#,
         );
         assert!(matches!(
@@ -452,9 +479,41 @@ mod tests {
     #[test]
     fn unknown_provider_error_stays_request_error() {
         let error = classify_provider_error(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
             r#"{"error":{"message":"upstream unavailable","code":"upstream_error"}}"#,
         );
-        assert!(matches!(error, InfraError::LlmRequest(_)));
+        assert!(matches!(error, InfraError::LlmHttp { status: 503, .. }));
+    }
+
+    #[test]
+    fn generic_moderation_message_from_5xx_is_not_quarantined() {
+        let error = classify_provider_error(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":{"message":"moderation service unavailable"}}"#,
+        );
+        assert!(matches!(error, InfraError::LlmHttp { status: 503, .. }));
+    }
+
+    #[test]
+    fn openai_content_filter_code_is_quarantined() {
+        let error = classify_provider_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"blocked","code":"content_filter"}}"#,
+        );
+        assert!(
+            matches!(error, InfraError::LlmRejected { ref code, .. } if code == "content_filter")
+        );
+    }
+
+    #[test]
+    fn cache_identity_never_exposes_endpoint_credentials_or_query() {
+        let client = OpenAIClient::new("key")
+            .with_base_url("https://user:secret@example.test/openai?token=private-value");
+        let identity = client.cache_identity();
+        assert!(identity.contains("endpoint-sha256:"));
+        for secret in ["user", "secret", "token", "private-value"] {
+            assert!(!identity.contains(secret));
+        }
     }
 
     fn with_clean_llm_env(test: impl FnOnce()) {

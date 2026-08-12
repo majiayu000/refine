@@ -99,6 +99,12 @@ where
 }
 
 fn is_retryable_error(err: &InfraError) -> bool {
+    if let InfraError::LlmHttp { status, .. } = err {
+        return *status == 408 || *status == 425 || (500..=599).contains(status);
+    }
+    if matches!(err, InfraError::LlmRejected { .. }) {
+        return false;
+    }
     let msg = err.to_string();
     msg.contains("cooldown")
         || msg.contains("service_busy")
@@ -123,6 +129,18 @@ fn backoff_delay_secs(base_delay_secs: u64, attempt: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_http_status_controls_retryability() {
+        assert!(is_retryable_error(&InfraError::LlmHttp {
+            status: 503,
+            message: "moderation service unavailable".into(),
+        }));
+        assert!(!is_retryable_error(&InfraError::LlmHttp {
+            status: 400,
+            message: "bad request".into(),
+        }));
+    }
     use crate::infra::quota_state::{is_exhausted as is_quota_exhausted, set_quota_file_override};
     use async_trait::async_trait;
     use std::collections::VecDeque;

@@ -23,7 +23,7 @@ The installer is idempotent. It can be used for first install and for upgrades f
 
 ## What The Installer Does
 
-- Installs `refine`, `mirror`, and `refine-server` with `cargo install --path`.
+- Installs `refine`, `mirror`, and `refine-server` with `cargo install --locked --path`.
 - Installs desktop UI dependencies with `bun install` when Bun is available.
 - Writes macOS user LaunchAgents under `~/Library/LaunchAgents/`.
 - Starts or reloads the local server and UI dev service.

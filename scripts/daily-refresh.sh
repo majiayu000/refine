@@ -68,7 +68,13 @@ if [ "$DOW" = "7" ]; then
 fi
 
 echo "Step 4: wal checkpoint"
-db_path="${REFINE_DB_PATH:-$HOME/Library/Application Support/refine/refine.db}"
+if [ -n "${REFINE_DB_PATH:-}" ]; then
+  db_path="$REFINE_DB_PATH"
+elif [ "$(uname -s)" = "Darwin" ]; then
+  db_path="$HOME/Library/Application Support/refine/refine.db"
+else
+  db_path="${XDG_DATA_HOME:-$HOME/.local/share}/refine/refine.db"
+fi
 if command -v sqlite3 >/dev/null 2>&1 && [ -f "$db_path" ]; then
   if ! sqlite3 "$db_path" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null; then
     echo "WARN: WAL checkpoint failed: $db_path" >&2

@@ -354,9 +354,9 @@ source_commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || printf 'unkno
   || die "install source must be clean; commit or stash changes first"
 
 log "installing Rust binaries"
-cargo install --path "${repo_root}/apps/cli"
-cargo install --path "${repo_root}/apps/mirror"
-cargo install --path "${repo_root}/apps/server"
+cargo install --locked --path "${repo_root}/apps/cli"
+cargo install --locked --path "${repo_root}/apps/mirror"
+cargo install --locked --path "${repo_root}/apps/server"
 
 cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
 path_env="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${cargo_bin}"
@@ -377,10 +377,21 @@ installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 }
 
+if [[ "$launchd_enabled" != "1" || "$(uname -s)" != "Darwin" ]]; then
+  write_install_manifest
+  print_llm_setup_hint
+  if [[ "$launchd_enabled" != "1" ]]; then
+    log "launchd disabled; binaries installed only"
+  else
+    log "launchd is only supported on macOS; binaries installed only"
+  fi
+  exit 0
+fi
+
 if [[ "$ui_dev_enabled" == "1" && -d "${repo_root}/apps/desktop/ui" ]]; then
   if command -v bun >/dev/null 2>&1; then
     log "installing desktop UI dependencies"
-    (cd "${repo_root}/apps/desktop/ui" && bun install)
+    (cd "${repo_root}/apps/desktop/ui" && bun install --frozen-lockfile)
     [[ -x "${repo_root}/apps/desktop/ui/node_modules/.bin/vite" ]] \
       || die "desktop UI install completed without an executable Vite binary"
     log "verifying desktop UI build"
@@ -389,20 +400,6 @@ if [[ "$ui_dev_enabled" == "1" && -d "${repo_root}/apps/desktop/ui" ]]; then
     log "Bun not found; skipping desktop UI dev service"
     ui_dev_enabled=0
   fi
-fi
-
-if [[ "$launchd_enabled" != "1" ]]; then
-  write_install_manifest
-  print_llm_setup_hint
-  log "launchd disabled; binaries installed only"
-  exit 0
-fi
-
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  write_install_manifest
-  print_llm_setup_hint
-  log "launchd is only supported on macOS; binaries installed only"
-  exit 0
 fi
 
 need_cmd launchctl
@@ -418,7 +415,7 @@ ui_plist="${launch_agents}/com.lifcc.refine-ui-dev.plist"
 
 write_server_plist "$server_plist" "$cargo_bin" "$path_env"
 write_calendar_plist "$daily_plist" "com.lifcc.refine-daily-ingest" "${repo_root}/scripts/daily-refresh.sh" "${HOME}/Library/Logs/refine-daily-ingest.log" 8 0
-write_calendar_plist "$weekly_plist" "com.lifcc.refine-weekly-insights" "${repo_root}/scripts/weekly-insights.sh" "${HOME}/Library/Logs/refine-insights.log" 9 0 1
+write_calendar_plist "$weekly_plist" "com.lifcc.refine-weekly-insights" "${repo_root}/scripts/weekly-insights.sh" "${HOME}/Library/Logs/refine-insights.log" 9 0 0
 if [[ "$ui_dev_enabled" == "1" ]]; then
   write_ui_plist "$ui_plist" "$(command -v bun)" "$path_env"
 fi

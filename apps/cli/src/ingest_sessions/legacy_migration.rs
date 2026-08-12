@@ -1,14 +1,19 @@
-use crate::remem_sessions::{RememSession, RememSessionSummary};
+use crate::remem_sessions::RememSession;
+#[cfg(test)]
+use crate::remem_sessions::RememSessionSummary;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use refine_core::knowledge::{Document, DocumentId};
-use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 
 const LOCAL_SOURCE_ROOT: &str = "local";
 const LOCAL_SOURCE_ROOT_HEX: &str = "6c6f63616c";
 const LEGACY_SOURCES: [&str; 2] = ["claude-code-session", "codex-session"];
 
+#[cfg(test)]
 pub(super) fn legacy_document_index(documents: &[Document]) -> HashMap<String, Vec<&Document>> {
     let mut index = HashMap::new();
     for document in documents
@@ -25,6 +30,7 @@ pub(super) fn legacy_document_index(documents: &[Document]) -> HashMap<String, V
     index
 }
 
+#[cfg(test)]
 pub(super) fn matching_legacy_document_for_summary<'doc>(
     index: &HashMap<String, Vec<&'doc Document>>,
     summary: &RememSessionSummary,
@@ -145,7 +151,7 @@ pub(super) fn matching_remem_document(
             session_ids
                 .iter()
                 .any(|session_id| document.url().ends_with(&hex_component(session_id)))
-                && contents_overlap(document.raw_content(), raw_content)
+                && canonical_contains_local(document.raw_content(), raw_content)
         })
         .collect();
     if !url_and_content.is_empty() {
@@ -157,7 +163,7 @@ pub(super) fn matching_remem_document(
         .copied()
         .filter(|document| {
             document.captured_at().timestamp() == captured_at.timestamp()
-                && contents_overlap(document.raw_content(), raw_content)
+                && canonical_contains_local(document.raw_content(), raw_content)
         })
         .collect();
     unique_remem_match(epoch_and_content, legacy_path)
@@ -217,8 +223,8 @@ fn hex_component(value: &str) -> String {
         .collect()
 }
 
-fn contents_overlap(left: &str, right: &str) -> bool {
-    left == right || left.starts_with(right) || right.starts_with(left)
+fn canonical_contains_local(canonical: &str, local: &str) -> bool {
+    canonical == local || canonical.starts_with(local)
 }
 
 fn is_local_remem_url(url: &str) -> bool {
@@ -404,6 +410,33 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(matched.id(), remem_doc.id());
+    }
+
+    #[test]
+    fn longer_local_snapshot_cannot_claim_or_overwrite_canonical_remem() {
+        let session_id = "12345678-1234-1234-1234-123456789abc";
+        let remem_doc = document(
+            "remem-raw-session",
+            &format!(
+                "remem-raw://v1/{}/{}/{}",
+                LOCAL_SOURCE_ROOT_HEX,
+                hex_component("/repo"),
+                hex_component(session_id)
+            ),
+            "User: canonical prefix\n",
+            10,
+        );
+        let path = Path::new(
+            "/tmp/rollout-2026-07-20T00-00-00-12345678-1234-1234-1234-123456789abc.jsonl",
+        );
+        let matched = matching_remem_document(
+            &[remem_doc],
+            path,
+            Utc.timestamp_opt(10, 0).unwrap(),
+            "User: canonical prefix\nAssistant: local-only suffix\n",
+        )
+        .unwrap();
+        assert!(matched.is_none());
     }
 
     #[test]

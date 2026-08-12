@@ -3,6 +3,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 const QUARANTINE_ENV: &str = "REFINE_INGEST_QUARANTINE_PATH";
@@ -10,6 +12,8 @@ const QUARANTINE_ENV: &str = "REFINE_INGEST_QUARANTINE_PATH";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct QuarantineRecord {
     pub url: String,
+    #[serde(default)]
+    pub source_version: Option<String>,
     pub code: String,
     pub message: String,
     pub first_seen: DateTime<Utc>,
@@ -50,7 +54,10 @@ impl QuarantineStore {
                     path.display()
                 )
             })?;
-            records.insert(record.url.clone(), record);
+            records.insert(
+                record_key(&record.url, record.source_version.as_deref()),
+                record,
+            );
         }
 
         Ok(Self {
@@ -60,17 +67,18 @@ impl QuarantineStore {
         })
     }
 
-    pub(super) fn contains(&self, url: &str) -> bool {
-        self.records.contains_key(url)
+    pub(super) fn contains(&self, url: &str, source_version: Option<&str>) -> bool {
+        self.records.contains_key(&record_key(url, source_version))
     }
 
     pub(super) fn len(&self) -> usize {
         self.records.len()
     }
 
-    pub(super) fn count_matching(&self, urls: &HashSet<String>) -> usize {
-        urls.iter()
-            .filter(|url| self.records.contains_key(url.as_str()))
+    pub(super) fn count_matching(&self, identities: &HashSet<String>) -> usize {
+        identities
+            .iter()
+            .filter(|identity| self.records.contains_key(identity.as_str()))
             .count()
     }
 
@@ -78,9 +86,16 @@ impl QuarantineStore {
         &self.path
     }
 
-    pub(super) fn record(&mut self, url: &str, code: &str, message: &str) {
+    pub(super) fn record(
+        &mut self,
+        url: &str,
+        source_version: Option<&str>,
+        code: &str,
+        message: &str,
+    ) {
         let now = Utc::now();
-        match self.records.get_mut(url) {
+        let key = record_key(url, source_version);
+        match self.records.get_mut(&key) {
             Some(record) => {
                 record.code = code.to_string();
                 record.message = message.to_string();
@@ -89,9 +104,10 @@ impl QuarantineStore {
             }
             None => {
                 self.records.insert(
-                    url.to_string(),
+                    key,
                     QuarantineRecord {
                         url: url.to_string(),
+                        source_version: source_version.map(ToOwned::to_owned),
                         code: code.to_string(),
                         message: message.to_string(),
                         first_seen: now,
@@ -105,7 +121,9 @@ impl QuarantineStore {
     }
 
     pub(super) fn resolve(&mut self, url: &str) {
-        if self.records.remove(url).is_some() {
+        let previous_len = self.records.len();
+        self.records.retain(|_, record| record.url != url);
+        if self.records.len() != previous_len {
             self.dirty = true;
         }
     }
@@ -120,6 +138,7 @@ impl QuarantineStore {
             .ok_or_else(|| anyhow::anyhow!("隔离队列路径没有父目录: {}", self.path.display()))?;
         std::fs::create_dir_all(parent)
             .with_context(|| format!("创建 ingest 隔离目录失败: {}", parent.display()))?;
+        secure_default_parent(parent)?;
 
         let file_name = self
             .path
@@ -128,7 +147,11 @@ impl QuarantineStore {
             .unwrap_or("ingest-quarantine.jsonl");
         let temp_path = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
         let write_result = (|| -> Result<()> {
-            let mut file = std::fs::File::create(&temp_path).with_context(|| {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options.open(&temp_path).with_context(|| {
                 format!("创建 ingest 隔离临时文件失败: {}", temp_path.display())
             })?;
             for record in self.records.values() {
@@ -154,6 +177,20 @@ impl QuarantineStore {
     }
 }
 
+pub(super) fn record_key(url: &str, source_version: Option<&str>) -> String {
+    format!("{url}\u{0}{}", source_version.unwrap_or_default())
+}
+
+fn secure_default_parent(parent: &Path) -> Result<()> {
+    #[cfg(unix)]
+    if dirs::home_dir().as_deref().map(|home| home.join(".refine")) == Some(parent.to_path_buf()) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("收紧 ingest 隔离目录权限失败: {}", parent.display()))?;
+    }
+    Ok(())
+}
+
 fn default_path() -> Result<PathBuf> {
     if let Ok(path) = std::env::var(QUARANTINE_ENV) {
         if !path.trim().is_empty() {
@@ -173,13 +210,26 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("queue.jsonl");
         let mut store = QuarantineStore::load_from(path.clone()).unwrap();
-        store.record("remem://one", "sensitive_words_detected", "blocked");
-        store.record("remem://one", "sensitive_words_detected", "blocked again");
+        store.record(
+            "remem://one",
+            Some("v1"),
+            "sensitive_words_detected",
+            "blocked",
+        );
+        store.record(
+            "remem://one",
+            Some("v1"),
+            "sensitive_words_detected",
+            "blocked again",
+        );
         store.save_if_dirty().unwrap();
 
         let loaded = QuarantineStore::load_from(path).unwrap();
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded.records["remem://one"].attempts, 2);
+        assert_eq!(
+            loaded.records[&record_key("remem://one", Some("v1"))].attempts,
+            2
+        );
     }
 
     #[test]
@@ -198,14 +248,38 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("queue.jsonl");
         let mut store = QuarantineStore::load_from(path).unwrap();
-        store.record("remem://selected", "blocked", "selected");
-        store.record("file://unrelated", "blocked", "unrelated");
+        store.record("remem://selected", Some("v1"), "blocked", "selected");
+        store.record("file://unrelated", Some("v1"), "blocked", "unrelated");
 
-        let selected = HashSet::from(["remem://selected".to_string()]);
+        let selected = HashSet::from([record_key("remem://selected", Some("v1"))]);
         assert_eq!(store.count_matching(&selected), 1);
 
-        let other_provider = HashSet::from(["remem://other".to_string()]);
+        let other_provider = HashSet::from([record_key("remem://other", Some("v1"))]);
         assert_eq!(store.count_matching(&other_provider), 0);
         assert_eq!(store.len(), 2);
+    }
+
+    #[test]
+    fn changed_snapshot_is_not_blocked_by_old_rejection() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = QuarantineStore::load_from(temp.path().join("queue.jsonl")).unwrap();
+        store.record("remem://one", Some("v1"), "blocked", "old snapshot");
+        assert!(store.contains("remem://one", Some("v1")));
+        assert!(!store.contains("remem://one", Some("v2")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quarantine_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("queue.jsonl");
+        let mut store = QuarantineStore::load_from(path.clone()).unwrap();
+        store.record("remem://one", Some("v1"), "blocked", "private detail");
+        store.save_if_dirty().unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

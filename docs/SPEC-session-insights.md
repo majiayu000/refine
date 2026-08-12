@@ -33,7 +33,7 @@ selector、排序、游标、计数和首尾时间；只有 remem 可执行文�
 refine ingest-sessions [--provider auto|remem|local] [--limit N | --latest N] [--dry-run]
 refine ingest-sessions --provider local [--source claude|codex]
 refine ingest-sessions --legacy-local-scan [--source claude|codex]  # deprecated alias
-refine insights [--period 30d] [--format terminal|json]
+refine insights [--period 30]
 ```
 
 ### 数据流

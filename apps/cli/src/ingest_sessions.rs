@@ -20,6 +20,7 @@ use refine_core::session::{
     build_facet_prompt, chunk_session, discover_sessions, facets_to_items, needs_chunking,
     parse_facet_response, parse_session_file, FilterConfig, SessionSource, FACET_SYSTEM_PROMPT,
 };
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -30,7 +31,7 @@ use tokio::sync::Semaphore;
 mod legacy_migration;
 mod quarantine;
 
-use quarantine::QuarantineStore;
+use quarantine::{record_key as quarantine_key, QuarantineStore};
 
 const DEFAULT_CONCURRENCY: usize = 1;
 
@@ -109,31 +110,9 @@ fn session_needs_refresh(existing_doc: &Document, file_modified_at: SystemTime) 
     file_modified_at > existing_doc.updated_at()
 }
 
-fn remem_source_version(summary: &RememSessionSummary) -> String {
-    format!(
-        "remem:v1:{}:{}:{}:{}:{}",
-        summary.first_epoch,
-        summary.last_epoch,
-        summary.message_count,
-        summary.user_message_count,
-        summary.assistant_message_count
-    )
-}
-
-fn document_covers_remem_summary(document: &Document, summary: &RememSessionSummary) -> bool {
-    let expected = remem_source_version(summary);
-    document.source_version() == Some(expected.as_str())
-}
-
-fn legacy_document_covers_remem_summary(
-    document: &Document,
-    summary: &RememSessionSummary,
-) -> bool {
-    // Legacy documents predate source_version. Keep their historical
-    // timestamp-based prefilter so a metadata migration cannot turn every
-    // legacy session into an LLM refresh. Canonical remem documents must use
-    // the exact source snapshot above instead.
-    document.updated_at().timestamp() >= summary.last_epoch
+fn content_source_version(provider: &str, raw_content: &str) -> String {
+    let digest = Sha256::digest(raw_content.as_bytes());
+    format!("{provider}:v2:sha256:{digest:x}")
 }
 
 fn document_with_source_version(document: &Document, source_version: &str) -> Document {
@@ -273,7 +252,6 @@ async fn handle_remem_ingest_sessions_with_summaries(
         .filter(|document| document.source() == "remem-raw-session")
         .map(|document| (document.url(), document))
         .collect();
-    let legacy_document_index = legacy_migration::legacy_document_index(&existing_documents);
     let mut claimed_legacy_documents = HashSet::new();
     let mut pending = Vec::new();
     let mut skipped_dup = 0usize;
@@ -283,27 +261,7 @@ async fn handle_remem_ingest_sessions_with_summaries(
 
     for (idx, summary) in summaries.into_iter().enumerate() {
         let url = summary.stable_document_url();
-        let source_version = remem_source_version(&summary);
         let existing_document = existing_remem_documents.get(url.as_str()).copied().cloned();
-        if existing_document
-            .as_ref()
-            .is_some_and(|document| document_covers_remem_summary(document, &summary))
-        {
-            skipped_dup += 1;
-            continue;
-        }
-        if existing_document.is_none() && summary.legacy_identity_is_unique {
-            let legacy_document = legacy_migration::matching_legacy_document_for_summary(
-                &legacy_document_index,
-                &summary,
-            )?;
-            if legacy_document
-                .is_some_and(|document| legacy_document_covers_remem_summary(document, &summary))
-            {
-                skipped_dup += 1;
-                continue;
-            }
-        }
         if summary.user_message_count < filter_config.min_user_messages as i64 {
             skipped_filter += 1;
             continue;
@@ -314,6 +272,7 @@ async fn handle_remem_ingest_sessions_with_summaries(
             .with_context(|| format!("failed to load full remem session for {url}"))?;
         fully_loaded += 1;
         let raw_content = remem_session.session.to_document_content();
+        let source_version = content_source_version("remem", &raw_content);
         let legacy_documents_to_delete = if legacy_identity_is_unique {
             legacy_migration::matching_legacy_document_ids(
                 &existing_documents,
@@ -500,6 +459,7 @@ async fn handle_legacy_ingest_sessions(
         let has_embedded_timestamp = session.meta.started_at.is_some();
         let captured_at = session_captured_at(session.meta.started_at, ds.modified_at);
         let raw_content = session.to_document_content();
+        let source_version = content_source_version("local", &raw_content);
         let remem_document = legacy_migration::matching_remem_document(
             &existing_documents,
             &ds.path,
@@ -517,12 +477,16 @@ async fn handle_legacy_ingest_sessions(
             if let Some(legacy_doc) = legacy_document.as_ref() {
                 legacy_documents_to_delete.push(legacy_doc.id().clone());
             }
-            if remem_doc.raw_content() == raw_content {
-                if options.dry_run && !legacy_documents_to_delete.is_empty() {
-                    println!(
-                        "  [dry-run] {} | would remove superseded legacy document",
-                        legacy_url
-                    );
+            if remem_doc.raw_content() == raw_content
+                || remem_doc.raw_content().starts_with(&raw_content)
+            {
+                if options.dry_run {
+                    if !legacy_documents_to_delete.is_empty() {
+                        println!(
+                            "  [dry-run] {} | would remove superseded legacy document",
+                            legacy_url
+                        );
+                    }
                 } else {
                     doc_store
                         .delete_documents_with_items(&legacy_documents_to_delete)
@@ -532,12 +496,18 @@ async fn handle_legacy_ingest_sessions(
                 skipped_dup += 1;
                 continue;
             }
-            stale_refresh += 1;
-            (
-                remem_doc.url().to_string(),
-                SessionSource::RememRaw,
-                Some(remem_doc),
-            )
+            // A local archive is never authoritative over a canonical remem
+            // document. If it is not a prefix/equal snapshot, keep it under
+            // its local identity instead of replacing remem data.
+            if let Some(existing_doc) = legacy_document.as_ref() {
+                if session_needs_refresh(existing_doc, ds.modified_at) {
+                    stale_refresh += 1;
+                } else {
+                    skipped_dup += 1;
+                    continue;
+                }
+            }
+            (legacy_url, ds.source.clone(), legacy_document)
         } else {
             if let Some(existing_doc) = legacy_document.as_ref() {
                 if session_needs_refresh(existing_doc, ds.modified_at) {
@@ -581,7 +551,7 @@ async fn handle_legacy_ingest_sessions(
             captured_at,
             has_embedded_timestamp,
             raw_content,
-            source_version: None,
+            source_version: Some(source_version),
             needs_chunk: !chunks.is_empty(),
             chunks,
             existing_document,
@@ -603,7 +573,7 @@ async fn handle_legacy_ingest_sessions(
     .await?;
 
     // Advance the incremental scan cursor so the next run only sees newer files.
-    if incremental {
+    if incremental && !options.dry_run {
         write_last_ingest_mtime(source.as_ref(), db_path, scan_start);
     }
 
@@ -632,12 +602,14 @@ async fn process_pending_sessions(
     }
 
     let mut quarantine = QuarantineStore::load()?;
-    let selected_urls: HashSet<String> =
-        pending.iter().map(|session| session.url.clone()).collect();
+    let selected_identities: HashSet<String> = pending
+        .iter()
+        .map(|session| quarantine_key(&session.url, session.source_version.as_deref()))
+        .collect();
     let mut skipped_quarantined = 0usize;
     if !retry_quarantined {
         pending.retain(|session| {
-            if quarantine.contains(&session.url) {
+            if quarantine.contains(&session.url, session.source_version.as_deref()) {
                 skipped_quarantined += 1;
                 false
             } else {
@@ -657,7 +629,7 @@ async fn process_pending_sessions(
         concurrency,
     );
     if pending.is_empty() {
-        let selected_quarantine_count = quarantine.count_matching(&selected_urls);
+        let selected_quarantine_count = quarantine.count_matching(&selected_identities);
         if selected_quarantine_count > 0 {
             anyhow::bail!(
                 "本次选择中仍有 {} 个会话处于隔离状态；队列: {}；确认上游策略已修复后使用 --retry-quarantined",
@@ -682,8 +654,10 @@ async fn process_pending_sessions(
     let failed = Arc::new(AtomicUsize::new(0));
     let total_items = Arc::new(AtomicUsize::new(0));
     let quota_hit = Arc::new(AtomicBool::new(false));
-    let succeeded_urls = Arc::new(Mutex::new(HashSet::<String>::new()));
-    let rejected_sessions = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
+    let succeeded_sessions = Arc::new(Mutex::new(HashSet::<(String, Option<String>)>::new()));
+    let rejected_sessions = Arc::new(Mutex::new(
+        Vec::<(String, Option<String>, String, String)>::new(),
+    ));
     let mut handles = Vec::new();
 
     for ps in pending {
@@ -694,7 +668,7 @@ async fn process_pending_sessions(
         let failed = failed.clone();
         let total_items = total_items.clone();
         let quota_hit = quota_hit.clone();
-        let succeeded_urls = succeeded_urls.clone();
+        let succeeded_sessions = succeeded_sessions.clone();
         let rejected_sessions = rejected_sessions.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.expect("semaphore closed");
@@ -702,10 +676,10 @@ async fn process_pending_sessions(
                 Ok(item_count) => {
                     processed.fetch_add(1, Ordering::Relaxed);
                     total_items.fetch_add(item_count, Ordering::Relaxed);
-                    succeeded_urls
+                    succeeded_sessions
                         .lock()
                         .expect("succeeded URL lock poisoned")
-                        .insert(ps.url.clone());
+                        .insert((ps.url.clone(), ps.source_version.clone()));
                 }
                 Err(error) => {
                     if let Some((code, message)) = content_rejection(&error) {
@@ -719,7 +693,7 @@ async fn process_pending_sessions(
                         rejected_sessions
                             .lock()
                             .expect("rejected session lock poisoned")
-                            .push((ps.url.clone(), code, message));
+                            .push((ps.url.clone(), ps.source_version.clone(), code, message));
                     } else {
                         eprintln!("  ✗ [{}/{}] 失败: {}", ps.idx + 1, ps.total, error);
                         failed.fetch_add(1, Ordering::Relaxed);
@@ -736,7 +710,7 @@ async fn process_pending_sessions(
     let processed = processed.load(Ordering::Relaxed);
     let failed = failed.load(Ordering::Relaxed);
     let total_items = total_items.load(Ordering::Relaxed);
-    for url in succeeded_urls
+    for (url, _) in succeeded_sessions
         .lock()
         .expect("succeeded URL lock poisoned")
         .iter()
@@ -746,14 +720,14 @@ async fn process_pending_sessions(
     let rejected = rejected_sessions
         .lock()
         .expect("rejected session lock poisoned");
-    for (url, code, message) in rejected.iter() {
-        quarantine.record(url, code, message);
+    for (url, source_version, code, message) in rejected.iter() {
+        quarantine.record(url, source_version.as_deref(), code, message);
     }
     let rejected_count = rejected.len();
     drop(rejected);
     quarantine.save_if_dirty()?;
     let quarantine_count = quarantine.len();
-    let selected_quarantine_count = quarantine.count_matching(&selected_urls);
+    let selected_quarantine_count = quarantine.count_matching(&selected_identities);
     println!(
         "\n完成: 处理 {}, 跳过重复 {}, 过滤 {}, 刷新过期 {}, 失败 {}, 新增隔离 {}, 本次相关隔离 {}, 隔离总数 {}, 生成 {} 条观测",
         processed,

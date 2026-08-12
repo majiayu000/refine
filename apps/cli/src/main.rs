@@ -36,27 +36,38 @@ async fn main() -> Result<()> {
         Some(raw) => PathBuf::from(raw),
         None => resolve_db_path(&[]),
     };
-    ensure_db_dir(&db_path).map_err(|e| anyhow::anyhow!(e))?;
-    match migrate_stale_dbs(&db_path) {
-        Ok(MigrationReport::NoOp) => {}
-        Ok(MigrationReport::Migrated {
-            sources,
-            rows_copied,
-        }) => {
-            eprintln!(
-                "[refine] migrated {} row(s) from legacy DB(s): {}",
+    let read_only_preview = cli.command.is_read_only_preview();
+    if !read_only_preview {
+        ensure_db_dir(&db_path).map_err(|e| anyhow::anyhow!(e))?;
+    }
+    if !read_only_preview {
+        match migrate_stale_dbs(&db_path) {
+            Ok(MigrationReport::NoOp) => {}
+            Ok(MigrationReport::Migrated {
+                sources,
                 rows_copied,
-                sources
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+            }) => {
+                eprintln!(
+                    "[refine] migrated {} row(s) from legacy DB(s): {}",
+                    rows_copied,
+                    sources
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            Err(e) => eprintln!("[refine] warning: DB migration failed (continuing): {e}"),
         }
-        Err(e) => eprintln!("[refine] warning: DB migration failed (continuing): {e}"),
     }
 
-    let store = Arc::new(SqliteStore::open(&db_path).context("打开数据库失败")?);
+    let store = Arc::new(if read_only_preview {
+        SqliteStore::open_read_only(&db_path).context(
+            "以只读方式打开数据库失败（dry-run 不会创建或迁移数据库；请先运行一次正式命令）",
+        )?
+    } else {
+        SqliteStore::open(&db_path).context("打开数据库失败")?
+    });
     let repo: Arc<dyn ItemRepository> = store.clone();
     let engine = Arc::new(SearchEngine::new(repo));
 

@@ -1,5 +1,5 @@
 use chrono::{Duration, Utc};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::indicators::{canonical_indicator_key, indicator_direction, indicator_specs, Direction};
 use super::types::{ScoreResult, Trend};
@@ -44,7 +44,7 @@ fn extract_indicator(result: &ScoreResult, name: &str) -> Option<f64> {
 }
 
 /// Compute personal baseline from historical scores within the last 28 days.
-/// Returns None if fewer than BASELINE_MIN_ENTRIES scores exist in that window.
+/// Returns None if fewer than BASELINE_MIN_ENTRIES distinct days exist in that window.
 fn avg_from_scores(scores: &[&ScoreResult], indicator_name: &str) -> f64 {
     let (sum, count) = scores
         .iter()
@@ -62,7 +62,17 @@ fn avg_from_scores(scores: &[&ScoreResult], indicator_name: &str) -> f64 {
 
 pub fn compute_personal_baseline(history: &[ScoreResult]) -> Option<PersonalBaseline> {
     let cutoff = Utc::now() - Duration::days(BASELINE_WINDOW_DAYS);
-    let recent: Vec<&ScoreResult> = history.iter().filter(|s| s.timestamp >= cutoff).collect();
+    let mut by_day: BTreeMap<chrono::NaiveDate, &ScoreResult> = BTreeMap::new();
+    for score in history.iter().filter(|score| score.timestamp >= cutoff) {
+        let day = score.timestamp.date_naive();
+        match by_day.get(&day) {
+            Some(existing) if existing.timestamp >= score.timestamp => {}
+            _ => {
+                by_day.insert(day, score);
+            }
+        }
+    }
+    let recent: Vec<&ScoreResult> = by_day.into_values().collect();
 
     if recent.len() < BASELINE_MIN_ENTRIES {
         return None;

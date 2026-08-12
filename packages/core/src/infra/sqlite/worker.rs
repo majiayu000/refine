@@ -1,10 +1,10 @@
-use super::rows::configure_connection;
+use super::rows::{configure_connection, configure_read_only_connection};
 use super::{conversation_ops, doc_ops, ops};
 use crate::conversation::{ConversationRecord, EventRecord, ExtractionJobRecord};
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{Document, Item, ItemType};
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use tokio::sync::oneshot;
@@ -15,6 +15,7 @@ const WORKER_INIT_FAILED: &str = "sqlite worker init failed";
 pub(super) enum OpenMode {
     InMemory,
     File(PathBuf),
+    ReadOnlyFile(PathBuf),
 }
 
 pub(super) enum SqliteCommand {
@@ -205,9 +206,9 @@ fn run_worker(
     rx: mpsc::Receiver<SqliteCommand>,
     init_tx: mpsc::SyncSender<InfraResult<()>>,
 ) {
-    let (conn, in_memory) = match mode {
+    let (conn, in_memory, read_only) = match mode {
         OpenMode::InMemory => match Connection::open_in_memory() {
-            Ok(conn) => (conn, true),
+            Ok(conn) => (conn, true, false),
             Err(err) => {
                 send_init_result(
                     &init_tx,
@@ -218,7 +219,7 @@ fn run_worker(
             }
         },
         OpenMode::File(path) => match Connection::open(path) {
-            Ok(conn) => (conn, false),
+            Ok(conn) => (conn, false, false),
             Err(err) => {
                 send_init_result(
                     &init_tx,
@@ -228,9 +229,28 @@ fn run_worker(
                 return;
             }
         },
+        OpenMode::ReadOnlyFile(path) => match Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) {
+            Ok(conn) => (conn, false, true),
+            Err(err) => {
+                send_init_result(
+                    &init_tx,
+                    Err(InfraError::Database(err.to_string())),
+                    "open read-only file connection",
+                );
+                return;
+            }
+        },
     };
 
-    if let Err(err) = configure_connection(&conn, in_memory).and_then(|_| ops::init_schema(&conn)) {
+    let configured = if read_only {
+        configure_read_only_connection(&conn)
+    } else {
+        configure_connection(&conn, in_memory).and_then(|_| ops::init_schema(&conn))
+    };
+    if let Err(err) = configured {
         send_init_result(&init_tx, Err(err), "configure schema");
         return;
     }

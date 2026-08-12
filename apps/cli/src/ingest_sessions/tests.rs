@@ -177,38 +177,21 @@ fn session_needs_refresh_when_file_mtime_is_newer_than_saved_document() {
 }
 
 #[test]
-fn remem_summary_compares_the_saved_source_snapshot_not_ingest_time() {
-    let mut summary = RememSessionSummary {
-        source_root: "local".to_string(),
-        project: "/repo".to_string(),
-        session_id: "session-1".to_string(),
-        first_epoch: 10,
-        last_epoch: 20,
-        message_count: 2,
-        user_message_count: 1,
-        assistant_message_count: 1,
-        user_message_samples: vec!["hello".to_string()],
-        legacy_identity_is_unique: true,
-    };
+fn source_snapshot_uses_full_content_and_preserves_document_time() {
     let mut versioned = Document::new("remem-raw-session", "raw");
-    versioned.set_source_version(Some(&remem_source_version(&summary)));
-
-    assert!(document_covers_remem_summary(&versioned, &summary));
-
-    // A backfilled message can leave last_epoch unchanged or older than the
-    // database write time. Message-count drift must still force a full fetch.
-    summary.message_count = 3;
-    summary.user_message_count = 2;
-    assert!(!document_covers_remem_summary(&versioned, &summary));
+    let raw_version = content_source_version("remem", "raw");
+    versioned.set_source_version(Some(&raw_version));
+    assert_eq!(versioned.source_version(), Some(raw_version.as_str()));
+    assert_ne!(
+        raw_version,
+        content_source_version("remem", "raw corrected")
+    );
 
     let unversioned = Document::new("remem-raw-session", "raw");
-    assert!(!document_covers_remem_summary(&unversioned, &summary));
-    assert!(legacy_document_covers_remem_summary(&unversioned, &summary));
-
     let original_updated_at = unversioned.updated_at();
-    let backfilled = document_with_source_version(&unversioned, &remem_source_version(&summary));
+    let backfilled = document_with_source_version(&unversioned, &raw_version);
     assert_eq!(backfilled.updated_at(), original_updated_at);
-    assert!(document_covers_remem_summary(&backfilled, &summary));
+    assert_eq!(backfilled.source_version(), Some(raw_version.as_str()));
 }
 
 #[test]

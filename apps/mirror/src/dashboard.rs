@@ -47,12 +47,12 @@ pub async fn handle_dashboard(
             .and_hms_opt(0, 0, 0)
             .ok_or_else(|| anyhow::anyhow!("invalid date"))?
             .and_utc();
-        repo.find_since(cutoff)
+        repo.find_observations_by_event_range(cutoff, chrono::Utc::now())
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?
     } else {
         let cutoff = chrono::Utc::now() - chrono::Duration::days(90);
-        repo.find_since(cutoff)
+        repo.find_observations_by_event_range(cutoff, chrono::Utc::now())
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?
     };

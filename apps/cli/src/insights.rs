@@ -2,8 +2,9 @@
 
 use crate::insights_checkpoint::{DatasetSignature, InsightsCheckpoint, CHECKPOINT_VERSION};
 use anyhow::{Context, Result};
+use chrono::{Duration, Utc};
 use refine_core::infra::{llm_with_retry_policy, LlmClient, LlmRetryPolicy};
-use refine_core::knowledge::{Document, DocumentRepository, ItemRepository, ItemType};
+use refine_core::knowledge::{Document, DocumentRepository, ItemRepository};
 use refine_core::session::{
     build_final_prompt, cluster_observations, merge_route_results, plan_routes, RouteResult,
     INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
@@ -26,6 +27,9 @@ pub async fn handle_insights(
     doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
+    if matches!(options.period, Some(0)) {
+        anyhow::bail!("--period 必须大于 0");
+    }
     let client = match &llm_client {
         Some(c) => c.clone(),
         None => {
@@ -34,11 +38,21 @@ pub async fn handle_insights(
         }
     };
 
-    // Step 0: 加载全量 observation
-    let observations = item_store
-        .find_by_type(ItemType::Observation)
-        .await
-        .context("加载 Observation 失败")?;
+    let observations = match options.period {
+        Some(days) => {
+            let days = i64::try_from(days).context("--period 超出支持范围")?;
+            let now = Utc::now();
+            item_store
+                .find_observations_by_event_range(now - Duration::days(days), now)
+                .await
+        }
+        None => {
+            item_store
+                .find_by_type(refine_core::knowledge::ItemType::Observation)
+                .await
+        }
+    }
+    .context("加载 Observation 失败")?;
 
     if observations.is_empty() {
         println!("暂无观测数据。请先运行 `refine ingest-sessions` 导入会话。");
@@ -69,6 +83,7 @@ pub async fn handle_insights(
         observation_count: observations.len(),
         latest_updated_at,
         with_prescription: options.with_prescription,
+        period_days: options.period,
         llm_identity: client.cache_identity(),
         prompt_identity: INSIGHTS_PROMPT_IDENTITY.to_string(),
     };

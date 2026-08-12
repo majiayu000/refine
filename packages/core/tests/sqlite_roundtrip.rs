@@ -12,6 +12,40 @@ use serde_json::json;
 use std::collections::HashSet;
 
 #[tokio::test]
+async fn read_only_store_never_runs_schema_migrations_or_accepts_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE marker (value TEXT NOT NULL);
+             INSERT INTO marker VALUES ('unchanged');",
+        )
+        .unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+    let store = SqliteStore::open_read_only(&path).unwrap();
+    let item = Item::new_knowledge("must fail", "read only");
+    assert!(store.save(&item).await.is_err());
+    drop(store);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT value FROM marker", [], |row| row
+            .get::<_, String>(0))
+            .unwrap(),
+        "unchanged"
+    );
+    assert!(conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='documents'",
+            [],
+            |_| Ok(())
+        )
+        .is_err());
+}
+
+#[tokio::test]
 async fn roundtrip_preserves_timestamps_and_content() {
     let store = SqliteStore::in_memory().expect("failed to create sqlite store");
 
