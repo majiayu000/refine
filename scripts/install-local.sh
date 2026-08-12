@@ -12,6 +12,8 @@ Options:
   --no-launchd      Install binaries only; skip macOS LaunchAgents.
   --no-start        Write LaunchAgents but do not start/restart services.
   --token-auth      Require REFINE_API_TOKEN instead of local dev anonymous API access.
+  --cognitive-portrait
+                    Install the opt-in biweekly cognitive portrait LaunchAgent.
   -h, --help        Show this help.
 
 Defaults:
@@ -20,6 +22,8 @@ Defaults:
     and the desktop UI dev service when Bun is available.
   - Uses REFINE_DEV_ANON=1 for loopback-only local dashboard/API access unless
     --token-auth is passed.
+  - Cognitive portrait automation is opt-in because it invokes an AI agent
+    with workspace write access and persists personal analysis in this repo.
 EOF
 }
 
@@ -28,6 +32,7 @@ launchd_enabled=1
 start_services=1
 ui_dev_enabled=1
 auth_mode="dev-anon"
+cognitive_portrait_enabled="auto"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -42,6 +47,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --token-auth)
       auth_mode="token"
+      ;;
+    --cognitive-portrait)
+      cognitive_portrait_enabled=1
       ;;
     -h|--help)
       usage
@@ -270,6 +278,58 @@ write_ui_plist() {
 EOF
 }
 
+write_portrait_plist() {
+  local path="$1"
+  local agent_bin="$2"
+  local path_env="$3"
+  local script_path="${repo_root}/scripts/cognitive-portrait.sh"
+  local repo_xml script_xml agent_xml path_xml
+  repo_xml="$(printf '%s' "$repo_root" | xml_escape)"
+  script_xml="$(printf '%s' "$script_path" | xml_escape)"
+  agent_xml="$(printf '%s' "$agent_bin" | xml_escape)"
+  path_xml="$(printf '%s' "$path_env" | xml_escape)"
+
+  write_file "$path" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.lifcc.refine-cognitive-portrait</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>${script_xml}</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${repo_xml}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>${HOME}</string>
+    <key>PATH</key>
+    <string>${path_xml}</string>
+    <key>REFINE_PORTRAIT_AGENT</key>
+    <string>${agent_xml}</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>0</integer>
+    <key>Hour</key>
+    <integer>10</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>${HOME}/Library/Logs/refine-portrait.log</string>
+  <key>StandardErrorPath</key>
+  <string>${HOME}/Library/Logs/refine-portrait.log</string>
+</dict>
+</plist>
+EOF
+}
+
 load_plist() {
   local path="$1"
   local label="$2"
@@ -331,6 +391,18 @@ cargo install --locked --path "${repo_root}/apps/server"
 cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
 path_env="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${cargo_bin}"
 
+resolve_cognitive_portrait_setting() {
+  if [[ "$cognitive_portrait_enabled" != "auto" ]]; then
+    return
+  fi
+  local portrait_plist="${HOME}/Library/LaunchAgents/com.lifcc.refine-cognitive-portrait.plist"
+  if [[ -f "$portrait_plist" ]]; then
+    cognitive_portrait_enabled=1
+  else
+    cognitive_portrait_enabled=0
+  fi
+}
+
 write_install_manifest() {
   [[ -z "$(git -C "$repo_root" status --porcelain 2>/dev/null || true)" ]] \
     || die "installation changed tracked source files; refusing a clean-source manifest"
@@ -344,10 +416,12 @@ refine_sha256=$(file_sha256 "${cargo_bin}/refine")
 mirror_sha256=$(file_sha256 "${cargo_bin}/mirror")
 refine_server_sha256=$(file_sha256 "${cargo_bin}/refine-server")
 installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+cognitive_portrait_enabled=${cognitive_portrait_enabled}
 EOF
 }
 
 if [[ "$launchd_enabled" != "1" || "$(uname -s)" != "Darwin" ]]; then
+  resolve_cognitive_portrait_setting
   write_install_manifest
   print_llm_setup_hint
   if [[ "$launchd_enabled" != "1" ]]; then
@@ -382,12 +456,20 @@ server_plist="${launch_agents}/com.lifcc.refine-server.plist"
 daily_plist="${launch_agents}/com.lifcc.refine-daily-ingest.plist"
 weekly_plist="${launch_agents}/com.lifcc.refine-weekly-insights.plist"
 ui_plist="${launch_agents}/com.lifcc.refine-ui-dev.plist"
+portrait_plist="${launch_agents}/com.lifcc.refine-cognitive-portrait.plist"
+
+resolve_cognitive_portrait_setting
 
 write_server_plist "$server_plist" "$cargo_bin" "$path_env"
 write_calendar_plist "$daily_plist" "com.lifcc.refine-daily-ingest" "${repo_root}/scripts/daily-refresh.sh" "${HOME}/Library/Logs/refine-daily-ingest.log" 8 0
 write_calendar_plist "$weekly_plist" "com.lifcc.refine-weekly-insights" "${repo_root}/scripts/weekly-insights.sh" "${HOME}/Library/Logs/refine-insights.log" 9 0 0
 if [[ "$ui_dev_enabled" == "1" ]]; then
   write_ui_plist "$ui_plist" "$(command -v bun)" "$path_env"
+fi
+if [[ "$cognitive_portrait_enabled" == "1" ]]; then
+  need_cmd codex
+  portrait_agent_bin="$(command -v codex)"
+  write_portrait_plist "$portrait_plist" "$portrait_agent_bin" "$(dirname "$portrait_agent_bin"):${path_env}"
 fi
 
 for plist in "$server_plist" "$daily_plist" "$weekly_plist"; do
@@ -398,6 +480,9 @@ if [[ "$ui_dev_enabled" == "1" ]]; then
 else
   disable_plist "$ui_plist" "com.lifcc.refine-ui-dev"
 fi
+if [[ "$cognitive_portrait_enabled" == "1" ]]; then
+  plutil -lint "$portrait_plist" >/dev/null
+fi
 
 if [[ "$start_services" == "1" ]]; then
   log "loading LaunchAgents"
@@ -406,6 +491,9 @@ if [[ "$start_services" == "1" ]]; then
   load_plist "$weekly_plist" "com.lifcc.refine-weekly-insights" 0
   if [[ "$ui_dev_enabled" == "1" ]]; then
     load_plist "$ui_plist" "com.lifcc.refine-ui-dev" 1
+  fi
+  if [[ "$cognitive_portrait_enabled" == "1" ]]; then
+    load_plist "$portrait_plist" "com.lifcc.refine-cognitive-portrait" 0
   fi
 fi
 

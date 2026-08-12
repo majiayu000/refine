@@ -30,6 +30,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Test unattended LLM credential scripts on GNU/Linux
         run: |
+          bash -n scripts/cognitive-portrait.sh
           bash scripts/test-llm-env.sh
           bash scripts/test-runtime-wrappers.sh
 
