@@ -18,11 +18,10 @@ fi
 
 # shellcheck source=scripts/runtime-job-lock.sh
 source "${SCRIPT_DIR}/runtime-job-lock.sh"
-acquire_refine_runtime_job_lock
-trap release_refine_runtime_job_lock EXIT
-trap 'release_refine_runtime_job_lock; exit 129' HUP
-trap 'release_refine_runtime_job_lock; exit 130' INT
-trap 'release_refine_runtime_job_lock; exit 143' TERM
+if [[ "${REFINE_RUNTIME_LOCK_ACTIVE:-}" != "1" ]]; then
+  run_refine_runtime_job_locked "${SCRIPT_DIR}/daily-refresh.sh" "$@"
+  exit $?
+fi
 
 QUOTA_FILE="$HOME/.refine/quota_exhausted_until"
 if [ -f "$QUOTA_FILE" ]; then

@@ -69,28 +69,42 @@ source "${SCRIPT_DIR}/runtime-job-lock.sh"
 lock_file="${TEST_ROOT}/runtime-job.lock"
 REFINE_RUNTIME_JOB_LOCK_FILE="$lock_file"
 REFINE_RUNTIME_JOB_LOCK_WAIT_SECONDS=0
-acquire_refine_runtime_job_lock || fail 'runtime job lock could not be acquired'
+run_refine_runtime_job_locked true || fail 'runtime job lock could not run a child command'
 [[ -f "$lock_file" ]] || fail 'runtime job lock did not create its lock file'
-release_refine_runtime_job_lock
 printf '%s\n' '99999999' > "$lock_file"
-acquire_refine_runtime_job_lock || fail 'runtime job lock did not recover a stale owner'
-release_refine_runtime_job_lock
+run_refine_runtime_job_locked true || fail 'runtime job lock treated a stale file as an owner'
+if run_refine_runtime_job_locked bash -c 'exit 17'; then
+  fail 'runtime job lock discarded the child exit status'
+fi
 
-# Two simultaneous contenders must remain strictly serialized even when a
-# stale lock file already exists on disk.
-printf '%s\n' '99999999' > "$lock_file"
-critical_log="${TEST_ROOT}/runtime-critical.log"
-for _worker in 1 2; do
-  env HOME="$home" REFINE_RUNTIME_JOB_LOCK_FILE="$lock_file" \
-    REFINE_RUNTIME_JOB_LOCK_WAIT_SECONDS=10 \
-    RUNTIME_LOCK_HELPER="${SCRIPT_DIR}/runtime-job-lock.sh" \
-    RUNTIME_CRITICAL_LOG="$critical_log" \
-    bash -c 'source "$RUNTIME_LOCK_HELPER"; acquire_refine_runtime_job_lock; printf "start %s\n" "$$" >> "$RUNTIME_CRITICAL_LOG"; sleep 1; printf "end %s\n" "$$" >> "$RUNTIME_CRITICAL_LOG"; release_refine_runtime_job_lock' &
+# Exercise every installed backend. Two simultaneous contenders must remain
+# strictly serialized even when a stale lock file already exists on disk.
+lock_worker="${TEST_ROOT}/runtime-lock-worker.sh"
+cat > "$lock_worker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$RUNTIME_LOCK_HELPER"
+run_refine_runtime_job_locked bash -c \
+  'printf "start %s\n" "$$" >> "$RUNTIME_CRITICAL_LOG"; sleep 1; printf "end %s\n" "$$" >> "$RUNTIME_CRITICAL_LOG"'
+EOF
+chmod 700 "$lock_worker"
+for lock_backend in flock lockf; do
+  command -v "$lock_backend" >/dev/null 2>&1 || continue
+  printf '%s\n' '99999999' > "$lock_file"
+  critical_log="${TEST_ROOT}/runtime-critical-${lock_backend}.log"
+  for _worker in 1 2; do
+    env HOME="$home" REFINE_RUNTIME_JOB_LOCK_FILE="$lock_file" \
+      REFINE_RUNTIME_JOB_LOCK_WAIT_SECONDS=10 \
+      REFINE_RUNTIME_LOCK_BACKEND="$lock_backend" \
+      RUNTIME_LOCK_HELPER="${SCRIPT_DIR}/runtime-job-lock.sh" \
+      RUNTIME_CRITICAL_LOG="$critical_log" \
+      bash "$lock_worker" &
+  done
+  wait
+  critical_shape="$(awk '{print $1}' "$critical_log" | paste -sd, -)"
+  [[ "$critical_shape" == 'start,end,start,end' ]] \
+    || fail "runtime ${lock_backend} contenders overlapped: ${critical_shape}"
 done
-wait
-critical_shape="$(awk '{print $1}' "$critical_log" | paste -sd, -)"
-[[ "$critical_shape" == 'start,end,start,end' ]] \
-  || fail "runtime stale reclaimers overlapped: ${critical_shape}"
 
 # A successful ingest must not publish a success marker when required advice
 # fails. The scheduled command must also request strict advice semantics.

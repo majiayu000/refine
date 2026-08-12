@@ -96,28 +96,26 @@ pub async fn handle_score(
             .map_err(|e| anyhow::anyhow!("{}", e))?
     };
     if items.is_empty() {
-        println!(
-            "{}",
+        return finish_without_observations(
+            require_advice,
             crate::lang::t!(
                 "No observation data. Run `refine ingest-sessions` first.",
                 "暂无观测数据。请先运行 `refine ingest-sessions` 导入会话。"
-            )
+            ),
         );
-        return Ok(());
     }
     let obs_count = items
         .iter()
         .filter(|i| i.item_type() == ItemType::Observation)
         .count();
     if obs_count == 0 {
-        println!(
-            "{}",
+        return finish_without_observations(
+            require_advice,
             crate::lang::t!(
                 "No observation data in the time window. Run `refine ingest-sessions` first.",
                 "当前时间窗口内无观测数据。请先运行 `refine ingest-sessions` 导入会话。"
-            )
+            ),
         );
-        return Ok(());
     }
     let cluster = cluster_observations(&items);
     let config = crate::config::load();
@@ -209,6 +207,14 @@ pub async fn handle_score(
         if let Some(error) = advice_error {
             return Err(error.context("required mirror advice generation failed"));
         }
+    }
+    Ok(())
+}
+
+fn finish_without_observations(require_advice: bool, message: &str) -> Result<()> {
+    println!("{message}");
+    if require_advice {
+        anyhow::bail!("required mirror advice cannot be generated without observation data");
     }
     Ok(())
 }
