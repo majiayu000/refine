@@ -728,12 +728,33 @@ fn copy_table(conn: &Connection, table: &str, legacy_alias: &str) -> Result<usiz
         ),
         _ => "ON CONFLICT(id) DO NOTHING".to_string(),
     };
+    let order_by = match table {
+        "documents" => document_source_order(&common),
+        _ => String::new(),
+    };
     let sql = format!(
         "INSERT INTO {table} ({col_list}) \
-         SELECT {select_list} FROM {legacy_alias}.{table} AS src {joins} WHERE true {conflict}"
+         SELECT {select_list} FROM {legacy_alias}.{table} AS src {joins} WHERE true {order_by} {conflict}"
     );
     conn.execute(&sql, [])
         .map_err(|e| format!("failed to copy table {table}: {e}"))
+}
+
+fn document_source_order(common: &[String]) -> String {
+    let has_column = |name: &str| common.iter().any(|column| column == name);
+    let mut terms = Vec::new();
+
+    if has_column("updated_at") {
+        terms.push("julianday(src.updated_at)");
+        terms.push("src.updated_at");
+    }
+    if has_column("captured_at") {
+        terms.push("julianday(src.captured_at)");
+        terms.push("src.captured_at");
+    }
+    terms.push("src.rowid");
+
+    format!("ORDER BY {}", terms.join(", "))
 }
 
 fn document_conflict(common: &[String]) -> String {
@@ -759,13 +780,42 @@ fn document_conflict(common: &[String]) -> String {
     }
     assignments.push("updated_at=excluded.updated_at".to_string());
 
+    let freshness = document_freshness_predicate(common);
     format!(
-        "ON CONFLICT(id) DO UPDATE SET {} \
-         WHERE julianday(excluded.updated_at) > julianday(documents.updated_at) \
-            OR (julianday(excluded.updated_at) = julianday(documents.updated_at) \
-                AND excluded.updated_at > documents.updated_at)",
+        "ON CONFLICT(id) DO UPDATE SET {} WHERE {freshness}",
         assignments.join(", ")
     )
+}
+
+fn document_freshness_predicate(common: &[String]) -> String {
+    let has_column = |name: &str| common.iter().any(|column| column == name);
+    let mut predicates = vec![
+        "julianday(excluded.updated_at) > julianday(documents.updated_at)".to_string(),
+        "(julianday(excluded.updated_at) = julianday(documents.updated_at) \
+          AND excluded.updated_at > documents.updated_at)"
+            .to_string(),
+    ];
+
+    if has_column("captured_at") {
+        predicates.extend([
+            "(julianday(excluded.updated_at) = julianday(documents.updated_at) \
+              AND excluded.updated_at = documents.updated_at \
+              AND julianday(excluded.captured_at) > julianday(documents.captured_at))"
+                .to_string(),
+            "(julianday(excluded.updated_at) = julianday(documents.updated_at) \
+              AND excluded.updated_at = documents.updated_at \
+              AND julianday(excluded.captured_at) = julianday(documents.captured_at) \
+              AND excluded.captured_at > documents.captured_at)"
+                .to_string(),
+            "(julianday(excluded.updated_at) = julianday(documents.updated_at) \
+              AND excluded.updated_at = documents.updated_at \
+              AND julianday(excluded.captured_at) = julianday(documents.captured_at) \
+              AND excluded.captured_at = documents.captured_at)"
+                .to_string(),
+        ]);
+    }
+
+    predicates.join(" OR ")
 }
 
 fn is_safe_identifier(name: &str) -> bool {
@@ -1153,6 +1203,113 @@ mod tests {
         assert_eq!(
             document,
             ("New title".into(), "new body".into(), "v-target".into())
+        );
+    }
+
+    #[test]
+    fn document_merge_prefers_later_capture_when_updated_at_ties() {
+        let tmp = TempDir::new().unwrap();
+        let target = make_target_db(tmp.path());
+        let tc = Connection::open(&target).unwrap();
+        tc.execute_batch(
+            "INSERT INTO documents
+               (id, title, raw_content, source, url, source_version,
+                captured_at, created_at, updated_at)
+             VALUES
+               ('target-doc', 'Old title', 'old body', 'canonical',
+                'https://example.com/equal-updated', 'v-target',
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                '2026-01-03T00:00:00Z');",
+        )
+        .unwrap();
+        drop(tc);
+
+        let legacy = tmp.path().join("server.db");
+        let lc = Connection::open(&legacy).unwrap();
+        crate::infra::prepare_sqlite_db(&lc).unwrap();
+        lc.execute_batch(
+            "INSERT INTO documents
+               (id, title, raw_content, source, url, source_version,
+                captured_at, created_at, updated_at)
+             VALUES
+               ('legacy-doc', 'New title', 'new body', 'legacy',
+                'https://example.com/equal-updated', 'v-legacy',
+                '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z',
+                '2026-01-03T00:00:00Z');",
+        )
+        .unwrap();
+        drop(lc);
+
+        migrate_stale_dbs(&target).unwrap();
+
+        let document: (String, String, String, String) = Connection::open(&target)
+            .unwrap()
+            .query_row(
+                "SELECT title, raw_content, source_version, captured_at
+                 FROM documents WHERE id='target-doc'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            document,
+            (
+                "New title".into(),
+                "new body".into(),
+                "v-legacy".into(),
+                "2026-01-02T00:00:00Z".into()
+            )
+        );
+    }
+
+    #[test]
+    fn document_merge_prefers_later_legacy_rowid_when_timestamps_tie() {
+        let tmp = TempDir::new().unwrap();
+        let target = make_target_db(tmp.path());
+        let legacy = tmp.path().join("server.db");
+        let lc = Connection::open(&legacy).unwrap();
+        lc.execute_batch(
+            "CREATE TABLE documents (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                raw_content TEXT NOT NULL,
+                source TEXT NOT NULL,
+                url TEXT NOT NULL,
+                source_version TEXT,
+                captured_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO documents
+              (id, title, raw_content, source, url, source_version,
+               captured_at, created_at, updated_at)
+            VALUES
+              ('first-doc', 'First title', 'first body', 'legacy',
+               'https://example.com/legacy-duplicate', 'v-first',
+               '2026-01-02T00:00:00Z', '2026-01-01T00:00:00Z',
+               '2026-01-03T00:00:00Z'),
+              ('second-doc', 'Second title', 'second body', 'legacy',
+               'https://example.com/legacy-duplicate', 'v-second',
+               '2026-01-02T00:00:00Z', '2026-01-01T00:00:00Z',
+               '2026-01-03T00:00:00Z');",
+        )
+        .unwrap();
+        drop(lc);
+
+        migrate_stale_dbs(&target).unwrap();
+
+        let document: (String, String, String) = Connection::open(&target)
+            .unwrap()
+            .query_row(
+                "SELECT id, raw_content, source_version
+                 FROM documents WHERE url='https://example.com/legacy-duplicate'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            document,
+            ("first-doc".into(), "second body".into(), "v-second".into())
         );
     }
 
