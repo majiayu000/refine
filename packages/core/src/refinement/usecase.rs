@@ -4,7 +4,7 @@
 //! 供 server/desktop/cli 复用，避免多处重复实现。
 
 use crate::error::{DomainError, DomainResult, InfraResult};
-use crate::infra::{llm_with_retry_policy_ref, LlmClient, LlmRetryPolicy};
+use crate::infra::{llm_with_retry_policy_ref, LlmClient, LlmRetryBehavior, LlmRetryPolicy};
 use crate::knowledge::{Document, DocumentId, DocumentRepository, Item, Source};
 use crate::refinement::{
     Conversation, ExtractionPolicy, ExtractionResult, Extractor, PromptTemplate,
@@ -211,6 +211,7 @@ async fn protected_llm_call(
         prompt,
         system,
         retry_policy,
+        LlmRetryBehavior::EXTRACTION,
         |attempt, max_attempts, delay_secs, err| {
             tracing::warn!(
                 attempt,
@@ -504,6 +505,10 @@ mod tests {
                 status: 401,
                 message: "invalid api key".to_string(),
             },
+            InfraError::LlmHttp {
+                status: 429,
+                message: "rate limited".to_string(),
+            },
             InfraError::LlmRejected {
                 code: "content_filter".to_string(),
                 message: "blocked".to_string(),
@@ -520,7 +525,7 @@ mod tests {
                 fast_retry_policy(3, 50),
             )
             .await
-            .expect_err("auth and content-policy failures must fail fast");
+            .expect_err("auth, rate-limit, and content-policy failures must fail fast");
             assert_eq!(client.calls(), 1);
         }
     }
@@ -579,27 +584,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn json_repair_does_not_retry_deterministic_rejection() {
-        let client = ScriptedLlmClient::new(vec![
-            immediate_response(INVALID_EXTRACTION),
-            immediate_error(InfraError::LlmRejected {
+    async fn json_repair_does_not_retry_deterministic_errors() {
+        for error in [
+            InfraError::LlmHttp {
+                status: 429,
+                message: "rate limited".to_string(),
+            },
+            InfraError::LlmRejected {
                 code: "content_filter".to_string(),
                 message: "blocked".to_string(),
-            }),
-            immediate_response(VALID_EXTRACTION),
-        ]);
+            },
+        ] {
+            let client = ScriptedLlmClient::new(vec![
+                immediate_response(INVALID_EXTRACTION),
+                immediate_error(error),
+                immediate_response(VALID_EXTRACTION),
+            ]);
 
-        let error = extract_items_with_llm_policy(
-            &client,
-            "Human: hello\nAssistant: world",
-            ExtractionPolicy::default(),
-            fast_retry_policy(3, 50),
-        )
-        .await
-        .expect_err("deterministic repair rejection must fail fast");
+            let error = extract_items_with_llm_policy(
+                &client,
+                "Human: hello\nAssistant: world",
+                ExtractionPolicy::default(),
+                fast_retry_policy(3, 50),
+            )
+            .await
+            .expect_err("deterministic repair failure must fail fast");
 
-        assert!(error.to_string().contains("JSON 修复请求失败"));
-        assert_eq!(client.calls(), 2);
+            assert!(error.to_string().contains("JSON 修复请求失败"));
+            assert_eq!(client.calls(), 2);
+        }
     }
 
     #[tokio::test]

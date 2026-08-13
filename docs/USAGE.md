@@ -79,7 +79,10 @@ CLI `refine extract`, desktop extraction, and server extraction all use the
 same protected core path for both the initial LLM request and a JSON-repair
 request. Each attempt has a timeout, and transient timeouts, HTTP 408/425/5xx,
 and recognized transport failures are retried with exponential backoff. Auth,
-content-policy rejection, and other deterministic errors fail immediately.
+HTTP 429/rate-limit responses, content-policy rejection, and other
+deterministic errors fail immediately. Extraction does not consult or update
+the legacy process-global quota marker, because that marker is not scoped by
+provider, endpoint, or credential.
 
 The defaults and bounded process-environment overrides are:
 

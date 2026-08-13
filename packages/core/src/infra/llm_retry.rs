@@ -17,6 +17,27 @@ pub struct LlmRetryPolicy {
     pub request_timeout_millis: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LlmRetryBehavior {
+    check_persistent_quota: bool,
+    record_persistent_quota: bool,
+    retry_http_429: bool,
+}
+
+impl LlmRetryBehavior {
+    const SHARED_DEFAULT: Self = Self {
+        check_persistent_quota: true,
+        record_persistent_quota: true,
+        retry_http_429: true,
+    };
+
+    pub(crate) const EXTRACTION: Self = Self {
+        check_persistent_quota: false,
+        record_persistent_quota: false,
+        retry_http_429: false,
+    };
+}
+
 impl Default for LlmRetryPolicy {
     fn default() -> Self {
         Self {
@@ -52,18 +73,27 @@ pub async fn llm_with_retry_policy<F>(
 where
     F: FnMut(usize, usize, u64, &InfraError),
 {
-    llm_with_retry_policy_ref(client.as_ref(), prompt, system, policy, on_retry).await
+    llm_with_retry_policy_ref(
+        client.as_ref(),
+        prompt,
+        system,
+        policy,
+        LlmRetryBehavior::SHARED_DEFAULT,
+        on_retry,
+    )
+    .await
 }
 
 /// Apply the shared timeout and retry policy to an already borrowed client.
 ///
 /// Application-layer use cases can use this variant without manufacturing an
 /// `Arc`; long-lived callers should keep using [`llm_with_retry_policy`].
-pub async fn llm_with_retry_policy_ref<F>(
+pub(crate) async fn llm_with_retry_policy_ref<F>(
     client: &dyn LlmClient,
     prompt: &str,
     system: &str,
     policy: LlmRetryPolicy,
+    behavior: LlmRetryBehavior,
     mut on_retry: F,
 ) -> InfraResult<String>
 where
@@ -73,7 +103,7 @@ where
     let request_timeout = Duration::from_millis(policy.request_timeout_millis.max(1));
 
     for attempt in 0..max_retries {
-        if is_quota_exhausted() {
+        if behavior.check_persistent_quota && is_quota_exhausted() {
             return Err(InfraError::RateLimited {
                 retry_after_secs: None,
             });
@@ -95,11 +125,14 @@ where
         match result {
             Ok(response) => return Ok(response),
             Err(err @ InfraError::RateLimited { retry_after_secs }) => {
-                set_quota_exhausted(retry_after_secs);
+                if behavior.record_persistent_quota {
+                    set_quota_exhausted(retry_after_secs);
+                }
                 return Err(err);
             }
             Err(err) => {
-                if !is_retryable_error(&err) || attempt == max_retries - 1 {
+                if !is_retryable_error(&err, behavior.retry_http_429) || attempt == max_retries - 1
+                {
                     return Err(err);
                 }
 
@@ -115,14 +148,20 @@ where
     unreachable!("retry loop always returns on success or failure")
 }
 
-fn is_retryable_error(err: &InfraError) -> bool {
+fn is_retryable_error(err: &InfraError, retry_http_429: bool) -> bool {
     if let InfraError::LlmHttp { status, .. } = err {
-        return *status == 408 || *status == 425 || *status == 429 || (500..=599).contains(status);
+        return *status == 408
+            || *status == 425
+            || (*status == 429 && retry_http_429)
+            || (500..=599).contains(status);
     }
     if matches!(err, InfraError::LlmRejected { .. }) {
         return false;
     }
     let msg = err.to_string();
+    if !retry_http_429 && is_rate_limit_message(&msg) {
+        return false;
+    }
     msg.contains("cooldown")
         || msg.contains("service_busy")
         || msg.contains("rate")
@@ -139,6 +178,16 @@ fn is_retryable_error(err: &InfraError) -> bool {
         || msg.contains("system_cpu_overloaded")
 }
 
+fn is_rate_limit_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("429")
+        || message.contains("rate limit")
+        || message.contains("rate_limit")
+        || message.contains("rate-limit")
+        || message.contains("too many requests")
+        || message.contains("quota exceeded")
+}
+
 fn backoff_delay_secs(base_delay_secs: u64, attempt: usize) -> u64 {
     let backoff_factor = 1u64.checked_shl(attempt as u32).unwrap_or(u64::MAX);
     base_delay_secs.saturating_mul(backoff_factor)
@@ -150,24 +199,50 @@ mod tests {
 
     #[test]
     fn typed_http_status_controls_retryability() {
-        assert!(is_retryable_error(&InfraError::LlmHttp {
-            status: 503,
-            message: "moderation service unavailable".into(),
-        }));
-        assert!(is_retryable_error(&InfraError::LlmHttp {
-            status: 429,
-            message: "rate limited".into(),
-        }));
-        assert!(!is_retryable_error(&InfraError::LlmHttp {
-            status: 400,
-            message: "bad request".into(),
-        }));
-        assert!(is_retryable_error(&InfraError::LlmRequest(
-            "system_cpu_overloaded".into()
-        )));
+        assert!(is_retryable_error(
+            &InfraError::LlmHttp {
+                status: 503,
+                message: "moderation service unavailable".into(),
+            },
+            true,
+        ));
+        assert!(is_retryable_error(
+            &InfraError::LlmHttp {
+                status: 429,
+                message: "rate limited".into(),
+            },
+            true,
+        ));
+        assert!(!is_retryable_error(
+            &InfraError::LlmHttp {
+                status: 429,
+                message: "rate limited".into(),
+            },
+            false,
+        ));
+        assert!(!is_retryable_error(
+            &InfraError::LlmHttp {
+                status: 400,
+                message: "bad request".into(),
+            },
+            true,
+        ));
+        assert!(is_retryable_error(
+            &InfraError::LlmRequest("system_cpu_overloaded".into()),
+            true,
+        ));
+        assert!(is_retryable_error(
+            &InfraError::LlmRequest("provider rate table unavailable".into()),
+            false,
+        ));
+        assert!(!is_retryable_error(
+            &InfraError::LlmRequest("429 rate limit".into()),
+            false,
+        ));
     }
     use crate::infra::quota_state::{is_exhausted as is_quota_exhausted, set_quota_file_override};
     use async_trait::async_trait;
+    use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
     use std::collections::VecDeque;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -236,14 +311,23 @@ mod tests {
 
     struct QuotaTestGuard {
         _dir: TempDir,
+        path: PathBuf,
     }
 
     impl QuotaTestGuard {
         fn new() -> Self {
             let dir = TempDir::new().expect("tempdir");
             let path = dir.path().join(".refine").join("quota_exhausted_until");
-            set_quota_file_override(Some(path));
-            Self { _dir: dir }
+            set_quota_file_override(Some(path.clone()));
+            Self { _dir: dir, path }
+        }
+
+        fn mark_exhausted(&self) {
+            std::fs::create_dir_all(self.path.parent().expect("quota parent"))
+                .expect("create quota parent");
+            let until = Utc::now() + ChronoDuration::minutes(1);
+            std::fs::write(&self.path, until.to_rfc3339_opts(SecondsFormat::Secs, true))
+                .expect("write quota marker");
         }
     }
 
@@ -310,6 +394,51 @@ mod tests {
 
         assert_eq!(result, "ok");
         assert_eq!(client.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn extraction_behavior_isolated_from_persistent_quota_state() {
+        let _env_guard = QUOTA_TEST_LOCK.lock().await;
+        let quota_guard = QuotaTestGuard::new();
+        quota_guard.mark_exhausted();
+        assert!(is_quota_exhausted());
+
+        let client = SequenceClient::new(vec![Ok("ok".into())]);
+        let result = llm_with_retry_policy_ref(
+            &client,
+            "prompt",
+            "system",
+            LlmRetryPolicy {
+                max_retries: 3,
+                base_delay_secs: 0,
+                ..LlmRetryPolicy::default()
+            },
+            LlmRetryBehavior::EXTRACTION,
+            |_attempt, _max_retries, _delay_secs, _err| {},
+        )
+        .await
+        .expect("unrelated persistent quota must not block extraction");
+
+        assert_eq!(result, "ok");
+        assert_eq!(client.calls(), 1);
+
+        let fresh_guard = QuotaTestGuard::new();
+        assert!(!is_quota_exhausted());
+        let limited_client = SequenceClient::new(vec![Err(InfraError::RateLimited {
+            retry_after_secs: Some(60),
+        })]);
+        llm_with_retry_policy_ref(
+            &limited_client,
+            "prompt",
+            "system",
+            LlmRetryPolicy::default(),
+            LlmRetryBehavior::EXTRACTION,
+            |_attempt, _max_retries, _delay_secs, _err| {},
+        )
+        .await
+        .expect_err("explicit rate limit must fail fast");
+        assert!(!is_quota_exhausted());
+        drop(fresh_guard);
     }
 
     #[tokio::test]
