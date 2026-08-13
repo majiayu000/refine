@@ -2,11 +2,11 @@
 //!
 //! 支持 Claude Code 和 Codex 两种格式
 //!
-//! 解析策略：line-level error recovery。
+//! 解析策略：只容忍 append-only 文件的尾部截断。
 //! JSONL 是 append-only 流；当进程被 SIGKILL 或盘满时常见尾行被截断，
-//! 中途偶发损坏行不应该让整个会话被丢弃。每条 line 独立解析：
 //! - 解析成功 → 累积到 messages / meta
-//! - 解析失败 → 记 warn 日志（带 line index 与截断 snippet），继续下一行
+//! - 最后一个非空行在 EOF 截断 → 保留合法前缀并标记 `truncated_tail`
+//! - 中间损坏或完整写入的非法末行 → 整个文件失败，避免用缺行快照覆盖完整数据
 //!
 //! 同时从原始 JSONL 提取首个时间戳填充 `SessionMeta.started_at`，
 //! 弥补先前的 declaration-execution gap（字段定义但从未写入）。
@@ -15,9 +15,6 @@ use super::types::{MessageRole, Session, SessionMessage, SessionMeta, SessionSou
 use chrono::{DateTime, Utc};
 use std::path::Path;
 use tracing::warn;
-
-/// 单行 snippet 在日志里的最大长度，避免泄漏整条原始内容到日志后端。
-const SNIPPET_MAX: usize = 120;
 
 /// 单个 session 文件大小上限（200 MiB）。
 ///
@@ -50,8 +47,8 @@ pub fn parse_session_file(path: &Path, source: SessionSource) -> Result<Session,
 
 /// 解析 JSONL 字符串内容为 Session（可测试）
 ///
-/// 返回 `Err` 仅在调用方传入完全无法处理的输入时；单行 JSON 错误不会
-/// 中断整个文件解析，遵循 JSONL append-only 流的容错惯例。
+/// 中间 JSON 错误返回 `Err`。只有没有换行结尾且 serde 报告 EOF 的最后
+/// 一个非空记录会作为 append-in-progress 尾部截断被标记并容忍。
 pub fn parse_session_content(
     content: &str,
     path: &Path,
@@ -62,7 +59,12 @@ pub fn parse_session_content(
     }
     let mut messages = Vec::new();
     let mut meta = SessionMeta::default();
-    let mut malformed = 0usize;
+    let last_nonempty_line = content
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(idx, _)| idx)
+        .last();
 
     for (idx, line) in content.lines().enumerate() {
         let line = line.trim();
@@ -72,15 +74,24 @@ pub fn parse_session_content(
         let value: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
-                malformed += 1;
-                warn!(
-                    path = %path.display(),
-                    line = idx + 1,
-                    error = %e,
-                    snippet = %truncate_snippet(line),
-                    "skipping malformed JSONL line"
-                );
-                continue;
+                let is_truncated_tail =
+                    Some(idx) == last_nonempty_line && !content.ends_with('\n') && e.is_eof();
+                if is_truncated_tail {
+                    meta.truncated_tail = true;
+                    warn!(
+                        path = %path.display(),
+                        line = idx + 1,
+                        error = %e,
+                        "session JSONL has a truncated tail; preserving parsed prefix"
+                    );
+                    break;
+                }
+                return Err(format!(
+                    "JSONL 解析失败 {}:{}: {}",
+                    path.display(),
+                    idx + 1,
+                    e
+                ));
             }
         };
 
@@ -97,37 +108,12 @@ pub fn parse_session_content(
         }
     }
 
-    if malformed > 0 {
-        warn!(
-            path = %path.display(),
-            malformed,
-            kept = messages.len(),
-            "JSONL parse completed with skipped lines"
-        );
-    }
-
     Ok(Session {
         source,
         file_path: path.to_path_buf(),
         messages,
         meta,
     })
-}
-
-/// 截断单行内容用于日志输出。
-fn truncate_snippet(line: &str) -> String {
-    if line.len() <= SNIPPET_MAX {
-        line.to_string()
-    } else {
-        // char_indices 避免在 UTF-8 字符中间切断。
-        let cut = line
-            .char_indices()
-            .take_while(|(i, _)| *i < SNIPPET_MAX)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
-        format!("{}…", &line[..cut])
-    }
 }
 
 /// 解析 ISO-8601 字符串为 `DateTime<Utc>`。
@@ -525,25 +511,35 @@ mod tests {
         assert_eq!(session.messages.len(), 2);
         assert_eq!(session.messages[0].content, "hello");
         assert_eq!(session.messages[1].content, "hi");
+        assert!(session.meta.truncated_tail);
     }
 
-    /// 中段单行损坏：仅丢弃损坏行，前后行正常累积。
+    /// 中段单行损坏不能被当成完整 transcript。
     #[test]
     fn parse_recovers_from_midstream_corruption() {
         let jsonl = r#"{"type":"user","message":{"content":"first"}}
 {not even json
 {"type":"assistant","message":{"content":[{"type":"text","text":"after corruption"}]}}
 "#;
-        let session = parse_session_content(
+        let error = parse_session_content(
             jsonl,
             &PathBuf::from("/tmp/midcorrupt.jsonl"),
             SessionSource::ClaudeCode,
         )
-        .unwrap();
+        .expect_err("middle corruption must fail the entire session");
+        assert!(error.contains(":2:"), "unexpected error: {error}");
+    }
 
-        assert_eq!(session.messages.len(), 2);
-        assert_eq!(session.messages[0].content, "first");
-        assert_eq!(session.messages[1].content, "after corruption");
+    #[test]
+    fn invalid_final_record_with_newline_is_not_treated_as_in_progress() {
+        let jsonl = "{\"type\":\"user\",\"message\":{\"content\":\"first\"}}\n{bad}\n";
+        let error = parse_session_content(
+            jsonl,
+            &PathBuf::from("/tmp/invalid-final.jsonl"),
+            SessionSource::ClaudeCode,
+        )
+        .expect_err("fully written invalid tail must fail");
+        assert!(error.contains(":2:"), "unexpected error: {error}");
     }
 
     #[test]
@@ -633,21 +629,5 @@ mod tests {
             .expect("should fall through to next valid ts");
         assert_eq!(started.to_rfc3339(), "2026-04-21T05:00:00+00:00");
         assert_eq!(session.messages.len(), 2);
-    }
-
-    #[test]
-    fn truncate_snippet_handles_utf8_boundaries() {
-        // 多字节字符在 SNIPPET_MAX 边界附近时不应导致越界 panic。
-        let s: String = "中".repeat(80); // 240 bytes, well past SNIPPET_MAX
-        let out = truncate_snippet(&s);
-        assert!(out.ends_with('…'));
-        // 必须仍是合法 UTF-8（如果切坏 String 构造会 panic）
-        assert!(!out.is_empty());
-    }
-
-    #[test]
-    fn truncate_snippet_passthrough_for_short_lines() {
-        let out = truncate_snippet("short");
-        assert_eq!(out, "short");
     }
 }

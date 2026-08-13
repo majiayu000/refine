@@ -263,6 +263,63 @@ fn cursor_is_partitioned_by_database_path() {
     );
 }
 
+#[test]
+fn safe_cursor_stays_before_oldest_failed_file() {
+    let scan_start = SystemTime::UNIX_EPOCH + Duration::from_secs(20_000);
+    let failures = [
+        SystemTime::UNIX_EPOCH + Duration::from_secs(15_000),
+        SystemTime::UNIX_EPOCH + Duration::from_secs(12_000),
+    ];
+    assert_eq!(
+        safe_cursor_watermark(scan_start, &failures),
+        SystemTime::UNIX_EPOCH + Duration::from_secs(11_999)
+    );
+    assert_eq!(safe_cursor_watermark(scan_start, &[]), scan_start);
+}
+
+#[test]
+fn cursor_write_atomically_replaces_previous_value() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("cursor/state");
+    let first = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+    let second = SystemTime::UNIX_EPOCH + Duration::from_secs(20);
+    let first = IngestCursorState {
+        version: INGEST_CURSOR_VERSION,
+        watermark_secs: unix_seconds(first),
+        failures: Vec::new(),
+    };
+    let second = IngestCursorState {
+        version: INGEST_CURSOR_VERSION,
+        watermark_secs: unix_seconds(second),
+        failures: vec![IngestCursorFailure {
+            path_sha256: "abc".to_string(),
+            modified_at_secs: 19,
+            reason: "parse_error".to_string(),
+        }],
+    };
+    write_ingest_cursor_at(&path, &first).expect("first cursor write");
+    write_ingest_cursor_at(&path, &second).expect("replace cursor");
+    let loaded: IngestCursorState =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(loaded, second);
+    assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+}
+
+#[test]
+fn cursor_reader_accepts_legacy_seconds_and_v2_state() {
+    assert_eq!(parse_ingest_cursor("42\n"), Some(42));
+    let state = IngestCursorState {
+        version: INGEST_CURSOR_VERSION,
+        watermark_secs: 84,
+        failures: Vec::new(),
+    };
+    assert_eq!(
+        parse_ingest_cursor(&serde_json::to_string(&state).unwrap()),
+        Some(84)
+    );
+    assert_eq!(parse_ingest_cursor("not a cursor"), None);
+}
+
 fn read_last_ingest_mtime_at(
     home: &Path,
     source: Option<&SessionSource>,
