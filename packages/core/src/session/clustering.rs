@@ -262,9 +262,14 @@ fn is_session_id(segment: &str) -> bool {
 }
 
 pub fn normalize_project_name(raw: &str) -> Option<String> {
-    let segments: Vec<&str> = raw
-        .split('-')
-        .filter(|s| !s.is_empty() && !GENERIC_PATH_SEGMENTS.contains(s) && !is_session_id(s))
+    let segments: Vec<&str> = raw.split('-').filter(|s| !s.is_empty()).collect();
+    let first_project_segment = segments
+        .iter()
+        .position(|segment| !GENERIC_PATH_SEGMENTS.contains(segment))?;
+    let segments: Vec<&str> = segments[first_project_segment..]
+        .iter()
+        .copied()
+        .filter(|segment| !is_session_id(segment))
         .collect();
     match segments.len() {
         0 => None,
@@ -385,6 +390,11 @@ mod tests {
             normalize_project_name("-users-lifcc-desktop-code-ai-tool-argus"),
             normalize_project_name("-users-lifcc-desktop-code-ai-tools-argus")
         );
+        assert_eq!(
+            normalize_project_name("-users-lifcc-desktop-code-ai-tools-codex-tool"),
+            Some("codex-tool".into())
+        );
+        assert_eq!(normalize_project_name("my-tool"), Some("my-tool".into()));
         assert_eq!(
             normalize_project_name("agent_019ec96be5fe7f53a6cca93bb6201c26"),
             None

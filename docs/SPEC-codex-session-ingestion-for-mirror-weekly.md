@@ -147,6 +147,9 @@ Project clustering must not let ingestion artifacts distort breadth metrics:
 - `agent_<hex>` session identifiers are not project names.
 - `session_count` is deduplicated per project, while `global_stats.total_sessions`
   remains globally deduplicated.
+- Profile project shares use the sum of per-project session assignments as
+  their denominator, matching breadth scoring when one session belongs to
+  multiple projects.
 
 The per-project dedupe matters when observations from one source document
 carry different project tags. Each affected project should count that source

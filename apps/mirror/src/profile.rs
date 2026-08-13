@@ -38,6 +38,14 @@ fn extract_profile_data(
 ) -> ProfileData {
     let total_sessions = cluster.global_stats.total_sessions;
     let total_projects = cluster.projects.len();
+    // A source document may legitimately contribute to more than one project.
+    // Use the same assignment-weighted denominator as breadth scoring so these
+    // project shares remain comparable and sum to 100%.
+    let project_session_assignments: usize = cluster
+        .projects
+        .values()
+        .map(|project| project.session_count)
+        .sum();
 
     let mut stats: Vec<ProjectStat> = cluster
         .projects
@@ -60,10 +68,10 @@ fn extract_profile_data(
                 deleg as f64 / collab_total as f64 * 100.0
             };
 
-            let pct = if total_sessions == 0 {
+            let pct = if project_session_assignments == 0 {
                 0.0
             } else {
-                p.session_count as f64 / total_sessions as f64 * 100.0
+                p.session_count as f64 / project_session_assignments as f64 * 100.0
             };
 
             ProjectStat {
@@ -433,6 +441,29 @@ mod tests {
         assert!((data.project_stats[0].delegation_pct - 60.0).abs() < f64::EPSILON);
 
         assert_eq!(data.project_stats[1].name, "proj-b");
+    }
+
+    #[test]
+    fn project_shares_use_project_assignment_denominator() {
+        let mut cluster = make_cluster();
+        cluster.global_stats.total_sessions = 2;
+        cluster.projects.get_mut("proj-a").unwrap().session_count = 1;
+        cluster.projects.get_mut("proj-b").unwrap().session_count = 2;
+
+        let data = extract_profile_data(&cluster, "G", &[]);
+        let proj_a = data
+            .project_stats
+            .iter()
+            .find(|project| project.name == "proj-a")
+            .unwrap();
+        let proj_b = data
+            .project_stats
+            .iter()
+            .find(|project| project.name == "proj-b")
+            .unwrap();
+
+        assert!((proj_a.pct - 100.0 / 3.0).abs() < 0.001);
+        assert!((proj_b.pct - 200.0 / 3.0).abs() < 0.001);
     }
 
     #[test]
