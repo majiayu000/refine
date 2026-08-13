@@ -3036,6 +3036,7 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "filetime",
+ "fs2",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
