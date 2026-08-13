@@ -126,9 +126,11 @@ fn session_captured_at(
     session_started_at.unwrap_or_else(|| DateTime::<Utc>::from(file_modified_at))
 }
 
-fn session_needs_refresh(existing_doc: &Document, file_modified_at: SystemTime) -> bool {
-    let file_modified_at = DateTime::<Utc>::from(file_modified_at);
-    file_modified_at > existing_doc.updated_at()
+fn session_needs_refresh(existing_doc: &Document, source_version: &str, raw_content: &str) -> bool {
+    match existing_doc.source_version() {
+        Some(existing_version) => existing_version != source_version,
+        None => existing_doc.raw_content() != raw_content,
+    }
 }
 
 fn content_source_version(provider: &str, raw_content: &str) -> String {
@@ -638,7 +640,7 @@ async fn handle_legacy_ingest_sessions(
             // document. If it is not a prefix/equal snapshot, keep it under
             // its local identity instead of replacing remem data.
             if let Some(existing_doc) = legacy_document.as_ref() {
-                if session_needs_refresh(existing_doc, ds.modified_at) {
+                if session_needs_refresh(existing_doc, &source_version, &raw_content) {
                     stale_refresh += 1;
                 } else {
                     skipped_dup += 1;
@@ -648,7 +650,7 @@ async fn handle_legacy_ingest_sessions(
             (legacy_url, ds.source.clone(), legacy_document)
         } else {
             if let Some(existing_doc) = legacy_document.as_ref() {
-                if session_needs_refresh(existing_doc, ds.modified_at) {
+                if session_needs_refresh(existing_doc, &source_version, &raw_content) {
                     stale_refresh += 1;
                 } else {
                     skipped_dup += 1;
