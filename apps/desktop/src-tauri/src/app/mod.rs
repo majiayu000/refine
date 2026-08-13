@@ -5,7 +5,7 @@ mod state;
 use refine_core::infra::{
     ensure_db_dir, migrate_stale_dbs, resolve_db_path, MigrationReport, SqliteStore,
 };
-use refine_core::knowledge::ItemRepository;
+use refine_core::knowledge::{DocumentRepository, ItemRepository};
 use refine_core::search::SearchEngine;
 use std::sync::Arc;
 
@@ -34,8 +34,13 @@ pub fn build_state() -> AppState {
     }
 
     let sqlite_store = Arc::new(SqliteStore::open(&db_path).expect("打开数据库失败"));
-    let store: Arc<dyn ItemRepository> = sqlite_store;
+    let store: Arc<dyn ItemRepository> = sqlite_store.clone();
+    let doc_store: Arc<dyn DocumentRepository> = sqlite_store;
     let engine = Arc::new(SearchEngine::new(store.clone()));
 
-    AppState { store, engine }
+    AppState {
+        store,
+        doc_store,
+        engine,
+    }
 }

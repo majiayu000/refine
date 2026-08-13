@@ -3,11 +3,14 @@ use crate::ingest_sessions::{handle_ingest_sessions, IngestOptions};
 use crate::insights::{handle_insights, InsightsOptions};
 use crate::support::{build_llm_client_from_env, format_item, parse_item_type};
 use anyhow::{Context, Result};
-use refine_core::infra::SqliteStore;
+use refine_core::infra::{LlmClient, SqliteStore};
 use refine_core::knowledge::{
     DocumentId, DocumentRepository, Item, ItemId, ItemRepository, ItemType, Source,
 };
-use refine_core::refinement::{apply_defaults, extract_items_with_llm, ExtractionPolicy};
+use refine_core::refinement::{
+    extract_document_with_strict_defaults, persist_extracted_document, ExtractionPolicy,
+    ItemExtractionInput,
+};
 use refine_core::search::{SearchEngine, SearchQuery};
 use refine_core::session::SessionSource;
 use std::io::{self, Read};
@@ -120,18 +123,10 @@ async fn handle_extract(stdin: bool, store: Arc<SqliteStore>) -> Result<()> {
     io::stdin().read_to_string(&mut content)?;
 
     let llm_client = build_llm_client_from_env()?;
-    let mut items =
-        extract_items_with_llm(llm_client.as_ref(), &content, ExtractionPolicy::default())
-            .await
-            .context("提炼失败")?;
-    let source = Source::new("cli");
-    let doc_id = DocumentId::new();
-    apply_defaults(&mut items, &source, &doc_id, &content);
-
-    let item_store: &dyn ItemRepository = store.as_ref();
+    let items =
+        extract_and_persist_cli_content(&content, store.as_ref(), llm_client.as_ref()).await?;
     println!("提炼完成：{} 条", items.len());
     for item in &items {
-        item_store.save(item).await?;
         println!(
             "  + [{}] {} ({})",
             format!("{:?}", item.item_type()).to_lowercase(),
@@ -141,6 +136,30 @@ async fn handle_extract(stdin: bool, store: Arc<SqliteStore>) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn extract_and_persist_cli_content(
+    content: &str,
+    store: &SqliteStore,
+    llm_client: &dyn LlmClient,
+) -> Result<Vec<Item>> {
+    let source = Source::new("cli");
+    let input = ItemExtractionInput {
+        source: "cli",
+        title: None,
+        raw_content: content,
+        captured_at: None,
+        policy: ExtractionPolicy::default(),
+    };
+    let aggregate = extract_document_with_strict_defaults(llm_client, &input, &source)
+        .await
+        .context("提炼失败")?;
+
+    let doc_store: &dyn DocumentRepository = store;
+    persist_extracted_document(doc_store, &aggregate)
+        .await
+        .context("保存提炼结果失败")?;
+    Ok(aggregate.items)
 }
 
 async fn handle_search(query: &str, limit: usize, engine: Arc<SearchEngine>) -> Result<()> {
@@ -317,8 +336,21 @@ fn parse_add_item_type(raw_type: &str) -> Result<ItemType> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_add_item_type;
-    use refine_core::knowledge::ItemType;
+    use super::{extract_and_persist_cli_content, parse_add_item_type};
+    use async_trait::async_trait;
+    use refine_core::error::InfraResult;
+    use refine_core::infra::{LlmClient, SqliteStore};
+    use refine_core::knowledge::{DocumentRepository, ItemRepository, ItemType};
+    use tempfile::tempdir;
+
+    struct FakeLlm;
+
+    #[async_trait]
+    impl LlmClient for FakeLlm {
+        async fn complete(&self, _prompt: &str, _system: Option<&str>) -> InfraResult<String> {
+            Ok(r#"{"items":[{"type":"knowledge","title":"CLI item","summary":"S","content":"C","tags":[]}]}"#.to_string())
+        }
+    }
 
     #[test]
     fn parse_add_item_type_accepts_supported_values() {
@@ -338,5 +370,24 @@ mod tests {
     fn parse_add_item_type_rejects_unknown_value() {
         let err = parse_add_item_type("invalid").expect_err("expected invalid type error");
         assert!(err.to_string().contains("无效的类型"));
+    }
+
+    #[tokio::test]
+    async fn cli_extract_persists_document_and_items_together() {
+        let temp = tempdir().unwrap();
+        let store = SqliteStore::open(&temp.path().join("refine.db")).unwrap();
+
+        let items =
+            extract_and_persist_cli_content("Human: hello\nAssistant: world", &store, &FakeLlm)
+                .await
+                .unwrap();
+
+        assert_eq!(items.len(), 1);
+        let doc_id = items[0].document_id().unwrap();
+        assert!(DocumentRepository::find_by_id(&store, doc_id)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(ItemRepository::count_items(&store, None).await.unwrap(), 1);
     }
 }

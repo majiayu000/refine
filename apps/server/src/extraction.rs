@@ -54,6 +54,10 @@ async fn run_extraction(
     if let Some(title) = &conversation.title {
         doc.set_title(title);
     }
+    let captured_at = chrono::DateTime::parse_from_rfc3339(&conversation.captured_at)
+        .map_err(|err| format!("invalid conversation captured_at: {err}"))?
+        .with_timezone(&chrono::Utc);
+    doc.set_captured_at(captured_at);
     let doc = canonicalize_document(&state.doc_store, doc).await?;
     let doc_id = doc.id().clone();
 
