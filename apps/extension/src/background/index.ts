@@ -22,6 +22,7 @@ import {
   RETRY_BASE_DELAY_MS,
   RETRY_MAX_DELAY_MS,
 } from '../lib/config'
+import { OutboxRuntime, type OutboxSnapshot } from '../lib/outbox-runtime'
 import type {
   ConversationPayload,
   ExtensionStats,
@@ -43,14 +44,7 @@ const DEFAULT_STATS: ExtensionStats = {
 
 const DEFAULT_SYNC_STATE: SyncState = {}
 
-let flushPromise: Promise<void> | null = null
 let cloudStatusCache: CloudStatusCache | null = null
-
-interface StorageSnapshot {
-  stats: ExtensionStats
-  outbox: OutboxItem[]
-  syncState: SyncState
-}
 
 interface CloudStatusCache {
   updatedAt: number
@@ -100,50 +94,7 @@ function formatQuotaExceededMessage(quota: QuotaStatusResponse): string {
   return '额度不足，请升级会员或提高服务端额度后重试。'
 }
 
-function backoffDelayMs(attemptCount: number): number {
-  const multiplier = Math.max(0, attemptCount - 1)
-  const delay = RETRY_BASE_DELAY_MS * 2 ** multiplier
-  return Math.min(delay, RETRY_MAX_DELAY_MS)
-}
-
-function createOutboxItem(payload: ConversationPayload): OutboxItem {
-  const now = Date.now()
-  return {
-    id: crypto.randomUUID(),
-    idempotencyKey: crypto.randomUUID(),
-    payload,
-    status: 'pending',
-    attemptCount: 0,
-    nextAttemptAt: now,
-    createdAt: now,
-    updatedAt: now,
-  }
-}
-
-function pruneOutbox(outbox: OutboxItem[]): OutboxItem[] {
-  const sentTtlMs = 24 * 60 * 60 * 1_000
-  const now = Date.now()
-  return outbox.filter((item) => item.status !== 'sent' || now - item.updatedAt <= sentTtlMs)
-}
-
-function recoverStuckSyncingItems(outbox: OutboxItem[], now = Date.now()): boolean {
-  let changed = false
-
-  for (const item of outbox) {
-    if (item.status !== 'syncing') continue
-    if (now - item.updatedAt < SYNCING_RECOVERY_STALE_MS) continue
-
-    item.status = 'failed'
-    item.lastError = item.lastError || 'Sync interrupted, retry scheduled'
-    item.nextAttemptAt = now
-    item.updatedAt = now
-    changed = true
-  }
-
-  return changed
-}
-
-async function buildSyncStatus(snapshot: StorageSnapshot): Promise<SyncStatus> {
+async function buildSyncStatus(snapshot: OutboxSnapshot): Promise<SyncStatus> {
   const counts = {
     pending: 0,
     syncing: 0,
@@ -163,7 +114,7 @@ async function buildSyncStatus(snapshot: StorageSnapshot): Promise<SyncStatus> {
   }
 }
 
-async function loadSnapshot(): Promise<StorageSnapshot> {
+async function loadSnapshot(): Promise<OutboxSnapshot> {
   const result = await chrome.storage.local.get([STATS_KEY, OUTBOX_KEY, SYNC_STATE_KEY])
   return {
     stats: (result[STATS_KEY] as ExtensionStats | undefined) || { ...DEFAULT_STATS },
@@ -172,7 +123,7 @@ async function loadSnapshot(): Promise<StorageSnapshot> {
   }
 }
 
-async function saveSnapshot(snapshot: StorageSnapshot): Promise<void> {
+async function saveSnapshot(snapshot: OutboxSnapshot): Promise<void> {
   await chrome.storage.local.set({
     [STATS_KEY]: snapshot.stats,
     [OUTBOX_KEY]: snapshot.outbox,
@@ -180,12 +131,29 @@ async function saveSnapshot(snapshot: StorageSnapshot): Promise<void> {
   })
 }
 
+const outboxRuntime = new OutboxRuntime({
+  storage: { load: loadSnapshot, save: saveSnapshot },
+  upload: uploadConversation,
+  retryBaseDelayMs: RETRY_BASE_DELAY_MS,
+  retryMaxDelayMs: RETRY_MAX_DELAY_MS,
+  syncingRecoveryStaleMs: SYNCING_RECOVERY_STALE_MS,
+  onSynced(item, result) {
+    void trackEvent({
+      event_name: 'conversation_synced',
+      source: item.payload.source,
+      properties: {
+        provider: item.payload.source,
+        outbox_item_id: item.id,
+        remote_conversation_id: result.conversationId || null,
+        attempt_count: item.attemptCount,
+      },
+      occurred_at: new Date().toISOString(),
+    })
+  },
+})
+
 async function initializeStorage(): Promise<void> {
-  const snapshot = await loadSnapshot()
-  const now = Date.now()
-  recoverStuckSyncingItems(snapshot.outbox, now)
-  snapshot.outbox = pruneOutbox(snapshot.outbox)
-  await saveSnapshot(snapshot)
+  await outboxRuntime.initialize()
 }
 
 async function getCloudStatusWithCache(): Promise<{
@@ -227,9 +195,7 @@ async function getCloudStatusWithCache(): Promise<{
 }
 
 async function resetDailyStats(): Promise<void> {
-  const snapshot = await loadSnapshot()
-  snapshot.stats.todayExtracted = 0
-  await saveSnapshot(snapshot)
+  await outboxRuntime.resetDailyStats()
 }
 
 async function enqueueConversation(payload: ConversationPayload): Promise<EnqueueConversationResult> {
@@ -241,11 +207,7 @@ async function enqueueConversation(payload: ConversationPayload): Promise<Enqueu
     }
   }
 
-  const snapshot = await loadSnapshot()
-  const item = createOutboxItem(payload)
-  snapshot.outbox.push(item)
-  snapshot.stats.todayExtracted += 1
-  await saveSnapshot(snapshot)
+  const item = await outboxRuntime.enqueue(payload)
 
   void trackEvent({
     event_name: 'conversation_extracted',
@@ -267,67 +229,7 @@ async function enqueueConversation(payload: ConversationPayload): Promise<Enqueu
 }
 
 async function flushOutboxNow(): Promise<void> {
-  await flushOutboxWithOptions({ forceRetry: false })
-}
-
-async function flushOutboxWithOptions(options: { forceRetry: boolean }): Promise<void> {
-  const snapshot = await loadSnapshot()
-  const now = Date.now()
-  const forceRetry = options.forceRetry
-  let changed = recoverStuckSyncingItems(snapshot.outbox, now)
-
-  for (const item of snapshot.outbox) {
-    if (item.status === 'sent') continue
-    if (item.status !== 'pending' && item.status !== 'failed') continue
-    if (!forceRetry && item.nextAttemptAt > now) continue
-    if (forceRetry && item.status === 'failed') {
-      item.nextAttemptAt = now
-    }
-
-    item.status = 'syncing'
-    item.updatedAt = Date.now()
-    changed = true
-    await saveSnapshot(snapshot)
-
-    const result = await uploadConversation(item)
-
-    if (result.success) {
-      item.status = 'sent'
-      item.lastError = undefined
-      item.remoteConversationId = result.conversationId
-      item.updatedAt = Date.now()
-      snapshot.stats.totalItems += 1
-      snapshot.syncState.lastSyncedAt = Date.now()
-      snapshot.syncState.lastError = undefined
-      changed = true
-
-      void trackEvent({
-        event_name: 'conversation_synced',
-        source: item.payload.source,
-        properties: {
-          provider: item.payload.source,
-          outbox_item_id: item.id,
-          remote_conversation_id: result.conversationId || null,
-          attempt_count: item.attemptCount,
-        },
-        occurred_at: new Date().toISOString(),
-      })
-      continue
-    }
-
-    item.status = 'failed'
-    item.attemptCount += 1
-    item.lastError = result.message || 'Unknown cloud sync error'
-    item.nextAttemptAt = Date.now() + backoffDelayMs(item.attemptCount)
-    item.updatedAt = Date.now()
-    snapshot.syncState.lastError = item.lastError
-    changed = true
-  }
-
-  if (changed) {
-    snapshot.outbox = pruneOutbox(snapshot.outbox)
-    await saveSnapshot(snapshot)
-  }
+  await outboxRuntime.requestFlush(false)
 }
 
 async function flushOutbox(): Promise<void> {
@@ -335,16 +237,7 @@ async function flushOutbox(): Promise<void> {
 }
 
 async function flushOutboxWith(options: { forceRetry: boolean }): Promise<void> {
-  if (flushPromise) {
-    await flushPromise
-    if (!options.forceRetry) return
-  }
-
-  flushPromise = flushOutboxWithOptions(options).finally(() => {
-    flushPromise = null
-  })
-
-  return flushPromise
+  return outboxRuntime.requestFlush(options.forceRetry)
 }
 
 async function ensureAlarms(): Promise<void> {
