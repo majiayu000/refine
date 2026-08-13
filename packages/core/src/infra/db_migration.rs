@@ -724,13 +724,19 @@ fn copy_table(
         "extraction_jobs" if common.iter().any(|c| c == "updated_at") => format!(
             "ON CONFLICT(id) DO UPDATE SET {assignments} \
              WHERE ( \
-               julianday(excluded.updated_at) > julianday(extraction_jobs.updated_at) \
-               OR (julianday(excluded.updated_at) = julianday(extraction_jobs.updated_at) \
-                   AND excluded.updated_at > extraction_jobs.updated_at) \
-             ) AND ( \
-               extraction_jobs.status = excluded.status \
-               OR (extraction_jobs.status = 'pending' AND excluded.status IN ('running','failed')) \
-               OR (extraction_jobs.status = 'running' AND excluded.status IN ('succeeded','failed')) \
+               extraction_jobs.status = excluded.status AND ( \
+                 julianday(excluded.updated_at) > julianday(extraction_jobs.updated_at) \
+                 OR (julianday(excluded.updated_at) = julianday(extraction_jobs.updated_at) \
+                     AND excluded.updated_at > extraction_jobs.updated_at) \
+               ) \
+             ) OR ( \
+               julianday(excluded.updated_at) >= julianday(extraction_jobs.updated_at) \
+               AND ( \
+                 extraction_jobs.status = 'pending' \
+                   AND excluded.status IN ('running','succeeded','failed') \
+                 OR extraction_jobs.status = 'running' \
+                   AND excluded.status IN ('succeeded','failed') \
+               ) \
              )"
         ),
         "conversations" => format!(
@@ -1396,6 +1402,98 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "succeeded");
+    }
+
+    #[test]
+    fn job_snapshots_can_skip_intermediate_states_monotonically() {
+        for (target_status, source_status, target_time, source_time, expected) in [
+            (
+                "pending",
+                "succeeded",
+                "2026-01-01T00:00:00Z",
+                "2026-01-02T00:00:00Z",
+                "succeeded",
+            ),
+            (
+                "pending",
+                "running",
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+                "running",
+            ),
+            (
+                "succeeded",
+                "failed",
+                "2026-01-01T00:00:00Z",
+                "2026-01-02T00:00:00Z",
+                "succeeded",
+            ),
+            (
+                "failed",
+                "succeeded",
+                "2026-01-01T00:00:00Z",
+                "2026-01-02T00:00:00Z",
+                "failed",
+            ),
+            (
+                "failed",
+                "running",
+                "2026-01-01T00:00:00Z",
+                "2026-01-02T00:00:00Z",
+                "failed",
+            ),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let target = make_target_db(tmp.path());
+            let tc = Connection::open(&target).unwrap();
+            tc.execute_batch(&format!(
+                "INSERT INTO conversations
+                   (id, user_id, source, url, raw_content, captured_at, created_at,
+                    status, idempotency_key, item_ids)
+                 VALUES
+                   ('conv-matrix', 'u', 'target', 'https://example.com/matrix', 'body',
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'processed',
+                    'matrix-key', '[]');
+                 INSERT INTO extraction_jobs
+                   (id, conversation_id, mode, status, created_at, updated_at)
+                 VALUES
+                   ('job-matrix', 'conv-matrix', 'auto', '{target_status}',
+                    '2026-01-01T00:00:00Z', '{target_time}');"
+            ))
+            .unwrap();
+            drop(tc);
+
+            let legacy = tmp.path().join("server.db");
+            let lc = Connection::open(&legacy).unwrap();
+            crate::infra::prepare_sqlite_db(&lc).unwrap();
+            lc.execute_batch(&format!(
+                "INSERT INTO conversations
+                   (id, user_id, source, url, raw_content, captured_at, created_at,
+                    status, idempotency_key, item_ids)
+                 VALUES
+                   ('conv-matrix', 'u', 'legacy', 'https://example.com/matrix', 'body',
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'processed',
+                    'matrix-key', '[]');
+                 INSERT INTO extraction_jobs
+                   (id, conversation_id, mode, status, created_at, updated_at)
+                 VALUES
+                   ('job-matrix', 'conv-matrix', 'auto', '{source_status}',
+                    '2026-01-01T00:00:00Z', '{source_time}');"
+            ))
+            .unwrap();
+            drop(lc);
+
+            migrate_stale_dbs(&target).unwrap();
+            let actual: String = Connection::open(&target)
+                .unwrap()
+                .query_row(
+                    "SELECT status FROM extraction_jobs WHERE id='job-matrix'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(actual, expected, "{target_status} -> {source_status}");
+        }
     }
 
     #[test]
