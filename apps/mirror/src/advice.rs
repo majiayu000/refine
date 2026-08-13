@@ -10,6 +10,7 @@ use std::sync::Arc;
 const ADVICE_CACHE_VERSION: &str = "advice-v2";
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
+const ADVICE_STALE_AFTER_HOURS: i64 = 72;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CachedAdvice {
@@ -23,6 +24,12 @@ pub struct CachedAdvice {
     pub cache_key: String,
     #[serde(default)]
     pub model_identity: String,
+}
+
+impl CachedAdvice {
+    pub fn is_stale(&self) -> bool {
+        (Utc::now() - self.generated_at).num_hours() >= ADVICE_STALE_AFTER_HOURS
+    }
 }
 
 pub fn load_cached() -> Result<Option<CachedAdvice>> {
@@ -61,12 +68,10 @@ fn load_cached_matching_key(
     if expected_key.is_some_and(|key| cached.cache_key != key) {
         return Ok(None);
     }
-    let age = Utc::now() - cached.generated_at;
-    if age.num_hours() < 72 {
-        Ok(Some(cached))
-    } else {
-        Ok(None)
+    if expected_key.is_some() && cached.is_stale() {
+        return Ok(None);
     }
+    Ok(Some(cached))
 }
 
 fn save_cached(advice: &str, short: &str, cache_key: &str, model_identity: &str) -> Result<()> {
@@ -251,13 +256,27 @@ mod tests {
     }
 
     #[test]
-    fn test_load_cached_returns_none_for_stale_cache() {
+    fn test_load_cached_returns_stale_cache_for_display_callers() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("advice.json");
         let cached = cached_advice("stale", Utc::now() - Duration::hours(80));
         std::fs::write(&path, serde_json::to_string(&cached).unwrap()).unwrap();
 
-        let loaded = load_cached_from_path(&path).unwrap();
+        let loaded = load_cached_from_path(&path)
+            .unwrap()
+            .expect("display callers need stale cache visibility");
+        assert!(loaded.is_stale());
+        assert_eq!(loaded.advice, "stale");
+    }
+
+    #[test]
+    fn test_load_cached_for_generation_ignores_stale_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("advice.json");
+        let cached = cached_advice("stale", Utc::now() - Duration::hours(80));
+        std::fs::write(&path, serde_json::to_string(&cached).unwrap()).unwrap();
+
+        let loaded = load_cached_for_key_from_path(&path, "cache-key").unwrap();
         assert!(loaded.is_none());
     }
 

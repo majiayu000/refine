@@ -33,6 +33,7 @@ pub(super) fn make_cluster(
             ProjectCluster {
                 project_name: name.to_string(),
                 session_count: *sessions,
+                doc_ids: std::collections::HashSet::new(),
                 summary_excerpts: Vec::new(),
                 decision_titles: dec_titles.iter().map(|s| s.to_string()).collect(),
                 bugfix_titles: Vec::new(),
@@ -81,6 +82,7 @@ pub(super) fn make_cluster_with_data(
             ProjectCluster {
                 project_name: name.to_string(),
                 session_count: *sessions,
+                doc_ids: std::collections::HashSet::new(),
                 summary_excerpts: Vec::new(),
                 decision_titles: dec_titles.iter().map(|s| s.to_string()).collect(),
                 bugfix_titles: Vec::new(),

@@ -34,9 +34,7 @@ use baseline::{trend_from_personal, PersonalBaseline};
 use types::Trend;
 
 #[cfg(test)]
-use compute::{
-    analyze_tension, dreyfus_weighted, friction_density, knowledge_rate, layer1, layer3,
-};
+use compute::{analyze_tension, dreyfus_weighted, layer1, layer3};
 
 #[cfg(test)]
 use persistence::load_recent_scores_from_path;

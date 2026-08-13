@@ -38,7 +38,7 @@ impl IndicatorSpec {
     }
 }
 
-const INDICATOR_SPECS: [IndicatorSpec; 11] = [
+const INDICATOR_SPECS: [IndicatorSpec; 8] = [
     IndicatorSpec {
         key: "dreyfus",
         format: IndicatorFormat::Fixed1,
@@ -54,22 +54,6 @@ const INDICATOR_SPECS: [IndicatorSpec; 11] = [
         aliases: &["Decision Quality", "决策质量"],
         display_en: "Decision Quality",
         display_zh: "决策质量",
-    },
-    IndicatorSpec {
-        key: "depth_output",
-        format: IndicatorFormat::Percent0,
-        direction: Direction::HigherBetter,
-        aliases: &["Depth Output", "深度产出比"],
-        display_en: "Depth Output",
-        display_zh: "深度产出比",
-    },
-    IndicatorSpec {
-        key: "knowledge_rate",
-        format: IndicatorFormat::Fixed1,
-        direction: Direction::HigherBetter,
-        aliases: &["Knowledge", "知识获取"],
-        display_en: "Knowledge",
-        display_zh: "知识获取",
     },
     IndicatorSpec {
         key: "exploration",
@@ -118,14 +102,6 @@ const INDICATOR_SPECS: [IndicatorSpec; 11] = [
         aliases: &["Bug/Decision", "bug/decision", "bug/决策"],
         display_en: "bug/decision",
         display_zh: "bug/决策",
-    },
-    IndicatorSpec {
-        key: "friction_density",
-        format: IndicatorFormat::Fixed1,
-        direction: Direction::LowerBetter,
-        aliases: &["Friction", "摩擦密度"],
-        display_en: "Friction",
-        display_zh: "摩擦密度",
     },
 ];
 

@@ -34,15 +34,15 @@ fn test_personal_baseline_calculation() {
     let bl = baseline.unwrap();
     assert!((bl.average("dreyfus").unwrap() - 3.5).abs() < f64::EPSILON);
     assert!((bl.average("decision_quality").unwrap() - 60.0).abs() < f64::EPSILON);
-    assert!((bl.average("depth_output").unwrap() - 10.0).abs() < f64::EPSILON);
     assert!((bl.average("exploration").unwrap() - 20.0).abs() < f64::EPSILON);
     assert!((bl.average("deep_invest").unwrap() - 25.0).abs() < f64::EPSILON);
     assert!((bl.average("fragmentation").unwrap() - 15.0).abs() < f64::EPSILON);
     assert!((bl.average("delegation").unwrap() - 30.0).abs() < f64::EPSILON);
     assert!((bl.average("mode_diversity").unwrap() - 4.0).abs() < f64::EPSILON);
     assert!((bl.average("bug_decision").unwrap() - 0.20).abs() < f64::EPSILON);
-    assert!((bl.average("knowledge_rate").unwrap() - 0.5).abs() < f64::EPSILON);
-    assert!((bl.average("friction_density").unwrap() - 0.8).abs() < f64::EPSILON);
+    assert!(bl.average("depth_output").is_none());
+    assert!(bl.average("knowledge_rate").is_none());
+    assert!(bl.average("friction_density").is_none());
 }
 
 #[test]
@@ -254,15 +254,12 @@ fn test_personal_baseline_mixed_legacy_schema_repro() {
         bl.average("decision_quality").unwrap()
     );
     assert!(
-        (bl.average("knowledge_rate").unwrap() - 0.9).abs() < f64::EPSILON,
-        "missing legacy entries should not dilute knowledge_rate avg, got {}",
-        bl.average("knowledge_rate").unwrap()
+        (bl.average("bug_decision").unwrap() - 0.10).abs() < f64::EPSILON,
+        "legacy aliases should still populate bug_decision, got {}",
+        bl.average("bug_decision").unwrap()
     );
-    assert!(
-        (bl.average("friction_density").unwrap() - 0.7).abs() < f64::EPSILON,
-        "missing legacy entries should not dilute friction_density avg, got {}",
-        bl.average("friction_density").unwrap()
-    );
+    assert!(bl.average("knowledge_rate").is_none());
+    assert!(bl.average("friction_density").is_none());
 }
 
 #[test]

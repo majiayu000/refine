@@ -316,6 +316,7 @@ mod tests {
         ProjectCluster {
             project_name: name.to_string(),
             session_count,
+            doc_ids: std::collections::HashSet::new(),
             summary_excerpts: Vec::new(),
             decision_titles: Vec::new(),
             bugfix_titles: Vec::new(),
