@@ -730,7 +730,11 @@ fn copy_table(
                      AND excluded.updated_at > extraction_jobs.updated_at) \
                ) \
              ) OR ( \
-               julianday(excluded.updated_at) >= julianday(extraction_jobs.updated_at) \
+               ( \
+                 julianday(excluded.updated_at) > julianday(extraction_jobs.updated_at) \
+                 OR (julianday(excluded.updated_at) = julianday(extraction_jobs.updated_at) \
+                     AND excluded.updated_at >= extraction_jobs.updated_at) \
+               ) \
                AND ( \
                  extraction_jobs.status = 'pending' \
                    AND excluded.status IN ('running','succeeded','failed') \
@@ -1402,6 +1406,98 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "succeeded");
+    }
+
+    #[test]
+    fn job_forward_transitions_preserve_submillisecond_timestamp_order() {
+        for (case, source_time, expected) in [
+            (
+                "older",
+                "2026-01-01T00:00:00.123100Z",
+                ("pending", "auto", "2026-01-01T00:00:00.123400Z", None),
+            ),
+            (
+                "equal",
+                "2026-01-01T00:00:00.123400Z",
+                (
+                    "running",
+                    "manual",
+                    "2026-01-01T00:00:00.123400Z",
+                    Some("source error"),
+                ),
+            ),
+            (
+                "newer",
+                "2026-01-01T00:00:00.123499Z",
+                (
+                    "running",
+                    "manual",
+                    "2026-01-01T00:00:00.123499Z",
+                    Some("source error"),
+                ),
+            ),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let target = make_target_db(tmp.path());
+            let tc = Connection::open(&target).unwrap();
+            tc.execute_batch(
+                "INSERT INTO conversations
+                   (id, user_id, source, url, raw_content, captured_at, created_at,
+                    status, idempotency_key, item_ids)
+                 VALUES
+                   ('conv-submillisecond', 'u', 'target', 'https://example.com/submillisecond',
+                    'body', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                    'processed', 'submillisecond-key', '[]');
+                 INSERT INTO extraction_jobs
+                   (id, conversation_id, mode, status, created_at, updated_at, error)
+                 VALUES
+                   ('job-submillisecond', 'conv-submillisecond', 'auto', 'pending',
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00.123400Z', NULL);",
+            )
+            .unwrap();
+            drop(tc);
+
+            let legacy = tmp.path().join("server.db");
+            let lc = Connection::open(&legacy).unwrap();
+            crate::infra::prepare_sqlite_db(&lc).unwrap();
+            lc.execute_batch(&format!(
+                "INSERT INTO conversations
+                   (id, user_id, source, url, raw_content, captured_at, created_at,
+                    status, idempotency_key, item_ids)
+                 VALUES
+                   ('conv-submillisecond', 'u', 'legacy', 'https://example.com/submillisecond',
+                    'body', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                    'processed', 'submillisecond-key', '[]');
+                 INSERT INTO extraction_jobs
+                   (id, conversation_id, mode, status, created_at, updated_at, error)
+                 VALUES
+                   ('job-submillisecond', 'conv-submillisecond', 'manual', 'running',
+                    '2026-01-01T00:00:00Z', '{source_time}', 'source error');"
+            ))
+            .unwrap();
+            drop(lc);
+
+            migrate_stale_dbs(&target).unwrap();
+            let actual: (String, String, String, Option<String>) = Connection::open(&target)
+                .unwrap()
+                .query_row(
+                    "SELECT status, mode, updated_at, error
+                     FROM extraction_jobs WHERE id='job-submillisecond'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                actual,
+                (
+                    expected.0.into(),
+                    expected.1.into(),
+                    expected.2.into(),
+                    expected.3.map(String::from),
+                ),
+                "{case} source timestamp"
+            );
+        }
     }
 
     #[test]
