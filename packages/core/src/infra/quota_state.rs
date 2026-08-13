@@ -70,8 +70,7 @@ pub fn set_exhausted(retry_after_secs: Option<u64>) {
             .min(MAX_QUOTA_BACKOFF_SECS)
     });
 
-    let until = Utc::now() + Duration::from_secs(secs);
-    let timestamp = until.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let timestamp = quota_deadline_timestamp(Utc::now(), secs);
 
     let path = quota_file_path();
     if let Some(parent) = path.parent() {
@@ -85,6 +84,10 @@ pub fn set_exhausted(retry_after_secs: Option<u64>) {
     if std::fs::write(&tmp, &timestamp).is_ok() {
         let _ = std::fs::rename(&tmp, &path);
     }
+}
+
+fn quota_deadline_timestamp(now: DateTime<Utc>, secs: u64) -> String {
+    (now + Duration::from_secs(secs)).to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
 
 fn env_override_secs() -> Option<u64> {
@@ -154,6 +157,24 @@ mod tests {
         let contents = fs::read_to_string(&path).unwrap();
         let parsed: DateTime<Utc> = contents.trim().parse().expect("must be valid ISO-8601");
         assert!(parsed > before, "written timestamp must be in the future");
+    }
+
+    #[test]
+    fn set_exhausted_preserves_subsecond_deadline_precision() {
+        let now = DateTime::parse_from_rfc3339("2026-08-13T12:34:56.789123456Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let contents = quota_deadline_timestamp(now, 1);
+        assert!(
+            contents.contains('.'),
+            "quota marker should preserve subsecond precision: {contents}"
+        );
+        let parsed: DateTime<Utc> = contents.trim().parse().expect("valid marker timestamp");
+        assert_eq!(
+            parsed.signed_duration_since(now),
+            chrono::Duration::seconds(1)
+        );
+        assert_eq!(contents, "2026-08-13T12:34:57.789123456Z");
     }
 
     #[test]

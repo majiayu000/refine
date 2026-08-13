@@ -286,17 +286,24 @@ fn classify_provider_error(
 }
 
 fn parse_retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<u64> {
+    parse_retry_after_at(value, SystemTime::now())
+}
+
+fn parse_retry_after_at(
+    value: Option<&reqwest::header::HeaderValue>,
+    now: SystemTime,
+) -> Option<u64> {
     let value = value?.to_str().ok()?.trim();
     if let Ok(seconds) = value.parse::<u64>() {
         return Some(seconds);
     }
 
     let retry_at = httpdate::parse_http_date(value).ok()?;
+    let remaining = retry_at.duration_since(now).unwrap_or_default();
     Some(
-        retry_at
-            .duration_since(SystemTime::now())
-            .unwrap_or_default()
-            .as_secs(),
+        remaining
+            .as_secs()
+            .saturating_add(u64::from(remaining.subsec_nanos() > 0)),
     )
 }
 
@@ -534,6 +541,27 @@ mod tests {
         let invalid = reqwest::header::HeaderValue::from_static("not-a-delay");
         assert_eq!(parse_retry_after(Some(&invalid)), None);
         assert_eq!(parse_retry_after(None), None);
+    }
+
+    #[test]
+    fn retry_after_http_date_rounds_future_fraction_up_without_extending_past_dates() {
+        let retry_at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100);
+        let header =
+            reqwest::header::HeaderValue::from_str(&httpdate::fmt_http_date(retry_at)).unwrap();
+
+        let half_second_before = SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(99_500);
+        assert_eq!(
+            parse_retry_after_at(Some(&header), half_second_before),
+            Some(1)
+        );
+        assert_eq!(parse_retry_after_at(Some(&header), retry_at), Some(0));
+        assert_eq!(
+            parse_retry_after_at(
+                Some(&header),
+                retry_at + std::time::Duration::from_millis(1)
+            ),
+            Some(0)
+        );
     }
 
     #[tokio::test]
