@@ -1,4 +1,5 @@
-export type ItemType = 'knowledge' | 'skill' | 'snippet'
+export type ItemType = 'knowledge' | 'skill' | 'snippet' | 'observation'
+export type CreatableItemType = Exclude<ItemType, 'observation'>
 
 export interface Item {
   id: string
@@ -59,7 +60,7 @@ export interface CreateItemParams {
   title: string
   summary: string
   content: string
-  item_type?: ItemType
+  item_type?: CreatableItemType
   tags?: string[]
 }
 

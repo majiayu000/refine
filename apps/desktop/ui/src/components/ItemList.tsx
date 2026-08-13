@@ -1,36 +1,12 @@
 import {
-  BookOpenText,
   Clock3,
-  Code2,
   Inbox,
   LoaderCircle,
-  Wrench,
-  type LucideIcon,
 } from 'lucide-react'
 import { useStore } from '../lib/store'
 import { cn } from '../lib/utils'
 import type { Item } from '../lib/api/types'
-
-const typeMeta: Record<
-  Item['item_type'],
-  { label: string; icon: LucideIcon; chipClass: string }
-> = {
-  knowledge: {
-    label: '知识',
-    icon: BookOpenText,
-    chipClass: 'bg-brand-100 text-brand-800 border border-brand-200',
-  },
-  skill: {
-    label: '技能',
-    icon: Wrench,
-    chipClass: 'bg-amber-100 text-amber-800 border border-amber-200',
-  },
-  snippet: {
-    label: '片段',
-    icon: Code2,
-    chipClass: 'bg-slate-100 text-slate-700 border border-slate-200',
-  },
-}
+import { getItemTypeMeta } from '../lib/item-type-meta'
 
 function formatShortDate(date: string): string {
   return new Date(date).toLocaleDateString('zh-CN', {
@@ -115,7 +91,7 @@ function ItemCard({
   isSelected: boolean
   onClick: () => void
 }) {
-  const meta = typeMeta[item.item_type]
+  const meta = getItemTypeMeta(item.item_type)
   const Icon = meta.icon
 
   return (
@@ -130,7 +106,7 @@ function ItemCard({
     >
       <div className="flex items-center justify-between gap-2">
         <span
-          className={cn('inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[11px] font-semibold', meta.chipClass)}
+          className={cn('inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[11px] font-semibold', meta.chipClass)}
         >
           <Icon className="h-3.5 w-3.5" />
           {meta.label}
