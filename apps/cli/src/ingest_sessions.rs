@@ -10,6 +10,7 @@ use crate::remem_sessions::{
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use refine_core::error::InfraError;
 use refine_core::infra::{
     llm_with_retry_policy, LlmClient, LlmRetryPolicy, DEFAULT_MAX_RETRIES,
@@ -25,6 +26,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -228,9 +231,11 @@ fn write_ingest_cursor_at(path: &Path, state: &IngestCursorState) -> Result<()> 
     let nonce = Utc::now().timestamp_nanos_opt().unwrap_or_default();
     let temp_path = path.with_extension(format!("tmp-{}-{nonce}", std::process::id()));
     let payload = serde_json::to_vec(state).context("failed to serialize ingest cursor")?;
-    let mut temp = OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut temp = options
         .open(&temp_path)
         .with_context(|| format!("failed to create {}", temp_path.display()))?;
     temp.write_all(&payload)
@@ -240,7 +245,34 @@ fn write_ingest_cursor_at(path: &Path, state: &IngestCursorState) -> Result<()> 
     drop(temp);
     std::fs::rename(&temp_path, path)
         .with_context(|| format!("failed to replace {}", path.display()))?;
+    std::fs::File::open(dir)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("failed to sync {}", dir.display()))?;
     Ok(())
+}
+
+fn lock_incremental_cursor(
+    source: Option<&SessionSource>,
+    db_path: &Path,
+) -> Result<std::fs::File> {
+    let home = dirs::home_dir().context("home directory is unavailable for ingest cursor")?;
+    let cursor_path = incremental_cursor_path(&home, source, db_path);
+    let parent = cursor_path
+        .parent()
+        .context("ingest cursor has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+    let lock_path = cursor_path.with_extension("lock");
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let lock = options
+        .open(&lock_path)
+        .with_context(|| format!("failed to open {}", lock_path.display()))?;
+    lock.lock_exclusive()
+        .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+    Ok(lock)
 }
 
 fn unix_seconds(t: SystemTime) -> u64 {
@@ -492,6 +524,13 @@ async fn handle_legacy_ingest_sessions(
     // 1-hour overlap on the cutoff absorbs clock skew and files modified near the boundary.
     let incremental = options.limit.is_none() && options.latest.is_none() && !options.dry_run;
     let source = options.source.clone();
+    // Serialize the complete read/scan/process/write cycle so an older,
+    // slower run cannot overwrite a newer safe watermark or failure set.
+    let _cursor_lock = if incremental {
+        Some(lock_incremental_cursor(source.as_ref(), db_path)?)
+    } else {
+        None
+    };
     let scan_start = SystemTime::now();
     let mtime_after = if incremental {
         read_last_ingest_mtime(source.as_ref(), db_path).map(|last| {
