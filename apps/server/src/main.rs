@@ -445,7 +445,7 @@ mod tests {
 
     #[tokio::test]
     async fn trusted_origin_receives_cors_headers_when_configured() {
-        let trusted_origin = "https://trusted.example";
+        let trusted_origin = "http://127.0.0.1:8987";
         let (_tmp, app) = test_app(
             AuthConfig {
                 api_token: None,
@@ -463,7 +463,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
-            Some(&HeaderValue::from_static("https://trusted.example"))
+            Some(&HeaderValue::from_static("http://127.0.0.1:8987"))
         );
         assert!(response
             .headers()
