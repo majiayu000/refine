@@ -866,7 +866,7 @@ async fn llm_call_with_retry(
     }
 
     let prompt = build_facet_prompt(content);
-    match llm_with_retry_policy(
+    let result = llm_with_retry_policy(
         client,
         &prompt,
         FACET_SYSTEM_PROMPT,
@@ -880,8 +880,15 @@ async fn llm_call_with_retry(
             );
         },
     )
-    .await
-    {
+    .await;
+    finish_llm_call(result, quota_hit)
+}
+
+fn finish_llm_call(
+    result: std::result::Result<String, InfraError>,
+    quota_hit: &Arc<AtomicBool>,
+) -> Result<String> {
+    match result {
         Ok(response) => Ok(response),
         Err(InfraError::RateLimited { retry_after_secs }) => {
             quota_hit.store(true, Ordering::Relaxed);
