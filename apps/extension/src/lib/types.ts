@@ -17,6 +17,7 @@ export interface OutboxItem {
   nextAttemptAt: number
   lastError?: string
   remoteConversationId?: string
+  syncLeaseId?: string
   createdAt: number
   updatedAt: number
 }
