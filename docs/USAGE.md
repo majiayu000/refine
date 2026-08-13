@@ -73,6 +73,30 @@ win over that file. A repository `.env` remains an explicit development
 fallback only, and scheduled scripts pass it to the loader after the process
 and secure-file sources.
 
+### Strict extraction timeout and retry policy
+
+CLI `refine extract`, desktop extraction, and server extraction all use the
+same protected core path for both the initial LLM request and a JSON-repair
+request. Each attempt has a timeout, and transient timeouts, HTTP 408/425/5xx,
+and recognized transport failures are retried with exponential backoff. Auth,
+HTTP 429/rate-limit responses, content-policy rejection, and other
+deterministic errors fail immediately. Extraction does not consult or update
+the legacy process-global quota marker, because that marker is not scoped by
+provider, endpoint, or credential.
+
+The defaults and bounded process-environment overrides are:
+
+| Variable | Default | Accepted range | Meaning |
+|----------|---------|----------------|---------|
+| `REFINE_EXTRACTION_MAX_ATTEMPTS` | `3` | `1..=5` | Total attempts per initial or repair request, including the first call |
+| `REFINE_EXTRACTION_RETRY_BASE_DELAY_SECS` | `1` | `0..=60` | Base delay; later retries use exponential backoff |
+| `REFINE_EXTRACTION_REQUEST_TIMEOUT_MILLIS` | `90000` | `1000..=300000` | Timeout for each provider attempt |
+
+Numeric values outside a range are clamped to its nearest bound. Missing,
+empty, or invalid values use the documented default. These settings are read
+by the shared core extraction path, so callers should not add their own retry
+loop around it.
+
 ## 3. Run Sync Stack (Server + Extension)
 
 ### Start server

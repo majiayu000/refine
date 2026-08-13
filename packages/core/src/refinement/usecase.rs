@@ -4,7 +4,7 @@
 //! 供 server/desktop/cli 复用，避免多处重复实现。
 
 use crate::error::{DomainError, DomainResult, InfraResult};
-use crate::infra::LlmClient;
+use crate::infra::{llm_with_retry_policy_ref, LlmClient, LlmRetryBehavior, LlmRetryPolicy};
 use crate::knowledge::{Document, DocumentId, DocumentRepository, Item, Source};
 use crate::refinement::{
     Conversation, ExtractionPolicy, ExtractionResult, Extractor, PromptTemplate,
@@ -14,6 +14,55 @@ pub const EXTRACTION_SYSTEM_PROMPT: &str =
     "你是 Refine 的知识提炼助手。严格按要求返回 JSON，不要输出额外说明文本。";
 pub const JSON_REPAIR_SYSTEM_PROMPT: &str =
     "你是 JSON 修复器。只输出一个合法 JSON 对象，不要输出 markdown 或解释。";
+pub const DEFAULT_EXTRACTION_MAX_ATTEMPTS: usize = 3;
+pub const DEFAULT_EXTRACTION_RETRY_BASE_DELAY_SECS: u64 = 1;
+pub const DEFAULT_EXTRACTION_REQUEST_TIMEOUT_MILLIS: u64 = 90_000;
+const MAX_EXTRACTION_ATTEMPTS: usize = 5;
+const MAX_EXTRACTION_RETRY_BASE_DELAY_SECS: u64 = 60;
+const MIN_EXTRACTION_REQUEST_TIMEOUT_MILLIS: u64 = 1_000;
+const MAX_EXTRACTION_REQUEST_TIMEOUT_MILLIS: u64 = 300_000;
+
+/// Bounded extraction policy. Environment overrides are intentionally capped
+/// so a typo cannot restore an effectively unbounded provider wait or retry
+/// storm.
+pub fn extraction_retry_policy_from_env() -> LlmRetryPolicy {
+    extraction_retry_policy_with(|key| std::env::var(key).ok())
+}
+
+fn extraction_retry_policy_with(mut get: impl FnMut(&str) -> Option<String>) -> LlmRetryPolicy {
+    let max_retries = parse_bounded_env(
+        get("REFINE_EXTRACTION_MAX_ATTEMPTS"),
+        DEFAULT_EXTRACTION_MAX_ATTEMPTS,
+        1,
+        MAX_EXTRACTION_ATTEMPTS,
+    );
+    let base_delay_secs = parse_bounded_env(
+        get("REFINE_EXTRACTION_RETRY_BASE_DELAY_SECS"),
+        DEFAULT_EXTRACTION_RETRY_BASE_DELAY_SECS,
+        0,
+        MAX_EXTRACTION_RETRY_BASE_DELAY_SECS,
+    );
+    let request_timeout_millis = parse_bounded_env(
+        get("REFINE_EXTRACTION_REQUEST_TIMEOUT_MILLIS"),
+        DEFAULT_EXTRACTION_REQUEST_TIMEOUT_MILLIS,
+        MIN_EXTRACTION_REQUEST_TIMEOUT_MILLIS,
+        MAX_EXTRACTION_REQUEST_TIMEOUT_MILLIS,
+    );
+    LlmRetryPolicy {
+        max_retries,
+        base_delay_secs,
+        request_timeout_millis,
+    }
+}
+
+fn parse_bounded_env<T>(raw: Option<String>, default: T, min: T, max: T) -> T
+where
+    T: Copy + Ord + std::str::FromStr,
+{
+    raw.and_then(|value| value.trim().parse::<T>().ok())
+        .map(|value| value.clamp(min, max))
+        .unwrap_or(default)
+}
 
 /// 提炼输入参数（供多端复用）
 pub struct ItemExtractionInput<'a> {
@@ -112,16 +161,37 @@ pub async fn extract_items_with_llm(
     raw_content: &str,
     policy: ExtractionPolicy,
 ) -> DomainResult<Vec<Item>> {
+    extract_items_with_llm_policy(
+        llm_client,
+        raw_content,
+        policy,
+        extraction_retry_policy_from_env(),
+    )
+    .await
+}
+
+async fn extract_items_with_llm_policy(
+    llm_client: &dyn LlmClient,
+    raw_content: &str,
+    policy: ExtractionPolicy,
+    retry_policy: LlmRetryPolicy,
+) -> DomainResult<Vec<Item>> {
     let conversation = Conversation::parse(raw_content)?;
     let prompt = PromptTemplate::extraction_prompt(&conversation.raw, &policy);
-    let llm_response = llm_client
-        .complete(&prompt, Some(EXTRACTION_SYSTEM_PROMPT))
-        .await
-        .map_err(|err| DomainError::Extraction(format!("LLM 调用失败: {}", err)))?;
+    let llm_response =
+        protected_llm_call(llm_client, &prompt, EXTRACTION_SYSTEM_PROMPT, retry_policy)
+            .await
+            .map_err(|err| DomainError::Extraction(format!("LLM 调用失败: {}", err)))?;
 
     let extractor = Extractor::new(policy);
-    let extraction =
-        parse_extraction_with_repair(llm_client, &extractor, &conversation, &llm_response).await?;
+    let extraction = parse_extraction_with_repair(
+        llm_client,
+        &extractor,
+        &conversation,
+        &llm_response,
+        retry_policy,
+    )
+    .await?;
 
     if extraction.items.is_empty() {
         return Err(DomainError::Extraction("提炼结果为空".to_string()));
@@ -130,11 +200,37 @@ pub async fn extract_items_with_llm(
     Ok(extraction.items)
 }
 
+async fn protected_llm_call(
+    llm_client: &dyn LlmClient,
+    prompt: &str,
+    system: &str,
+    retry_policy: LlmRetryPolicy,
+) -> InfraResult<String> {
+    llm_with_retry_policy_ref(
+        llm_client,
+        prompt,
+        system,
+        retry_policy,
+        LlmRetryBehavior::EXTRACTION,
+        |attempt, max_attempts, delay_secs, err| {
+            tracing::warn!(
+                attempt,
+                max_attempts,
+                delay_secs,
+                error = %err,
+                "LLM extraction attempt failed; retrying"
+            );
+        },
+    )
+    .await
+}
+
 async fn parse_extraction_with_repair(
     llm_client: &dyn LlmClient,
     extractor: &Extractor,
     conversation: &Conversation,
     raw_response: &str,
+    retry_policy: LlmRetryPolicy,
 ) -> DomainResult<ExtractionResult> {
     match extractor.parse_response(raw_response, conversation) {
         Ok(extraction) => Ok(extraction),
@@ -143,12 +239,16 @@ async fn parse_extraction_with_repair(
             tracing::warn!("首次提炼解析失败，尝试 JSON 修复重试: {}", first_message);
 
             let repair_prompt = build_json_repair_prompt(raw_response, &first_message);
-            let repaired_response = llm_client
-                .complete(&repair_prompt, Some(JSON_REPAIR_SYSTEM_PROMPT))
-                .await
-                .map_err(|err| {
-                    DomainError::Extraction(format!("原始解析失败，且 JSON 修复请求失败: {}", err))
-                })?;
+            let repaired_response = protected_llm_call(
+                llm_client,
+                &repair_prompt,
+                JSON_REPAIR_SYSTEM_PROMPT,
+                retry_policy,
+            )
+            .await
+            .map_err(|err| {
+                DomainError::Extraction(format!("原始解析失败，且 JSON 修复请求失败: {}", err))
+            })?;
 
             extractor
                 .parse_response(&repaired_response, conversation)
@@ -193,15 +293,29 @@ fn build_json_repair_prompt(raw_response: &str, parse_error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::InfraResult;
+    use crate::error::{InfraError, InfraResult};
     use async_trait::async_trait;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     struct SequenceLlmClient {
         responses: Arc<Mutex<Vec<String>>>,
     }
 
     struct AlwaysFailLlmClient;
+
+    enum LlmStep {
+        Return(InfraResult<String>),
+        Delayed(Duration, InfraResult<String>),
+    }
+
+    struct ScriptedLlmClient {
+        calls: AtomicUsize,
+        steps: Mutex<VecDeque<LlmStep>>,
+        systems: Mutex<Vec<Option<String>>>,
+    }
 
     impl SequenceLlmClient {
         fn new(responses: Vec<&str>) -> Self {
@@ -210,6 +324,24 @@ mod tests {
                     responses.into_iter().map(ToString::to_string).collect(),
                 )),
             }
+        }
+    }
+
+    impl ScriptedLlmClient {
+        fn new(steps: Vec<LlmStep>) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                steps: Mutex::new(VecDeque::from(steps)),
+                systems: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::Relaxed)
+        }
+
+        fn systems(&self) -> Vec<Option<String>> {
+            self.systems.lock().expect("systems lock poisoned").clone()
         }
     }
 
@@ -235,6 +367,251 @@ mod tests {
             Err(crate::error::InfraError::LlmRequest(
                 "mock failure".to_string(),
             ))
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for ScriptedLlmClient {
+        async fn complete(&self, _prompt: &str, system: Option<&str>) -> InfraResult<String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.systems
+                .lock()
+                .expect("systems lock poisoned")
+                .push(system.map(ToString::to_string));
+            let step = self
+                .steps
+                .lock()
+                .expect("steps lock poisoned")
+                .pop_front()
+                .unwrap_or_else(|| {
+                    LlmStep::Return(Err(InfraError::LlmRequest(
+                        "no scripted response".to_string(),
+                    )))
+                });
+            match step {
+                LlmStep::Return(result) => result,
+                LlmStep::Delayed(delay, result) => {
+                    tokio::time::sleep(delay).await;
+                    result
+                }
+            }
+        }
+    }
+
+    fn immediate_response(response: &str) -> LlmStep {
+        LlmStep::Return(Ok(response.to_string()))
+    }
+
+    fn immediate_error(error: InfraError) -> LlmStep {
+        LlmStep::Return(Err(error))
+    }
+
+    fn delayed_response(delay_millis: u64, response: &str) -> LlmStep {
+        LlmStep::Delayed(
+            Duration::from_millis(delay_millis),
+            Ok(response.to_string()),
+        )
+    }
+
+    fn fast_retry_policy(max_attempts: usize, timeout_millis: u64) -> LlmRetryPolicy {
+        LlmRetryPolicy {
+            max_retries: max_attempts,
+            base_delay_secs: 0,
+            request_timeout_millis: timeout_millis,
+        }
+    }
+
+    const VALID_EXTRACTION: &str =
+        r#"{"items":[{"type":"knowledge","title":"T","summary":"S","content":"C","tags":[]}] }"#;
+    const INVALID_EXTRACTION: &str = r#"{"items":[{"type":"knowledge","title":"broken""#;
+
+    #[test]
+    fn extraction_environment_policy_defaults_and_clamps_overrides() {
+        let defaults = extraction_retry_policy_with(|_| None);
+        assert_eq!(defaults.max_retries, DEFAULT_EXTRACTION_MAX_ATTEMPTS);
+        assert_eq!(
+            defaults.base_delay_secs,
+            DEFAULT_EXTRACTION_RETRY_BASE_DELAY_SECS
+        );
+        assert_eq!(
+            defaults.request_timeout_millis,
+            DEFAULT_EXTRACTION_REQUEST_TIMEOUT_MILLIS
+        );
+
+        let bounded = extraction_retry_policy_with(|key| match key {
+            "REFINE_EXTRACTION_MAX_ATTEMPTS" => Some("99".to_string()),
+            "REFINE_EXTRACTION_RETRY_BASE_DELAY_SECS" => Some("999".to_string()),
+            "REFINE_EXTRACTION_REQUEST_TIMEOUT_MILLIS" => Some("1".to_string()),
+            _ => None,
+        });
+        assert_eq!(bounded.max_retries, MAX_EXTRACTION_ATTEMPTS);
+        assert_eq!(
+            bounded.base_delay_secs,
+            MAX_EXTRACTION_RETRY_BASE_DELAY_SECS
+        );
+        assert_eq!(
+            bounded.request_timeout_millis,
+            MIN_EXTRACTION_REQUEST_TIMEOUT_MILLIS
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_extraction_retries_transient_failure() {
+        let client = ScriptedLlmClient::new(vec![
+            immediate_error(InfraError::LlmHttp {
+                status: 503,
+                message: "temporarily unavailable".to_string(),
+            }),
+            immediate_response(VALID_EXTRACTION),
+        ]);
+
+        let items = extract_items_with_llm_policy(
+            &client,
+            "Human: hello\nAssistant: world",
+            ExtractionPolicy::default(),
+            fast_retry_policy(2, 50),
+        )
+        .await
+        .expect("transient initial failure should recover");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(client.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn initial_extraction_timeout_is_bounded_and_retried() {
+        let client = ScriptedLlmClient::new(vec![
+            delayed_response(30, VALID_EXTRACTION),
+            immediate_response(VALID_EXTRACTION),
+        ]);
+
+        let items = extract_items_with_llm_policy(
+            &client,
+            "Human: hello\nAssistant: world",
+            ExtractionPolicy::default(),
+            fast_retry_policy(2, 5),
+        )
+        .await
+        .expect("timed-out initial attempt should recover");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(client.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn initial_extraction_does_not_retry_deterministic_errors() {
+        for error in [
+            InfraError::LlmHttp {
+                status: 401,
+                message: "invalid api key".to_string(),
+            },
+            InfraError::LlmHttp {
+                status: 429,
+                message: "rate limited".to_string(),
+            },
+            InfraError::LlmRejected {
+                code: "content_filter".to_string(),
+                message: "blocked".to_string(),
+            },
+        ] {
+            let client = ScriptedLlmClient::new(vec![
+                immediate_error(error),
+                immediate_response(VALID_EXTRACTION),
+            ]);
+            extract_items_with_llm_policy(
+                &client,
+                "Human: hello\nAssistant: world",
+                ExtractionPolicy::default(),
+                fast_retry_policy(3, 50),
+            )
+            .await
+            .expect_err("auth, rate-limit, and content-policy failures must fail fast");
+            assert_eq!(client.calls(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn json_repair_retries_transient_failure() {
+        let client = ScriptedLlmClient::new(vec![
+            immediate_response(INVALID_EXTRACTION),
+            immediate_error(InfraError::LlmHttp {
+                status: 503,
+                message: "upstream unavailable".to_string(),
+            }),
+            immediate_response(VALID_EXTRACTION),
+        ]);
+
+        let items = extract_items_with_llm_policy(
+            &client,
+            "Human: hello\nAssistant: world",
+            ExtractionPolicy::default(),
+            fast_retry_policy(2, 50),
+        )
+        .await
+        .expect("transient repair failure should recover");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(client.calls(), 3);
+        assert_eq!(
+            client.systems(),
+            vec![
+                Some(EXTRACTION_SYSTEM_PROMPT.to_string()),
+                Some(JSON_REPAIR_SYSTEM_PROMPT.to_string()),
+                Some(JSON_REPAIR_SYSTEM_PROMPT.to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn json_repair_timeout_is_bounded_and_retried() {
+        let client = ScriptedLlmClient::new(vec![
+            immediate_response(INVALID_EXTRACTION),
+            delayed_response(30, VALID_EXTRACTION),
+            immediate_response(VALID_EXTRACTION),
+        ]);
+
+        let items = extract_items_with_llm_policy(
+            &client,
+            "Human: hello\nAssistant: world",
+            ExtractionPolicy::default(),
+            fast_retry_policy(2, 5),
+        )
+        .await
+        .expect("timed-out repair attempt should recover");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(client.calls(), 3);
+    }
+
+    #[tokio::test]
+    async fn json_repair_does_not_retry_deterministic_errors() {
+        for error in [
+            InfraError::LlmHttp {
+                status: 429,
+                message: "rate limited".to_string(),
+            },
+            InfraError::LlmRejected {
+                code: "content_filter".to_string(),
+                message: "blocked".to_string(),
+            },
+        ] {
+            let client = ScriptedLlmClient::new(vec![
+                immediate_response(INVALID_EXTRACTION),
+                immediate_error(error),
+                immediate_response(VALID_EXTRACTION),
+            ]);
+
+            let error = extract_items_with_llm_policy(
+                &client,
+                "Human: hello\nAssistant: world",
+                ExtractionPolicy::default(),
+                fast_retry_policy(3, 50),
+            )
+            .await
+            .expect_err("deterministic repair failure must fail fast");
+
+            assert!(error.to_string().contains("JSON 修复请求失败"));
+            assert_eq!(client.calls(), 2);
         }
     }
 
