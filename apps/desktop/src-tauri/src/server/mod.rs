@@ -7,7 +7,7 @@ mod http;
 mod json;
 
 use refine_core::infra::{build_required_llm_client_from_env, LlmClient};
-use refine_core::knowledge::ItemRepository;
+use refine_core::knowledge::{DocumentRepository, ItemRepository};
 use std::sync::Arc;
 use tiny_http::Server;
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -16,7 +16,7 @@ const DEFAULT_SERVER_PORT: u16 = 21567;
 const MAX_SERVER_WORKERS: usize = 8;
 
 /// 启动 HTTP 服务器
-pub fn start_server(store: Arc<dyn ItemRepository>) {
+pub fn start_server(store: Arc<dyn ItemRepository>, doc_store: Arc<dyn DocumentRepository>) {
     std::thread::spawn(move || {
         let port = resolve_server_port();
         let server = match Server::http(format!("127.0.0.1:{}", port)) {
@@ -51,9 +51,10 @@ pub fn start_server(store: Arc<dyn ItemRepository>) {
         for _ in 0..worker_count {
             let server = Arc::clone(&server);
             let store = Arc::clone(&store);
+            let doc_store = Arc::clone(&doc_store);
             let llm_client = llm_client.clone();
             handles.push(std::thread::spawn(move || {
-                run_worker(server, store, llm_client);
+                run_worker(server, store, doc_store, llm_client);
             }));
         }
 
@@ -73,6 +74,7 @@ fn resolve_server_port() -> u16 {
 fn run_worker(
     server: Arc<Server>,
     store: Arc<dyn ItemRepository>,
+    doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) {
     let runtime = match RuntimeBuilder::new_current_thread().enable_all().build() {
@@ -89,7 +91,13 @@ fn run_worker(
             Err(_) => break,
         };
 
-        let response = http::handle_request(&mut request, &store, &runtime, llm_client.as_ref());
+        let response = http::handle_request(
+            &mut request,
+            &store,
+            &doc_store,
+            &runtime,
+            llm_client.as_ref(),
+        );
         let _ = request.respond(response);
     }
 }

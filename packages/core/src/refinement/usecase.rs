@@ -3,9 +3,9 @@
 //! 在不引入新 crate 的过渡阶段，将 LLM 调用、JSON 修复集中，
 //! 供 server/desktop/cli 复用，避免多处重复实现。
 
-use crate::error::{DomainError, DomainResult};
+use crate::error::{DomainError, DomainResult, InfraResult};
 use crate::infra::LlmClient;
-use crate::knowledge::{DocumentId, Item, Source};
+use crate::knowledge::{Document, DocumentId, DocumentRepository, Item, Source};
 use crate::refinement::{
     Conversation, ExtractionPolicy, ExtractionResult, Extractor, PromptTemplate,
 };
@@ -22,6 +22,59 @@ pub struct ItemExtractionInput<'a> {
     pub raw_content: &'a str,
     pub captured_at: Option<&'a str>,
     pub policy: ExtractionPolicy,
+}
+
+/// A document and all items extracted from it. Persist this aggregate through
+/// `DocumentRepository::save_with_replaced_items` so foreign keys and partial
+/// writes cannot diverge.
+pub struct ExtractedDocument {
+    pub document: Document,
+    pub items: Vec<Item>,
+}
+
+/// Build and strictly extract one complete document aggregate.
+pub async fn extract_document_with_strict_defaults(
+    llm_client: &dyn LlmClient,
+    input: &ItemExtractionInput<'_>,
+    source: &Source,
+) -> DomainResult<ExtractedDocument> {
+    let mut document = Document::new(input.source, input.raw_content);
+    if let Some(title) = input.title.filter(|value| !value.trim().is_empty()) {
+        document.set_title(title);
+    }
+    if let Some(url) = source.url.as_deref() {
+        document.set_url(url);
+    } else {
+        document.set_url(&format!("refine://{}/{}", input.source, document.id()));
+    }
+    if let Some(captured_at) = input.captured_at {
+        let captured_at = chrono::DateTime::parse_from_rfc3339(captured_at)
+            .map_err(|err| {
+                DomainError::Validation(format!("invalid captured_at timestamp: {err}"))
+            })?
+            .with_timezone(&chrono::Utc);
+        document.set_captured_at(captured_at);
+    }
+
+    let items =
+        extract_items_with_strict_defaults(llm_client, input, source, document.id()).await?;
+    Ok(ExtractedDocument { document, items })
+}
+
+/// Persist the complete extracted aggregate through the repository's atomic
+/// document+items boundary and return the stable item identities.
+pub async fn persist_extracted_document(
+    repository: &dyn DocumentRepository,
+    aggregate: &ExtractedDocument,
+) -> InfraResult<Vec<String>> {
+    repository
+        .save_with_replaced_items(&aggregate.document, &aggregate.items)
+        .await?;
+    Ok(aggregate
+        .items
+        .iter()
+        .map(|item| item.id().to_string())
+        .collect())
 }
 
 /// 为提炼结果补齐来源、文档关联与兜底 content。
@@ -265,5 +318,110 @@ mod tests {
             items[0].document_id().map(|id| id.as_str()),
             Some(doc_id.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn extracted_document_uses_one_identity_for_document_and_items() {
+        let client = SequenceLlmClient::new(vec![
+            r#"{"items":[{"type":"knowledge","title":"T","summary":"S","content":"C","tags":[]}]}"#,
+        ]);
+        let input = ItemExtractionInput {
+            source: "cli",
+            title: Some("Imported conversation"),
+            raw_content: "Human: hello\nAssistant: world",
+            captured_at: Some("2026-08-13T00:00:00Z"),
+            policy: ExtractionPolicy::default(),
+        };
+        let source = Source::new("cli").with_url("stdin://conversation");
+
+        let aggregate = extract_document_with_strict_defaults(&client, &input, &source)
+            .await
+            .unwrap();
+
+        assert_eq!(aggregate.document.title(), Some("Imported conversation"));
+        assert_eq!(aggregate.document.url(), "stdin://conversation");
+        assert_eq!(aggregate.items.len(), 1);
+        assert_eq!(
+            aggregate.items[0].document_id(),
+            Some(aggregate.document.id())
+        );
+    }
+
+    #[tokio::test]
+    async fn extracted_document_persists_document_and_items_atomically() {
+        use crate::infra::SqliteStore;
+        use crate::knowledge::{DocumentRepository, ItemRepository};
+        use tempfile::tempdir;
+
+        let client = SequenceLlmClient::new(vec![
+            r#"{"items":[{"type":"knowledge","title":"T","summary":"S","content":"C","tags":[]}]}"#,
+        ]);
+        let input = ItemExtractionInput {
+            source: "cli",
+            title: None,
+            raw_content: "Human: hello\nAssistant: world",
+            captured_at: None,
+            policy: ExtractionPolicy::default(),
+        };
+        let aggregate = extract_document_with_strict_defaults(&client, &input, &Source::new("cli"))
+            .await
+            .unwrap();
+        let temp = tempdir().unwrap();
+        let store = SqliteStore::open(&temp.path().join("refine.db")).unwrap();
+
+        let ids = persist_extracted_document(&store, &aggregate)
+            .await
+            .unwrap();
+
+        assert_eq!(ids.len(), 1);
+        assert!(
+            DocumentRepository::find_by_id(&store, aggregate.document.id())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let persisted = ItemRepository::find_by_document_id(&store, aggregate.document.id())
+            .await
+            .unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].id().as_str(), ids[0]);
+    }
+
+    #[tokio::test]
+    async fn aggregate_persistence_rolls_back_document_and_prior_items_on_failure() {
+        use crate::infra::SqliteStore;
+        use crate::knowledge::{DocumentRepository, ItemRepository};
+        use tempfile::tempdir;
+
+        let client = SequenceLlmClient::new(vec![
+            r#"{"items":[{"type":"knowledge","title":"first","summary":"S","content":"C","tags":[]},{"type":"skill","title":"second","summary":"S","content":"C","tags":[]}]}"#,
+        ]);
+        let input = ItemExtractionInput {
+            source: "cli",
+            title: None,
+            raw_content: "Human: hello\nAssistant: world",
+            captured_at: None,
+            policy: ExtractionPolicy::default(),
+        };
+        let mut aggregate =
+            extract_document_with_strict_defaults(&client, &input, &Source::new("cli"))
+                .await
+                .unwrap();
+        aggregate.items[1].set_document_id(DocumentId::from("missing-document"));
+        let temp = tempdir().unwrap();
+        let store = SqliteStore::open(&temp.path().join("refine.db")).unwrap();
+
+        let err = persist_extracted_document(&store, &aggregate)
+            .await
+            .expect_err("the second item must violate its document foreign key");
+
+        assert!(err.to_string().contains("FOREIGN KEY"));
+        assert!(
+            DocumentRepository::find_by_id(&store, aggregate.document.id())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(ItemRepository::count_items(&store, None).await.unwrap(), 0);
     }
 }

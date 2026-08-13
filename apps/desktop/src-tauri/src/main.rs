@@ -15,7 +15,7 @@ fn main() {
     let state = app::build_state();
 
     // 启动 HTTP API 服务器（供浏览器扩展调用）
-    server::start_server(state.store.clone());
+    server::start_server(state.store.clone(), state.doc_store.clone());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())

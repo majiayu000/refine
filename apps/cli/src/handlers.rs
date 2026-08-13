@@ -7,7 +7,10 @@ use refine_core::infra::SqliteStore;
 use refine_core::knowledge::{
     DocumentId, DocumentRepository, Item, ItemId, ItemRepository, ItemType, Source,
 };
-use refine_core::refinement::{apply_defaults, extract_items_with_llm, ExtractionPolicy};
+use refine_core::refinement::{
+    extract_document_with_strict_defaults, persist_extracted_document, ExtractionPolicy,
+    ItemExtractionInput,
+};
 use refine_core::search::{SearchEngine, SearchQuery};
 use refine_core::session::SessionSource;
 use std::io::{self, Read};
@@ -120,18 +123,24 @@ async fn handle_extract(stdin: bool, store: Arc<SqliteStore>) -> Result<()> {
     io::stdin().read_to_string(&mut content)?;
 
     let llm_client = build_llm_client_from_env()?;
-    let mut items =
-        extract_items_with_llm(llm_client.as_ref(), &content, ExtractionPolicy::default())
-            .await
-            .context("提炼失败")?;
     let source = Source::new("cli");
-    let doc_id = DocumentId::new();
-    apply_defaults(&mut items, &source, &doc_id, &content);
+    let input = ItemExtractionInput {
+        source: "cli",
+        title: None,
+        raw_content: &content,
+        captured_at: None,
+        policy: ExtractionPolicy::default(),
+    };
+    let aggregate = extract_document_with_strict_defaults(llm_client.as_ref(), &input, &source)
+        .await
+        .context("提炼失败")?;
 
-    let item_store: &dyn ItemRepository = store.as_ref();
-    println!("提炼完成：{} 条", items.len());
-    for item in &items {
-        item_store.save(item).await?;
+    let doc_store: &dyn DocumentRepository = store.as_ref();
+    persist_extracted_document(doc_store, &aggregate)
+        .await
+        .context("保存提炼结果失败")?;
+    println!("提炼完成：{} 条", aggregate.items.len());
+    for item in &aggregate.items {
         println!(
             "  + [{}] {} ({})",
             format!("{:?}", item.item_type()).to_lowercase(),

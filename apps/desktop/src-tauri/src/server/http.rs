@@ -4,7 +4,7 @@ use refine_core::infra::{
     normalize_conversation_input, validate_contract_version, CreateConversationRequest, ItemDto,
     LlmClient, CONTRACT_VERSION, CONTRACT_VERSION_HEADER,
 };
-use refine_core::knowledge::ItemRepository;
+use refine_core::knowledge::{DocumentRepository, ItemRepository};
 use serde_json::json;
 use std::io::Cursor;
 use std::sync::Arc;
@@ -18,6 +18,7 @@ const CLIENT_HEADER_VALUE: &str = "extension";
 pub(super) fn handle_request(
     request: &mut tiny_http::Request,
     store: &Arc<dyn ItemRepository>,
+    doc_store: &Arc<dyn DocumentRepository>,
     runtime: &Runtime,
     llm_client: Option<&Arc<dyn LlmClient>>,
 ) -> Response<Cursor<Vec<u8>>> {
@@ -62,7 +63,7 @@ pub(super) fn handle_request(
             }
             handle_create_conversation(
                 request,
-                store,
+                doc_store,
                 runtime,
                 llm_client,
                 allowed_origin.as_deref(),
@@ -84,7 +85,7 @@ pub(super) fn handle_request(
 
 fn handle_create_conversation(
     request: &mut tiny_http::Request,
-    store: &Arc<dyn ItemRepository>,
+    doc_store: &Arc<dyn DocumentRepository>,
     runtime: &Runtime,
     llm_client: Option<&Arc<dyn LlmClient>>,
     allowed_origin: Option<&str>,
@@ -122,7 +123,7 @@ fn handle_create_conversation(
         };
 
     let extract_result = extract::ingest_conversation(
-        store,
+        doc_store,
         runtime,
         llm_client,
         IngestRequest {

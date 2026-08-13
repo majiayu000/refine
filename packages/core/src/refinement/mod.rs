@@ -17,6 +17,7 @@ pub use conversation::{Conversation, Message, Role};
 pub use extractor::{ExtractionResult, Extractor};
 pub use policy::{ExtractionPolicy, PromptTemplate};
 pub use usecase::{
-    apply_defaults, extract_items_with_llm, extract_items_with_strict_defaults,
+    apply_defaults, extract_document_with_strict_defaults, extract_items_with_llm,
+    extract_items_with_strict_defaults, persist_extracted_document, ExtractedDocument,
     ItemExtractionInput, EXTRACTION_SYSTEM_PROMPT, JSON_REPAIR_SYSTEM_PROMPT,
 };
