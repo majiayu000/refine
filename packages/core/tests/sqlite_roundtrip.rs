@@ -528,6 +528,9 @@ async fn pending_job_can_record_startup_failure_without_regressing_terminal_stat
         created_at: now.clone(),
         updated_at: now,
         error: None,
+        attempt_count: 0,
+        lease_owner: None,
+        lease_expires_at: None,
     };
 
     store.upsert_job(&job).await.expect("insert pending job");

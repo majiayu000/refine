@@ -18,7 +18,7 @@ pub mod quota_state;
 mod sqlite;
 
 const FTS_BOOTSTRAP_USER_VERSION: i64 = 1;
-const ALLOWED_COLUMN_EXISTS_TABLES: &[&str] = &["items", "documents"];
+const ALLOWED_COLUMN_EXISTS_TABLES: &[&str] = &["items", "documents", "extraction_jobs"];
 const ALLOWED_FOREIGN_KEY_TABLES: &[&str] = &["items", "extraction_jobs"];
 
 pub fn prepare_sqlite_db(conn: &Connection) -> InfraResult<()> {
@@ -32,6 +32,7 @@ pub fn prepare_sqlite_db(conn: &Connection) -> InfraResult<()> {
     migrate_documents_add_source_version(&tx)?;
     migrate_documents_url_unique(&tx)?;
     migrate_items_document_fk(&tx)?;
+    migrate_extraction_jobs_add_lease_columns(&tx)?;
     migrate_extraction_jobs_conversation_fk(&tx)?;
     maybe_rebuild_fts_index(&tx)?;
     tx.commit()
@@ -365,11 +366,16 @@ fn migrate_extraction_jobs_conversation_fk(conn: &Connection) -> InfraResult<()>
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             error TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            lease_owner TEXT,
+            lease_expires_at TEXT,
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
         );
         INSERT INTO extraction_jobs
-          (id, conversation_id, mode, status, created_at, updated_at, error)
-        SELECT id, conversation_id, mode, status, created_at, updated_at, error
+          (id, conversation_id, mode, status, created_at, updated_at, error,
+           attempt_count, lease_owner, lease_expires_at)
+        SELECT id, conversation_id, mode, status, created_at, updated_at, error,
+               attempt_count, lease_owner, lease_expires_at
         FROM extraction_jobs_without_conversation_fk
         WHERE EXISTS (
             SELECT 1
@@ -379,10 +385,37 @@ fn migrate_extraction_jobs_conversation_fk(conn: &Connection) -> InfraResult<()>
         DROP TABLE extraction_jobs_without_conversation_fk;
         CREATE INDEX IF NOT EXISTS idx_extraction_jobs_conversation
         ON extraction_jobs(conversation_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_extraction_jobs_recovery
+        ON extraction_jobs(status, lease_expires_at, created_at);
         "#,
     )
     .map_err(|e| InfraError::Database(e.to_string()))?;
 
+    Ok(())
+}
+
+fn migrate_extraction_jobs_add_lease_columns(conn: &Connection) -> InfraResult<()> {
+    if !column_exists(conn, "extraction_jobs", "attempt_count")? {
+        conn.execute_batch(
+            "ALTER TABLE extraction_jobs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0",
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    }
+    if !column_exists(conn, "extraction_jobs", "lease_owner")? {
+        conn.execute_batch("ALTER TABLE extraction_jobs ADD COLUMN lease_owner TEXT")
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+    }
+    if !column_exists(conn, "extraction_jobs", "lease_expires_at")? {
+        conn.execute_batch("ALTER TABLE extraction_jobs ADD COLUMN lease_expires_at TEXT")
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+    }
+    conn.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_extraction_jobs_recovery
+        ON extraction_jobs(status, lease_expires_at, created_at);
+        "#,
+    )
+    .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(())
 }
 

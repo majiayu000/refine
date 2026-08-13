@@ -326,6 +326,17 @@ impl ConversationRepository for SqliteStore {
         self.request(|resp| SqliteCommand::ConversationInsertOrFetchByIdempotency { record, resp })
             .await
     }
+
+    async fn insert_or_fetch_conversation_with_job(
+        &self,
+        record: &ConversationRecord,
+        job: &ExtractionJobRecord,
+    ) -> InfraResult<(ConversationRecord, Option<ExtractionJobRecord>)> {
+        let record = record.clone();
+        let job = job.clone();
+        self.request(|resp| SqliteCommand::ConversationInsertOrFetchWithJob { record, job, resp })
+            .await
+    }
 }
 
 #[async_trait]
@@ -340,6 +351,114 @@ impl JobRepository for SqliteStore {
         let job = job.clone();
         self.request(|resp| SqliteCommand::JobUpsert { job, resp })
             .await
+    }
+
+    async fn enqueue_job(&self, job: &ExtractionJobRecord) -> InfraResult<ExtractionJobRecord> {
+        let job = job.clone();
+        self.request(|resp| SqliteCommand::JobEnqueue { job, resp })
+            .await
+    }
+
+    async fn list_recoverable_jobs(
+        &self,
+        now: &str,
+        limit: usize,
+    ) -> InfraResult<Vec<ExtractionJobRecord>> {
+        let now = now.to_string();
+        self.request(|resp| SqliteCommand::JobListRecoverable { now, limit, resp })
+            .await
+    }
+
+    async fn claim_job(
+        &self,
+        id: &str,
+        owner: &str,
+        now: &str,
+        lease_expires_at: &str,
+    ) -> InfraResult<Option<ExtractionJobRecord>> {
+        let id = id.to_string();
+        let owner = owner.to_string();
+        let now = now.to_string();
+        let lease_expires_at = lease_expires_at.to_string();
+        self.request(|resp| SqliteCommand::JobClaim {
+            id,
+            owner,
+            now,
+            lease_expires_at,
+            resp,
+        })
+        .await
+    }
+
+    async fn renew_job_lease(
+        &self,
+        id: &str,
+        owner: &str,
+        now: &str,
+        lease_expires_at: &str,
+    ) -> InfraResult<bool> {
+        let id = id.to_string();
+        let owner = owner.to_string();
+        let now = now.to_string();
+        let lease_expires_at = lease_expires_at.to_string();
+        self.request(|resp| SqliteCommand::JobRenewLease {
+            id,
+            owner,
+            now,
+            lease_expires_at,
+            resp,
+        })
+        .await
+    }
+
+    async fn finish_job_claim(
+        &self,
+        id: &str,
+        owner: &str,
+        status: crate::conversation::JobStatus,
+        item_ids: &[String],
+        error: Option<&str>,
+        now: &str,
+    ) -> InfraResult<bool> {
+        let id = id.to_string();
+        let owner = owner.to_string();
+        let item_ids = item_ids.to_vec();
+        let error = error.map(ToString::to_string);
+        let now = now.to_string();
+        self.request(|resp| SqliteCommand::JobFinishClaim {
+            id,
+            owner,
+            status,
+            item_ids,
+            error,
+            now,
+            resp,
+        })
+        .await
+    }
+
+    async fn finish_job_claim_with_results(
+        &self,
+        id: &str,
+        owner: &str,
+        document: &Document,
+        items: &[Item],
+        now: &str,
+    ) -> InfraResult<bool> {
+        let id = id.to_string();
+        let owner = owner.to_string();
+        let document = document.clone();
+        let items = items.to_vec();
+        let now = now.to_string();
+        self.request(|resp| SqliteCommand::JobFinishClaimWithResults {
+            id,
+            owner,
+            document,
+            items,
+            now,
+            resp,
+        })
+        .await
     }
 }
 

@@ -105,49 +105,56 @@ pub async fn create_conversation(
         last_error: None,
     };
 
-    // Atomically insert or, on idempotency-key conflict, fetch the existing row.
-    // Comparing returned id against the generated id reveals deduplication.
-    let persisted = state
-        .conversation_repo
-        .insert_or_fetch_conversation_by_idempotency(&conversation)
-        .await
-        .map_err(|err| CreateConversationError::Internal(err.to_string()))?;
-
-    if persisted.id != conversation_id {
+    if ingest_only {
+        let persisted = state
+            .conversation_repo
+            .insert_or_fetch_conversation_by_idempotency(&conversation)
+            .await
+            .map_err(|err| CreateConversationError::Internal(err.to_string()))?;
+        let deduplicated = persisted.id != conversation_id;
         return Ok(CreateConversationResult {
             conversation_id: persisted.id,
             status: persisted.status,
-            deduplicated: true,
+            deduplicated,
             job_id: None,
         });
     }
 
-    let mut job_id = None;
-    if !ingest_only {
-        let id = Uuid::new_v4().to_string();
-        let job = ExtractionJobRecord {
-            id: id.clone(),
-            conversation_id: conversation_id.clone(),
-            mode: mode.clone(),
-            status: JobStatus::Pending,
-            created_at: now.clone(),
-            updated_at: now,
-            error: None,
-        };
-        state
-            .job_repo
-            .upsert_job(&job)
-            .await
-            .map_err(|err| CreateConversationError::Internal(err.to_string()))?;
-        spawn_extraction(state, conversation_id.clone(), id.clone(), mode);
-        job_id = Some(id);
+    let job = ExtractionJobRecord {
+        id: Uuid::new_v4().to_string(),
+        conversation_id: conversation_id.clone(),
+        mode: mode.clone(),
+        status: JobStatus::Pending,
+        created_at: now.clone(),
+        updated_at: now,
+        error: None,
+        attempt_count: 0,
+        lease_owner: None,
+        lease_expires_at: None,
+    };
+    let (persisted, persisted_job) = state
+        .conversation_repo
+        .insert_or_fetch_conversation_with_job(&conversation, &job)
+        .await
+        .map_err(|err| CreateConversationError::Internal(err.to_string()))?;
+    let deduplicated = persisted.id != conversation_id;
+    if let Some(persisted_job) = persisted_job
+        .as_ref()
+        .filter(|job| job.status == JobStatus::Pending)
+    {
+        spawn_extraction(
+            state,
+            persisted.id.clone(),
+            persisted_job.id.clone(),
+            persisted_job.mode.clone(),
+        );
     }
 
     Ok(CreateConversationResult {
-        conversation_id,
-        status: conversation_status,
-        deduplicated: false,
-        job_id,
+        conversation_id: persisted.id,
+        status: persisted.status,
+        deduplicated,
+        job_id: persisted_job.map(|job| job.id),
     })
 }
 
@@ -191,20 +198,12 @@ pub async fn create_extraction_job(
             CreateExtractionJobError::BadRequest("conversation_id is required".to_string())
         })?;
 
-    let mut queued_conversation = state
+    let conversation = state
         .conversation_repo
         .find_conversation_by_id(&conversation_id)
         .await
         .map_err(|err| CreateExtractionJobError::Internal(err.to_string()))?
         .ok_or_else(|| CreateExtractionJobError::NotFound("Conversation not found".to_string()))?;
-    queued_conversation.status = ConversationStatus::Queued;
-    queued_conversation.last_error = None;
-    state
-        .conversation_repo
-        .upsert_conversation(&queued_conversation)
-        .await
-        .map_err(|err| CreateExtractionJobError::Internal(err.to_string()))?;
-
     let mode = ExtractionMode::from_option(payload.mode);
     let now = now_iso();
     let job_id = Uuid::new_v4().to_string();
@@ -216,19 +215,24 @@ pub async fn create_extraction_job(
         created_at: now.clone(),
         updated_at: now,
         error: None,
+        attempt_count: 0,
+        lease_owner: None,
+        lease_expires_at: None,
     };
 
-    state
+    let job = state
         .job_repo
-        .upsert_job(&job)
+        .enqueue_job(&job)
         .await
         .map_err(|err| CreateExtractionJobError::Internal(err.to_string()))?;
 
-    spawn_extraction(state, conversation_id, job_id.clone(), mode);
+    if job.status == JobStatus::Pending {
+        spawn_extraction(state, conversation.id, job.id.clone(), job.mode.clone());
+    }
 
     Ok(CreateExtractionJobResult {
-        job_id,
-        status: JobStatus::Pending,
+        job_id: job.id,
+        status: job.status,
     })
 }
 

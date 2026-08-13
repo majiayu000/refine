@@ -5,11 +5,13 @@ use refine_core::refinement::{
     extract_items_with_strict_defaults, ExtractionPolicy, ItemExtractionInput,
 };
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::sync::oneshot;
+use tokio::time::{interval, Duration};
+use uuid::Uuid;
 
-use crate::models::{
-    now_iso, ConversationRecord, ConversationStatus, ExtractionJobRecord, ExtractionMode, JobStatus,
-};
+use crate::models::{now_iso, ExtractionMode, JobStatus};
 use crate::state::AppState;
 
 pub fn spawn_extraction(
@@ -19,16 +21,53 @@ pub fn spawn_extraction(
     mode: ExtractionMode,
 ) {
     tokio::spawn(async move {
-        if let Err(err) = run_extraction(state.clone(), &conversation_id, &job_id, mode).await {
-            if let Err(persist_err) = set_conversation_failed(&state, &conversation_id, &err).await
-            {
-                tracing::warn!("persist failed conversation failed: {}", persist_err);
-            }
-            if let Err(persist_err) = set_job_failed(&state, &job_id, &err).await {
-                tracing::warn!("persist failed job failed: {}", persist_err);
+        if let Err(err) = run_extraction(state, &conversation_id, &job_id, mode).await {
+            tracing::warn!(job_id, conversation_id, error = %err, "extraction attempt ended");
+        }
+    });
+}
+
+pub async fn recover_extraction_jobs(state: Arc<AppState>) -> Result<usize, String> {
+    let jobs = state
+        .job_repo
+        .list_recoverable_jobs(&now_iso(), 10_000)
+        .await
+        .map_err(|err| format!("failed to list recoverable extraction jobs: {err}"))?;
+    let count = jobs.len();
+    for job in jobs {
+        spawn_extraction(state.clone(), job.conversation_id, job.id, job.mode);
+    }
+    Ok(count)
+}
+
+const LEASE_DURATION_SECS: i64 = 120;
+const HEARTBEAT_INTERVAL_SECS: u64 = 30;
+const RECOVERY_INTERVAL_SECS: u64 = 30;
+
+pub fn spawn_extraction_recovery(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut ticker = interval(Duration::from_secs(RECOVERY_INTERVAL_SECS));
+        // The caller performs the startup sweep after binding the listener.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            match recover_extraction_jobs(state.clone()).await {
+                Ok(0) => {}
+                Ok(count) => tracing::info!(count, "scheduled recoverable extraction jobs"),
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to reconcile extraction jobs")
+                }
             }
         }
     });
+}
+
+fn lease_times() -> (String, String) {
+    let now = chrono::Utc::now();
+    (
+        now.to_rfc3339(),
+        (now + chrono::Duration::seconds(LEASE_DURATION_SECS)).to_rfc3339(),
+    )
 }
 
 async fn run_extraction(
@@ -37,9 +76,95 @@ async fn run_extraction(
     job_id: &str,
     mode: ExtractionMode,
 ) -> Result<(), String> {
-    set_job_running(&state, job_id).await?;
-    set_conversation_status(&state, conversation_id, ConversationStatus::Processing).await?;
+    let owner = Uuid::new_v4().to_string();
+    let (now, lease_expires_at) = lease_times();
+    let claimed = state
+        .job_repo
+        .claim_job(job_id, &owner, &now, &lease_expires_at)
+        .await
+        .map_err(|err| format!("failed to claim extraction job: {err}"))?;
+    if claimed.is_none() {
+        return Err("extraction job is already claimed or terminal".to_string());
+    }
 
+    let lease_valid = Arc::new(AtomicBool::new(true));
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let heartbeat = tokio::spawn(heartbeat_job_lease(
+        state.clone(),
+        job_id.to_string(),
+        owner.clone(),
+        lease_valid.clone(),
+        stop_rx,
+    ));
+    let result = run_claimed_extraction(
+        state.clone(),
+        conversation_id,
+        job_id,
+        mode,
+        &owner,
+        lease_valid,
+    )
+    .await;
+    let _ = stop_tx.send(());
+    let _ = heartbeat.await;
+
+    if let Err(error) = &result {
+        let finished = state
+            .job_repo
+            .finish_job_claim(
+                job_id,
+                &owner,
+                JobStatus::Failed,
+                &[],
+                Some(error),
+                &now_iso(),
+            )
+            .await
+            .map_err(|err| format!("failed to finish extraction claim: {err}"))?;
+        if !finished {
+            return Err("extraction claim was lost before failure was persisted".to_string());
+        }
+    }
+    result
+}
+
+async fn heartbeat_job_lease(
+    state: Arc<AppState>,
+    job_id: String,
+    owner: String,
+    lease_valid: Arc<AtomicBool>,
+    mut stop: oneshot::Receiver<()>,
+) {
+    let mut ticker = interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+    ticker.tick().await;
+    loop {
+        tokio::select! {
+            _ = &mut stop => return,
+            _ = ticker.tick() => {
+                let (now, expires_at) = lease_times();
+                match state.job_repo.renew_job_lease(&job_id, &owner, &now, &expires_at).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        lease_valid.store(false, Ordering::Release);
+                        return;
+                    }
+                    Err(err) => {
+                        tracing::warn!(job_id, error = %err, "failed to renew extraction lease");
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn run_claimed_extraction(
+    state: Arc<AppState>,
+    conversation_id: &str,
+    job_id: &str,
+    mode: ExtractionMode,
+    owner: &str,
+    lease_valid: Arc<AtomicBool>,
+) -> Result<(), String> {
     let conversation = state
         .conversation_repo
         .find_conversation_by_id(conversation_id)
@@ -76,19 +201,29 @@ async fn run_extraction(
         .await
         .map_err(|e| e.to_string())?;
 
-    let item_ids = save_document_items_and_index(&state, &doc, &items).await?;
+    if !lease_valid.load(Ordering::Acquire) {
+        return Err("extraction lease was lost while awaiting the provider".to_string());
+    }
+    let (now, expires_at) = lease_times();
+    let renewed = state
+        .job_repo
+        .renew_job_lease(job_id, owner, &now, &expires_at)
+        .await
+        .map_err(|err| format!("failed to verify extraction lease: {err}"))?;
+    if !renewed {
+        return Err("extraction lease was lost before persistence".to_string());
+    }
 
-    set_conversation_processed(&state, conversation_id, item_ids).await?;
-    set_job_succeeded(&state, job_id).await?;
-
-    Ok(())
+    save_claimed_results_and_index(&state, job_id, owner, &doc, &items).await
 }
 
-async fn save_document_items_and_index(
+async fn save_claimed_results_and_index(
     state: &Arc<AppState>,
+    job_id: &str,
+    owner: &str,
     doc: &Document,
     items: &[Item],
-) -> Result<Vec<String>, String> {
+) -> Result<(), String> {
     let existing_item_ids = state
         .store
         .find_by_document_id(doc.id())
@@ -119,17 +254,31 @@ async fn save_document_items_and_index(
         indexed_ids.push(item.id().clone());
     }
 
-    if let Err(err) = state.doc_store.save_with_replaced_items(doc, items).await {
+    let finished = match state
+        .job_repo
+        .finish_job_claim_with_results(job_id, owner, doc, items, &now_iso())
+        .await
+    {
+        Ok(finished) => finished,
+        Err(err) => {
+            let cleanup_error = cleanup_indexed_items(state, &indexed_ids).await;
+            return Err(with_cleanup_error(
+                format!("failed to save claimed extraction results: {}", err),
+                cleanup_error,
+            ));
+        }
+    };
+    if !finished {
         let cleanup_error = cleanup_indexed_items(state, &indexed_ids).await;
         return Err(with_cleanup_error(
-            format!("failed to save document items transaction: {}", err),
+            "extraction claim was lost before result persistence".to_string(),
             cleanup_error,
         ));
     }
 
     remove_obsolete_indexes(state, &existing_item_ids, &new_item_ids).await;
 
-    Ok(new_item_ids.iter().map(ToString::to_string).collect())
+    Ok(())
 }
 
 async fn canonicalize_document(
@@ -220,153 +369,9 @@ fn mode_to_policy(mode: ExtractionMode) -> ExtractionPolicy {
     }
 }
 
-async fn set_job_running(state: &Arc<AppState>, job_id: &str) -> Result<(), String> {
-    update_job(
-        state,
-        job_id,
-        |job| {
-            job.status = JobStatus::Running;
-            job.updated_at = now_iso();
-            job.error = None;
-        },
-        "running",
-    )
-    .await
-}
-
-async fn set_job_succeeded(state: &Arc<AppState>, job_id: &str) -> Result<(), String> {
-    update_job(
-        state,
-        job_id,
-        |job| {
-            job.status = JobStatus::Succeeded;
-            job.updated_at = now_iso();
-            job.error = None;
-        },
-        "succeeded",
-    )
-    .await
-}
-
-async fn set_job_failed(state: &Arc<AppState>, job_id: &str, error: &str) -> Result<(), String> {
-    update_job(
-        state,
-        job_id,
-        |job| {
-            job.status = JobStatus::Failed;
-            job.updated_at = now_iso();
-            job.error = Some(error.to_string());
-        },
-        "failed",
-    )
-    .await
-}
-
-async fn set_conversation_status(
-    state: &Arc<AppState>,
-    conversation_id: &str,
-    status: ConversationStatus,
-) -> Result<(), String> {
-    update_conversation(
-        state,
-        conversation_id,
-        move |conversation| {
-            conversation.status = status;
-        },
-        "status",
-    )
-    .await
-}
-
-async fn set_conversation_processed(
-    state: &Arc<AppState>,
-    conversation_id: &str,
-    item_ids: Vec<String>,
-) -> Result<(), String> {
-    update_conversation(
-        state,
-        conversation_id,
-        move |conversation| {
-            conversation.status = ConversationStatus::Processed;
-            conversation.item_ids = item_ids;
-            conversation.last_error = None;
-        },
-        "processed",
-    )
-    .await
-}
-
-async fn set_conversation_failed(
-    state: &Arc<AppState>,
-    conversation_id: &str,
-    error: &str,
-) -> Result<(), String> {
-    update_conversation(
-        state,
-        conversation_id,
-        |conversation| {
-            conversation.status = ConversationStatus::Failed;
-            conversation.last_error = Some(error.to_string());
-        },
-        "failed",
-    )
-    .await
-}
-
-async fn update_job<F>(
-    state: &Arc<AppState>,
-    job_id: &str,
-    mutate: F,
-    phase: &str,
-) -> Result<(), String>
-where
-    F: FnOnce(&mut ExtractionJobRecord),
-{
-    let mut job = state
-        .job_repo
-        .find_job_by_id(job_id)
-        .await
-        .map_err(|err| format!("persist {} job skipped: load error {}", phase, err))?
-        .ok_or_else(|| format!("persist {} job skipped: not found {}", phase, job_id))?;
-    mutate(&mut job);
-    state
-        .job_repo
-        .upsert_job(&job)
-        .await
-        .map_err(|err| format!("persist {} job failed: {}", phase, err))
-}
-
-async fn update_conversation<F>(
-    state: &Arc<AppState>,
-    conversation_id: &str,
-    mutate: F,
-    phase: &str,
-) -> Result<(), String>
-where
-    F: FnOnce(&mut ConversationRecord),
-{
-    let mut conversation = state
-        .conversation_repo
-        .find_conversation_by_id(conversation_id)
-        .await
-        .map_err(|err| format!("persist {} conversation skipped: load error {}", phase, err))?
-        .ok_or_else(|| {
-            format!(
-                "persist {} conversation skipped: not found {}",
-                phase, conversation_id
-            )
-        })?;
-    mutate(&mut conversation);
-    state
-        .conversation_repo
-        .upsert_conversation(&conversation)
-        .await
-        .map_err(|err| format!("persist {} conversation failed: {}", phase, err))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{run_extraction, spawn_extraction};
+    use super::{recover_extraction_jobs, run_extraction, spawn_extraction};
     use crate::models::{
         now_iso, ConversationRecord, ConversationStatus, ExtractionJobRecord, ExtractionMode,
         JobStatus,
@@ -540,7 +545,7 @@ mod tests {
         .await
         .expect_err("succeeded job must not restart extraction");
         assert!(
-            err.contains("invalid job status transition"),
+            err.contains("already claimed or terminal"),
             "unexpected error: {}",
             err
         );
@@ -551,6 +556,20 @@ mod tests {
             "aborted extraction saved items: {:?}",
             saved_items
         );
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_schedules_pending_jobs() {
+        let (_tmp, state, persistence, _conversation_id, job_id) = build_state_with_failing_index()
+            .await
+            .expect("build test state");
+
+        let scheduled = recover_extraction_jobs(state)
+            .await
+            .expect("schedule recovery");
+        assert_eq!(scheduled, 1);
+        let job = wait_for_failed_job(&persistence, &job_id).await;
+        assert_eq!(job.attempt_count, 1);
     }
 
     async fn build_state_with_failing_index(
@@ -597,6 +616,9 @@ mod tests {
                 created_at: now.clone(),
                 updated_at: now,
                 error: None,
+                attempt_count: 0,
+                lease_owner: None,
+                lease_expires_at: None,
             })
             .await
             .map_err(|e| e.to_string())?;

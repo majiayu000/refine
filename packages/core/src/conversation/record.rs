@@ -95,6 +95,10 @@ pub struct ExtractionJobRecord {
     pub created_at: String,
     pub updated_at: String,
     pub error: Option<String>,
+    pub attempt_count: u32,
+    #[serde(skip_serializing)]
+    pub lease_owner: Option<String>,
+    pub lease_expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

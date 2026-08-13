@@ -155,6 +155,11 @@ pub(super) enum SqliteCommand {
         record: ConversationRecord,
         resp: oneshot::Sender<InfraResult<ConversationRecord>>,
     },
+    ConversationInsertOrFetchWithJob {
+        record: ConversationRecord,
+        job: ExtractionJobRecord,
+        resp: oneshot::Sender<InfraResult<(ConversationRecord, Option<ExtractionJobRecord>)>>,
+    },
     // Extraction job 操作
     JobFindById {
         id: String,
@@ -163,6 +168,46 @@ pub(super) enum SqliteCommand {
     JobUpsert {
         job: ExtractionJobRecord,
         resp: oneshot::Sender<InfraResult<()>>,
+    },
+    JobEnqueue {
+        job: ExtractionJobRecord,
+        resp: oneshot::Sender<InfraResult<ExtractionJobRecord>>,
+    },
+    JobListRecoverable {
+        now: String,
+        limit: usize,
+        resp: oneshot::Sender<InfraResult<Vec<ExtractionJobRecord>>>,
+    },
+    JobClaim {
+        id: String,
+        owner: String,
+        now: String,
+        lease_expires_at: String,
+        resp: oneshot::Sender<InfraResult<Option<ExtractionJobRecord>>>,
+    },
+    JobRenewLease {
+        id: String,
+        owner: String,
+        now: String,
+        lease_expires_at: String,
+        resp: oneshot::Sender<InfraResult<bool>>,
+    },
+    JobFinishClaim {
+        id: String,
+        owner: String,
+        status: crate::conversation::JobStatus,
+        item_ids: Vec<String>,
+        error: Option<String>,
+        now: String,
+        resp: oneshot::Sender<InfraResult<bool>>,
+    },
+    JobFinishClaimWithResults {
+        id: String,
+        owner: String,
+        document: Document,
+        items: Vec<Item>,
+        now: String,
+        resp: oneshot::Sender<InfraResult<bool>>,
     },
     // Event 操作
     EventInsert {
@@ -478,6 +523,13 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
                 conversation_ops::insert_or_fetch_conversation_by_idempotency(conn, &record),
             );
         }
+        SqliteCommand::ConversationInsertOrFetchWithJob { record, job, resp } => {
+            send_response(
+                "ConversationInsertOrFetchWithJob",
+                resp,
+                conversation_ops::insert_or_fetch_conversation_with_job(conn, &record, &job),
+            );
+        }
         SqliteCommand::JobFindById { id, resp } => {
             send_response(
                 "JobFindById",
@@ -487,6 +539,83 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
         }
         SqliteCommand::JobUpsert { job, resp } => {
             send_response("JobUpsert", resp, conversation_ops::upsert_job(conn, &job));
+        }
+        SqliteCommand::JobEnqueue { job, resp } => {
+            send_response(
+                "JobEnqueue",
+                resp,
+                conversation_ops::enqueue_job(conn, &job),
+            );
+        }
+        SqliteCommand::JobListRecoverable { now, limit, resp } => {
+            send_response(
+                "JobListRecoverable",
+                resp,
+                conversation_ops::list_recoverable_jobs(conn, &now, limit),
+            );
+        }
+        SqliteCommand::JobClaim {
+            id,
+            owner,
+            now,
+            lease_expires_at,
+            resp,
+        } => {
+            send_response(
+                "JobClaim",
+                resp,
+                conversation_ops::claim_job(conn, &id, &owner, &now, &lease_expires_at),
+            );
+        }
+        SqliteCommand::JobRenewLease {
+            id,
+            owner,
+            now,
+            lease_expires_at,
+            resp,
+        } => {
+            send_response(
+                "JobRenewLease",
+                resp,
+                conversation_ops::renew_job_lease(conn, &id, &owner, &now, &lease_expires_at),
+            );
+        }
+        SqliteCommand::JobFinishClaim {
+            id,
+            owner,
+            status,
+            item_ids,
+            error,
+            now,
+            resp,
+        } => {
+            send_response(
+                "JobFinishClaim",
+                resp,
+                conversation_ops::finish_job_claim(
+                    conn,
+                    &id,
+                    &owner,
+                    status,
+                    &item_ids,
+                    error.as_deref(),
+                    &now,
+                ),
+            );
+        }
+        SqliteCommand::JobFinishClaimWithResults {
+            id,
+            owner,
+            document,
+            items,
+            now,
+            resp,
+        } => {
+            send_response(
+                "JobFinishClaimWithResults",
+                resp,
+                finish_job_claim_with_results(conn, &id, &owner, &document, &items, &now),
+            );
         }
         SqliteCommand::EventInsert { event, resp } => {
             send_response(
@@ -521,6 +650,59 @@ fn save_document_with_replaced_items(
     tx.commit()
         .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(())
+}
+
+fn finish_job_claim_with_results(
+    conn: &Connection,
+    id: &str,
+    owner: &str,
+    document: &Document,
+    items: &[Item],
+    now: &str,
+) -> InfraResult<bool> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let owns_claim: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM extraction_jobs \
+             WHERE id = ?1 AND status = 'running' AND lease_owner = ?2)",
+            rusqlite::params![id, owner],
+            |row| row.get(0),
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    if !owns_claim {
+        tx.commit()
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        return Ok(false);
+    }
+
+    let (document, items) = canonicalize_document_items(&tx, document, items)?;
+    doc_ops::save(&tx, &document)?;
+    ops::delete_by_document_id(&tx, document.id().as_str())?;
+    for item in &items {
+        ops::save(&tx, item)?;
+    }
+    let item_ids = items
+        .iter()
+        .map(|item| item.id().to_string())
+        .collect::<Vec<_>>();
+    let finished = conversation_ops::finish_job_claim_in_transaction(
+        &tx,
+        id,
+        owner,
+        crate::conversation::JobStatus::Succeeded,
+        &item_ids,
+        None,
+        now,
+    )?;
+    if !finished {
+        return Err(InfraError::Database(
+            "extraction lease changed during result transaction".to_string(),
+        ));
+    }
+    tx.commit()
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    Ok(true)
 }
 
 fn save_document_with_replaced_items_and_delete_documents(
