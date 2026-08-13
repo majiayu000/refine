@@ -20,9 +20,16 @@ describe('getItemTypeMeta', () => {
   })
 
   it('returns a safe fallback for a future runtime item type', () => {
-    const meta = getItemTypeMeta('future-type-from-newer-server')
-    expect(meta.label).toBe('未知类型')
-    expect(meta.icon).toBeDefined()
-    expect(meta.chipClass).toContain('slate')
+    for (const itemType of [
+      'future-type-from-newer-server',
+      '__proto__',
+      'constructor',
+      'toString',
+    ]) {
+      const meta = getItemTypeMeta(itemType)
+      expect(meta.label).toBe('未知类型')
+      expect(meta.icon).toBeDefined()
+      expect(meta.chipClass).toContain('slate')
+    }
   })
 })

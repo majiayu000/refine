@@ -50,5 +50,8 @@ const unknownItemTypeMeta: ItemTypeMeta = {
 }
 
 export function getItemTypeMeta(itemType: string): ItemTypeMeta {
-  return itemTypeMeta[itemType as ItemType] ?? unknownItemTypeMeta
+  if (!Object.prototype.hasOwnProperty.call(itemTypeMeta, itemType)) {
+    return unknownItemTypeMeta
+  }
+  return itemTypeMeta[itemType as ItemType]
 }
