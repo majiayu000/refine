@@ -411,6 +411,20 @@ fn migrate_extraction_jobs_add_lease_columns(conn: &Connection) -> InfraResult<(
     }
     conn.execute_batch(
         r#"
+        UPDATE extraction_jobs
+        SET status = 'failed',
+            error = COALESCE(error, 'superseded by a newer active extraction job'),
+            lease_owner = NULL,
+            lease_expires_at = NULL
+        WHERE status IN ('pending', 'running')
+          AND EXISTS (
+            SELECT 1 FROM extraction_jobs newer
+            WHERE newer.conversation_id = extraction_jobs.conversation_id
+              AND newer.status IN ('pending', 'running')
+              AND (newer.created_at > extraction_jobs.created_at
+                   OR (newer.created_at = extraction_jobs.created_at
+                       AND newer.id > extraction_jobs.id))
+          );
         CREATE INDEX IF NOT EXISTS idx_extraction_jobs_recovery
         ON extraction_jobs(status, lease_expires_at, created_at);
         "#,
