@@ -76,6 +76,12 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    match extraction::recover_extraction_jobs(state.clone()).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(count, "scheduled recoverable extraction jobs"),
+        Err(err) => tracing::warn!(error = %err, "failed to recover extraction jobs"),
+    }
+    extraction::spawn_extraction_recovery(state.clone());
     axum::serve(listener, app).await.expect("server exited");
 }
 

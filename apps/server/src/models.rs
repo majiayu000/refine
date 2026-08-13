@@ -183,11 +183,15 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:01Z".to_string(),
             error: None,
+            attempt_count: 0,
+            lease_owner: None,
+            lease_expires_at: None,
         };
         let get_value = serde_json::to_value(GetExtractionJobResponse { job: job_record })
             .expect("serialize get response");
         assert_eq!(get_value["job"]["id"], "j1");
         assert_eq!(get_value["job"]["status"], "running");
+        assert!(get_value["job"].get("lease_owner").is_none());
     }
 
     #[test]
