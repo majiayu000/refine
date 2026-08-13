@@ -77,8 +77,13 @@ The experiment drops three noisy live indicators:
   to be a color-bearing collaboration metric.
 
 Historical `scores.jsonl` entries that contain those old indicators remain
-deserializable. The baseline registry simply stops computing personal averages
-for removed live indicators.
+deserializable and remain available as score-run activity for streak tracking.
+They do not participate in current MOTD, dashboard, or personal-trend reads:
+new entries carry `score_schema_version = 2`, and metric consumers only compare
+entries with the current scoring semantics. Unversioned entries with the exact
+eight-indicator contract are accepted for the short PR #146 transition window;
+older 11-indicator entries are activity-only. This prevents project-count
+fragmentation values from contaminating session-weighted baselines.
 
 ## Breadth Weighting
 
@@ -115,6 +120,8 @@ The three lights are absolute target signals. The optional arrow is the
 overall personal trend. Advice cache handling is deliberately visible:
 
 - Generation only reuses a fresh cache entry for the exact score/model key.
+- Cache versions include the scoring schema, so advice generated from an older
+  score formula is rejected immediately after an upgrade.
 - Display callers can still load stale cache entries so they can show
   `advice stale` instead of silently showing nothing.
 - MOTD falls back to static tips when cached advice is stale, and marks that

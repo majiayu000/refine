@@ -3,7 +3,9 @@ use chrono::{Duration, Utc};
 use std::collections::HashSet;
 use std::sync::{Arc, Barrier};
 
-use super::super::persistence::persist_score_to_path;
+use super::super::persistence::{
+    load_score_activity_from_path, persist_score_to_path, SCORE_SCHEMA_VERSION,
+};
 
 #[test]
 fn test_persist_and_load() {
@@ -33,6 +35,13 @@ fn test_persist_and_load() {
     };
 
     persist_score_to_path(&path, &result).unwrap();
+
+    let persisted = std::fs::read_to_string(&path).unwrap();
+    let persisted: serde_json::Value = serde_json::from_str(persisted.trim()).unwrap();
+    assert_eq!(
+        persisted["score_schema_version"].as_u64(),
+        Some(u64::from(SCORE_SCHEMA_VERSION))
+    );
 
     let loaded = load_recent_scores_from_path(&path, 10).unwrap();
     assert_eq!(loaded.len(), 1);
@@ -176,15 +185,95 @@ fn test_load_recent_scores_reports_invalid_jsonl_line() {
 }
 
 #[test]
-fn test_load_recent_scores_accepts_legacy_missing_timestamp() {
+fn test_legacy_unversioned_scores_are_activity_only() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scores.jsonl");
 
     let legacy_line = r#"{"layers":[{"name":"L1","signal":"Green","indicators":[]},{"name":"L2","signal":"Yellow","indicators":[]},{"name":"L3","signal":"Red","indicators":[]}],"tension":"legacy tension"}"#;
     std::fs::write(&path, format!("{}\n", legacy_line)).unwrap();
 
-    let loaded = load_recent_scores_from_path(&path, 10).unwrap();
-    assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].tension.as_deref(), Some("legacy tension"));
-    assert_eq!(loaded[0].timestamp, chrono::DateTime::<Utc>::UNIX_EPOCH);
+    let compatible = load_recent_scores_from_path(&path, 10).unwrap();
+    assert!(compatible.is_empty());
+
+    let activity = load_score_activity_from_path(&path, 10).unwrap();
+    assert_eq!(activity.len(), 1);
+    assert_eq!(activity[0].tension.as_deref(), Some("legacy tension"));
+    assert_eq!(activity[0].timestamp, chrono::DateTime::<Utc>::UNIX_EPOCH);
+}
+
+#[test]
+fn test_unversioned_current_indicator_contract_is_compatible() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scores.jsonl");
+    let mut score = make_score_result(
+        4.0,
+        80.0,
+        20.0,
+        0.5,
+        12.0,
+        25.0,
+        1.0,
+        30.0,
+        6.0,
+        0.2,
+        0.8,
+        Utc::now(),
+    );
+    remove_indicator(&mut score, "depth_output");
+    remove_indicator(&mut score, "knowledge_rate");
+    remove_indicator(&mut score, "friction_density");
+    std::fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string(&score).unwrap()),
+    )
+    .unwrap();
+
+    let compatible = load_recent_scores_from_path(&path, 10).unwrap();
+    assert_eq!(compatible.len(), 1);
+}
+
+#[test]
+fn test_old_scoring_semantics_do_not_pollute_current_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scores.jsonl");
+    let old = make_score_result(
+        4.0,
+        80.0,
+        20.0,
+        0.5,
+        5.3,
+        11.8,
+        46.0,
+        42.2,
+        6.0,
+        0.28,
+        2.5,
+        Utc::now() - Duration::days(1),
+    );
+    std::fs::write(&path, format!("{}\n", serde_json::to_string(&old).unwrap())).unwrap();
+
+    let mut current = old.clone();
+    remove_indicator(&mut current, "depth_output");
+    remove_indicator(&mut current, "knowledge_rate");
+    remove_indicator(&mut current, "friction_density");
+    current.layers[1]
+        .indicators
+        .iter_mut()
+        .find(|indicator| indicator.name == "fragmentation")
+        .unwrap()
+        .actual = 0.6;
+    current.timestamp = Utc::now();
+    persist_score_to_path(&path, &current).unwrap();
+
+    let compatible = load_recent_scores_from_path(&path, 10).unwrap();
+    assert_eq!(compatible.len(), 1);
+    let fragmentation = compatible[0].layers[1]
+        .indicators
+        .iter()
+        .find(|indicator| indicator.name == "fragmentation")
+        .unwrap();
+    assert_eq!(fragmentation.actual, 0.6);
+
+    let activity = load_score_activity_from_path(&path, 10).unwrap();
+    assert_eq!(activity.len(), 2, "legacy rows must remain auditable");
 }

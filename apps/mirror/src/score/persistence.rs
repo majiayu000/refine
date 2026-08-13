@@ -1,15 +1,60 @@
 use anyhow::{Context, Result};
 use fs2::FileExt;
+use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 use std::path::Path;
 
 use crate::config::{ensure_mirror_dir, mirror_dir};
 
+use super::indicators::{canonical_indicator_key, indicator_specs};
 use super::types::ScoreResult;
 
 // ── Persistence ──
 
 const SCORE_HISTORY_LIMIT: usize = 365;
+pub(super) const SCORE_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Serialize)]
+struct PersistedScoreRef<'a> {
+    score_schema_version: u32,
+    #[serde(flatten)]
+    score: &'a ScoreResult,
+}
+
+#[derive(Deserialize)]
+struct PersistedScore {
+    #[serde(default)]
+    score_schema_version: Option<u32>,
+    #[serde(flatten)]
+    score: ScoreResult,
+}
+
+impl PersistedScore {
+    fn uses_current_scoring_semantics(&self) -> bool {
+        match self.score_schema_version {
+            Some(version) => version == SCORE_SCHEMA_VERSION,
+            // PR #146 briefly produced unversioned snapshots with the current
+            // eight-indicator contract. Accept only that exact fingerprint;
+            // older unversioned snapshots used incompatible breadth formulas.
+            None => has_current_indicator_contract(&self.score),
+        }
+    }
+}
+
+fn has_current_indicator_contract(score: &ScoreResult) -> bool {
+    let mut actual: Vec<&str> = score
+        .layers
+        .iter()
+        .flat_map(|layer| &layer.indicators)
+        .map(|indicator| canonical_indicator_key(&indicator.name))
+        .collect();
+    actual.sort_unstable();
+    actual.dedup();
+
+    let mut expected: Vec<&str> = indicator_specs().iter().map(|spec| spec.key).collect();
+    expected.sort_unstable();
+    actual == expected
+}
 
 pub fn persist_score(result: &ScoreResult) -> Result<()> {
     let dir = ensure_mirror_dir()?;
@@ -57,7 +102,10 @@ fn persist_score_to_path_locked(path: &Path, result: &ScoreResult) -> Result<()>
         }
     };
 
-    lines.push(serde_json::to_string(result)?);
+    lines.push(serde_json::to_string(&PersistedScoreRef {
+        score_schema_version: SCORE_SCHEMA_VERSION,
+        score: result,
+    })?);
     if lines.len() > SCORE_HISTORY_LIMIT {
         let trim = lines.len() - SCORE_HISTORY_LIMIT;
         lines.drain(0..trim);
@@ -125,6 +173,36 @@ pub fn load_recent_scores(n: usize) -> Result<Vec<ScoreResult>> {
 }
 
 pub(super) fn load_recent_scores_from_path(path: &Path, n: usize) -> Result<Vec<ScoreResult>> {
+    let all = load_persisted_scores_from_path(path)?;
+    let compatible: Vec<ScoreResult> = all
+        .into_iter()
+        .filter(PersistedScore::uses_current_scoring_semantics)
+        .map(|entry| entry.score)
+        .collect();
+    let start = compatible.len().saturating_sub(n);
+    Ok(compatible[start..].to_vec())
+}
+
+/// Load score timestamps across every historical scoring schema.
+///
+/// Streaks track whether scoring ran on a day, so a scoring-formula migration
+/// must not reset them. Metric trends use `load_recent_scores` instead and are
+/// intentionally restricted to comparable score schemas.
+pub(super) fn load_score_activity(n: usize) -> Result<Vec<ScoreResult>> {
+    let path = mirror_dir().join("scores.jsonl");
+    load_score_activity_from_path(&path, n)
+}
+
+pub(super) fn load_score_activity_from_path(path: &Path, n: usize) -> Result<Vec<ScoreResult>> {
+    let all: Vec<ScoreResult> = load_persisted_scores_from_path(path)?
+        .into_iter()
+        .map(|entry| entry.score)
+        .collect();
+    let start = all.len().saturating_sub(n);
+    Ok(all[start..].to_vec())
+}
+
+fn load_persisted_scores_from_path(path: &Path) -> Result<Vec<PersistedScore>> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -151,7 +229,7 @@ pub(super) fn load_recent_scores_from_path(path: &Path, n: usize) -> Result<Vec<
         if line.is_empty() {
             continue;
         }
-        let parsed = serde_json::from_str::<ScoreResult>(line).with_context(|| {
+        let parsed = serde_json::from_str::<PersistedScore>(line).with_context(|| {
             format!(
                 "failed to parse JSON on line {} in score history {}",
                 line_no,
@@ -160,6 +238,5 @@ pub(super) fn load_recent_scores_from_path(path: &Path, n: usize) -> Result<Vec<
         })?;
         all.push(parsed);
     }
-    let start = all.len().saturating_sub(n);
-    Ok(all[start..].to_vec())
+    Ok(all)
 }
