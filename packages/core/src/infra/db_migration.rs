@@ -713,14 +713,26 @@ fn copy_table(
         .join(", ");
     let conflict = match table {
         "documents" if common.iter().any(|c| c == "updated_at") => document_conflict(&common),
-        "items" | "extraction_jobs" if common.iter().any(|c| c == "updated_at") => {
+        "items" if common.iter().any(|c| c == "updated_at") => {
             format!(
                 "ON CONFLICT(id) DO UPDATE SET {assignments} \
-                 WHERE julianday(excluded.updated_at) > julianday({table}.updated_at) \
-                    OR (julianday(excluded.updated_at) = julianday({table}.updated_at) \
-                        AND excluded.updated_at > {table}.updated_at)"
+                 WHERE julianday(excluded.updated_at) > julianday(items.updated_at) \
+                    OR (julianday(excluded.updated_at) = julianday(items.updated_at) \
+                        AND excluded.updated_at > items.updated_at)"
             )
         }
+        "extraction_jobs" if common.iter().any(|c| c == "updated_at") => format!(
+            "ON CONFLICT(id) DO UPDATE SET {assignments} \
+             WHERE ( \
+               julianday(excluded.updated_at) > julianday(extraction_jobs.updated_at) \
+               OR (julianday(excluded.updated_at) = julianday(extraction_jobs.updated_at) \
+                   AND excluded.updated_at > extraction_jobs.updated_at) \
+             ) AND ( \
+               extraction_jobs.status = excluded.status \
+               OR (extraction_jobs.status = 'pending' AND excluded.status IN ('running','failed')) \
+               OR (extraction_jobs.status = 'running' AND excluded.status IN ('succeeded','failed')) \
+             )"
+        ),
         "conversations" => format!(
             "ON CONFLICT(id) DO UPDATE SET {assignments} WHERE \
              (conversations.status = excluded.status) OR \
@@ -1329,6 +1341,61 @@ mod tests {
             .unwrap();
         assert_eq!(job_count, 0);
         assert_eq!(event_count, 1);
+    }
+
+    #[test]
+    fn later_legacy_job_timestamp_does_not_regress_terminal_state() {
+        let tmp = TempDir::new().unwrap();
+        let target = make_target_db(tmp.path());
+        let tc = Connection::open(&target).unwrap();
+        tc.execute_batch(
+            "INSERT INTO conversations
+               (id, user_id, source, url, raw_content, captured_at, created_at,
+                status, idempotency_key, item_ids)
+             VALUES
+               ('conv-job-state', 'u', 'target', 'https://example.com/job-state', 'body',
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'processed',
+                'job-state-key', '[]');
+             INSERT INTO extraction_jobs
+               (id, conversation_id, mode, status, created_at, updated_at)
+             VALUES
+               ('job-state', 'conv-job-state', 'auto', 'succeeded',
+                '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z');",
+        )
+        .unwrap();
+        drop(tc);
+
+        let legacy = tmp.path().join("server.db");
+        let lc = Connection::open(&legacy).unwrap();
+        crate::infra::prepare_sqlite_db(&lc).unwrap();
+        lc.execute_batch(
+            "INSERT INTO conversations
+               (id, user_id, source, url, raw_content, captured_at, created_at,
+                status, idempotency_key, item_ids)
+             VALUES
+               ('conv-job-state', 'u', 'legacy', 'https://example.com/job-state', 'body',
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'processed',
+                'job-state-key', '[]');
+             INSERT INTO extraction_jobs
+               (id, conversation_id, mode, status, created_at, updated_at)
+             VALUES
+               ('job-state', 'conv-job-state', 'auto', 'running',
+                '2026-01-01T00:00:00Z', '2026-01-03T00:00:00Z');",
+        )
+        .unwrap();
+        drop(lc);
+
+        migrate_stale_dbs(&target).unwrap();
+
+        let status: String = Connection::open(&target)
+            .unwrap()
+            .query_row(
+                "SELECT status FROM extraction_jobs WHERE id='job-state'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "succeeded");
     }
 
     #[test]
