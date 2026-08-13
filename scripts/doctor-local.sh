@@ -18,7 +18,11 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${repo_root}/scripts/local-ui-contract.sh"
 server_url="${REFINE_SERVER_URL:-http://127.0.0.1:21567}"
 ui_url="${REFINE_UI_URL:-$REFINE_INSTALLED_UI_ORIGIN}"
-ui_origin="${REFINE_UI_ORIGIN:-${ui_url%/}}"
+ui_origin=""
+ui_origin_error=""
+if ! ui_origin="$(refine_url_origin "$ui_url")"; then
+  ui_origin_error="invalid desktop UI URL: $ui_url"
+fi
 failures=0
 warnings=0
 ui_dev_enabled=1
@@ -336,12 +340,19 @@ check_ui_http() {
 
 check_ui_cors() {
   local headers
-  headers="$(curl -sS --max-time 3 -D - -o /dev/null \
+  if [[ -n "$ui_origin_error" ]]; then
+    fail "$ui_origin_error"
+    return
+  fi
+  if ! headers="$(curl -sS --max-time 3 -D - -o /dev/null \
     -X OPTIONS \
     -H "Origin: ${ui_origin}" \
     -H 'Access-Control-Request-Method: GET' \
-    "${server_url}/v1/items" 2>/dev/null || true)"
-  if refine_cors_response_allows_origin "$headers" "$ui_origin"; then
+    "${server_url}/v1/items" 2>/dev/null)"; then
+    fail "server CORS preflight request failed: ${server_url}/v1/items"
+    return
+  fi
+  if refine_cors_preflight_succeeds "$headers" "$ui_origin" GET; then
     pass "server permits desktop UI origin: $ui_origin"
   else
     fail "server CORS blocks desktop UI origin: $ui_origin"

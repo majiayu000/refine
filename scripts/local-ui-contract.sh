@@ -13,18 +13,71 @@ refine_server_trusted_origins_xml() {
   fi
 }
 
-refine_cors_response_allows_origin() {
+refine_url_origin() {
+  local url="$1"
+  local scheme authority host port=""
+
+  if [[ "$url" =~ ^([Hh][Tt][Tt][Pp][Ss]?)://([^/?#]+)(/[^?#]*)?(\?[^#]*)?(#.*)?$ ]]; then
+    scheme="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')"
+    authority="${BASH_REMATCH[2]}"
+  else
+    return 1
+  fi
+  [[ "$authority" != *'@'* && "$authority" != *[$'\t\r\n ']* ]] || return 1
+
+  if [[ "$authority" =~ ^(\[[0-9A-Fa-f:.]+\])(:([0-9]+))?$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[3]:-}"
+  elif [[ "$authority" =~ ^([A-Za-z0-9._-]+)(:([0-9]+))?$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[3]:-}"
+  else
+    return 1
+  fi
+  host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$scheme" == "http" && "$port" == "80" ]] \
+    || [[ "$scheme" == "https" && "$port" == "443" ]]; then
+    port=""
+  fi
+
+  printf '%s://%s' "$scheme" "$host"
+  [[ -z "$port" ]] || printf ':%s' "$port"
+  printf '\n'
+}
+
+refine_cors_preflight_succeeds() {
   local headers="$1"
   local expected_origin="$2"
-  local actual_origin
-  actual_origin="$(printf '%s\n' "$headers" | awk '
-    tolower($1) == "access-control-allow-origin:" {
-      $1 = ""
-      sub(/^ /, "")
-      sub(/\r$/, "")
-      print
-      exit
-    }
-  ')"
-  [[ "$actual_origin" == "$expected_origin" ]]
+  local expected_method="$3"
+  local line status="" actual_origin="" allowed_methods="" name value token
+
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    if [[ "$line" =~ ^HTTP/[0-9.]+[[:space:]]+([0-9]{3})([[:space:]]|$) ]]; then
+      # Only the final response block is authoritative (for example after an
+      # intermediary's 100 Continue response).
+      status="${BASH_REMATCH[1]}"
+      actual_origin=""
+      allowed_methods=""
+      continue
+    fi
+    [[ "$line" == *:* ]] || continue
+    name="$(printf '%s' "${line%%:*}" | tr '[:upper:]' '[:lower:]')"
+    value="${line#*:}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    case "$name" in
+      access-control-allow-origin) actual_origin="$value" ;;
+      access-control-allow-methods) allowed_methods="${allowed_methods:+${allowed_methods},}${value}" ;;
+    esac
+  done <<< "$headers"
+
+  [[ "$status" == 2[0-9][0-9] && "$actual_origin" == "$expected_origin" ]] || return 1
+  while IFS= read -r token; do
+    token="${token#"${token%%[![:space:]]*}"}"
+    token="${token%"${token##*[![:space:]]}"}"
+    [[ "$(printf '%s' "$token" | tr '[:lower:]' '[:upper:]')" == "$expected_method" ]] \
+      && return 0
+  done < <(printf '%s' "$allowed_methods" | tr ',' '\n')
+  return 1
 }
