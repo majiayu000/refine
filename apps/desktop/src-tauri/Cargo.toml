@@ -24,3 +24,7 @@ tiny_http = { version = "0.12.0", features = ["ssl"] }
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+[dev-dependencies]
+async-trait.workspace = true
+tempfile = "3"

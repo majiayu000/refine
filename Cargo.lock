@@ -3053,6 +3053,7 @@ dependencies = [
 name = "refine-desktop"
 version = "0.1.3"
 dependencies = [
+ "async-trait",
  "dirs 5.0.1",
  "refine-core",
  "serde",
@@ -3060,6 +3061,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-shell",
+ "tempfile",
  "tiny_http",
  "tokio",
  "tracing",

@@ -106,6 +106,7 @@ fn handle_create_conversation(
         url,
         source,
         title,
+        captured_at,
         idempotency_key,
         ..
     } = payload;
@@ -131,6 +132,7 @@ fn handle_create_conversation(
             url: normalized.url,
             source: normalized.source,
             title: normalized.title,
+            captured_at,
         },
     );
 

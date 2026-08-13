@@ -424,4 +424,97 @@ mod tests {
         );
         assert_eq!(ItemRepository::count_items(&store, None).await.unwrap(), 0);
     }
+
+    #[tokio::test]
+    async fn repeated_url_reuses_canonical_document_identity() {
+        use crate::infra::SqliteStore;
+        use crate::knowledge::{DocumentRepository, ItemRepository};
+        use tempfile::tempdir;
+
+        let input = ItemExtractionInput {
+            source: "browser",
+            title: None,
+            raw_content: "Human: hello\nAssistant: world",
+            captured_at: Some("2020-01-02T03:04:05Z"),
+            policy: ExtractionPolicy::default(),
+        };
+        let source = Source::new("browser").with_url("https://same.example/conversation");
+        let first = extract_document_with_strict_defaults(
+            &SequenceLlmClient::new(vec![r#"{"items":[{"type":"knowledge","title":"first","summary":"S","content":"C","tags":[]}]}"#]),
+            &input,
+            &source,
+        )
+        .await
+        .unwrap();
+        let second = extract_document_with_strict_defaults(
+            &SequenceLlmClient::new(vec![r#"{"items":[{"type":"knowledge","title":"second","summary":"S","content":"C","tags":[]}]}"#]),
+            &input,
+            &source,
+        )
+        .await
+        .unwrap();
+        assert_ne!(first.document.id(), second.document.id());
+        let temp = tempdir().unwrap();
+        let store = SqliteStore::open(&temp.path().join("refine.db")).unwrap();
+
+        persist_extracted_document(&store, &first).await.unwrap();
+        persist_extracted_document(&store, &second).await.unwrap();
+
+        let canonical = DocumentRepository::find_by_url(&store, source.url.as_deref().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(canonical.id(), first.document.id());
+        assert_eq!(
+            canonical.captured_at().to_rfc3339(),
+            "2020-01-02T03:04:05+00:00"
+        );
+        let items = ItemRepository::find_by_document_id(&store, canonical.id())
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title(), "second");
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_url_persistence_converges_without_foreign_key_errors() {
+        use crate::infra::SqliteStore;
+        use crate::knowledge::{DocumentRepository, ItemRepository};
+        use tempfile::tempdir;
+
+        let input = ItemExtractionInput {
+            source: "browser",
+            title: None,
+            raw_content: "Human: hello\nAssistant: world",
+            captured_at: None,
+            policy: ExtractionPolicy::default(),
+        };
+        let source = Source::new("browser").with_url("https://same.example/concurrent");
+        let first = extract_document_with_strict_defaults(
+            &SequenceLlmClient::new(vec![r#"{"items":[{"type":"knowledge","title":"first","summary":"S","content":"C","tags":[]}]}"#]),
+            &input,
+            &source,
+        )
+        .await
+        .unwrap();
+        let second = extract_document_with_strict_defaults(
+            &SequenceLlmClient::new(vec![r#"{"items":[{"type":"knowledge","title":"second","summary":"S","content":"C","tags":[]}]}"#]),
+            &input,
+            &source,
+        )
+        .await
+        .unwrap();
+        let temp = tempdir().unwrap();
+        let store = SqliteStore::open(&temp.path().join("refine.db")).unwrap();
+
+        let (first_result, second_result) = tokio::join!(
+            persist_extracted_document(&store, &first),
+            persist_extracted_document(&store, &second)
+        );
+        first_result.unwrap();
+        second_result.unwrap();
+
+        assert_eq!(DocumentRepository::count(&store).await.unwrap(), 1);
+        assert_eq!(ItemRepository::count_items(&store, None).await.unwrap(), 1);
+    }
 }

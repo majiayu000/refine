@@ -2,9 +2,9 @@ use super::rows::{configure_connection, configure_read_only_connection};
 use super::{conversation_ops, doc_ops, ops};
 use crate::conversation::{ConversationRecord, EventRecord, ExtractionJobRecord};
 use crate::error::{InfraError, InfraResult};
-use crate::knowledge::{Document, Item, ItemType};
+use crate::knowledge::{Document, Item, ItemType, RestoreDocumentParams};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use tokio::sync::oneshot;
@@ -510,12 +510,12 @@ fn save_document_with_replaced_items(
     doc: &Document,
     items: &[Item],
 ) -> InfraResult<()> {
-    let tx = conn
-        .unchecked_transaction()
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|e| InfraError::Database(e.to_string()))?;
-    doc_ops::save(&tx, doc)?;
+    let (doc, items) = canonicalize_document_items(&tx, doc, items)?;
+    doc_ops::save(&tx, &doc)?;
     ops::delete_by_document_id(&tx, doc.id().as_str())?;
-    for item in items {
+    for item in &items {
         ops::save(&tx, item)?;
     }
     tx.commit()
@@ -529,18 +529,51 @@ fn save_document_with_replaced_items_and_delete_documents(
     items: &[Item],
     obsolete_document_ids: &[String],
 ) -> InfraResult<()> {
-    let tx = conn
-        .unchecked_transaction()
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|e| InfraError::Database(e.to_string()))?;
-    doc_ops::save(&tx, doc)?;
+    let (doc, items) = canonicalize_document_items(&tx, doc, items)?;
+    doc_ops::save(&tx, &doc)?;
     ops::delete_by_document_id(&tx, doc.id().as_str())?;
-    for item in items {
+    for item in &items {
         ops::save(&tx, item)?;
     }
     delete_documents_with_items_in_transaction(&tx, obsolete_document_ids)?;
     tx.commit()
         .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(())
+}
+
+fn canonicalize_document_items(
+    conn: &Connection,
+    doc: &Document,
+    items: &[Item],
+) -> InfraResult<(Document, Vec<Item>)> {
+    let existing = doc_ops::find_by_url(conn, doc.url())?;
+    let canonical_doc = match existing {
+        Some(existing) if existing.id() != doc.id() => Document::restore(RestoreDocumentParams {
+            id: existing.id().clone(),
+            title: doc
+                .title()
+                .map(ToOwned::to_owned)
+                .or_else(|| existing.title().map(ToOwned::to_owned)),
+            raw_content: doc.raw_content().to_string(),
+            source: doc.source().to_string(),
+            url: doc.url().to_string(),
+            source_version: doc.source_version().map(ToOwned::to_owned),
+            captured_at: doc.captured_at(),
+            created_at: existing.created_at(),
+            updated_at: doc.updated_at(),
+        }),
+        _ => doc.clone(),
+    };
+    let canonical_id = canonical_doc.id().clone();
+    let mut canonical_items = items.to_vec();
+    for item in &mut canonical_items {
+        if item.document_id() == Some(doc.id()) {
+            item.set_document_id(canonical_id.clone());
+        }
+    }
+    Ok((canonical_doc, canonical_items))
 }
 
 fn delete_documents_with_items(conn: &Connection, document_ids: &[String]) -> InfraResult<()> {
