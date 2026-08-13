@@ -536,7 +536,7 @@ fn copy_all_tables(conn: &Connection, legacy_alias: &str, source: &Path) -> Resu
     let legacy_tables = list_base_tables(conn, legacy_alias)?;
     let ordered_tables = migration_copy_order(&legacy_tables);
 
-    create_identity_maps(conn, legacy_alias, &legacy_tables)?;
+    create_identity_maps(conn, legacy_alias, &legacy_tables, source)?;
 
     let mut total = 0usize;
     for table in &ordered_tables {
@@ -569,6 +569,7 @@ fn create_identity_maps(
     conn: &Connection,
     legacy_alias: &str,
     legacy_tables: &[String],
+    source: &Path,
 ) -> Result<(), String> {
     conn.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS refine_document_id_map (
@@ -583,31 +584,47 @@ fn create_identity_maps(
     .map_err(|e| format!("failed to prepare legacy identity maps: {e}"))?;
 
     if legacy_tables.iter().any(|table| table == "documents") {
-        conn.execute_batch(&format!(
-            "INSERT INTO refine_document_id_map (source_id, canonical_id)
+        conn.execute(
+            &format!(
+                "INSERT INTO refine_document_id_map (source_id, canonical_id)
              SELECT src.id, COALESCE(
                target.id,
+               imported.canonical_id,
                (SELECT first.id FROM {legacy_alias}.documents AS first
                 WHERE first.url = src.url ORDER BY first.rowid LIMIT 1)
              )
              FROM {legacy_alias}.documents AS src
-             LEFT JOIN main.documents AS target ON target.url = src.url"
-        ))
+             LEFT JOIN main.documents AS target ON target.url = src.url
+             LEFT JOIN main.refine_legacy_imported_rows AS imported
+               ON imported.source_path=?1
+              AND imported.table_name='documents'
+              AND imported.source_id=src.id"
+            ),
+            [source.to_string_lossy().as_ref()],
+        )
         .map_err(|e| format!("failed to map legacy document identities: {e}"))?;
     }
     if legacy_tables.iter().any(|table| table == "conversations") {
-        conn.execute_batch(&format!(
-            "INSERT INTO refine_conversation_id_map (source_id, canonical_id)
+        conn.execute(
+            &format!(
+                "INSERT INTO refine_conversation_id_map (source_id, canonical_id)
              SELECT src.id, COALESCE(
                target.id,
+               imported.canonical_id,
                (SELECT first.id FROM {legacy_alias}.conversations AS first
                 WHERE first.idempotency_key = src.idempotency_key
                 ORDER BY first.rowid LIMIT 1)
              )
              FROM {legacy_alias}.conversations AS src
              LEFT JOIN main.conversations AS target
-               ON target.idempotency_key = src.idempotency_key"
-        ))
+               ON target.idempotency_key = src.idempotency_key
+             LEFT JOIN main.refine_legacy_imported_rows AS imported
+               ON imported.source_path=?1
+              AND imported.table_name='conversations'
+              AND imported.source_id=src.id"
+            ),
+            [source.to_string_lossy().as_ref()],
+        )
         .map_err(|e| format!("failed to map legacy conversation identities: {e}"))?;
     }
     Ok(())
@@ -718,6 +735,21 @@ fn copy_table(
         "documents" => document_source_order(&common),
         _ => String::new(),
     };
+    let parent_tombstone_guard = match table {
+        "items" if common.iter().any(|column| column == "document_id") => {
+            "AND NOT (doc_map.canonical_id IS NOT NULL AND NOT EXISTS ( \
+               SELECT 1 FROM main.documents AS parent \
+               WHERE parent.id=doc_map.canonical_id \
+             ))"
+        }
+        "extraction_jobs" if common.iter().any(|column| column == "conversation_id") => {
+            "AND NOT (conv_map.canonical_id IS NOT NULL AND NOT EXISTS ( \
+               SELECT 1 FROM main.conversations AS parent \
+               WHERE parent.id=conv_map.canonical_id \
+             ))"
+        }
+        _ => "",
+    };
     let sql = format!(
         "INSERT INTO {table} ({col_list}) \
          SELECT {select_list} FROM {legacy_alias}.{table} AS src {joins} \
@@ -730,13 +762,13 @@ fn copy_table(
                SELECT 1 FROM main.{table} AS current \
                WHERE current.id=imported.canonical_id \
              ) \
-         ) {order_by} {conflict}"
+         ) {parent_tombstone_guard} {order_by} {conflict}"
     );
     let source_path = source.to_string_lossy();
     let copied = conn
         .execute(&sql, [source_path.as_ref()])
         .map_err(|e| format!("failed to copy table {table}: {e}"))?;
-    record_imported_rows(conn, table, legacy_alias, source_path.as_ref())?;
+    record_imported_rows(conn, table, legacy_alias, source_path.as_ref(), &common)?;
     Ok(copied)
 }
 
@@ -745,24 +777,42 @@ fn record_imported_rows(
     table: &str,
     legacy_alias: &str,
     source_path: &str,
+    common: &[String],
 ) -> Result<(), String> {
-    let (canonical_id, joins) = match table {
+    let (canonical_id, joins, recordable) = match table {
         "documents" => (
             "doc_map.canonical_id",
             "JOIN refine_document_id_map AS doc_map ON doc_map.source_id=src.id",
+            "current.id IS NOT NULL",
+        ),
+        "items" if common.iter().any(|column| column == "document_id") => (
+            "src.id",
+            "LEFT JOIN refine_document_id_map AS doc_map ON doc_map.source_id=src.document_id",
+            "current.id IS NOT NULL OR (doc_map.canonical_id IS NOT NULL AND NOT EXISTS ( \
+               SELECT 1 FROM main.documents AS parent WHERE parent.id=doc_map.canonical_id \
+             ))",
         ),
         "conversations" => (
             "conv_map.canonical_id",
             "JOIN refine_conversation_id_map AS conv_map ON conv_map.source_id=src.id",
+            "current.id IS NOT NULL",
         ),
-        _ => ("src.id", ""),
+        "extraction_jobs" if common.iter().any(|column| column == "conversation_id") => (
+            "src.id",
+            "LEFT JOIN refine_conversation_id_map AS conv_map ON conv_map.source_id=src.conversation_id",
+            "current.id IS NOT NULL OR (conv_map.canonical_id IS NOT NULL AND NOT EXISTS ( \
+               SELECT 1 FROM main.conversations AS parent WHERE parent.id=conv_map.canonical_id \
+             ))",
+        ),
+        _ => ("src.id", "", "current.id IS NOT NULL"),
     };
     let sql = format!(
         "INSERT INTO main.refine_legacy_imported_rows \
            (source_path, table_name, source_id, canonical_id) \
          SELECT ?1, '{table}', src.id, {canonical_id} \
          FROM {legacy_alias}.{table} AS src {joins} \
-         JOIN main.{table} AS current ON current.id={canonical_id} \
+         LEFT JOIN main.{table} AS current ON current.id={canonical_id} \
+         WHERE {recordable} \
          ON CONFLICT(source_path, table_name, source_id) DO UPDATE SET \
            canonical_id=excluded.canonical_id"
     );
@@ -1149,6 +1199,136 @@ mod tests {
         let tc = Connection::open(&target).unwrap();
         assert_eq!(item_count(&tc, "deleted-in-target"), 0);
         assert_eq!(item_count(&tc, "late-write"), 1);
+    }
+
+    #[test]
+    fn deleted_document_tombstones_late_children_without_blocking_other_rows() {
+        let tmp = TempDir::new().unwrap();
+        let target = make_target_db(tmp.path());
+        let tc = Connection::open(&target).unwrap();
+        tc.execute_batch(
+            "INSERT INTO documents
+               (id, title, raw_content, source, url, source_version,
+                captured_at, created_at, updated_at)
+             VALUES
+               ('target-doc', 'Target', 'target', 'canonical',
+                'https://example.com/tombstone-parent', 'v-target',
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                '2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+        drop(tc);
+
+        let legacy = tmp.path().join("server.db");
+        let lc = Connection::open(&legacy).unwrap();
+        crate::infra::prepare_sqlite_db(&lc).unwrap();
+        lc.execute_batch(
+            "INSERT INTO documents
+               (id, title, raw_content, source, url, source_version,
+                captured_at, created_at, updated_at)
+             VALUES
+               ('source-doc', 'Source', 'source', 'legacy',
+                'https://example.com/tombstone-parent', 'v-source',
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                '2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+
+        migrate_stale_dbs(&target).unwrap();
+        let tc = Connection::open(&target).unwrap();
+        tc.execute("DELETE FROM documents WHERE id='target-doc'", [])
+            .unwrap();
+        drop(tc);
+
+        lc.execute_batch(
+            "INSERT INTO items
+               (id, item_type, title, summary, content, tags,
+                created_at, updated_at, document_id)
+             VALUES
+               ('orphaned-late-child', 'knowledge', 'T', 'S', 'C', '[]',
+                '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', 'source-doc'),
+               ('independent-late-item', 'knowledge', 'T', 'S', 'C', '[]',
+                '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', NULL);",
+        )
+        .unwrap();
+        drop(lc);
+
+        migrate_stale_dbs(&target).unwrap();
+        let tc = Connection::open(&target).unwrap();
+        assert_eq!(item_count(&tc, "orphaned-late-child"), 0);
+        assert_eq!(item_count(&tc, "independent-late-item"), 1);
+    }
+
+    #[test]
+    fn deleted_conversation_tombstones_late_jobs_without_blocking_events() {
+        let tmp = TempDir::new().unwrap();
+        let target = make_target_db(tmp.path());
+        let tc = Connection::open(&target).unwrap();
+        tc.execute_batch(
+            "INSERT INTO conversations
+               (id, user_id, source, url, raw_content, captured_at, created_at,
+                status, idempotency_key, item_ids)
+             VALUES
+               ('target-conv', 'u', 'canonical', 'https://example.com/conv', 'target',
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'captured',
+                'shared-conv-key', '[]');",
+        )
+        .unwrap();
+        drop(tc);
+
+        let legacy = tmp.path().join("server.db");
+        let lc = Connection::open(&legacy).unwrap();
+        crate::infra::prepare_sqlite_db(&lc).unwrap();
+        lc.execute_batch(
+            "INSERT INTO conversations
+               (id, user_id, source, url, raw_content, captured_at, created_at,
+                status, idempotency_key, item_ids)
+             VALUES
+               ('source-conv', 'u', 'legacy', 'https://example.com/conv', 'source',
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'captured',
+                'shared-conv-key', '[]');",
+        )
+        .unwrap();
+
+        migrate_stale_dbs(&target).unwrap();
+        let tc = Connection::open(&target).unwrap();
+        tc.execute("DELETE FROM conversations WHERE id='target-conv'", [])
+            .unwrap();
+        drop(tc);
+
+        lc.execute_batch(
+            "INSERT INTO extraction_jobs
+               (id, conversation_id, mode, status, created_at, updated_at)
+             VALUES
+               ('orphaned-late-job', 'source-conv', 'auto', 'pending',
+                '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z');
+             INSERT INTO events
+               (id, user_id, event_name, source, properties_json, created_at)
+             VALUES
+               ('independent-late-event', 'u', 'late', 'legacy', '{}',
+                '2026-01-02T00:00:00Z');",
+        )
+        .unwrap();
+        drop(lc);
+
+        migrate_stale_dbs(&target).unwrap();
+        let tc = Connection::open(&target).unwrap();
+        let job_count: i64 = tc
+            .query_row(
+                "SELECT COUNT(*) FROM extraction_jobs WHERE id='orphaned-late-job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let event_count: i64 = tc
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE id='independent-late-event'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(job_count, 0);
+        assert_eq!(event_count, 1);
     }
 
     #[test]
