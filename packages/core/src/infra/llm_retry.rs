@@ -180,12 +180,27 @@ fn is_retryable_error(err: &InfraError, retry_http_429: bool) -> bool {
 
 fn is_rate_limit_message(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
-    message.contains("429")
-        || message.contains("rate limit")
-        || message.contains("rate_limit")
-        || message.contains("rate-limit")
-        || message.contains("too many requests")
-        || message.contains("quota exceeded")
+    let tokens = message
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+
+    tokens.contains(&"429")
+        || tokens
+            .iter()
+            .any(|token| *token == "ratelimit" || token.starts_with("ratelimiterror"))
+        || tokens.windows(2).any(|pair| {
+            matches!(
+                pair,
+                ["rate", "limit"]
+                    | ["rate", "limited"]
+                    | ["rate", "exceeded"]
+                    | ["quota", "exceeded"]
+            )
+        })
+        || tokens
+            .windows(3)
+            .any(|triple| matches!(triple, ["too", "many", "requests"]))
 }
 
 fn backoff_delay_secs(base_delay_secs: u64, attempt: usize) -> u64 {
@@ -239,6 +254,23 @@ mod tests {
             &InfraError::LlmRequest("429 rate limit".into()),
             false,
         ));
+        assert!(is_retryable_error(
+            &InfraError::LlmRequest("request to http://127.0.0.1:4290/v1 timed out".into(),),
+            false,
+        ));
+        for message in [
+            "HTTP 429",
+            "RateLimitError",
+            "rate_limit",
+            "rate exceeded",
+            "too many requests",
+            "quota exceeded",
+        ] {
+            assert!(!is_retryable_error(
+                &InfraError::LlmRequest(message.into()),
+                false,
+            ));
+        }
     }
     use crate::infra::quota_state::{is_exhausted as is_quota_exhausted, set_quota_file_override};
     use async_trait::async_trait;
