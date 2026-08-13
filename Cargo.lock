@@ -3037,6 +3037,7 @@ dependencies = [
  "dirs 5.0.1",
  "filetime",
  "fs2",
+ "httpdate",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

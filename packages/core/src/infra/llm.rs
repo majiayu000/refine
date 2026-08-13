@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 /// LLM 客户端接口
 #[async_trait]
@@ -115,8 +116,10 @@ impl LlmClient for ClaudeClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
+            let retry_after_secs =
+                parse_retry_after(resp.headers().get(reqwest::header::RETRY_AFTER));
             let err = resp.text().await.unwrap_or_default();
-            return Err(classify_provider_error(status, &err));
+            return Err(classify_provider_error(status, retry_after_secs, &err));
         }
 
         let data: ClaudeResponse = resp
@@ -203,8 +206,10 @@ impl LlmClient for OpenAIClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
+            let retry_after_secs =
+                parse_retry_after(resp.headers().get(reqwest::header::RETRY_AFTER));
             let err = resp.text().await.unwrap_or_default();
-            return Err(classify_provider_error(status, &err));
+            return Err(classify_provider_error(status, retry_after_secs, &err));
         }
 
         let data: OpenAIResponse = resp
@@ -239,7 +244,15 @@ fn env_var(keys: &[&str]) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-fn classify_provider_error(status: reqwest::StatusCode, body: &str) -> InfraError {
+fn classify_provider_error(
+    status: reqwest::StatusCode,
+    retry_after_secs: Option<u64>,
+    body: &str,
+) -> InfraError {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return InfraError::RateLimited { retry_after_secs };
+    }
+
     let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
     let error = parsed.as_ref().and_then(|value| value.get("error"));
     let code = error
@@ -270,6 +283,28 @@ fn classify_provider_error(status: reqwest::StatusCode, body: &str) -> InfraErro
         status: status.as_u16(),
         message: body.to_string(),
     }
+}
+
+fn parse_retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<u64> {
+    parse_retry_after_at(value, SystemTime::now())
+}
+
+fn parse_retry_after_at(
+    value: Option<&reqwest::header::HeaderValue>,
+    now: SystemTime,
+) -> Option<u64> {
+    let value = value?.to_str().ok()?.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(seconds);
+    }
+
+    let retry_at = httpdate::parse_http_date(value).ok()?;
+    let remaining = retry_at.duration_since(now).unwrap_or_default();
+    Some(
+        remaining
+            .as_secs()
+            .saturating_add(u64::from(remaining.subsec_nanos() > 0)),
+    )
 }
 
 fn is_content_rejection(code: &str, message: &str) -> bool {
@@ -345,6 +380,8 @@ impl LlmClient for MockLlmClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -438,6 +475,7 @@ mod tests {
     fn sensitive_words_error_is_structured_as_non_retryable_rejection() {
         let error = classify_provider_error(
             reqwest::StatusCode::BAD_REQUEST,
+            None,
             r#"{"error":{"message":"sensitive_words_detected","code":"sensitive_words_detected"}}"#,
         );
         assert!(matches!(
@@ -450,6 +488,7 @@ mod tests {
     fn sensitive_words_message_without_code_is_still_non_retryable() {
         let error = classify_provider_error(
             reqwest::StatusCode::BAD_REQUEST,
+            None,
             r#"{"error":{"message":"request blocked: sensitive_words_detected"}}"#,
         );
         assert!(matches!(
@@ -462,24 +501,105 @@ mod tests {
     fn unknown_provider_error_stays_request_error() {
         let error = classify_provider_error(
             reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            None,
             r#"{"error":{"message":"upstream unavailable","code":"upstream_error"}}"#,
         );
         assert!(matches!(error, InfraError::LlmHttp { status: 503, .. }));
     }
 
     #[test]
-    fn provider_rate_limit_stays_retryable_http_error() {
+    fn provider_rate_limit_is_structured_and_drops_response_body() {
         let error = classify_provider_error(
             reqwest::StatusCode::TOO_MANY_REQUESTS,
-            r#"{"error":{"message":"rate limited","code":"rate_limit"}}"#,
+            Some(42),
+            r#"{"error":{"message":"secret provider body","code":"rate_limit"}}"#,
         );
-        assert!(matches!(error, InfraError::LlmHttp { status: 429, .. }));
+        assert!(matches!(
+            error,
+            InfraError::RateLimited {
+                retry_after_secs: Some(42)
+            }
+        ));
+    }
+
+    #[test]
+    fn retry_after_supports_delta_seconds_http_date_and_invalid_values() {
+        let seconds = reqwest::header::HeaderValue::from_static("42");
+        assert_eq!(parse_retry_after(Some(&seconds)), Some(42));
+
+        let future = SystemTime::now() + std::time::Duration::from_secs(120);
+        let http_date =
+            reqwest::header::HeaderValue::from_str(&httpdate::fmt_http_date(future)).unwrap();
+        let parsed = parse_retry_after(Some(&http_date)).expect("HTTP-date should parse");
+        assert!((118..=120).contains(&parsed), "unexpected delay: {parsed}");
+
+        let past = SystemTime::now() - std::time::Duration::from_secs(60);
+        let past_date =
+            reqwest::header::HeaderValue::from_str(&httpdate::fmt_http_date(past)).unwrap();
+        assert_eq!(parse_retry_after(Some(&past_date)), Some(0));
+
+        let invalid = reqwest::header::HeaderValue::from_static("not-a-delay");
+        assert_eq!(parse_retry_after(Some(&invalid)), None);
+        assert_eq!(parse_retry_after(None), None);
+    }
+
+    #[test]
+    fn retry_after_http_date_rounds_future_fraction_up_without_extending_past_dates() {
+        let retry_at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100);
+        let header =
+            reqwest::header::HeaderValue::from_str(&httpdate::fmt_http_date(retry_at)).unwrap();
+
+        let half_second_before = SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(99_500);
+        assert_eq!(
+            parse_retry_after_at(Some(&header), half_second_before),
+            Some(1)
+        );
+        assert_eq!(parse_retry_after_at(Some(&header), retry_at), Some(0));
+        assert_eq!(
+            parse_retry_after_at(
+                Some(&header),
+                retry_at + std::time::Duration::from_millis(1)
+            ),
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn concrete_clients_preserve_retry_after_from_provider_429() {
+        for provider in ["anthropic", "openai"] {
+            let base_url = spawn_single_response_server(
+                "429 Too Many Requests",
+                &[("Retry-After", "42")],
+                r#"{"error":{"message":"do not persist this body"}}"#,
+            );
+            let client: Box<dyn LlmClient> = match provider {
+                "anthropic" => Box::new(ClaudeClient::new("test-key").with_base_url(&base_url)),
+                "openai" => Box::new(OpenAIClient::new("test-key").with_base_url(&base_url)),
+                _ => unreachable!(),
+            };
+
+            let error = client
+                .complete("hello", Some("system"))
+                .await
+                .expect_err("provider 429 must fail");
+            assert!(
+                matches!(
+                    error,
+                    InfraError::RateLimited {
+                        retry_after_secs: Some(42)
+                    }
+                ),
+                "{provider} returned unexpected error: {error}"
+            );
+            assert!(!error.to_string().contains("do not persist this body"));
+        }
     }
 
     #[test]
     fn generic_moderation_message_from_5xx_is_not_quarantined() {
         let error = classify_provider_error(
             reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            None,
             r#"{"error":{"message":"moderation service unavailable"}}"#,
         );
         assert!(matches!(error, InfraError::LlmHttp { status: 503, .. }));
@@ -489,6 +609,7 @@ mod tests {
     fn openai_content_filter_code_is_quarantined() {
         let error = classify_provider_error(
             reqwest::StatusCode::BAD_REQUEST,
+            None,
             r#"{"error":{"message":"blocked","code":"content_filter"}}"#,
         );
         assert!(
@@ -505,6 +626,35 @@ mod tests {
         for secret in ["user", "secret", "token", "private-value"] {
             assert!(!identity.contains(secret));
         }
+    }
+
+    fn spawn_single_response_server(status: &str, headers: &[(&str, &str)], body: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let status = status.to_string();
+        let headers = headers
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect::<Vec<_>>();
+        let body = body.to_string();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept provider request");
+            let mut request = [0u8; 8192];
+            let _ = stream.read(&mut request).expect("read provider request");
+            let mut response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+                body.len()
+            );
+            for (name, value) in headers {
+                response.push_str(&format!("{name}: {value}\r\n"));
+            }
+            response.push_str("\r\n");
+            response.push_str(&body);
+            stream
+                .write_all(response.as_bytes())
+                .expect("write provider response");
+        });
+        format!("http://{address}")
     }
 
     fn with_clean_llm_env(test: impl FnOnce()) {

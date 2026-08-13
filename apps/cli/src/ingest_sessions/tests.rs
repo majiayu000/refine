@@ -545,6 +545,30 @@ async fn quota_hit_short_circuits_before_llm_call() {
     assert!(err.to_string().contains("LLM 配额已耗尽"));
 }
 
+#[tokio::test]
+async fn provider_rate_limit_sets_batch_early_stop_without_retrying() {
+    let client = Arc::new(SequenceLlmClient::new(vec!["unused".to_string()]));
+    let client_dyn = client.clone() as Arc<dyn LlmClient>;
+    let quota_hit = Arc::new(AtomicBool::new(false));
+
+    let first = finish_llm_call(
+        Err(InfraError::RateLimited {
+            retry_after_secs: Some(42),
+        }),
+        &quota_hit,
+    )
+    .expect_err("provider quota must stop the first call");
+    assert!(first.to_string().contains("LLM 配额已耗尽"));
+    assert!(quota_hit.load(Ordering::Relaxed));
+    assert_eq!(client.calls(), 0);
+
+    let second = llm_call_with_retry(&client_dyn, "other content", &quota_hit)
+        .await
+        .expect_err("later batch work must short-circuit");
+    assert!(second.to_string().contains("跳过"));
+    assert_eq!(client.calls(), 0);
+}
+
 #[test]
 fn content_rejection_survives_anyhow_context() {
     let error = anyhow::Error::new(InfraError::LlmRejected {

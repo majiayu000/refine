@@ -10,6 +10,20 @@ fail() {
   exit 1
 }
 
+# Legacy second-only and precise markers must sort correctly within the same
+# whole second; this is the boundary that plain RFC 3339 string comparison gets wrong.
+# shellcheck source=scripts/quota-time.sh
+source "${SCRIPT_DIR}/quota-time.sh"
+second_key=$(quota_timestamp_sort_key '2026-08-13T12:34:57Z')
+precise_key=$(quota_timestamp_sort_key '2026-08-13T12:34:57.789123456Z')
+[[ "$precise_key" > "$second_key" ]] \
+  || fail 'precise quota marker did not sort after the same whole second'
+[[ "$second_key" == '2026-08-13T12:34:57.000000000Z' ]] \
+  || fail 'legacy quota marker did not normalize to fixed precision'
+if quota_timestamp_sort_key '2026-02-31T12:34:57Z' >/dev/null 2>&1; then
+  fail 'quota timestamp parser accepted an invalid calendar date'
+fi
+
 home="${TEST_ROOT}/home"
 mkdir -p "${home}/.refine"
 chmod 700 "${home}/.refine"
@@ -115,6 +129,9 @@ printf '%s\n' "export BASE_API_KEY='daily-secret'" > "${daily_home}/.refine/llm.
 chmod 600 "${daily_home}/.refine/llm.env"
 cat > "${daily_home}/.cargo/bin/refine" <<'EOF'
 #!/usr/bin/env bash
+if [[ -n "${FAKE_REFINE_LOG:-}" ]]; then
+  printf 'called\n' >> "$FAKE_REFINE_LOG"
+fi
 exit 0
 EOF
 cat > "${daily_home}/.cargo/bin/mirror" <<'EOF'
@@ -146,5 +163,40 @@ env -i HOME="$daily_home" PATH="/usr/bin:/bin" FAKE_MIRROR_EXIT=0 \
   || fail 'daily refresh did not succeed with all required steps healthy'
 [[ -f "${daily_home}/.refine/last-refresh-ok" ]] \
   || fail 'daily refresh omitted success marker after complete success'
+
+# Quota markers are written by Rust with optional nanosecond precision. The
+# wrapper must compare both legacy second-only and precise forms correctly.
+quota_refine_log="${TEST_ROOT}/quota-refine.log"
+future_year=$((10#$(date -u +%Y) + 1))
+printf '%04d-01-01T00:00:00.000000001Z\n' "$future_year" \
+  > "${daily_home}/.refine/quota_exhausted_until"
+output=$(env -i HOME="$daily_home" PATH="/usr/bin:/bin" \
+  FAKE_REFINE_LOG="$quota_refine_log" REFINE_RUNTIME_JOB_LOCK_WAIT_SECONDS=0 \
+  bash "${SCRIPT_DIR}/daily-refresh.sh" 2>&1) \
+  || fail 'daily refresh failed while honoring a precise future quota marker'
+[[ "$output" == *'skipping refresh'* ]] \
+  || fail 'daily refresh ignored a precise future quota marker'
+[[ ! -e "$quota_refine_log" ]] \
+  || fail 'daily refresh called refine despite a precise future quota marker'
+
+printf '%s\n' '2000-01-01T00:00:00Z' \
+  > "${daily_home}/.refine/quota_exhausted_until"
+env -i HOME="$daily_home" PATH="/usr/bin:/bin" \
+  FAKE_REFINE_LOG="$quota_refine_log" REFINE_RUNTIME_JOB_LOCK_WAIT_SECONDS=0 \
+  bash "${SCRIPT_DIR}/daily-refresh.sh" >/dev/null 2>&1 \
+  || fail 'daily refresh rejected a legacy expired quota marker'
+[[ -s "$quota_refine_log" ]] \
+  || fail 'daily refresh skipped work for a legacy expired quota marker'
+
+: > "$quota_refine_log"
+printf '%s\n' 'not-a-timestamp' > "${daily_home}/.refine/quota_exhausted_until"
+output=$(env -i HOME="$daily_home" PATH="/usr/bin:/bin" \
+  FAKE_REFINE_LOG="$quota_refine_log" REFINE_RUNTIME_JOB_LOCK_WAIT_SECONDS=0 \
+  bash "${SCRIPT_DIR}/daily-refresh.sh" 2>&1) \
+  || fail 'daily refresh did not fail open for a malformed quota marker'
+[[ "$output" == *'WARN: ignoring malformed quota marker'* ]] \
+  || fail 'daily refresh did not report a malformed quota marker'
+[[ -s "$quota_refine_log" ]] \
+  || fail 'daily refresh skipped work for a malformed quota marker'
 
 printf 'All runtime wrapper tests passed\n'
