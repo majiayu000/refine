@@ -26,7 +26,7 @@ fn test_layer1_has_2_indicators() {
 }
 
 #[test]
-fn test_layer2_uses_session_weighted_project_rates() {
+fn test_layer2_uses_project_bucket_rates() {
     let targets = crate::config::Targets::default();
     let cluster = make_cluster(
         HashMap::new(),
@@ -45,8 +45,8 @@ fn test_layer2_uses_session_weighted_project_rates() {
     let deep_invest = indicator(breadth, "deep_invest");
     let fragmentation = indicator(breadth, "fragmentation");
 
-    assert!((deep_invest.actual - (20.0 / 22.0 * 100.0)).abs() < 0.0001);
-    assert!((fragmentation.actual - (2.0 / 22.0 * 100.0)).abs() < 0.0001);
+    assert!((deep_invest.actual - (1.0 / 3.0 * 100.0)).abs() < 0.0001);
+    assert!((fragmentation.actual - (2.0 / 3.0 * 100.0)).abs() < 0.0001);
 }
 
 #[test]

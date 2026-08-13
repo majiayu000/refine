@@ -15,10 +15,11 @@ use refine_core::infra::{
     llm_with_retry_policy, LlmClient, LlmRetryPolicy, DEFAULT_MAX_RETRIES,
     DEFAULT_RETRY_BASE_DELAY_SECS,
 };
-use refine_core::knowledge::{Document, DocumentRepository, RestoreDocumentParams};
+use refine_core::knowledge::{Document, DocumentRepository, RestoreDocumentParams, Tag};
 use refine_core::session::{
-    build_facet_prompt, chunk_session, discover_sessions, facets_to_items, needs_chunking,
-    parse_facet_response, parse_session_file, FilterConfig, SessionSource, FACET_SYSTEM_PROMPT,
+    build_facet_prompt, chunk_session, discover_sessions, facets_to_items_with_mode,
+    needs_chunking, normalize_project_name, parse_facet_response, parse_session_file, FilterConfig,
+    SessionMode, SessionSource, FACET_SYSTEM_PROMPT,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -51,6 +52,7 @@ pub struct IngestOptions {
     pub latest: Option<usize>,
     pub dry_run: bool,
     pub retry_quarantined: bool,
+    pub backfill_session_metadata: bool,
 }
 
 #[derive(Debug)]
@@ -79,6 +81,7 @@ struct PendingSession {
     url: String,
     source: SessionSource,
     project: Option<String>,
+    mode: SessionMode,
     captured_at: DateTime<Utc>,
     has_embedded_timestamp: bool,
     raw_content: String,
@@ -93,9 +96,80 @@ fn project_for_ingest(
     discovered_project: Option<&str>,
     session_project: Option<&str>,
 ) -> Option<String> {
-    discovered_project
-        .or(session_project)
+    session_project
+        .or(discovered_project)
         .map(ToOwned::to_owned)
+}
+
+fn is_observation_metadata_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "decision"
+            | "bugfix"
+            | "novice"
+            | "advanced_beginner"
+            | "competent"
+            | "proficient"
+            | "expert"
+            | "delegation"
+            | "pair_programming"
+            | "review"
+            | "exploration"
+            | "teaching"
+            | "deep_inquiry"
+    ) || tag.starts_with("session_mode_")
+}
+
+async fn backfill_session_metadata(
+    doc_store: &Arc<dyn DocumentRepository>,
+    document: &Document,
+    mode: SessionMode,
+    project: Option<&str>,
+) -> Result<bool> {
+    let expected = mode.as_tag();
+    let project = project.and_then(normalize_project_name);
+    let mut items = doc_store
+        .find_items_by_document_id(document.id())
+        .await
+        .context("load observations for session-mode backfill")?;
+    let mut changed = false;
+    for item in &mut items {
+        let old_tags = item
+            .tags()
+            .iter()
+            .map(|tag| tag.as_str())
+            .collect::<Vec<_>>();
+        let mut tags = item
+            .tags()
+            .iter()
+            .filter(|tag| {
+                is_observation_metadata_tag(tag.as_str())
+                    && !tag.as_str().starts_with("session_mode_")
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        tags.push(Tag::try_new(expected).expect("static session mode tag is valid"));
+        if let Some(project) = project.as_deref() {
+            if let Some(tag) = Tag::try_new(project) {
+                tags.push(tag);
+            }
+        }
+        let new_tags = tags.iter().map(|tag| tag.as_str()).collect::<Vec<_>>();
+        if old_tags == new_tags {
+            continue;
+        }
+        item.set_tags(tags)
+            .map_err(|error| anyhow::anyhow!("set session-mode tag: {error}"))?;
+        changed = true;
+    }
+
+    if changed {
+        doc_store
+            .save_with_replaced_items(document, &items)
+            .await
+            .context("persist session-mode metadata backfill")?;
+    }
+    Ok(changed)
 }
 
 fn session_captured_at(
@@ -129,7 +203,12 @@ fn document_with_source_version(document: &Document, source_version: &str) -> Do
     })
 }
 
-fn incremental_cursor_path(home: &Path, source: Option<&SessionSource>, db_path: &Path) -> PathBuf {
+fn incremental_cursor_path(
+    home: &Path,
+    source: Option<&SessionSource>,
+    db_path: &Path,
+    cursor_name: &str,
+) -> PathBuf {
     let source_key = match source {
         Some(SessionSource::ClaudeCode) => "claude-code",
         Some(SessionSource::Codex) => "codex",
@@ -139,7 +218,7 @@ fn incremental_cursor_path(home: &Path, source: Option<&SessionSource>, db_path:
     let db_key = encode_path_for_filename(db_path);
     home.join(".refine")
         .join("ingest-cursors")
-        .join(format!("last-ingest-mtime-{source_key}-{db_key}"))
+        .join(format!("last-{cursor_name}-mtime-{source_key}-{db_key}"))
 }
 
 fn encode_path_for_filename(path: &Path) -> String {
@@ -153,17 +232,26 @@ fn encode_path_for_filename(path: &Path) -> String {
 }
 
 /// Read the Unix-second timestamp from the scoped ingest cursor file.
-fn read_last_ingest_mtime(source: Option<&SessionSource>, db_path: &Path) -> Option<SystemTime> {
+fn read_last_scan_mtime(
+    source: Option<&SessionSource>,
+    db_path: &Path,
+    cursor_name: &str,
+) -> Option<SystemTime> {
     let home = dirs::home_dir()?;
-    let path = incremental_cursor_path(&home, source, db_path);
+    let path = incremental_cursor_path(&home, source, db_path, cursor_name);
     let secs: u64 = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
     Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
 }
 
 /// Persist the Unix-second timestamp to the scoped ingest cursor file.
-fn write_last_ingest_mtime(source: Option<&SessionSource>, db_path: &Path, t: SystemTime) {
+fn write_last_scan_mtime(
+    source: Option<&SessionSource>,
+    db_path: &Path,
+    cursor_name: &str,
+    t: SystemTime,
+) {
     let Some(home) = dirs::home_dir() else { return };
-    let path = incremental_cursor_path(&home, source, db_path);
+    let path = incremental_cursor_path(&home, source, db_path, cursor_name);
     let Some(dir) = path.parent() else { return };
     if let Err(e) = std::fs::create_dir_all(dir) {
         tracing::warn!("failed to create {}: {}", dir.display(), e);
@@ -186,6 +274,9 @@ pub async fn handle_ingest_sessions(
         anyhow::bail!(
             "--source requires --provider local because remem does not expose a trustworthy Claude/Codex source"
         );
+    }
+    if options.backfill_session_metadata && options.provider != IngestProvider::Local {
+        anyhow::bail!("--backfill-session-metadata requires --provider local");
     }
 
     match options.provider {
@@ -375,6 +466,7 @@ async fn handle_remem_ingest_sessions_with_summaries(
             url,
             source: remem_session.session.source,
             project: Some(remem_session.project),
+            mode: remem_session.session.meta.mode,
             captured_at,
             has_embedded_timestamp: true,
             raw_content,
@@ -412,9 +504,14 @@ async fn handle_legacy_ingest_sessions(
     // 1-hour overlap on the cutoff absorbs clock skew and files modified near the boundary.
     let incremental = options.limit.is_none() && options.latest.is_none() && !options.dry_run;
     let source = options.source.clone();
+    let cursor_name = if options.backfill_session_metadata {
+        "metadata"
+    } else {
+        "ingest"
+    };
     let scan_start = SystemTime::now();
     let mtime_after = if incremental {
-        read_last_ingest_mtime(source.as_ref(), db_path).map(|last| {
+        read_last_scan_mtime(source.as_ref(), db_path, cursor_name).map(|last| {
             last.checked_sub(Duration::from_secs(3600))
                 .unwrap_or(SystemTime::UNIX_EPOCH)
         })
@@ -450,6 +547,8 @@ async fn handle_legacy_ingest_sessions(
     let mut skipped_dup = 0usize;
     let mut skipped_filter = 0usize;
     let mut stale_refresh = 0usize;
+    let mut metadata_backfilled = 0usize;
+    let mut metadata_missing = 0usize;
 
     // 阶段 1: 串行做去重 + 过滤 + 解析（快，不需要 LLM）
     for (idx, ds) in sessions_to_process.iter().enumerate() {
@@ -465,6 +564,7 @@ async fn handle_legacy_ingest_sessions(
         };
 
         let project = project_for_ingest(ds.project.as_deref(), session.meta.project.as_deref());
+        let mode = session.meta.mode;
         let has_embedded_timestamp = session.meta.started_at.is_some();
         let captured_at = session_captured_at(session.meta.started_at, ds.modified_at);
         let raw_content = session.to_document_content();
@@ -475,6 +575,25 @@ async fn handle_legacy_ingest_sessions(
             captured_at,
             &raw_content,
         )?;
+
+        if options.backfill_session_metadata {
+            let existing = remem_document.as_ref().or(legacy_document.as_ref());
+            match existing {
+                Some(_document) if options.dry_run => {
+                    println!("  [dry-run] {} | would backfill {:?}", legacy_url, mode);
+                    metadata_backfilled += 1;
+                }
+                Some(document) => {
+                    if backfill_session_metadata(&doc_store, document, mode, project.as_deref())
+                        .await?
+                    {
+                        metadata_backfilled += 1;
+                    }
+                }
+                None => metadata_missing += 1,
+            }
+            continue;
+        }
 
         let mut legacy_documents_to_delete = Vec::new();
         let (url, effective_source, existing_document) = if let Some(remem_doc) = remem_document {
@@ -497,6 +616,8 @@ async fn handle_legacy_ingest_sessions(
                         );
                     }
                 } else {
+                    backfill_session_metadata(&doc_store, &remem_doc, mode, project.as_deref())
+                        .await?;
                     doc_store
                         .delete_documents_with_items(&legacy_documents_to_delete)
                         .await
@@ -512,6 +633,15 @@ async fn handle_legacy_ingest_sessions(
                 if session_needs_refresh(existing_doc, ds.modified_at) {
                     stale_refresh += 1;
                 } else {
+                    if !options.dry_run {
+                        backfill_session_metadata(
+                            &doc_store,
+                            existing_doc,
+                            mode,
+                            project.as_deref(),
+                        )
+                        .await?;
+                    }
                     skipped_dup += 1;
                     continue;
                 }
@@ -557,6 +687,7 @@ async fn handle_legacy_ingest_sessions(
             url,
             source: effective_source,
             project,
+            mode,
             captured_at,
             has_embedded_timestamp,
             raw_content,
@@ -566,6 +697,17 @@ async fn handle_legacy_ingest_sessions(
             existing_document,
             legacy_documents_to_delete,
         });
+    }
+
+    if options.backfill_session_metadata {
+        if incremental && !options.dry_run {
+            write_last_scan_mtime(source.as_ref(), db_path, cursor_name, scan_start);
+        }
+        println!(
+            "会话元数据回填完成: 更新 {}, 未找到既有文档 {}（未调用 LLM）",
+            metadata_backfilled, metadata_missing
+        );
+        return Ok(());
     }
 
     process_pending_sessions(
@@ -583,7 +725,7 @@ async fn handle_legacy_ingest_sessions(
 
     // Advance the incremental scan cursor so the next run only sees newer files.
     if incremental && !options.dry_run {
-        write_last_ingest_mtime(source.as_ref(), db_path, scan_start);
+        write_last_scan_mtime(source.as_ref(), db_path, cursor_name, scan_start);
     }
 
     Ok(())
@@ -798,7 +940,8 @@ async fn process_single_session(
     let facet_response = extract_and_parse_facets_with_retry(&content, client, quota_hit).await?;
 
     let doc = build_session_document(ps, &facet_response.session_summary);
-    let items = facets_to_items(&facet_response, doc.id(), ps.project.as_deref());
+    let items =
+        facets_to_items_with_mode(&facet_response, doc.id(), ps.project.as_deref(), ps.mode);
     let item_count = items.len();
     doc_store
         .save_with_replaced_items_and_delete_documents(&doc, &items, &ps.legacy_documents_to_delete)

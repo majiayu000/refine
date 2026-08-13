@@ -11,7 +11,7 @@
 //! 同时从原始 JSONL 提取首个时间戳填充 `SessionMeta.started_at`，
 //! 弥补先前的 declaration-execution gap（字段定义但从未写入）。
 
-use super::types::{MessageRole, Session, SessionMessage, SessionMeta, SessionSource};
+use super::types::{MessageRole, Session, SessionMessage, SessionMeta, SessionMode, SessionSource};
 use chrono::{DateTime, Utc};
 use std::path::Path;
 use tracing::warn;
@@ -149,6 +149,34 @@ fn project_name_from_cwd(cwd: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn project_name_from_repository_url(url: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let leaf = trimmed.rsplit(['/', ':']).next()?.trim_end_matches(".git");
+    (!leaf.is_empty()).then(|| leaf.to_string())
+}
+
+fn update_codex_session_mode(value: &serde_json::Value, meta: &mut SessionMeta) {
+    let thread_source = value
+        .pointer("/payload/thread_source")
+        .and_then(|v| v.as_str());
+    if thread_source == Some("subagent") {
+        meta.mode = SessionMode::Subagent;
+        return;
+    }
+
+    match value
+        .pointer("/payload/originator")
+        .and_then(|v| v.as_str())
+    {
+        Some("codex-tui") => meta.mode = SessionMode::Interactive,
+        Some("codex_exec") => meta.mode = SessionMode::Unattended,
+        _ => {}
+    }
+}
+
 /// 同时覆盖多种格式：Claude Code 行通常在顶层带 `timestamp`，
 /// Codex 新格式也可能把时间放在 `payload.timestamp`。
 /// 取首个能解析成 RFC3339 的时间戳作为 `started_at`，与 JSONL 写入顺序对齐。
@@ -277,12 +305,19 @@ fn parse_codex_line(
 
     match msg_type {
         "session_meta" => {
+            update_codex_session_mode(value, meta);
             if let Some(model) = value
                 .pointer("/payload/model")
                 .or_else(|| value.get("model"))
                 .and_then(|v| v.as_str())
             {
                 meta.model = Some(model.to_string());
+            }
+            if let Some(repository_url) = value
+                .pointer("/payload/git/repository_url")
+                .and_then(|v| v.as_str())
+            {
+                meta.project = project_name_from_repository_url(repository_url);
             }
             if meta.project.is_none() {
                 if let Some(cwd) = value.pointer("/payload/cwd").and_then(|v| v.as_str()) {
@@ -291,6 +326,7 @@ fn parse_codex_line(
             }
         }
         "turn_context" => {
+            update_codex_session_mode(value, meta);
             if let Some(model) = value.pointer("/payload/model").and_then(|v| v.as_str()) {
                 meta.model = Some(model.to_string());
             }
@@ -449,6 +485,33 @@ mod tests {
             session.meta.started_at.as_ref().map(|ts| ts.to_rfc3339()),
             Some("2026-05-25T08:00:00+00:00".to_string())
         );
+    }
+
+    #[test]
+    fn parse_codex_uses_repository_and_explicit_execution_provenance() {
+        let jsonl = r#"{"type":"session_meta","payload":{"cwd":"/tmp/refine-worktree","originator":"codex_exec","thread_source":"user","git":{"repository_url":"git@github.com:lifcc/refine.git"}}}"#;
+        let session = parse_session_content(
+            jsonl,
+            &PathBuf::from("/tmp/codex-meta.jsonl"),
+            SessionSource::Codex,
+        )
+        .unwrap();
+
+        assert_eq!(session.meta.project.as_deref(), Some("refine"));
+        assert_eq!(session.meta.mode, SessionMode::Unattended);
+    }
+
+    #[test]
+    fn parse_codex_subagent_provenance_takes_precedence() {
+        let jsonl = r#"{"type":"session_meta","payload":{"originator":"codex_exec","thread_source":"subagent"}}"#;
+        let session = parse_session_content(
+            jsonl,
+            &PathBuf::from("/tmp/codex-subagent.jsonl"),
+            SessionSource::Codex,
+        )
+        .unwrap();
+
+        assert_eq!(session.meta.mode, SessionMode::Subagent);
     }
 
     #[test]

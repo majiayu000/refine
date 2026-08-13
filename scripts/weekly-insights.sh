@@ -49,6 +49,15 @@ else
   FAILED_STEPS+=("ingest-sessions")
 fi
 
+log "Step 1b: backfill Codex session metadata"
+metadata_rc=0
+"$REFINE_BIN" ingest-sessions --provider local --source codex \
+  --backfill-session-metadata 2>&1 || metadata_rc=$?
+if [[ "$metadata_rc" -ne 0 ]]; then
+  log "ERROR: Step 1b metadata backfill failed with exit code ${metadata_rc}"
+  FAILED_STEPS+=("session metadata backfill")
+fi
+
 # Step 2: 生成处方报告
 log "Step 2: insights --prescription"
 insights_rc=0

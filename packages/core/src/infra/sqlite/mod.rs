@@ -204,6 +204,12 @@ impl DocumentRepository for SqliteStore {
         .await
     }
 
+    async fn find_items_by_document_id(&self, id: &DocumentId) -> InfraResult<Vec<Item>> {
+        let document_id = id.as_str().to_string();
+        self.request(|resp| SqliteCommand::FindByDocumentId { document_id, resp })
+            .await
+    }
+
     async fn count(&self) -> InfraResult<usize> {
         self.request(|resp| SqliteCommand::DocCount { resp }).await
     }

@@ -28,7 +28,7 @@ refine workspace 新 member `apps/mirror/`，纯 Rust CLI，只读 refine SQLite
 | 指标 | 数据来源 | 计算 | 绿 | 黄 | 红 |
 |------|---------|------|---|---|---|
 | Dreyfus 加权分 | cognitive_level tags | novice=1,adv=2,comp=3,prof=4,exp=5 加权平均 | >3.5 | 2.5-3.5 | <2.5 |
-| 决策质量率 | decision titles 含"因为/原因"比例 | 关键词匹配 | >60% | 40-60% | <40% |
+| 理由显式率 | decision titles 含"因为/原因"比例 | 关键词匹配；不等同决策质量 | >60% | 40-60% | <40% |
 | 深度思考产出比 | deep_inquiry 中 expert% vs delegation 中 expert% | 交叉统计 | 差>10% | 差0-10% | 反转 |
 
 层 1 信号灯 = 3 个指标中最差的那个
@@ -38,8 +38,8 @@ refine workspace 新 member `apps/mirror/`，纯 Rust CLI，只读 refine SQLite
 | 指标 | 数据来源 | 计算 | 绿 | 黄 | 红 |
 |------|---------|------|---|---|---|
 | 探索率 | exploration / 总协作模式 | 百分比 | >15% | 8-15% | <8% |
-| 深耕率 | 20+ session 项目 / 总项目 | 百分比 | 15-30% | <10%或>30% | <5%或>50% |
-| 碎片化指数 | 1 session 项目 / 总项目 | 百分比 | <20% | 20-40% | >40% |
+| 成熟项目占比 | 20+ session 项目 / 总项目 | 百分比 | 15-30% | 10-15% | <10%或>30% |
+| 一次性项目占比 | 1 session 项目 / 总项目 | 百分比；不等同上下文切换 | <20% | 20-40% | >40% |
 
 层 2 信号灯 = 3 个指标中最差的那个
 
@@ -49,7 +49,7 @@ refine workspace 新 member `apps/mirror/`，纯 Rust CLI，只读 refine SQLite
 |------|---------|------|---|---|---|
 | delegation 率 | delegation / 总协作模式 | 百分比 | <40% | 40-55% | >55% |
 | 模式多样性 | 协作模式中 >0 的数量 | 整数 | >=4 | 2-3 | 1 |
-| Bug/决策比 | bugfix / decision | 比率 | <0.6 | 0.6-0.8 | >0.8 |
+| Bug/决策抽取比 | extracted bugfix / extracted decision | 提取量比率，不等同协作质量 | <0.6 | 0.6-0.8 | >0.8 |
 
 层 3 信号灯 = 3 个指标中最差的那个
 

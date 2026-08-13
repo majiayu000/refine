@@ -6,13 +6,12 @@ use std::path::Path;
 
 use crate::config::{ensure_mirror_dir, mirror_dir};
 
-use super::indicators::{canonical_indicator_key, indicator_specs};
 use super::types::ScoreResult;
 
 // ── Persistence ──
 
 const SCORE_HISTORY_LIMIT: usize = 365;
-pub(super) const SCORE_SCHEMA_VERSION: u32 = 2;
+pub(super) const SCORE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Serialize)]
 struct PersistedScoreRef<'a> {
@@ -33,27 +32,11 @@ impl PersistedScore {
     fn uses_current_scoring_semantics(&self) -> bool {
         match self.score_schema_version {
             Some(version) => version == SCORE_SCHEMA_VERSION,
-            // PR #146 briefly produced unversioned snapshots with the current
-            // eight-indicator contract. Accept only that exact fingerprint;
-            // older unversioned snapshots used incompatible breadth formulas.
-            None => has_current_indicator_contract(&self.score),
+            // Unversioned eight-indicator snapshots used the v2
+            // session-weighted breadth formulas, so they are activity-only.
+            None => false,
         }
     }
-}
-
-fn has_current_indicator_contract(score: &ScoreResult) -> bool {
-    let mut actual: Vec<&str> = score
-        .layers
-        .iter()
-        .flat_map(|layer| &layer.indicators)
-        .map(|indicator| canonical_indicator_key(&indicator.name))
-        .collect();
-    actual.sort_unstable();
-    actual.dedup();
-
-    let mut expected: Vec<&str> = indicator_specs().iter().map(|spec| spec.key).collect();
-    expected.sort_unstable();
-    actual == expected
 }
 
 pub fn persist_score(result: &ScoreResult) -> Result<()> {

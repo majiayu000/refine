@@ -42,6 +42,7 @@ pub async fn run(
             dry_run,
             legacy_local_scan,
             retry_quarantined,
+            backfill_session_metadata,
         } => {
             let provider = IngestProvider::resolve(provider, legacy_local_scan)?;
             let source_filter = source
@@ -59,7 +60,10 @@ pub async fn run(
             if legacy_local_scan {
                 eprintln!("warning: --legacy-local-scan is deprecated; use --provider local");
             }
-            let llm_client = if dry_run {
+            if backfill_session_metadata && provider != IngestProvider::Local {
+                anyhow::bail!("--backfill-session-metadata requires --provider local");
+            }
+            let llm_client = if dry_run || backfill_session_metadata {
                 None
             } else {
                 Some(build_llm_client_from_env()?)
@@ -73,6 +77,7 @@ pub async fn run(
                     latest,
                     dry_run,
                     retry_quarantined,
+                    backfill_session_metadata,
                 },
                 db_path,
                 doc_store,

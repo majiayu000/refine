@@ -52,6 +52,18 @@ else
   echo "⚠️  ingest-sessions reported failures; success timestamp will not be updated"
 fi
 
+# Remem does not carry Codex originator/thread-source metadata. Reconcile the
+# matching local archive incrementally so personal scores exclude unattended
+# exec and subagent sessions without another LLM extraction.
+echo "Step 1b: backfill Codex session metadata"
+metadata_rc=0
+refine ingest-sessions --provider local --source codex --backfill-session-metadata 2>&1 \
+  || metadata_rc=$?
+if [ "$metadata_rc" -ne 0 ]; then
+  echo "ERROR: Step 1b metadata backfill failed with exit code ${metadata_rc}" >&2
+  FAILED_STEPS+=("session metadata backfill")
+fi
+
 # 2. Refresh mirror score + LLM advice (run regardless of ingest result)
 echo "Step 2: mirror score"
 score_rc=0

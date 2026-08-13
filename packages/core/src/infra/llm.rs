@@ -21,33 +21,45 @@ pub trait LlmClient: Send + Sync {
 
 /// 从环境变量构建 LLM 客户端。
 ///
-/// 优先级：
-/// 1. Anthropic (`REFINE_ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`)
-/// 2. OpenAI-compatible (`REFINE_OPENAI_API_KEY` / `OPENAI_API_KEY` / `BASE_API_KEY`)
+/// 优先级：显式 Refine 配置 > 显式 BASE OpenAI-compatible 配置 >
+/// ambient provider variables. This prevents an unrelated inherited
+/// `ANTHROPIC_AUTH_TOKEN` from hijacking Refine's own BASE endpoint.
 pub fn build_llm_client_from_env() -> Option<Arc<dyn LlmClient>> {
+    if env_var(&["REFINE_ANTHROPIC_API_KEY"]).is_some() {
+        return anthropic_config_from_env().map(build_anthropic_client);
+    }
+    if env_var(&["REFINE_OPENAI_API_KEY"]).is_some() {
+        return openai_config_from_env().map(build_openai_client);
+    }
+    if let Some(config) = base_openai_config_from_env() {
+        return Some(build_openai_client(config));
+    }
     if let Some(config) = anthropic_config_from_env() {
-        let mut client = ClaudeClient::new(&config.api_key);
-        if let Some(model) = config.model {
-            client = client.with_model(&model);
-        }
-        if let Some(base_url) = config.base_url {
-            client = client.with_base_url(&base_url);
-        }
-        return Some(Arc::new(client));
+        return Some(build_anthropic_client(config));
     }
+    openai_config_from_env().map(build_openai_client)
+}
 
-    if let Some(config) = openai_config_from_env() {
-        let mut client = OpenAIClient::new(&config.api_key);
-        if let Some(model) = config.model {
-            client = client.with_model(&model);
-        }
-        if let Some(base_url) = config.base_url {
-            client = client.with_base_url(&base_url);
-        }
-        return Some(Arc::new(client));
+fn build_anthropic_client(config: LlmEnvConfig) -> Arc<dyn LlmClient> {
+    let mut client = ClaudeClient::new(&config.api_key);
+    if let Some(model) = config.model {
+        client = client.with_model(&model);
     }
+    if let Some(base_url) = config.base_url {
+        client = client.with_base_url(&base_url);
+    }
+    Arc::new(client)
+}
 
-    None
+fn build_openai_client(config: LlmEnvConfig) -> Arc<dyn LlmClient> {
+    let mut client = OpenAIClient::new(&config.api_key);
+    if let Some(model) = config.model {
+        client = client.with_model(&model);
+    }
+    if let Some(base_url) = config.base_url {
+        client = client.with_base_url(&base_url);
+    }
+    Arc::new(client)
 }
 
 pub fn build_required_llm_client_from_env() -> Result<Arc<dyn LlmClient>, String> {
@@ -313,6 +325,14 @@ fn openai_config_from_env() -> Option<LlmEnvConfig> {
     })
 }
 
+fn base_openai_config_from_env() -> Option<LlmEnvConfig> {
+    Some(LlmEnvConfig {
+        api_key: env_var(&["BASE_API_KEY"])?,
+        model: env_var(&["BASE_MODEL"]),
+        base_url: env_var(&["BASE_URL"]),
+    })
+}
+
 fn normalize_openai_base_url(url: &str) -> String {
     url.trim()
         .trim_end_matches('/')
@@ -415,6 +435,23 @@ mod tests {
                 config.base_url.as_deref(),
                 Some("https://refine.example.test")
             );
+        });
+    }
+
+    #[test]
+    fn base_openai_config_beats_ambient_anthropic_credentials() {
+        let Ok(_env_lock) = ENV_LOCK.lock() else {
+            panic!("failed to lock env");
+        };
+        with_clean_llm_env(|| {
+            std::env::set_var("ANTHROPIC_AUTH_TOKEN", "ambient-kimi-key");
+            std::env::set_var("ANTHROPIC_BASE_URL", "https://api.kimi.com/coding/");
+            std::env::set_var("BASE_API_KEY", "personal-gpt-key");
+            std::env::set_var("BASE_MODEL", "gpt-5.4");
+            std::env::set_var("BASE_URL", "http://127.0.0.1:8200/v1");
+
+            let client = build_llm_client_from_env().expect("LLM should be configured");
+            assert!(client.cache_identity().starts_with("openai:gpt-5.4:"));
         });
     }
 

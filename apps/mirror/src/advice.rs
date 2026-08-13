@@ -7,10 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
-// Bump whenever score semantics change. Advice generated from the pre-#146
-// project-count fragmentation metric must never be displayed with current
-// session-weighted scores.
-const ADVICE_CACHE_VERSION: &str = "advice-v3-score-v2";
+// Bump whenever score semantics change.
+const ADVICE_CACHE_VERSION: &str = "advice-v4-score-v3";
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 const ADVICE_STALE_AFTER_HOURS: i64 = 72;

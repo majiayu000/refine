@@ -2,6 +2,7 @@
 //!
 //! 从会话内容中提取结构化认知维度 (facets)
 
+use super::SessionMode;
 use crate::knowledge::{DocumentId, Item, Tag};
 
 /// Facet 提取结果
@@ -137,6 +138,17 @@ pub fn facets_to_items(
     document_id: &DocumentId,
     project: Option<&str>,
 ) -> Vec<Item> {
+    facets_to_items_with_mode(facets, document_id, project, SessionMode::Unknown)
+}
+
+/// Convert facets to observations and persist the source-provenance cohort on
+/// every item so a document can be filtered without guessing from its title.
+pub fn facets_to_items_with_mode(
+    facets: &FacetResponse,
+    document_id: &DocumentId,
+    project: Option<&str>,
+    mode: SessionMode,
+) -> Vec<Item> {
     let mut items = Vec::new();
 
     // 宏观标注作为一个综合 observation
@@ -200,6 +212,7 @@ pub fn facets_to_items(
     let mut tags = vec![
         Tag::try_new(&facets.cognitive_level),
         Tag::try_new(&facets.collaboration_mode),
+        Tag::try_new(mode.as_tag()),
     ];
     if let Some(proj) = project {
         tags.push(Tag::try_new(proj));
@@ -216,6 +229,7 @@ pub fn facets_to_items(
         let mut item = Item::new_observation(decision, decision);
         item.set_document_id(document_id.clone());
         let mut dtags: Vec<Tag> = Tag::try_new("decision").into_iter().collect();
+        dtags.extend(Tag::try_new(mode.as_tag()));
         if let Some(proj) = project {
             dtags.extend(Tag::try_new(proj));
         }
@@ -230,6 +244,7 @@ pub fn facets_to_items(
         let mut item = Item::new_observation(bug, bug);
         item.set_document_id(document_id.clone());
         let mut btags: Vec<Tag> = Tag::try_new("bugfix").into_iter().collect();
+        btags.extend(Tag::try_new(mode.as_tag()));
         if let Some(proj) = project {
             btags.extend(Tag::try_new(proj));
         }

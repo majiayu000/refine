@@ -31,6 +31,29 @@ pub enum MessageRole {
     System,
 }
 
+/// How the session was driven. This is deliberately narrower than
+/// "scheduled": Codex metadata can prove that a run was interactive,
+/// unattended, or a subagent, but it cannot prove who scheduled an exec run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionMode {
+    Interactive,
+    Unattended,
+    Subagent,
+    #[default]
+    Unknown,
+}
+
+impl SessionMode {
+    pub fn as_tag(self) -> &'static str {
+        match self {
+            Self::Interactive => "session_mode_interactive",
+            Self::Unattended => "session_mode_unattended",
+            Self::Subagent => "session_mode_subagent",
+            Self::Unknown => "session_mode_unknown",
+        }
+    }
+}
+
 /// 会话消息
 #[derive(Debug, Clone)]
 pub struct SessionMessage {
@@ -44,6 +67,7 @@ pub struct SessionMeta {
     pub project: Option<String>,
     pub model: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
+    pub mode: SessionMode,
 }
 
 /// 统一会话结构

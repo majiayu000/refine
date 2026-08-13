@@ -202,7 +202,7 @@ fn test_legacy_unversioned_scores_are_activity_only() {
 }
 
 #[test]
-fn test_unversioned_current_indicator_contract_is_compatible() {
+fn test_unversioned_v2_indicator_contract_is_activity_only() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scores.jsonl");
     let mut score = make_score_result(
@@ -229,7 +229,7 @@ fn test_unversioned_current_indicator_contract_is_compatible() {
     .unwrap();
 
     let compatible = load_recent_scores_from_path(&path, 10).unwrap();
-    assert_eq!(compatible.len(), 1);
+    assert!(compatible.is_empty());
 }
 
 #[test]

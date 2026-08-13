@@ -35,7 +35,7 @@ pub(super) fn dreyfus_weighted(stats: &GlobalStats) -> f64 {
     }
 }
 
-fn decision_quality_rate(cluster: &ClusterResult) -> f64 {
+fn reason_explicitness_rate(cluster: &ClusterResult) -> f64 {
     let total: usize = cluster
         .projects
         .values()
@@ -55,7 +55,7 @@ fn decision_quality_rate(cluster: &ClusterResult) -> f64 {
 
 pub(super) fn layer1(cluster: &ClusterResult, t: &Targets) -> LayerScore {
     let dw = dreyfus_weighted(&cluster.global_stats);
-    let dq = decision_quality_rate(cluster);
+    let dq = reason_explicitness_rate(cluster);
 
     let sig_dw = if dw > t.dreyfus_green {
         Signal::Green
@@ -109,25 +109,29 @@ fn layer2(cluster: &ClusterResult, t: &Targets) -> LayerScore {
         exploration as f64 / collab_total as f64
     };
 
-    let total_sessions: usize = cluster.projects.values().map(|p| p.session_count).sum();
-    let deep_sessions: usize = cluster
+    // These thresholds were specified for project buckets, not for sessions
+    // inside those buckets. Keep the numerator and denominator at the same
+    // project granularity and exclude the synthetic untagged bucket.
+    let scored_projects: Vec<_> = cluster
         .projects
         .values()
-        .filter(|p| p.session_count >= 20)
-        .map(|p| p.session_count)
-        .sum();
-    let frag_sessions: usize = cluster
-        .projects
-        .values()
-        .filter(|p| p.session_count == 1)
-        .map(|p| p.session_count)
-        .sum();
-    let (deep_rate, frag_rate) = if total_sessions == 0 {
+        .filter(|project| project.project_name != "other" && project.session_count > 0)
+        .collect();
+    let project_count = scored_projects.len();
+    let mature_projects = scored_projects
+        .iter()
+        .filter(|project| project.session_count >= 20)
+        .count();
+    let one_off_projects = scored_projects
+        .iter()
+        .filter(|project| project.session_count == 1)
+        .count();
+    let (deep_rate, frag_rate) = if project_count == 0 {
         (0.0, 0.0)
     } else {
         (
-            deep_sessions as f64 / total_sessions as f64,
-            frag_sessions as f64 / total_sessions as f64,
+            mature_projects as f64 / project_count as f64,
+            one_off_projects as f64 / project_count as f64,
         )
     };
 

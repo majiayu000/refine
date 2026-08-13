@@ -19,7 +19,10 @@ const META_TAGS: &[&str] = &[
     "exploration",
     "teaching",
     "deep_inquiry",
-    "debugging",
+    "session_mode_interactive",
+    "session_mode_unattended",
+    "session_mode_subagent",
+    "session_mode_unknown",
 ];
 
 const GENERIC_PATH_SEGMENTS: &[&str] = &[
@@ -35,6 +38,9 @@ const GENERIC_PATH_SEGMENTS: &[&str] = &[
     "life",
     "information",
     "mutil",
+    "infra",
+    "private",
+    "tmp",
 ];
 
 /// 单个项目的聚类数据
@@ -81,10 +87,33 @@ pub struct ClusterResult {
 
 /// 主函数：从全量 observation 生成聚类结果
 pub fn cluster_observations(items: &[Item]) -> ClusterResult {
+    // Mirror measures the user's direct interactive work. Codex can reliably
+    // identify unattended exec and subagent sessions, so exclude those
+    // cohorts by provenance. Unknown legacy sessions remain included.
+    let excluded_doc_ids: HashSet<String> = items
+        .iter()
+        .filter(|item| {
+            item.tags()
+                .iter()
+                .any(|tag| is_excluded_session_mode(tag.as_str()))
+        })
+        .filter_map(|item| item.document_id().map(|id| id.as_str().to_string()))
+        .collect();
+
     // Single filtering pass: compute tags once per item to avoid double allocation.
     let obs_with_tags: Vec<(&Item, Vec<&str>)> = items
         .iter()
         .filter(|i| i.item_type() == ItemType::Observation)
+        .filter(|item| {
+            let excluded_by_doc = item
+                .document_id()
+                .is_some_and(|id| excluded_doc_ids.contains(id.as_str()));
+            let excluded_by_tag = item
+                .tags()
+                .iter()
+                .any(|tag| is_excluded_session_mode(tag.as_str()));
+            !excluded_by_doc && !excluded_by_tag
+        })
         .map(|item| {
             let tags: Vec<&str> = item.tags().iter().map(|t| t.as_str()).collect();
             (item, tags)
@@ -262,7 +291,11 @@ fn is_session_id(segment: &str) -> bool {
 }
 
 pub fn normalize_project_name(raw: &str) -> Option<String> {
-    let segments: Vec<&str> = raw.split('-').filter(|s| !s.is_empty()).collect();
+    let normalized_path = raw.to_ascii_lowercase().replace(['/', '\\'], "-");
+    let segments: Vec<&str> = normalized_path
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect();
     let first_project_segment = segments
         .iter()
         .position(|segment| !GENERIC_PATH_SEGMENTS.contains(segment))?;
@@ -324,14 +357,12 @@ fn is_cognitive_level(tag: &str) -> bool {
 fn is_collab_mode(tag: &str) -> bool {
     matches!(
         tag,
-        "delegation"
-            | "pair_programming"
-            | "review"
-            | "exploration"
-            | "teaching"
-            | "deep_inquiry"
-            | "debugging"
+        "delegation" | "pair_programming" | "review" | "exploration" | "teaching" | "deep_inquiry"
     )
+}
+
+fn is_excluded_session_mode(tag: &str) -> bool {
+    matches!(tag, "session_mode_unattended" | "session_mode_subagent")
 }
 
 #[cfg(test)]
@@ -396,6 +427,15 @@ mod tests {
         );
         assert_eq!(normalize_project_name("my-tool"), Some("my-tool".into()));
         assert_eq!(
+            normalize_project_name("/Users/lifcc/Desktop/code/work/infra/her"),
+            Some("her".into())
+        );
+        assert_eq!(normalize_project_name("infra-her"), Some("her".into()));
+        assert_eq!(
+            normalize_project_name("/Users/lifcc/Desktop/code/work/life/looper"),
+            Some("looper".into())
+        );
+        assert_eq!(
             normalize_project_name("agent_019ec96be5fe7f53a6cca93bb6201c26"),
             None
         );
@@ -456,5 +496,22 @@ mod tests {
         assert_eq!(cluster.global_stats.total_sessions, 2);
         assert_eq!(cluster.projects["project-a"].session_count, 1);
         assert_eq!(cluster.projects["project-b"].session_count, 2);
+    }
+
+    #[test]
+    fn cluster_observations_excludes_unattended_and_subagent_documents() {
+        let cluster = cluster_observations(&[
+            observation(
+                "interactive",
+                "doc-1",
+                &["project-a", "session_mode_interactive"],
+            ),
+            observation("exec", "doc-2", &["project-a", "session_mode_unattended"]),
+            observation("child", "doc-3", &["project-a", "session_mode_subagent"]),
+            observation("legacy", "doc-4", &["project-a"]),
+        ]);
+
+        assert_eq!(cluster.global_stats.total_sessions, 2);
+        assert_eq!(cluster.projects["project-a"].session_count, 2);
     }
 }

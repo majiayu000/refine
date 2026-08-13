@@ -1,7 +1,7 @@
 # SPEC: Mirror Scoring and Codex Weekly Semantics
 
-Date: 2026-08-12
-Status: Accepted for issue #145
+Date: 2026-08-13
+Status: Accepted scoring schema v3
 
 ## Goal
 
@@ -17,17 +17,17 @@ these parts, so this issue must not replay them:
 
 | Area from PR #141 | Current `main` state | Decision |
 | --- | --- | --- |
-| Codex transcript parser | Current `response_item.payload.type = "message"` schema, roles, text types, metadata, and timestamp extraction are already implemented in `packages/core/src/session/parser.rs`. | Do not edit parser transport. |
-| Codex project attribution | `apps/cli/src/ingest_sessions.rs` already falls back from discovery project to `session.meta.project` before `facets_to_items`. | Do not replay ingest changes. |
+| Codex transcript parser | Current `response_item.payload.type = "message"` schema, roles, text types, metadata, and timestamp extraction are already implemented in `packages/core/src/session/parser.rs`. | Preserve message transport; extend only explicit metadata provenance. |
+| Codex project attribution | Discovery paths and session metadata can disagree or encode the same repository differently. | Prefer repository metadata and normalize path aliases. |
 | Event-time storage | Session documents have `captured_at`; session ingestion sets it from `SessionMeta.started_at` or file mtime. | Preserve. |
 | Weekly event-time window | `mirror weekly` already uses `find_observations_by_event_range`. | Preserve. |
 | Score/dashboard event-time window | `mirror score` and dashboard already use the same event-time query for default and `--since` windows. | Preserve. |
-| Scheduled workflow hardening | PR #143 made daily/weekly automation locked, serialized, and failure-visible. | Do not edit scheduler scripts. |
+| Scheduled workflow hardening | PR #143 made daily/weekly automation locked, serialized, and failure-visible. | Preserve locking and failure propagation; add the metadata reconciliation step. |
 | Cognitive portrait archive | PR #144 extracted generated reports and scheduling. | Do not add generated reports. |
 
 The remaining portable work is therefore limited to scoring semantics,
 statusline/advice visibility, weekly action cards, clustering input stability,
-and this specification.
+metadata reconciliation, and this specification.
 
 ## Event-Time Window Semantics
 
@@ -59,13 +59,13 @@ Mirror now scores three layers with eight live indicators:
 | Layer | Indicator | Direction | Target source |
 | --- | --- | --- | --- |
 | Depth | `dreyfus` | Higher is better | Weighted cognitive level average |
-| Depth | `decision_quality` | Higher is better | Decision titles with explicit reason keywords |
+| Depth | `decision_quality` | Higher is better | Decision titles with explicit reason keywords; displayed as **Reason Explicitness**, not decision quality |
 | Breadth | `exploration` | Higher is better | Exploration observations over all collaboration-mode observations |
-| Breadth | `deep_invest` | Band | Session-weighted share of projects with at least 20 sessions |
-| Breadth | `fragmentation` | Lower is better | Session-weighted share of single-session projects |
+| Breadth | `deep_invest` | Band | Projects with at least 20 sessions over scored projects; displayed as **Mature Project Share** |
+| Breadth | `fragmentation` | Lower is better | Single-session projects over scored projects; displayed as **One-off Project Share** |
 | Collaboration | `delegation` | Lower is better | Delegation observations over all collaboration-mode observations |
 | Collaboration | `mode_diversity` | Higher is better | Count of observed collaboration modes |
-| Collaboration | `bug_decision` | Lower is better | Bugfix count over decision count |
+| Collaboration | `bug_decision` | Lower is better | Extracted bugfix count over extracted decision count; displayed as an extraction ratio |
 
 The experiment drops three noisy live indicators:
 
@@ -79,17 +79,16 @@ The experiment drops three noisy live indicators:
 Historical `scores.jsonl` entries that contain those old indicators remain
 deserializable and remain available as score-run activity for streak tracking.
 They do not participate in current MOTD, dashboard, or personal-trend reads:
-new entries carry `score_schema_version = 2`, and metric consumers only compare
-entries with the current scoring semantics. Unversioned entries with the exact
-eight-indicator contract are accepted for the short PR #146 transition window;
-older 11-indicator entries are activity-only. This prevents project-count
-fragmentation values from contaminating session-weighted baselines.
+new entries carry `score_schema_version = 3`, and metric consumers only compare
+entries with the current scoring semantics. All unversioned entries and v1/v2
+entries are activity-only. This prevents incompatible project denominators
+from contaminating current baselines while preserving score-run streaks.
 
 ## Breadth Weighting
 
-`deep_invest` and `fragmentation` are session-weighted, not bucket-weighted.
-A one-session side project should not have the same weight as a deeply worked
-project. For example:
+`deep_invest` and `fragmentation` use project buckets because their fixed
+thresholds were defined as percentages of projects. Mixing a session-weighted
+numerator with project-level target bands produced false red signals. For example:
 
 ```text
 solo-a: 1 session
@@ -99,11 +98,27 @@ deep-a: 20 sessions
 
 The resulting rates are:
 
-- `deep_invest = 20 / 22 = 90.9%`
-- `fragmentation = 2 / 22 = 9.1%`
+- `deep_invest = 1 / 3 = 33.3%`
+- `fragmentation = 2 / 3 = 66.7%`
 
-The old bucket-weighted interpretation would have produced `33.3%` and
-`66.7%`, overstating fragmentation.
+The synthetic `other` bucket is excluded. These indicators describe portfolio
+shape, not time allocation or context switching; their display names must not
+claim otherwise.
+
+## Personal Cohort Provenance
+
+Mirror's personal score includes direct interactive sessions and legacy
+sessions whose provenance is unknown. It excludes documents explicitly tagged
+as unattended Codex exec or subagent work. The classification is based only on
+Codex `session_meta` fields (`originator` and `thread_source`), never on titles,
+prompt keywords, project names, or inferred scheduler intent.
+
+`codex_exec` proves an unattended execution surface, not that a scheduler
+started it. Mirror therefore calls this cohort `unattended`, not `scheduled`.
+Metadata tags are persisted on every observation item. A local metadata-only
+backfill can tag already extracted remem-backed observations without another
+LLM extraction via `refine ingest-sessions --provider local --source codex
+--backfill-session-metadata`.
 
 ## Statusline and Advice Cache
 
@@ -152,6 +167,9 @@ Project clustering must not let ingestion artifacts distort breadth metrics:
 - `tool` and `tools` path segments are both generic and are removed during
   project normalization.
 - `agent_<hex>` session identifiers are not project names.
+- `/` and `-users-...` path encodings normalize through the same path-segment
+  rules; generic grouping directories such as `infra` do not become projects.
+- Codex `git.repository_url` is preferred to cwd/discovery aliases when present.
 - `session_count` is deduplicated per project, while `global_stats.total_sessions`
   remains globally deduplicated.
 - Profile project shares use the sum of per-project session assignments as
@@ -170,10 +188,11 @@ Focused validation for this issue:
 ```bash
 cargo fmt --all --check
 cargo test -p mirror
-cargo test -p refine-core session::clustering
+cargo test -p refine-core session::
+cargo test -p refine-cli ingest_sessions
 git diff --check
 ```
 
-Broader workspace tests are useful before release, but this issue intentionally
-does not change parser transport, LLM ingest, SQLite migrations, or scheduler
-scripts.
+Broader workspace tests are useful before release. This v3 correction changes
+metadata parsing and metadata-only ingest backfill, but not message transport,
+LLM facet semantics, SQLite schema, or scheduler scripts.

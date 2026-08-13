@@ -52,8 +52,8 @@ const INDICATOR_SPECS: [IndicatorSpec; 8] = [
         format: IndicatorFormat::Percent0,
         direction: Direction::HigherBetter,
         aliases: &["Decision Quality", "决策质量"],
-        display_en: "Decision Quality",
-        display_zh: "决策质量",
+        display_en: "Reason Explicitness",
+        display_zh: "理由显式率",
     },
     IndicatorSpec {
         key: "exploration",
@@ -68,16 +68,16 @@ const INDICATOR_SPECS: [IndicatorSpec; 8] = [
         format: IndicatorFormat::Percent0,
         direction: Direction::Band,
         aliases: &["Deep Invest", "深耕率", "深挖率", "深挖占比"],
-        display_en: "Deep Invest",
-        display_zh: "深耕率",
+        display_en: "Mature Project Share",
+        display_zh: "成熟项目占比",
     },
     IndicatorSpec {
         key: "fragmentation",
         format: IndicatorFormat::Percent0,
         direction: Direction::LowerBetter,
         aliases: &["Fragmentation", "碎片化"],
-        display_en: "Fragmentation",
-        display_zh: "碎片化",
+        display_en: "One-off Project Share",
+        display_zh: "一次性项目占比",
     },
     IndicatorSpec {
         key: "delegation",
@@ -100,8 +100,8 @@ const INDICATOR_SPECS: [IndicatorSpec; 8] = [
         format: IndicatorFormat::Fixed2,
         direction: Direction::LowerBetter,
         aliases: &["Bug/Decision", "bug/decision", "bug/决策"],
-        display_en: "bug/decision",
-        display_zh: "bug/决策",
+        display_en: "Bug/Decision Extraction Ratio",
+        display_zh: "Bug/决策抽取比",
     },
 ];
 

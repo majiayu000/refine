@@ -61,8 +61,12 @@ explicit alternative is:
 bash scripts/configure-llm-env.sh --from-env
 ```
 
-The loader precedence is current non-empty process credentials, then the
-secure file, then an explicitly supplied repository `.env` fallback. It
+The shell loader precedence is current non-empty process credentials, then the
+secure file, then an explicitly supplied repository `.env` fallback. Provider
+selection then prefers explicit `REFINE_*` credentials, followed by an
+explicit `BASE_*` OpenAI-compatible endpoint, followed by ambient provider
+variables. Thus an inherited `ANTHROPIC_AUTH_TOKEN` cannot override Refine's
+configured `BASE_URL`. It
 supports the Anthropic aliases `REFINE_ANTHROPIC_API_KEY`,
 `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_API_KEY`; the OpenAI aliases
 `REFINE_OPENAI_API_KEY` and `OPENAI_API_KEY`; and the compatibility
@@ -126,7 +130,7 @@ scripts/install-local.sh --no-start
 | Label | Role | Trigger | Log |
 | --- | --- | --- | --- |
 | `com.lifcc.refine-server` | Local API/dashboard | RunAtLoad + KeepAlive | `~/Library/Logs/refine-server.log` |
-| `com.lifcc.refine-daily-ingest` | `refine ingest-sessions` + `mirror score` | Daily 08:00 | `~/Library/Logs/refine-daily-ingest.log` |
+| `com.lifcc.refine-daily-ingest` | `refine ingest-sessions` + incremental Codex metadata backfill + `mirror score` | Daily 08:00 | `~/Library/Logs/refine-daily-ingest.log` |
 | `com.lifcc.refine-weekly-insights` | `refine insights --prescription` | Sunday 09:00 | `~/Library/Logs/refine-insights.log` |
 | `com.lifcc.refine-ui-dev` | Desktop UI Vite dev server | RunAtLoad + KeepAlive | `.run/launchd-refine-ui.*.log` |
 

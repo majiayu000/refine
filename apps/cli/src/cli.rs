@@ -135,6 +135,9 @@ pub enum Commands {
         /// Explicitly retry sessions previously quarantined for deterministic provider rejection.
         #[arg(long)]
         retry_quarantined: bool,
+        /// Backfill project/provenance metadata on existing observations without calling an LLM.
+        #[arg(long, requires = "source")]
+        backfill_session_metadata: bool,
     },
     /// 生成认知洞察报告
     Insights {

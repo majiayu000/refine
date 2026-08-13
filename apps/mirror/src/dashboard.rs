@@ -20,7 +20,6 @@ const COLLAB: &[(&str, &str)] = &[
     ("review", "review"),
     ("pair_prog", "pair_programming"),
     ("teaching", "teaching"),
-    ("debugging", "debugging"),
 ];
 const BAR_W: usize = 10;
 

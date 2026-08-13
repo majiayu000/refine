@@ -135,6 +135,8 @@ refine ingest-sessions --provider remem
 refine ingest-sessions --provider local
 refine ingest-sessions --provider local --source claude
 refine ingest-sessions --provider local --source codex
+# One-time provenance backfill for already extracted observations (no LLM):
+refine ingest-sessions --provider local --source codex --backfill-session-metadata
 # Deprecated compatibility alias for --provider local
 refine ingest-sessions --legacy-local-scan --source claude
 refine insights --prescription
