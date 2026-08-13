@@ -10,6 +10,7 @@ use crate::remem_sessions::{
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use refine_core::error::InfraError;
 use refine_core::infra::{
     llm_with_retry_policy, LlmClient, LlmRetryPolicy, DEFAULT_MAX_RETRIES,
@@ -20,12 +21,17 @@ use refine_core::session::{
     build_facet_prompt, chunk_session, discover_sessions, facets_to_items, needs_chunking,
     parse_facet_response, parse_session_file, FilterConfig, SessionSource, FACET_SYSTEM_PROMPT,
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::fs::OpenOptions;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 
 mod legacy_migration;
@@ -34,6 +40,21 @@ mod quarantine;
 use quarantine::{record_key as quarantine_key, QuarantineStore};
 
 const DEFAULT_CONCURRENCY: usize = 1;
+const INGEST_CURSOR_VERSION: u8 = 2;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct IngestCursorFailure {
+    path_sha256: String,
+    modified_at_secs: u64,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct IngestCursorState {
+    version: u8,
+    watermark_secs: u64,
+    failures: Vec<IngestCursorFailure>,
+}
 
 fn concurrency() -> usize {
     std::env::var("REFINE_INGEST_CONCURRENCY")
@@ -105,9 +126,11 @@ fn session_captured_at(
     session_started_at.unwrap_or_else(|| DateTime::<Utc>::from(file_modified_at))
 }
 
-fn session_needs_refresh(existing_doc: &Document, file_modified_at: SystemTime) -> bool {
-    let file_modified_at = DateTime::<Utc>::from(file_modified_at);
-    file_modified_at > existing_doc.updated_at()
+fn session_needs_refresh(existing_doc: &Document, source_version: &str, raw_content: &str) -> bool {
+    match existing_doc.source_version() {
+        Some(existing_version) => existing_version != source_version,
+        None => existing_doc.raw_content() != raw_content,
+    }
 }
 
 fn content_source_version(provider: &str, raw_content: &str) -> String {
@@ -156,23 +179,114 @@ fn encode_path_for_filename(path: &Path) -> String {
 fn read_last_ingest_mtime(source: Option<&SessionSource>, db_path: &Path) -> Option<SystemTime> {
     let home = dirs::home_dir()?;
     let path = incremental_cursor_path(&home, source, db_path);
-    let secs: u64 = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
+    let secs = parse_ingest_cursor(&std::fs::read_to_string(path).ok()?)?;
     Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
 }
 
+fn parse_ingest_cursor(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim();
+    trimmed.parse::<u64>().ok().or_else(|| {
+        serde_json::from_str::<IngestCursorState>(trimmed)
+            .ok()
+            .filter(|state| state.version == INGEST_CURSOR_VERSION)
+            .map(|state| state.watermark_secs)
+    })
+}
+
 /// Persist the Unix-second timestamp to the scoped ingest cursor file.
-fn write_last_ingest_mtime(source: Option<&SessionSource>, db_path: &Path, t: SystemTime) {
-    let Some(home) = dirs::home_dir() else { return };
+fn write_last_ingest_mtime(
+    source: Option<&SessionSource>,
+    db_path: &Path,
+    t: SystemTime,
+    failures: Vec<IngestCursorFailure>,
+) -> Result<()> {
+    let home = dirs::home_dir().context("home directory is unavailable for ingest cursor")?;
     let path = incremental_cursor_path(&home, source, db_path);
-    let Some(dir) = path.parent() else { return };
-    if let Err(e) = std::fs::create_dir_all(dir) {
-        tracing::warn!("failed to create {}: {}", dir.display(), e);
-        return;
-    }
-    if let Ok(dur) = t.duration_since(SystemTime::UNIX_EPOCH) {
-        if let Err(e) = std::fs::write(&path, dur.as_secs().to_string()) {
-            tracing::warn!("failed to write {}: {}", path.display(), e);
-        }
+    write_ingest_cursor_at(
+        &path,
+        &IngestCursorState {
+            version: INGEST_CURSOR_VERSION,
+            watermark_secs: unix_seconds(t),
+            failures,
+        },
+    )
+}
+
+fn safe_cursor_watermark(scan_start: SystemTime, failed_mtimes: &[SystemTime]) -> SystemTime {
+    failed_mtimes
+        .iter()
+        .copied()
+        .min()
+        .map(|failed| {
+            failed
+                .checked_sub(Duration::from_secs(1))
+                .unwrap_or(UNIX_EPOCH)
+        })
+        .map_or(scan_start, |safe| safe.min(scan_start))
+}
+
+fn write_ingest_cursor_at(path: &Path, state: &IngestCursorState) -> Result<()> {
+    let dir = path
+        .parent()
+        .context("ingest cursor has no parent directory")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let nonce = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    let temp_path = path.with_extension(format!("tmp-{}-{nonce}", std::process::id()));
+    let payload = serde_json::to_vec(state).context("failed to serialize ingest cursor")?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut temp = options
+        .open(&temp_path)
+        .with_context(|| format!("failed to create {}", temp_path.display()))?;
+    temp.write_all(&payload)
+        .with_context(|| format!("failed to write {}", temp_path.display()))?;
+    temp.sync_all()
+        .with_context(|| format!("failed to sync {}", temp_path.display()))?;
+    drop(temp);
+    std::fs::rename(&temp_path, path)
+        .with_context(|| format!("failed to replace {}", path.display()))?;
+    std::fs::File::open(dir)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("failed to sync {}", dir.display()))?;
+    Ok(())
+}
+
+fn lock_incremental_cursor(
+    source: Option<&SessionSource>,
+    db_path: &Path,
+) -> Result<std::fs::File> {
+    let home = dirs::home_dir().context("home directory is unavailable for ingest cursor")?;
+    let cursor_path = incremental_cursor_path(&home, source, db_path);
+    let parent = cursor_path
+        .parent()
+        .context("ingest cursor has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+    let lock_path = cursor_path.with_extension("lock");
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let lock = options
+        .open(&lock_path)
+        .with_context(|| format!("failed to open {}", lock_path.display()))?;
+    lock.lock_exclusive()
+        .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+    Ok(lock)
+}
+
+fn unix_seconds(t: SystemTime) -> u64 {
+    t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+}
+
+fn cursor_failure(path: &Path, modified_at: SystemTime, reason: &str) -> IngestCursorFailure {
+    let digest = Sha256::digest(path.to_string_lossy().as_bytes());
+    IngestCursorFailure {
+        path_sha256: format!("{digest:x}"),
+        modified_at_secs: unix_seconds(modified_at),
+        reason: reason.to_string(),
     }
 }
 
@@ -412,6 +526,13 @@ async fn handle_legacy_ingest_sessions(
     // 1-hour overlap on the cutoff absorbs clock skew and files modified near the boundary.
     let incremental = options.limit.is_none() && options.latest.is_none() && !options.dry_run;
     let source = options.source.clone();
+    // Serialize the complete read/scan/process/write cycle so an older,
+    // slower run cannot overwrite a newer safe watermark or failure set.
+    let _cursor_lock = if incremental {
+        Some(lock_incremental_cursor(source.as_ref(), db_path)?)
+    } else {
+        None
+    };
     let scan_start = SystemTime::now();
     let mtime_after = if incremental {
         read_last_ingest_mtime(source.as_ref(), db_path).map(|last| {
@@ -450,6 +571,7 @@ async fn handle_legacy_ingest_sessions(
     let mut skipped_dup = 0usize;
     let mut skipped_filter = 0usize;
     let mut stale_refresh = 0usize;
+    let mut parse_failures = Vec::new();
 
     // 阶段 1: 串行做去重 + 过滤 + 解析（快，不需要 LLM）
     for (idx, ds) in sessions_to_process.iter().enumerate() {
@@ -460,9 +582,18 @@ async fn handle_legacy_ingest_sessions(
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("解析失败 {}: {}", legacy_url, e);
+                parse_failures.push(cursor_failure(&ds.path, ds.modified_at, "parse_error"));
                 continue;
             }
         };
+        if session.meta.truncated_tail {
+            tracing::warn!(
+                path = %ds.path.display(),
+                "会话文件尾部仍在写入；本次不保存，下一轮重试"
+            );
+            parse_failures.push(cursor_failure(&ds.path, ds.modified_at, "truncated_tail"));
+            continue;
+        }
 
         let project = project_for_ingest(ds.project.as_deref(), session.meta.project.as_deref());
         let has_embedded_timestamp = session.meta.started_at.is_some();
@@ -509,7 +640,7 @@ async fn handle_legacy_ingest_sessions(
             // document. If it is not a prefix/equal snapshot, keep it under
             // its local identity instead of replacing remem data.
             if let Some(existing_doc) = legacy_document.as_ref() {
-                if session_needs_refresh(existing_doc, ds.modified_at) {
+                if session_needs_refresh(existing_doc, &source_version, &raw_content) {
                     stale_refresh += 1;
                 } else {
                     skipped_dup += 1;
@@ -519,7 +650,7 @@ async fn handle_legacy_ingest_sessions(
             (legacy_url, ds.source.clone(), legacy_document)
         } else {
             if let Some(existing_doc) = legacy_document.as_ref() {
-                if session_needs_refresh(existing_doc, ds.modified_at) {
+                if session_needs_refresh(existing_doc, &source_version, &raw_content) {
                     stale_refresh += 1;
                 } else {
                     skipped_dup += 1;
@@ -568,7 +699,7 @@ async fn handle_legacy_ingest_sessions(
         });
     }
 
-    process_pending_sessions(
+    let process_result = process_pending_sessions(
         pending,
         total,
         skipped_dup,
@@ -579,11 +710,20 @@ async fn handle_legacy_ingest_sessions(
         doc_store,
         llm_client,
     )
-    .await?;
+    .await;
 
-    // Advance the incremental scan cursor so the next run only sees newer files.
-    if incremental && !options.dry_run {
-        write_last_ingest_mtime(source.as_ref(), db_path, scan_start);
+    if incremental && process_result.is_ok() {
+        let failed_mtimes = parse_failures
+            .iter()
+            .map(|failure| UNIX_EPOCH + Duration::from_secs(failure.modified_at_secs))
+            .collect::<Vec<_>>();
+        let watermark = safe_cursor_watermark(scan_start, &failed_mtimes);
+        write_last_ingest_mtime(source.as_ref(), db_path, watermark, parse_failures.clone())?;
+    }
+
+    process_result?;
+    if !parse_failures.is_empty() {
+        anyhow::bail!("{} 个会话文件解析失败或仍在写入", parse_failures.len());
     }
 
     Ok(())

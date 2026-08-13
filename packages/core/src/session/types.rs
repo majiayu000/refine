@@ -44,6 +44,10 @@ pub struct SessionMeta {
     pub project: Option<String>,
     pub model: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
+    /// The final JSONL record ended at EOF before it became valid JSON. The
+    /// parsed prefix is useful for inspection, but must not replace a complete
+    /// persisted snapshot or advance an incremental ingest cursor.
+    pub truncated_tail: bool,
 }
 
 /// 统一会话结构

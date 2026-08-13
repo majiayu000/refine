@@ -44,6 +44,31 @@ struct SequenceLlmClient {
     calls: AtomicUsize,
 }
 
+struct AppendingLlmClient {
+    path: PathBuf,
+    record: String,
+    response: String,
+    appended: AtomicBool,
+}
+
+#[async_trait]
+impl LlmClient for AppendingLlmClient {
+    async fn complete(&self, _prompt: &str, _system: Option<&str>) -> InfraResult<String> {
+        if !self.appended.swap(true, Ordering::SeqCst) {
+            use std::io::Write as _;
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(&self.path)
+                .expect("active transcript should remain appendable");
+            file.write_all(self.record.as_bytes())
+                .expect("active writer should append a complete JSONL record");
+            file.sync_all()
+                .expect("appended transcript record should reach the file");
+        }
+        Ok(self.response.clone())
+    }
+}
+
 impl SequenceLlmClient {
     fn new(responses: Vec<String>) -> Self {
         Self {
@@ -163,17 +188,136 @@ async fn facet_parse_error_retries_then_succeeds() {
 }
 
 #[test]
-fn session_needs_refresh_when_file_mtime_is_newer_than_saved_document() {
-    let mut doc = Document::new("codex-session", "raw");
+fn session_refresh_uses_source_content_instead_of_ingest_timestamp() {
+    let old_raw = "User: first message\n";
+    let old_version = content_source_version("local", old_raw);
+    let mut doc = Document::new("codex-session", old_raw);
     doc.set_url("file:///tmp/session.jsonl");
+    doc.set_source_version(Some(&old_version));
 
-    let old_mtime = SystemTime::now()
-        .checked_sub(Duration::from_secs(60))
-        .unwrap();
-    assert!(!session_needs_refresh(&doc, old_mtime));
+    assert!(!session_needs_refresh(&doc, &old_version, old_raw));
 
-    let new_mtime = SystemTime::now() + Duration::from_millis(200);
-    assert!(session_needs_refresh(&doc, new_mtime));
+    // Model a complete JSONL record appended while the previous snapshot is
+    // being processed. The database write can be newer than the append, so
+    // mtime compared with Document.updated_at is not a valid freshness check.
+    let appended_raw = "User: first message\nAssistant: appended while LLM was running\n";
+    let appended_version = content_source_version("local", appended_raw);
+    assert!(session_needs_refresh(&doc, &appended_version, appended_raw));
+
+    // Legacy documents without a source_version still use an exact content
+    // comparison, never the later database ingestion timestamp.
+    let legacy_doc = Document::new("codex-session", old_raw);
+    assert!(!session_needs_refresh(&legacy_doc, &old_version, old_raw));
+    assert!(session_needs_refresh(
+        &legacy_doc,
+        &appended_version,
+        appended_raw
+    ));
+}
+
+#[tokio::test]
+async fn complete_record_appended_during_llm_is_ingested_on_next_pass() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("active.jsonl");
+    fs::write(
+        &path,
+        "{\"type\":\"user\",\"message\":{\"content\":\"first\"}}\n",
+    )
+    .unwrap();
+
+    let first_session = parse_session_file(&path, SessionSource::ClaudeCode).unwrap();
+    assert!(!first_session.meta.truncated_tail);
+    let first_raw = first_session.to_document_content();
+    let first_version = content_source_version("local", &first_raw);
+    let url = path.to_string_lossy().to_string();
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let response = r#"{
+        "session_summary": "active snapshot",
+        "cognitive_level": "proficient",
+        "collaboration_mode": "pair_programming",
+        "decisions": [], "bugs_fixed": [], "patterns": [], "friction": [],
+        "project_progress": [], "questions": [], "knowledge_gained": [],
+        "tools_discovered": [], "architecture": [], "code_artifacts": []
+    }"#
+    .to_string();
+    let appending_client: Arc<dyn LlmClient> = Arc::new(AppendingLlmClient {
+        path: path.clone(),
+        record: concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[",
+            "{\"type\":\"text\",\"text\":\"appended\"}]}}\n"
+        )
+        .to_string(),
+        response: response.clone(),
+        appended: AtomicBool::new(false),
+    });
+    let first_pending = PendingSession {
+        idx: 0,
+        total: 1,
+        url: url.clone(),
+        source: SessionSource::ClaudeCode,
+        project: None,
+        captured_at: Utc::now(),
+        has_embedded_timestamp: false,
+        raw_content: first_raw.clone(),
+        source_version: Some(first_version.clone()),
+        needs_chunk: false,
+        chunks: Vec::new(),
+        existing_document: None,
+        legacy_documents_to_delete: Vec::new(),
+    };
+
+    process_single_session(
+        &first_pending,
+        &appending_client,
+        &doc_store,
+        &Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    let first_saved = doc_store.find_by_url(&url).await.unwrap().unwrap();
+    assert_eq!(first_saved.raw_content(), first_raw);
+    assert_eq!(first_saved.source_version(), Some(first_version.as_str()));
+
+    let appended_session = parse_session_file(&path, SessionSource::ClaudeCode).unwrap();
+    assert!(!appended_session.meta.truncated_tail);
+    assert_eq!(appended_session.messages.len(), 2);
+    let appended_raw = appended_session.to_document_content();
+    let appended_version = content_source_version("local", &appended_raw);
+    assert!(session_needs_refresh(
+        &first_saved,
+        &appended_version,
+        &appended_raw
+    ));
+
+    let second_pending = PendingSession {
+        idx: 0,
+        total: 1,
+        url: url.clone(),
+        source: SessionSource::ClaudeCode,
+        project: None,
+        captured_at: Utc::now(),
+        has_embedded_timestamp: false,
+        raw_content: appended_raw.clone(),
+        source_version: Some(appended_version.clone()),
+        needs_chunk: false,
+        chunks: Vec::new(),
+        existing_document: Some(first_saved),
+        legacy_documents_to_delete: Vec::new(),
+    };
+    let static_client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient { response });
+    process_single_session(
+        &second_pending,
+        &static_client,
+        &doc_store,
+        &Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+
+    let refreshed = doc_store.find_by_url(&url).await.unwrap().unwrap();
+    assert_eq!(refreshed.raw_content(), appended_raw);
+    assert_eq!(refreshed.source_version(), Some(appended_version.as_str()));
 }
 
 #[test]
@@ -261,6 +405,63 @@ fn cursor_is_partitioned_by_database_path() {
         incremental_cursor_path(home, Some(&SessionSource::Codex), &db_a),
         incremental_cursor_path(home, Some(&SessionSource::Codex), &db_b)
     );
+}
+
+#[test]
+fn safe_cursor_stays_before_oldest_failed_file() {
+    let scan_start = SystemTime::UNIX_EPOCH + Duration::from_secs(20_000);
+    let failures = [
+        SystemTime::UNIX_EPOCH + Duration::from_secs(15_000),
+        SystemTime::UNIX_EPOCH + Duration::from_secs(12_000),
+    ];
+    assert_eq!(
+        safe_cursor_watermark(scan_start, &failures),
+        SystemTime::UNIX_EPOCH + Duration::from_secs(11_999)
+    );
+    assert_eq!(safe_cursor_watermark(scan_start, &[]), scan_start);
+}
+
+#[test]
+fn cursor_write_atomically_replaces_previous_value() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("cursor/state");
+    let first = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+    let second = SystemTime::UNIX_EPOCH + Duration::from_secs(20);
+    let first = IngestCursorState {
+        version: INGEST_CURSOR_VERSION,
+        watermark_secs: unix_seconds(first),
+        failures: Vec::new(),
+    };
+    let second = IngestCursorState {
+        version: INGEST_CURSOR_VERSION,
+        watermark_secs: unix_seconds(second),
+        failures: vec![IngestCursorFailure {
+            path_sha256: "abc".to_string(),
+            modified_at_secs: 19,
+            reason: "parse_error".to_string(),
+        }],
+    };
+    write_ingest_cursor_at(&path, &first).expect("first cursor write");
+    write_ingest_cursor_at(&path, &second).expect("replace cursor");
+    let loaded: IngestCursorState =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(loaded, second);
+    assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+}
+
+#[test]
+fn cursor_reader_accepts_legacy_seconds_and_v2_state() {
+    assert_eq!(parse_ingest_cursor("42\n"), Some(42));
+    let state = IngestCursorState {
+        version: INGEST_CURSOR_VERSION,
+        watermark_secs: 84,
+        failures: Vec::new(),
+    };
+    assert_eq!(
+        parse_ingest_cursor(&serde_json::to_string(&state).unwrap()),
+        Some(84)
+    );
+    assert_eq!(parse_ingest_cursor("not a cursor"), None);
 }
 
 fn read_last_ingest_mtime_at(

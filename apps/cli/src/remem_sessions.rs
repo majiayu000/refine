@@ -360,6 +360,7 @@ fn load_one_session<R: Runner>(runner: &R, summary: RememSessionSummary) -> Resu
                 project: None,
                 model: None,
                 started_at: Some(started_at),
+                truncated_tail: false,
             },
         },
     };
