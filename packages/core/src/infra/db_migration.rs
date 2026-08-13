@@ -59,6 +59,7 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
     crate::infra::prepare_sqlite_db(&conn)
         .map_err(|e| format!("failed to initialise target schema: {}", e))?;
     prepare_migration_state(&conn)?;
+    prepare_import_ledger(&conn)?;
 
     let mut sources = Vec::new();
     let mut total_rows = 0usize;
@@ -116,7 +117,7 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
             let tx = conn
                 .unchecked_transaction()
                 .map_err(|e| format!("failed to start migration transaction: {e}"))?;
-            let rows = copy_all_tables(&tx, "refine_migration_src")?;
+            let rows = copy_all_tables(&tx, "refine_migration_src", candidate)?;
             let signature_after = source_signature(candidate)?;
             if signature_after != signature_before {
                 return Err(format!(
@@ -166,6 +167,19 @@ fn prepare_migration_state(conn: &Connection) -> Result<(), String> {
         .map_err(|e| format!("failed to upgrade legacy migration state: {e}"))?;
     }
     Ok(())
+}
+
+fn prepare_import_ledger(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS refine_legacy_imported_rows (
+            source_path TEXT NOT NULL,
+            table_name TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            canonical_id TEXT NOT NULL,
+            PRIMARY KEY (source_path, table_name, source_id)
+        )",
+    )
+    .map_err(|e| format!("failed to prepare legacy import ledger: {e}"))
 }
 
 fn migration_state(conn: &Connection, source: &Path) -> Result<Option<MigrationState>, String> {
@@ -517,7 +531,7 @@ fn preserve_forensic_bundle(source: &Path) -> Result<(), String> {
     result
 }
 
-fn copy_all_tables(conn: &Connection, legacy_alias: &str) -> Result<usize, String> {
+fn copy_all_tables(conn: &Connection, legacy_alias: &str, source: &Path) -> Result<usize, String> {
     let target_tables = list_base_tables(conn, "main")?;
     let legacy_tables = list_base_tables(conn, legacy_alias)?;
     let ordered_tables = migration_copy_order(&legacy_tables);
@@ -529,7 +543,7 @@ fn copy_all_tables(conn: &Connection, legacy_alias: &str) -> Result<usize, Strin
         if !target_tables.contains(table) {
             continue;
         }
-        total += copy_table(conn, table, legacy_alias)?;
+        total += copy_table(conn, table, legacy_alias, source)?;
     }
     Ok(total)
 }
@@ -627,7 +641,12 @@ fn table_columns(conn: &Connection, db_alias: &str, table: &str) -> Result<Vec<S
     Ok(cols)
 }
 
-fn copy_table(conn: &Connection, table: &str, legacy_alias: &str) -> Result<usize, String> {
+fn copy_table(
+    conn: &Connection,
+    table: &str,
+    legacy_alias: &str,
+    source: &Path,
+) -> Result<usize, String> {
     let target_cols = table_columns(conn, "main", table)?;
     let legacy_cols = table_columns(conn, legacy_alias, table)?;
     let common: Vec<String> = legacy_cols
@@ -701,10 +720,55 @@ fn copy_table(conn: &Connection, table: &str, legacy_alias: &str) -> Result<usiz
     };
     let sql = format!(
         "INSERT INTO {table} ({col_list}) \
-         SELECT {select_list} FROM {legacy_alias}.{table} AS src {joins} WHERE true {order_by} {conflict}"
+         SELECT {select_list} FROM {legacy_alias}.{table} AS src {joins} \
+         WHERE NOT EXISTS ( \
+           SELECT 1 FROM main.refine_legacy_imported_rows AS imported \
+           WHERE imported.source_path=?1 \
+             AND imported.table_name='{table}' \
+             AND imported.source_id=src.id \
+             AND NOT EXISTS ( \
+               SELECT 1 FROM main.{table} AS current \
+               WHERE current.id=imported.canonical_id \
+             ) \
+         ) {order_by} {conflict}"
     );
-    conn.execute(&sql, [])
-        .map_err(|e| format!("failed to copy table {table}: {e}"))
+    let source_path = source.to_string_lossy();
+    let copied = conn
+        .execute(&sql, [source_path.as_ref()])
+        .map_err(|e| format!("failed to copy table {table}: {e}"))?;
+    record_imported_rows(conn, table, legacy_alias, source_path.as_ref())?;
+    Ok(copied)
+}
+
+fn record_imported_rows(
+    conn: &Connection,
+    table: &str,
+    legacy_alias: &str,
+    source_path: &str,
+) -> Result<(), String> {
+    let (canonical_id, joins) = match table {
+        "documents" => (
+            "doc_map.canonical_id",
+            "JOIN refine_document_id_map AS doc_map ON doc_map.source_id=src.id",
+        ),
+        "conversations" => (
+            "conv_map.canonical_id",
+            "JOIN refine_conversation_id_map AS conv_map ON conv_map.source_id=src.id",
+        ),
+        _ => ("src.id", ""),
+    };
+    let sql = format!(
+        "INSERT INTO main.refine_legacy_imported_rows \
+           (source_path, table_name, source_id, canonical_id) \
+         SELECT ?1, '{table}', src.id, {canonical_id} \
+         FROM {legacy_alias}.{table} AS src {joins} \
+         JOIN main.{table} AS current ON current.id={canonical_id} \
+         ON CONFLICT(source_path, table_name, source_id) DO UPDATE SET \
+           canonical_id=excluded.canonical_id"
+    );
+    conn.execute(&sql, [source_path])
+        .map(|_| ())
+        .map_err(|e| format!("failed to record imported rows for table {table}: {e}"))
 }
 
 fn document_source_order(common: &[String]) -> String {
@@ -1062,6 +1126,29 @@ mod tests {
             1
         );
         assert!(legacy.exists());
+    }
+
+    #[test]
+    fn later_source_changes_do_not_resurrect_target_deletions() {
+        let tmp = TempDir::new().unwrap();
+        let target = make_target_db(tmp.path());
+        let legacy = make_legacy_db_with_items(tmp.path(), "server.db");
+        let lc = Connection::open(&legacy).unwrap();
+        insert_item(&lc, "deleted-in-target");
+
+        migrate_stale_dbs(&target).unwrap();
+        let tc = Connection::open(&target).unwrap();
+        tc.execute("DELETE FROM items WHERE id='deleted-in-target'", [])
+            .unwrap();
+        drop(tc);
+
+        insert_item(&lc, "late-write");
+        drop(lc);
+        migrate_stale_dbs(&target).unwrap();
+
+        let tc = Connection::open(&target).unwrap();
+        assert_eq!(item_count(&tc, "deleted-in-target"), 0);
+        assert_eq!(item_count(&tc, "late-write"), 1);
     }
 
     #[test]
