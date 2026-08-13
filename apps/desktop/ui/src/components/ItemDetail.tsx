@@ -1,37 +1,12 @@
 import {
-  BookOpenText,
   CalendarClock,
-  Code2,
   Hash,
   NotebookPen,
   Trash2,
-  Wrench,
-  type LucideIcon,
 } from 'lucide-react'
 import { useStore } from '../lib/store'
 import { cn } from '../lib/utils'
-import type { Item } from '../lib/api/types'
-
-const typeMeta: Record<
-  Item['item_type'],
-  { label: string; icon: LucideIcon; badgeClass: string }
-> = {
-  knowledge: {
-    label: '知识文档',
-    icon: BookOpenText,
-    badgeClass: 'bg-brand-100 text-brand-800 border-brand-200',
-  },
-  skill: {
-    label: '技能说明',
-    icon: Wrench,
-    badgeClass: 'bg-amber-100 text-amber-800 border-amber-200',
-  },
-  snippet: {
-    label: '代码片段',
-    icon: Code2,
-    badgeClass: 'bg-slate-100 text-slate-700 border-slate-200',
-  },
-}
+import { getItemTypeMeta } from '../lib/item-type-meta'
 
 function formatFullDate(date: string): string {
   return new Date(date).toLocaleDateString('zh-CN', {
@@ -61,7 +36,7 @@ export function ItemDetail() {
     )
   }
 
-  const meta = typeMeta[selectedItem.item_type]
+  const meta = getItemTypeMeta(selectedItem.item_type)
   const Icon = meta.icon
 
   const handleDelete = async () => {

@@ -7,40 +7,19 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   ArrowDown,
   ArrowUp,
-  BookOpenText,
-  Code2,
   CornerDownLeft,
   LoaderCircle,
   Search,
-  Wrench,
-  type LucideIcon,
 } from 'lucide-react'
 import { useStore } from '../lib/store'
 import { cn } from '../lib/utils'
 import { getApiClient } from '../lib/api/client'
 import type { Item } from '../lib/api/types'
+import { getItemTypeMeta } from '../lib/item-type-meta'
 
 interface SpotlightProps {
   isOpen: boolean
   onClose: () => void
-}
-
-const typeMeta: Record<Item['item_type'], { label: string; icon: LucideIcon; chipClass: string }> = {
-  knowledge: {
-    label: '知识',
-    icon: BookOpenText,
-    chipClass: 'border-brand-200 bg-brand-100 text-brand-800',
-  },
-  skill: {
-    label: '技能',
-    icon: Wrench,
-    chipClass: 'border-amber-200 bg-amber-100 text-amber-800',
-  },
-  snippet: {
-    label: '片段',
-    icon: Code2,
-    chipClass: 'border-slate-200 bg-slate-100 text-slate-700',
-  },
 }
 
 export function Spotlight({ isOpen, onClose }: SpotlightProps) {
@@ -169,7 +148,7 @@ export function Spotlight({ isOpen, onClose }: SpotlightProps) {
                     </div>
 
                     {results.map((item, index) => {
-                      const meta = typeMeta[item.item_type]
+                      const meta = getItemTypeMeta(item.item_type)
                       const Icon = meta.icon
 
                       return (

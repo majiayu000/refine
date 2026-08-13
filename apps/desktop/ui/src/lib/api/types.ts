@@ -1,4 +1,4 @@
-export type ItemType = 'knowledge' | 'skill' | 'snippet'
+export type ItemType = 'knowledge' | 'skill' | 'snippet' | 'observation'
 
 export interface Item {
   id: string
