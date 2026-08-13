@@ -41,6 +41,9 @@ pub trait JobRepository: Send + Sync {
     /// Atomically queues the parent conversation and inserts `job`. If the
     /// conversation already has a pending or running job, returns that job.
     async fn enqueue_job(&self, job: &ExtractionJobRecord) -> InfraResult<ExtractionJobRecord>;
+    /// Converges legacy crash states where the conversation was already
+    /// committed as processed before its active job reached succeeded.
+    async fn reconcile_processed_jobs(&self, now: &str) -> InfraResult<usize>;
     async fn list_recoverable_jobs(
         &self,
         now: &str,

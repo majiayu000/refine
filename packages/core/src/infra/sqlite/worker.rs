@@ -178,6 +178,10 @@ pub(super) enum SqliteCommand {
         limit: usize,
         resp: oneshot::Sender<InfraResult<Vec<ExtractionJobRecord>>>,
     },
+    JobReconcileProcessed {
+        now: String,
+        resp: oneshot::Sender<InfraResult<usize>>,
+    },
     JobClaim {
         id: String,
         owner: String,
@@ -552,6 +556,13 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
                 "JobListRecoverable",
                 resp,
                 conversation_ops::list_recoverable_jobs(conn, &now, limit),
+            );
+        }
+        SqliteCommand::JobReconcileProcessed { now, resp } => {
+            send_response(
+                "JobReconcileProcessed",
+                resp,
+                conversation_ops::reconcile_processed_jobs(conn, &now),
             );
         }
         SqliteCommand::JobClaim {

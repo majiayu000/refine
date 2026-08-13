@@ -6,8 +6,8 @@ use refine_core::refinement::{
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use tokio::sync::oneshot;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::{oneshot, Semaphore};
 use tokio::time::{interval, Duration};
 use uuid::Uuid;
 
@@ -20,7 +20,16 @@ pub fn spawn_extraction(
     job_id: String,
     mode: ExtractionMode,
 ) {
+    let permit = match extraction_semaphore().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            // The durable pending job will be picked up by the reconciliation
+            // loop when capacity becomes available.
+            return;
+        }
+    };
     tokio::spawn(async move {
+        let _permit = permit;
         if let Err(err) = run_extraction(state, &conversation_id, &job_id, mode).await {
             tracing::warn!(job_id, conversation_id, error = %err, "extraction attempt ended");
         }
@@ -28,9 +37,21 @@ pub fn spawn_extraction(
 }
 
 pub async fn recover_extraction_jobs(state: Arc<AppState>) -> Result<usize, String> {
+    let now = now_iso();
+    let reconciled = state
+        .job_repo
+        .reconcile_processed_jobs(&now)
+        .await
+        .map_err(|err| format!("failed to reconcile processed extraction jobs: {err}"))?;
+    if reconciled > 0 {
+        tracing::info!(reconciled, "reconciled already processed extraction jobs");
+    }
+    if state.llm_client.is_none() {
+        return Ok(0);
+    }
     let jobs = state
         .job_repo
-        .list_recoverable_jobs(&now_iso(), 10_000)
+        .list_recoverable_jobs(&now, MAX_CONCURRENT_EXTRACTIONS)
         .await
         .map_err(|err| format!("failed to list recoverable extraction jobs: {err}"))?;
     let count = jobs.len();
@@ -43,6 +64,14 @@ pub async fn recover_extraction_jobs(state: Arc<AppState>) -> Result<usize, Stri
 const LEASE_DURATION_SECS: i64 = 120;
 const HEARTBEAT_INTERVAL_SECS: u64 = 30;
 const RECOVERY_INTERVAL_SECS: u64 = 30;
+const MAX_CONCURRENT_EXTRACTIONS: usize = 4;
+
+fn extraction_semaphore() -> Arc<Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SEMAPHORE
+        .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_EXTRACTIONS)))
+        .clone()
+}
 
 pub fn spawn_extraction_recovery(state: Arc<AppState>) {
     tokio::spawn(async move {
@@ -386,6 +415,7 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use tempfile::TempDir;
+    use tokio::sync::Semaphore;
     use tokio::time::{sleep, Duration, Instant};
     use uuid::Uuid;
 
@@ -570,6 +600,53 @@ mod tests {
         assert_eq!(scheduled, 1);
         let job = wait_for_failed_job(&persistence, &job_id).await;
         assert_eq!(job.attempt_count, 1);
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_without_llm_keeps_job_pending() {
+        let (_tmp, state, persistence, _conversation_id, job_id) = build_state_with_failing_index()
+            .await
+            .expect("build test state");
+        let state = Arc::new(AppState {
+            llm_client: None,
+            store: state.store.clone(),
+            doc_store: state.doc_store.clone(),
+            engine: state.engine.clone(),
+            semantic_search_enabled: state.semantic_search_enabled,
+            free_quota_items: state.free_quota_items,
+            premium_users: state.premium_users.clone(),
+            api_token: state.api_token.clone(),
+            dev_anon: state.dev_anon,
+            conversation_repo: state.conversation_repo.clone(),
+            job_repo: state.job_repo.clone(),
+            event_repo: state.event_repo.clone(),
+        });
+
+        assert_eq!(recover_extraction_jobs(state).await.expect("recovery"), 0);
+        let job = persistence
+            .find_job_by_id(&job_id)
+            .await
+            .expect("load job")
+            .expect("job exists");
+        assert_eq!(job.status, JobStatus::Pending);
+        assert_eq!(job.attempt_count, 0);
+    }
+
+    #[tokio::test]
+    async fn extraction_scheduler_enforces_provider_concurrency_limit() {
+        let semaphore = Semaphore::new(super::MAX_CONCURRENT_EXTRACTIONS);
+        let mut permits = Vec::new();
+        for _ in 0..super::MAX_CONCURRENT_EXTRACTIONS {
+            permits.push(
+                semaphore
+                    .try_acquire()
+                    .expect("configured extraction slot should be available"),
+            );
+        }
+        assert!(
+            semaphore.try_acquire().is_err(),
+            "scheduler admitted more than the configured extraction concurrency"
+        );
     }
 
     async fn build_state_with_failing_index(

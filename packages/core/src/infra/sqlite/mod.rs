@@ -369,6 +369,12 @@ impl JobRepository for SqliteStore {
             .await
     }
 
+    async fn reconcile_processed_jobs(&self, now: &str) -> InfraResult<usize> {
+        let now = now.to_string();
+        self.request(|resp| SqliteCommand::JobReconcileProcessed { now, resp })
+            .await
+    }
+
     async fn claim_job(
         &self,
         id: &str,

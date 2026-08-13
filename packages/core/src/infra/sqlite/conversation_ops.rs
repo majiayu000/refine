@@ -467,11 +467,17 @@ pub(super) fn list_recoverable_jobs(
             SELECT id, conversation_id, mode, status, created_at, updated_at, error,
                    attempt_count, lease_owner, lease_expires_at
             FROM extraction_jobs
-            WHERE status = 'pending'
+            WHERE EXISTS (
+                SELECT 1 FROM conversations
+                WHERE conversations.id = extraction_jobs.conversation_id
+                  AND conversations.status IN ('queued', 'processing', 'failed')
+            ) AND (
+               status = 'pending'
                OR (status = 'running' AND (
                     lease_expires_at IS NULL
                     OR julianday(lease_expires_at) <= julianday(?1)
                ))
+            )
             ORDER BY created_at ASC, id ASC
             LIMIT ?2
             "#,
@@ -485,6 +491,24 @@ pub(super) fn list_recoverable_jobs(
         .map_err(|e| InfraError::Database(e.to_string()))?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| InfraError::Database(e.to_string()))
+}
+
+pub(super) fn reconcile_processed_jobs(conn: &Connection, now: &str) -> InfraResult<usize> {
+    conn.execute(
+        r#"
+        UPDATE extraction_jobs
+        SET status = 'succeeded', updated_at = ?1, error = NULL,
+            lease_owner = NULL, lease_expires_at = NULL
+        WHERE status IN ('pending', 'running')
+          AND EXISTS (
+            SELECT 1 FROM conversations
+            WHERE conversations.id = extraction_jobs.conversation_id
+              AND conversations.status = 'processed'
+          )
+        "#,
+        [now],
+    )
+    .map_err(|e| InfraError::Database(e.to_string()))
 }
 
 pub(super) fn claim_job(
@@ -504,7 +528,11 @@ pub(super) fn claim_job(
             SET status = 'running', updated_at = ?3, error = NULL,
                 attempt_count = attempt_count + 1,
                 lease_owner = ?2, lease_expires_at = ?4
-            WHERE id = ?1 AND (
+            WHERE id = ?1 AND EXISTS (
+                SELECT 1 FROM conversations
+                WHERE conversations.id = extraction_jobs.conversation_id
+                  AND conversations.status IN ('queued', 'processing', 'failed')
+            ) AND (
                 status = 'pending'
                 OR (status = 'running' AND (
                     lease_expires_at IS NULL
@@ -608,26 +636,38 @@ pub(super) fn finish_job_claim_in_transaction(
         serde_json::to_string(item_ids).map_err(|e| InfraError::Database(e.to_string()))?;
     match status {
         JobStatus::Succeeded => {
-            conn.execute(
-                r#"
+            let changed = conn
+                .execute(
+                    r#"
                 UPDATE conversations
                 SET status = 'processed', item_ids = ?2, last_error = NULL
                 WHERE id = ?1 AND status IN ('queued', 'processing')
                 "#,
-                params![conversation_id, item_ids],
-            )
-            .map_err(|e| InfraError::Database(e.to_string()))?;
+                    params![conversation_id, item_ids],
+                )
+                .map_err(|e| InfraError::Database(e.to_string()))?;
+            if changed != 1 {
+                return Err(InfraError::Database(format!(
+                    "claimed job {id} could not finish its conversation successfully"
+                )));
+            }
         }
         JobStatus::Failed => {
-            conn.execute(
-                r#"
+            let changed = conn
+                .execute(
+                    r#"
                 UPDATE conversations
                 SET status = 'failed', last_error = ?2
                 WHERE id = ?1 AND status IN ('queued', 'processing')
                 "#,
-                params![conversation_id, error],
-            )
-            .map_err(|e| InfraError::Database(e.to_string()))?;
+                    params![conversation_id, error],
+                )
+                .map_err(|e| InfraError::Database(e.to_string()))?;
+            if changed != 1 {
+                return Err(InfraError::Database(format!(
+                    "claimed job {id} could not fail its conversation"
+                )));
+            }
         }
         _ => unreachable!(),
     }
@@ -1306,6 +1346,79 @@ mod tests {
             .expect("conversation exists");
         assert_eq!(conversation.status, ConversationStatus::Processed);
         assert_eq!(conversation.item_ids, vec!["item-1"]);
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn processed_parent_is_not_recovered_or_reclaimed() {
+        let path = temp_db_path();
+        let store = Arc::new(SqliteStore::open(&path).expect("store init"));
+        let mut conversation =
+            build_conversation(ConversationStatus::Queued, "processed-running-parent");
+        store
+            .upsert_conversation(&conversation)
+            .await
+            .expect("insert conversation");
+        let now = now_iso();
+        let job = ExtractionJobRecord {
+            id: Uuid::new_v4().to_string(),
+            conversation_id: conversation.id.clone(),
+            mode: ExtractionMode::Auto,
+            status: JobStatus::Pending,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            error: None,
+            attempt_count: 0,
+            lease_owner: None,
+            lease_expires_at: None,
+        };
+        store.upsert_job(&job).await.expect("insert job");
+        store
+            .claim_job(&job.id, "legacy-worker", &now, "2020-01-01T00:00:00Z")
+            .await
+            .expect("claim")
+            .expect("claimed");
+        conversation.status = ConversationStatus::Processing;
+        store
+            .upsert_conversation(&conversation)
+            .await
+            .expect("processing");
+        conversation.status = ConversationStatus::Processed;
+        conversation.item_ids = vec!["old-item".to_string()];
+        store
+            .upsert_conversation(&conversation)
+            .await
+            .expect("processed");
+
+        assert!(store
+            .list_recoverable_jobs(&now_iso(), 10)
+            .await
+            .expect("recoverable")
+            .is_empty());
+        assert!(store
+            .claim_job(&job.id, "new-worker", &now_iso(), "2099-01-01T00:00:00Z",)
+            .await
+            .expect("claim processed")
+            .is_none());
+        assert_eq!(
+            store
+                .reconcile_processed_jobs(&now_iso())
+                .await
+                .expect("reconcile processed"),
+            1
+        );
+        let reconciled = store
+            .find_job_by_id(&job.id)
+            .await
+            .expect("load reconciled job")
+            .expect("job exists");
+        assert_eq!(reconciled.status, JobStatus::Succeeded);
+        let parent = store
+            .find_conversation_by_id(&conversation.id)
+            .await
+            .expect("load parent")
+            .expect("parent exists");
+        assert_eq!(parent.item_ids, vec!["old-item"]);
         cleanup(&path);
     }
 
