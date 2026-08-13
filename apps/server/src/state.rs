@@ -426,8 +426,20 @@ mod tests {
 
         assert_eq!(conversation_count, 1);
         assert_eq!(event_count, 1);
-        assert!(legacy_path.with_extension("db.migrated").exists());
-        assert!(!legacy_path.exists());
+        assert!(
+            legacy_path.exists(),
+            "live legacy DB remains discoverable for later reconciliation"
+        );
+        assert!(legacy_path.with_extension("db.pre-migration.bak").exists());
+
+        let state = runtime
+            .block_on(AppState::build())
+            .expect("rebuild app state idempotently");
+        drop(state);
+        let count_after_rebuild: i64 = conn
+            .query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
+            .expect("count conversations after idempotent rebuild");
+        assert_eq!(count_after_rebuild, 1);
 
         cleanup_dir(&dir);
     }
