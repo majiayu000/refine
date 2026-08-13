@@ -30,6 +30,8 @@ EOF
 }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/local-ui-contract.sh
+source "${repo_root}/scripts/local-ui-contract.sh"
 launchd_enabled=1
 start_services=1
 ui_dev_enabled=1
@@ -125,7 +127,7 @@ write_server_plist() {
   local path="$1"
   local cargo_bin="$2"
   local path_env="$3"
-  local home_xml server_bin_xml wrapper_xml project_env_xml path_xml token_xml=""
+  local home_xml server_bin_xml wrapper_xml project_env_xml path_xml token_xml="" cors_xml=""
   local server_bin="${cargo_bin}/refine-server"
   local wrapper="${repo_root}/scripts/run-refine-server.sh"
   local project_env="${repo_root}/.env"
@@ -142,6 +144,7 @@ write_server_plist() {
     token_xml="<key>REFINE_DEV_ANON</key>
     <string>1</string>"
   fi
+  cors_xml="$(refine_server_trusted_origins_xml "$ui_dev_enabled")"
   server_bin_xml="$(printf '%s' "$server_bin" | xml_escape)"
   wrapper_xml="$(printf '%s' "$wrapper" | xml_escape)"
   project_env_xml="$(printf '%s' "$project_env" | xml_escape)"
@@ -167,6 +170,7 @@ write_server_plist() {
     <key>PATH</key>
     <string>${path_xml}</string>
     ${token_xml}
+${cors_xml}
   </dict>
   <key>RunAtLoad</key>
   <true/>

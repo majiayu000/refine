@@ -14,7 +14,11 @@ EOF
 }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/local-ui-contract.sh
+source "${repo_root}/scripts/local-ui-contract.sh"
 server_url="${REFINE_SERVER_URL:-http://127.0.0.1:21567}"
+ui_url="${REFINE_UI_URL:-$REFINE_INSTALLED_UI_ORIGIN}"
+ui_origin="${REFINE_UI_ORIGIN:-${ui_url%/}}"
 failures=0
 warnings=0
 ui_dev_enabled=1
@@ -323,11 +327,24 @@ check_ui_deps() {
 }
 
 check_ui_http() {
-  local ui_url="${REFINE_UI_URL:-http://127.0.0.1:8987}"
   if curl -fsS --max-time 3 "$ui_url" >/dev/null 2>&1; then
     pass "desktop UI reachable: $ui_url"
   else
     fail "desktop UI unreachable: $ui_url"
+  fi
+}
+
+check_ui_cors() {
+  local headers
+  headers="$(curl -sS --max-time 3 -D - -o /dev/null \
+    -X OPTIONS \
+    -H "Origin: ${ui_origin}" \
+    -H 'Access-Control-Request-Method: GET' \
+    "${server_url}/v1/items" 2>/dev/null || true)"
+  if refine_cors_response_allows_origin "$headers" "$ui_origin"; then
+    pass "server permits desktop UI origin: $ui_origin"
+  else
+    fail "server CORS blocks desktop UI origin: $ui_origin"
   fi
 }
 
@@ -361,6 +378,7 @@ check_logs
 if [[ "$ui_dev_enabled" == "1" ]]; then
   check_ui_deps
   check_ui_http
+  check_ui_cors
 else
   pass "desktop UI dependency check skipped"
 fi
