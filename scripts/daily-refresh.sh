@@ -23,11 +23,19 @@ if [[ "${REFINE_RUNTIME_LOCK_ACTIVE:-}" != "1" ]]; then
   exit $?
 fi
 
+# shellcheck source=scripts/quota-time.sh
+source "${SCRIPT_DIR}/quota-time.sh"
+
 QUOTA_FILE="$HOME/.refine/quota_exhausted_until"
 if [ -f "$QUOTA_FILE" ]; then
   UNTIL=$(cat "$QUOTA_FILE")
   NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  if [[ "$UNTIL" > "$NOW" ]]; then
+  if ! UNTIL_KEY=$(quota_timestamp_sort_key "$UNTIL"); then
+    echo "WARN: ignoring malformed quota marker: $QUOTA_FILE" >&2
+  elif ! NOW_KEY=$(quota_timestamp_sort_key "$NOW"); then
+    echo "ERROR: failed to normalize current UTC time" >&2
+    exit 1
+  elif [[ "$UNTIL_KEY" > "$NOW_KEY" ]]; then
     echo "LLM quota exhausted until $UNTIL — skipping refresh"
     exit 0
   fi
