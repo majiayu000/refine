@@ -47,6 +47,23 @@ pub async fn llm_with_retry_policy<F>(
     prompt: &str,
     system: &str,
     policy: LlmRetryPolicy,
+    on_retry: F,
+) -> InfraResult<String>
+where
+    F: FnMut(usize, usize, u64, &InfraError),
+{
+    llm_with_retry_policy_ref(client.as_ref(), prompt, system, policy, on_retry).await
+}
+
+/// Apply the shared timeout and retry policy to an already borrowed client.
+///
+/// Application-layer use cases can use this variant without manufacturing an
+/// `Arc`; long-lived callers should keep using [`llm_with_retry_policy`].
+pub async fn llm_with_retry_policy_ref<F>(
+    client: &dyn LlmClient,
+    prompt: &str,
+    system: &str,
+    policy: LlmRetryPolicy,
     mut on_retry: F,
 ) -> InfraResult<String>
 where
@@ -154,7 +171,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{LazyLock, Mutex};
+    use std::sync::{Arc, LazyLock, Mutex};
     use tempfile::TempDir;
     use tokio::sync::Mutex as AsyncMutex;
 

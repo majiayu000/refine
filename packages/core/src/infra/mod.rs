@@ -785,8 +785,8 @@ pub use llm::{
     OpenAIClient,
 };
 pub use llm_retry::{
-    llm_with_retry, llm_with_retry_policy, LlmRetryPolicy, DEFAULT_MAX_RETRIES,
-    DEFAULT_RETRY_BASE_DELAY_SECS,
+    llm_with_retry, llm_with_retry_policy, llm_with_retry_policy_ref, LlmRetryPolicy,
+    DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BASE_DELAY_SECS,
 };
 pub use paths::{default_db_path, ensure_db_dir, resolve_db_path, stale_db_candidates};
 pub use quota_state::{is_exhausted as is_quota_exhausted, set_exhausted as set_quota_exhausted};
