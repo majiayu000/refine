@@ -61,8 +61,8 @@ Mirror now scores three layers with eight live indicators:
 | Depth | `dreyfus` | Higher is better | Weighted cognitive level average |
 | Depth | `decision_quality` | Higher is better | Decision titles with explicit reason keywords |
 | Breadth | `exploration` | Higher is better | Exploration observations over all collaboration-mode observations |
-| Breadth | `deep_invest` | Band | Session-weighted share of projects with at least 20 sessions |
-| Breadth | `fragmentation` | Lower is better | Session-weighted share of single-session projects |
+| Breadth | `deep_invest` | Band | Share of valid projects with at least 20 sessions |
+| Breadth | `fragmentation` | Lower is better | Share of valid projects with exactly one session |
 | Collaboration | `delegation` | Lower is better | Delegation observations over all collaboration-mode observations |
 | Collaboration | `mode_diversity` | Higher is better | Count of observed collaboration modes |
 | Collaboration | `bug_decision` | Lower is better | Bugfix count over decision count |
@@ -82,9 +82,9 @@ for removed live indicators.
 
 ## Breadth Weighting
 
-`deep_invest` and `fragmentation` are session-weighted, not bucket-weighted.
-A one-session side project should not have the same weight as a deeply worked
-project. For example:
+`deep_invest` and `fragmentation` are project-bucket metrics. Projects named
+`other` and projects with zero sessions are excluded from the denominator. For
+example:
 
 ```text
 solo-a: 1 session
@@ -94,11 +94,11 @@ deep-a: 20 sessions
 
 The resulting rates are:
 
-- `deep_invest = 20 / 22 = 90.9%`
-- `fragmentation = 2 / 22 = 9.1%`
+- `deep_invest = 1 / 3 = 33.3%`
+- `fragmentation = 2 / 3 = 66.7%`
 
-The old bucket-weighted interpretation would have produced `33.3%` and
-`66.7%`, overstating fragmentation.
+These values describe the shape of the project portfolio, not the share of
+sessions spent in each bucket.
 
 ## Statusline and Advice Cache
 

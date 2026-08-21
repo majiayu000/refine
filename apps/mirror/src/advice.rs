@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
-const ADVICE_CACHE_VERSION: &str = "advice-v2";
+const ADVICE_CACHE_VERSION: &str = "advice-score-v3";
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 const ADVICE_STALE_AFTER_HOURS: i64 = 72;
@@ -149,10 +149,10 @@ fn build_prompt(score: &ScoreResult) -> String {
         t!(
             "Respond in this exact JSON format (no markdown):\n\
              {\"short\": \"<8 words max, one actionable verb phrase>\", \"full\": \"<1-2 sentences with actual numbers>\"}\n\
-             Example: {\"short\": \"Write 3 design decisions before coding\", \"full\": \"Your Decision Quality is 41%...\"}",
+             Example: {\"short\": \"State reasons for 3 decisions\", \"full\": \"Your Reason Explicitness is 41%...\"}",
             "用这个 JSON 格式回复（不要 markdown）：\n\
              {\"short\": \"<最多10个字，一个动作短语>\", \"full\": \"<1-2句话，引用实际数字>\"}\n\
-             示例：{\"short\": \"开工前写3个设计决策\", \"full\": \"你的决策质量只有41%...\"}"
+             示例：{\"short\": \"写明3个决策理由\", \"full\": \"你的理由显式率只有41%...\"}"
         )
     ));
     lines.join("\n")
@@ -319,6 +319,17 @@ mod tests {
 
         let loaded = load_cached_from_path(&path).unwrap();
         assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn test_load_cached_rejects_previous_score_semantics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("advice.json");
+        let mut cached = cached_advice("old score advice", Utc::now() - Duration::hours(2));
+        cached.cache_version = "advice-v2".into();
+        std::fs::write(&path, serde_json::to_string(&cached).unwrap()).unwrap();
+
+        assert!(load_cached_from_path(&path).unwrap().is_none());
     }
 
     #[test]

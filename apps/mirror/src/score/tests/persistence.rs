@@ -3,7 +3,20 @@ use chrono::{Duration, Utc};
 use std::collections::HashSet;
 use std::sync::{Arc, Barrier};
 
-use super::super::persistence::persist_score_to_path;
+use super::super::persistence::{
+    load_score_activity_from_path, persist_score_to_path, SCORE_SCHEMA_VERSION,
+};
+
+fn score_line(score: &ScoreResult, schema_version: Option<u32>) -> String {
+    let mut value = serde_json::to_value(score).unwrap();
+    if let Some(version) = schema_version {
+        value.as_object_mut().unwrap().insert(
+            "score_schema_version".into(),
+            serde_json::Value::from(version),
+        );
+    }
+    serde_json::to_string(&value).unwrap()
+}
 
 #[test]
 fn test_persist_and_load() {
@@ -33,6 +46,13 @@ fn test_persist_and_load() {
     };
 
     persist_score_to_path(&path, &result).unwrap();
+
+    let persisted: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
+    assert_eq!(
+        persisted["score_schema_version"],
+        serde_json::Value::from(SCORE_SCHEMA_VERSION)
+    );
 
     let loaded = load_recent_scores_from_path(&path, 10).unwrap();
     assert_eq!(loaded.len(), 1);
@@ -167,24 +187,96 @@ fn test_load_recent_scores_reports_invalid_jsonl_line() {
         timestamp: Utc::now(),
     };
     let valid_line = serde_json::to_string(&valid).unwrap();
-    std::fs::write(&path, format!("{}\n{{\"bad\":\n", valid_line)).unwrap();
+    std::fs::write(&path, format!("{}\n\n{{\"bad\":\n", valid_line)).unwrap();
 
     let err = load_recent_scores_from_path(&path, 10).unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("line 2"));
+    assert!(msg.contains("line 3"));
     assert!(msg.contains("score history"));
 }
 
 #[test]
-fn test_load_recent_scores_accepts_legacy_missing_timestamp() {
+fn test_legacy_score_is_activity_only_and_accepts_missing_timestamp() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scores.jsonl");
 
     let legacy_line = r#"{"layers":[{"name":"L1","signal":"Green","indicators":[]},{"name":"L2","signal":"Yellow","indicators":[]},{"name":"L3","signal":"Red","indicators":[]}],"tension":"legacy tension"}"#;
     std::fs::write(&path, format!("{}\n", legacy_line)).unwrap();
 
-    let loaded = load_recent_scores_from_path(&path, 10).unwrap();
-    assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].tension.as_deref(), Some("legacy tension"));
-    assert_eq!(loaded[0].timestamp, chrono::DateTime::<Utc>::UNIX_EPOCH);
+    assert!(load_recent_scores_from_path(&path, 10).unwrap().is_empty());
+
+    let activity = load_score_activity_from_path(&path, 10).unwrap();
+    assert_eq!(activity.len(), 1);
+    assert_eq!(activity[0].timestamp, chrono::DateTime::<Utc>::UNIX_EPOCH);
+}
+
+#[test]
+fn test_known_old_schema_is_excluded_from_metrics_but_kept_as_activity() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scores.jsonl");
+    let old = make_score_at_date(chrono::NaiveDate::from_ymd_opt(2026, 3, 20).unwrap());
+    std::fs::write(&path, format!("{}\n", score_line(&old, Some(2)))).unwrap();
+
+    assert!(load_recent_scores_from_path(&path, 10).unwrap().is_empty());
+    assert_eq!(load_score_activity_from_path(&path, 10).unwrap().len(), 1);
+}
+
+#[test]
+fn test_recent_limit_is_applied_after_schema_filtering() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scores.jsonl");
+    let old_unversioned = make_score_at_date(chrono::NaiveDate::from_ymd_opt(2026, 3, 20).unwrap());
+    let old_v2 = make_score_at_date(chrono::NaiveDate::from_ymd_opt(2026, 3, 21).unwrap());
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n{}\n",
+            score_line(&old_unversioned, None),
+            score_line(&old_v2, Some(2))
+        ),
+    )
+    .unwrap();
+
+    for (date, tension) in [(22, "current-1"), (23, "current-2"), (24, "current-3")] {
+        let mut score = make_score_at_date(chrono::NaiveDate::from_ymd_opt(2026, 3, date).unwrap());
+        score.tension = Some(tension.into());
+        persist_score_to_path(&path, &score).unwrap();
+    }
+
+    let loaded = load_recent_scores_from_path(&path, 2).unwrap();
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded[0].tension.as_deref(), Some("current-2"));
+    assert_eq!(loaded[1].tension.as_deref(), Some("current-3"));
+}
+
+#[test]
+fn test_future_schema_errors_for_metrics_but_remains_activity() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scores.jsonl");
+    let timestamp = chrono::Utc.with_ymd_and_hms(2026, 3, 20, 12, 0, 0).unwrap();
+    let future_line = serde_json::json!({
+        "score_schema_version": 99,
+        "timestamp": timestamp,
+        "layers": {"future_shape": true},
+        "metric_payload": ["not", "compatible"]
+    })
+    .to_string();
+    std::fs::write(&path, format!("{}\n", future_line)).unwrap();
+
+    let error = load_recent_scores_from_path(&path, 10).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("unsupported score schema version 99"));
+
+    let activity = load_score_activity_from_path(&path, 10).unwrap();
+    assert_eq!(activity.len(), 1);
+    assert_eq!(activity[0].timestamp, timestamp);
+
+    let before = std::fs::read_to_string(&path).unwrap();
+    let current = make_score_at_date(chrono::NaiveDate::from_ymd_opt(2026, 3, 21).unwrap());
+    let append_error = persist_score_to_path(&path, &current).unwrap_err();
+    assert!(append_error
+        .to_string()
+        .contains("unsupported score schema version 99"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
 }

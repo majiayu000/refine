@@ -28,7 +28,7 @@ refine workspace 新 member `apps/mirror/`，纯 Rust CLI，只读 refine SQLite
 | 指标 | 数据来源 | 计算 | 绿 | 黄 | 红 |
 |------|---------|------|---|---|---|
 | Dreyfus 加权分 | cognitive_level tags | novice=1,adv=2,comp=3,prof=4,exp=5 加权平均 | >3.5 | 2.5-3.5 | <2.5 |
-| 决策质量率 | decision titles 含"因为/原因"比例 | 关键词匹配 | >60% | 40-60% | <40% |
+| 理由显式率 | decision titles 含"因为/原因"等理由关键词的比例 | 关键词匹配 | >60% | 40-60% | <40% |
 | 深度思考产出比 | deep_inquiry 中 expert% vs delegation 中 expert% | 交叉统计 | 差>10% | 差0-10% | 反转 |
 
 层 1 信号灯 = 3 个指标中最差的那个
@@ -38,8 +38,8 @@ refine workspace 新 member `apps/mirror/`，纯 Rust CLI，只读 refine SQLite
 | 指标 | 数据来源 | 计算 | 绿 | 黄 | 红 |
 |------|---------|------|---|---|---|
 | 探索率 | exploration / 总协作模式 | 百分比 | >15% | 8-15% | <8% |
-| 深耕率 | 20+ session 项目 / 总项目 | 百分比 | 15-30% | <10%或>30% | <5%或>50% |
-| 碎片化指数 | 1 session 项目 / 总项目 | 百分比 | <20% | 20-40% | >40% |
+| 成熟项目占比 | 20+ session 项目数 / 有效项目数 | 按项目计数；排除 `other` 和 0 session 项目 | 15-30% | <10%或>30% | <5%或>50% |
+| 一次性项目占比 | 1 session 项目数 / 有效项目数 | 按项目计数；排除 `other` 和 0 session 项目 | <20% | 20-40% | >40% |
 
 层 2 信号灯 = 3 个指标中最差的那个
 
@@ -49,7 +49,7 @@ refine workspace 新 member `apps/mirror/`，纯 Rust CLI，只读 refine SQLite
 |------|---------|------|---|---|---|
 | delegation 率 | delegation / 总协作模式 | 百分比 | <40% | 40-55% | >55% |
 | 模式多样性 | 协作模式中 >0 的数量 | 整数 | >=4 | 2-3 | 1 |
-| Bug/决策比 | bugfix / decision | 比率 | <0.6 | 0.6-0.8 | >0.8 |
+| Bug/决策抽取比 | 抽取的 bugfix / decision | 比率 | <0.6 | 0.6-0.8 | >0.8 |
 
 层 3 信号灯 = 3 个指标中最差的那个
 
@@ -86,21 +86,23 @@ refine workspace 新 member `apps/mirror/`，纯 Rust CLI，只读 refine SQLite
 
 ### `mirror score`
 
-计算 3 层信号灯 + 9 个子指标 + 张力分析。
+计算 3 层信号灯 + 子指标 + 张力分析。
 
 输出：
 ```
 Mirror 认知镜像
 
-  认知深度   🟢  Dreyfus 3.6 | 决策质量 65% | 深度产出比 +14%
-  战略广度   🟡  探索 16% ✓ | 深耕 19% ✓ | 碎片化 14% ✓ (深耕率偏低)
-  协作效能   🟡  delegation 45% ✗ | 多样性 6种 ✓ | bug/决策 0.50 ✓
+  认知深度   🟢  Dreyfus 3.6 | 理由显式率 65%
+  战略广度   🟡  探索 16% ✓ | 成熟项目占比 19% ✓ | 一次性项目占比 14% ✓
+  协作效能   🟡  delegation 45% ✗ | 多样性 6种 ✓ | Bug/决策抽取比 0.50 ✓
 
   张力: 层1绿+层3黄 → 认知在提升但 delegation 偏高，试试 review 模式
   基线: 默认阈值（还需 3 周建立个人基线）
 ```
 
-持久化到 `~/.mirror/scores.jsonl`。
+持久化到 `~/.mirror/scores.jsonl`。每条记录带 `score_schema_version`；只有当前
+评分口径的数据参与指标趋势和个人基线，旧口径仍保留用于连续打卡统计。遇到未知的
+未来版本时，指标历史读取会明确报错，而不会混入不可比数据。
 
 ### `mirror motd`
 
@@ -114,7 +116,7 @@ Mirror 认知镜像
 
 ### `mirror dashboard`
 
-完整 ASCII 仪表盘：信号灯 + 9 个子指标进度条 + 张力分析 + 历史趋势 + 本周数据。
+完整 ASCII 仪表盘：信号灯 + 子指标进度条 + 张力分析 + 历史趋势 + 本周数据。
 
 ### `mirror weekly`
 

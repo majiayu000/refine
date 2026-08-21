@@ -26,7 +26,7 @@ fn test_layer1_has_2_indicators() {
 }
 
 #[test]
-fn test_layer2_uses_session_weighted_project_rates() {
+fn test_layer2_uses_project_bucket_rates() {
     let targets = crate::config::Targets::default();
     let cluster = make_cluster(
         HashMap::new(),
@@ -45,8 +45,47 @@ fn test_layer2_uses_session_weighted_project_rates() {
     let deep_invest = indicator(breadth, "deep_invest");
     let fragmentation = indicator(breadth, "fragmentation");
 
-    assert!((deep_invest.actual - (20.0 / 22.0 * 100.0)).abs() < 0.0001);
-    assert!((fragmentation.actual - (2.0 / 22.0 * 100.0)).abs() < 0.0001);
+    assert!((deep_invest.actual - (1.0 / 3.0 * 100.0)).abs() < 0.0001);
+    assert!((fragmentation.actual - (2.0 / 3.0 * 100.0)).abs() < 0.0001);
+}
+
+#[test]
+fn test_layer2_excludes_other_and_zero_session_projects() {
+    let targets = crate::config::Targets::default();
+    let cluster = make_cluster(
+        HashMap::new(),
+        HashMap::new(),
+        0,
+        0,
+        vec![
+            ("other", 100, vec![]),
+            ("empty", 0, vec![]),
+            ("deep-a", 20, vec![]),
+            ("solo-a", 1, vec![]),
+        ],
+    );
+
+    let score = compute(&cluster, &targets);
+    let breadth = &score.layers[1];
+    assert_eq!(indicator(breadth, "deep_invest").actual, 50.0);
+    assert_eq!(indicator(breadth, "fragmentation").actual, 50.0);
+}
+
+#[test]
+fn test_layer2_empty_project_denominator_is_safe() {
+    let targets = crate::config::Targets::default();
+    let cluster = make_cluster(
+        HashMap::new(),
+        HashMap::new(),
+        0,
+        0,
+        vec![("other", 5, vec![]), ("empty", 0, vec![])],
+    );
+
+    let score = compute(&cluster, &targets);
+    let breadth = &score.layers[1];
+    assert_eq!(indicator(breadth, "deep_invest").actual, 0.0);
+    assert_eq!(indicator(breadth, "fragmentation").actual, 0.0);
 }
 
 #[test]
