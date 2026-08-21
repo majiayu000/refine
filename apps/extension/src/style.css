@@ -394,6 +394,97 @@ body,
   word-break: break-word;
 }
 
+/* ── API Auth ── */
+
+.auth-card {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(183, 196, 255, 0.16);
+  background: var(--surface-low);
+}
+
+.auth-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.auth-card h3 {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.auth-card p {
+  margin: 2px 0 0;
+  font-size: 9px;
+  color: var(--text-sub);
+}
+
+.auth-state {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--surface-highest);
+  color: var(--text-muted);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.auth-state.is-set {
+  background: rgba(64, 222, 176, 0.12);
+  color: var(--accent);
+}
+
+.auth-input {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 9px;
+  border: 1px solid var(--outline-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+}
+
+.auth-input::placeholder {
+  color: var(--text-muted);
+}
+
+.auth-actions {
+  display: flex;
+  gap: 7px;
+  margin-top: 7px;
+}
+
+.auth-actions button {
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--brand);
+  color: var(--brand-on);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.auth-actions button.secondary {
+  border: 1px solid var(--outline-strong);
+  background: var(--surface-highest);
+  color: var(--text-sub);
+}
+
+.auth-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.auth-card .auth-message {
+  margin-top: 7px;
+  color: var(--brand);
+}
+
 /* ── Onboarding ── */
 
 .onboarding-card {

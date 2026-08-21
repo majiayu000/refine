@@ -14,9 +14,29 @@ export const RETRY_MAX_DELAY_MS = 30 * 60 * 1_000
 const CANDIDATE_PORTS = [21567, 21568, 21569, 21570]
 const DISCOVERY_CACHE_KEY = 'refine_server_port'
 const DISCOVERY_CACHE_TTL_MS = 5 * 60 * 1_000 // 5 minutes
+export const API_TOKEN_STORAGE_KEY = 'refine_api_token'
 
 function normalizeBaseUrl(url: string): string {
   return url.replace(/\/+$/, '')
+}
+
+export async function readApiToken(): Promise<string> {
+  const stored = await chrome.storage.local.get(API_TOKEN_STORAGE_KEY)
+  const value = stored[API_TOKEN_STORAGE_KEY]
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+export async function setApiToken(token: string): Promise<boolean> {
+  const normalized = token.trim()
+  if (normalized && !/^[!-~]+$/.test(normalized)) {
+    throw new Error('API token must contain visible ASCII characters only')
+  }
+  if (normalized) {
+    await chrome.storage.local.set({ [API_TOKEN_STORAGE_KEY]: normalized })
+    return true
+  }
+  await chrome.storage.local.remove(API_TOKEN_STORAGE_KEY)
+  return false
 }
 
 /**

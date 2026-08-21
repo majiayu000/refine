@@ -5,6 +5,11 @@
 import { useState, useEffect } from 'react'
 import './style.css'
 import { readOnboardingTaskState, type OnboardingTaskState } from './lib/onboarding'
+import {
+  API_TOKEN_STORAGE_KEY,
+  readApiToken,
+  setApiToken,
+} from './lib/config'
 import type { SyncStatus } from './lib/types'
 
 const POPUP_WIDTH_PX = 360
@@ -316,6 +321,10 @@ export default function Popup() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(DEFAULT_SYNC_STATUS)
   const [quota, setQuota] = useState<QuotaInfo | null>(null)
   const [onboarding, setOnboarding] = useState<OnboardingTaskState>(DEFAULT_ONBOARDING_STATE)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [authTokenInput, setAuthTokenInput] = useState('')
+  const [hasAuthToken, setHasAuthToken] = useState(false)
+  const [authMessage, setAuthMessage] = useState('')
 
   const queueSize = syncStatus.pending + syncStatus.syncing
   const displayedTotalItems = remoteTotalItems ?? stats.totalItems
@@ -376,6 +385,12 @@ export default function Popup() {
     enforcePopupViewportWidth()
 
     void syncCloudStatus()
+    void readApiToken()
+      .then((token) => setHasAuthToken(Boolean(token)))
+      .catch(() => {
+        setHasAuthToken(false)
+        setAuthMessage('无法读取扩展本地 token 设置')
+      })
     const timer = setInterval(() => {
       void syncCloudStatus()
     }, 15000)
@@ -400,6 +415,10 @@ export default function Popup() {
         void readOnboardingTaskState()
           .then((next) => setOnboarding(next))
           .catch(() => setOnboarding(DEFAULT_ONBOARDING_STATE))
+      }
+
+      if (changes[API_TOKEN_STORAGE_KEY]) {
+        setHasAuthToken(typeof changes[API_TOKEN_STORAGE_KEY].newValue === 'string' && Boolean(changes[API_TOKEN_STORAGE_KEY].newValue.trim()))
       }
     }
 
@@ -470,6 +489,37 @@ export default function Popup() {
       setRemoteTotalItems(null)
       setExtractMessage('扩展后台未就绪，请在扩展页点击“重新加载”')
       setExtractMessageLevel('error')
+    }
+  }
+
+  const handleApplyToken = async () => {
+    const token = authTokenInput.trim()
+    if (!token) {
+      setAuthMessage('请输入 Bearer token；如需移除请使用“清除”。')
+      return
+    }
+    try {
+      await setApiToken(token)
+      setAuthTokenInput('')
+      setHasAuthToken(true)
+      await safeRuntimeMessage({ action: 'tokenChanged' })
+      await syncCloudStatus()
+      setAuthMessage('Token 已保存，受保护请求已刷新。')
+    } catch {
+      setAuthMessage('Token 保存失败，请检查扩展存储权限。')
+    }
+  }
+
+  const handleClearToken = async () => {
+    try {
+      await setApiToken('')
+      setAuthTokenInput('')
+      setHasAuthToken(false)
+      await safeRuntimeMessage({ action: 'tokenChanged' })
+      await syncCloudStatus()
+      setAuthMessage('Token 已清除，已切换为匿名请求。')
+    } catch {
+      setAuthMessage('Token 清除失败，请检查扩展存储权限。')
     }
   }
 
@@ -554,6 +604,41 @@ export default function Popup() {
           {syncStatus.lastError && <p className="sync-error">{syncStatus.lastError}</p>}
         </section>
 
+        {settingsOpen && (
+          <section className="auth-card" aria-label="API token 设置">
+            <div className="auth-card-head">
+              <div>
+                <h3>API Bearer token</h3>
+                <p>{hasAuthToken ? '已配置，仅用于 /v1/* 请求' : '未配置，使用 dev-anon 模式'}</p>
+              </div>
+              <span className={hasAuthToken ? 'auth-state is-set' : 'auth-state'}>
+                {hasAuthToken ? '已配置' : '未配置'}
+              </span>
+            </div>
+            <input
+              type="password"
+              autoComplete="off"
+              value={authTokenInput}
+              onChange={(event) => setAuthTokenInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') void handleApplyToken()
+              }}
+              placeholder="输入 installer 使用的 token"
+              aria-label="API Bearer token"
+              className="auth-input"
+            />
+            <div className="auth-actions">
+              <button type="button" onClick={() => void handleApplyToken()}>
+                应用并刷新
+              </button>
+              <button type="button" className="secondary" disabled={!hasAuthToken} onClick={() => void handleClearToken()}>
+                清除
+              </button>
+            </div>
+            {authMessage && <p className="auth-message">{authMessage}</p>}
+          </section>
+        )}
+
         <section className="onboarding-card">
           <div className="onboarding-head">
             <h3 className="onboarding-title">首日任务流</h3>
@@ -618,7 +703,12 @@ export default function Popup() {
         <button className="bottom-nav-item" type="button" onClick={() => { setExtractMessage('功能开发中'); setExtractMessageLevel('error') }}>
           <HistoryIcon className="bottom-nav-icon" />
         </button>
-        <button className="bottom-nav-item" type="button" onClick={() => { setExtractMessage('功能开发中'); setExtractMessageLevel('error') }}>
+        <button
+          className={`bottom-nav-item ${settingsOpen ? 'is-active' : ''}`}
+          type="button"
+          aria-label="API token 设置"
+          onClick={() => setSettingsOpen((open) => !open)}
+        >
           <GearIcon className="bottom-nav-icon" />
         </button>
       </nav>

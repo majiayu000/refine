@@ -74,6 +74,7 @@ export function createTauriAdapter(): RefineApiClient {
     capabilities,
     getCapabilities: cloneCapabilities,
     getAuthToken: () => '',
+    getAuthTokenError: () => null,
     setAuthToken: (_token: string) => {
       // local invoke mode does not use bearer token
     },

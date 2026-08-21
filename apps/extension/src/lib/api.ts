@@ -2,7 +2,7 @@
  * Refine 云端 API 客户端
  */
 
-import { discoverCloudApiBase } from './config'
+import { discoverCloudApiBase, readApiToken } from './config'
 import type {
   CloudIngestResponse,
   CloudItemsResponse,
@@ -34,12 +34,23 @@ function isServerContractCompatible(serverVersion: string | null): boolean {
   return normalizeContractMajor(serverVersion) === normalizeContractMajor(EXTENSION_CONTRACT_VERSION)
 }
 
-function buildHeaders(extraHeaders?: Record<string, string>): Record<string, string> {
+function buildPublicHeaders(extraHeaders?: Record<string, string>): Record<string, string> {
   return {
     [CLIENT_HEADER_NAME]: CLIENT_HEADER_VALUE,
     [CONTRACT_VERSION_HEADER]: EXTENSION_CONTRACT_VERSION,
     ...(extraHeaders || {}),
   }
+}
+
+async function buildProtectedHeaders(
+  extraHeaders?: Record<string, string>
+): Promise<Record<string, string>> {
+  const headers = buildPublicHeaders(extraHeaders)
+  const token = await readApiToken()
+  if (token) {
+    headers.Authorization = `Bearer ${token}`
+  }
+  return headers
 }
 
 function toRequestBody(item: OutboxItem): CloudUploadRequest {
@@ -82,7 +93,7 @@ export async function checkCloudHealth(): Promise<boolean> {
   try {
     const res = await fetch(`${apiBase}/health`, {
       method: 'GET',
-      headers: buildHeaders(),
+      headers: buildPublicHeaders(),
     })
     if (!res.ok) return false
     if (!isServerContractCompatible(res.headers.get('x-refine-contract-version'))) return false
@@ -99,7 +110,7 @@ export async function uploadConversation(item: OutboxItem): Promise<CloudUploadR
   try {
     const res = await fetch(`${apiBase}/v1/conversations`, {
       method: 'POST',
-      headers: buildHeaders({
+      headers: await buildProtectedHeaders({
         'Content-Type': 'application/json',
       }),
       body: JSON.stringify(toRequestBody(item)),
@@ -137,7 +148,7 @@ export async function fetchCloudTotalItems(): Promise<number | null> {
   const apiBase = await discoverCloudApiBase()
 
   try {
-    const headers = buildHeaders()
+    const headers = await buildProtectedHeaders()
     const firstRes = await fetch(`${apiBase}/v1/items?cursor=0&limit=1`, { method: 'GET', headers })
     if (!firstRes.ok) return null
     const first = (await firstRes.json()) as CloudItemsResponse
@@ -164,7 +175,7 @@ export async function fetchRecommendations(
   try {
     const res = await fetch(`${apiBase}/v1/recommendations?q=${q}&limit=${limit}`, {
       method: 'GET',
-      headers: buildHeaders(),
+      headers: await buildProtectedHeaders(),
       signal: controller.signal,
     })
 
@@ -183,7 +194,7 @@ export async function fetchQuotaStatus(): Promise<QuotaStatusResponse | null> {
   try {
     const res = await fetch(`${apiBase}/v1/quota`, {
       method: 'GET',
-      headers: buildHeaders(),
+      headers: await buildProtectedHeaders(),
     })
     if (!res.ok) return null
 
@@ -209,7 +220,7 @@ export async function trackEvent(payload: TrackEventRequest): Promise<boolean> {
   try {
     const res = await fetch(`${apiBase}/v1/events`, {
       method: 'POST',
-      headers: buildHeaders({
+      headers: await buildProtectedHeaders({
         'Content-Type': 'application/json',
       }),
       body: JSON.stringify(payload),

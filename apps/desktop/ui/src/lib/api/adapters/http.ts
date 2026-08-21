@@ -74,8 +74,9 @@ function readStoredToken(): string {
   }
   try {
     return window.localStorage.getItem(TOKEN_STORAGE_KEY) || ''
-  } catch {
-    return ''
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(`无法读取浏览器中的 API token 设置: ${detail}`)
   }
 }
 
@@ -83,14 +84,10 @@ function persistToken(token: string): void {
   if (typeof window === 'undefined') {
     return
   }
-  try {
-    if (token) {
-      window.localStorage.setItem(TOKEN_STORAGE_KEY, token)
-    } else {
-      window.localStorage.removeItem(TOKEN_STORAGE_KEY)
-    }
-  } catch {
-    // ignore storage failures
+  if (token) {
+    window.localStorage.setItem(TOKEN_STORAGE_KEY, token)
+  } else {
+    window.localStorage.removeItem(TOKEN_STORAGE_KEY)
   }
 }
 
@@ -127,8 +124,9 @@ async function requestJson<T extends object>(path: string, init?: RequestInit): 
   let data: ApiEnvelope<T> = {} as ApiEnvelope<T>
   try {
     data = (await res.json()) as ApiEnvelope<T>
-  } catch {
-    // keep default empty object
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(`HTTP ${res.status} 返回了无效 JSON: ${detail}`)
   }
 
   if (!res.ok || data.success === false) {
@@ -138,16 +136,31 @@ async function requestJson<T extends object>(path: string, init?: RequestInit): 
   return data
 }
 
-let authToken = readStoredToken().trim()
+let authToken = ''
+let authTokenError: string | null = null
 
 export function createHttpAdapter(): RefineApiClient {
+  try {
+    authToken = readStoredToken().trim()
+    authTokenError = null
+  } catch (error) {
+    authToken = ''
+    authTokenError = error instanceof Error ? error.message : String(error)
+  }
+
   return {
     capabilities,
     getCapabilities: cloneCapabilities,
     getAuthToken: () => authToken,
+    getAuthTokenError: () => authTokenError,
     setAuthToken: (token: string) => {
-      authToken = token.trim()
-      persistToken(authToken)
+      const normalized = token.trim()
+      if (normalized && !/^[!-~]+$/.test(normalized)) {
+        throw new Error('API token 只能包含可见 ASCII 字符')
+      }
+      persistToken(normalized)
+      authToken = normalized
+      authTokenError = null
     },
 
     getItems: async (params?: ListItemsParams): Promise<ItemListResult> => {
