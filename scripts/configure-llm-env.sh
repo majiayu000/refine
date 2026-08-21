@@ -269,6 +269,15 @@ secure_file_is_present() {
   [[ -L "$secure_file" || -e "$secure_file" ]]
 }
 
+secure_file_has_usable_provider() (
+  local key
+  for key in "${REFINE_LLM_ENV_SUPPORTED_KEYS[@]}"; do
+    unset "$key"
+  done
+  refine_llm_env_load_file "$secure_file" 1 0 \
+    && refine_llm_env_has_usable_provider
+)
+
 write_managed_source_block() {
   printf '\n%s\n' "$source_begin"
   printf '%s\n' "if [ -r \"\${REFINE_LLM_ENV_FILE:-\$HOME/.refine/llm.env}\" ]; then"
@@ -292,15 +301,16 @@ backup_zshrc() {
 }
 
 check_mode() {
-  local secure_ready=0
+  local secure_present=0 secure_ready=0
 
   if secure_file_is_present; then
+    secure_present=1
     refine_llm_env_validate_secure_file "$secure_file" || exit 1
-    if [[ "$REFINE_LLM_ENV_FILE_HAS_API_KEY" == '1' ]]; then
+    if secure_file_has_usable_provider; then
       secure_ready=1
-      printf 'CHECK: secure LLM env file is valid (API key: <set>; values withheld)\n'
+      printf 'CHECK: secure LLM env file has a usable provider (values withheld)\n'
     else
-      printf 'CHECK: secure LLM env file is valid but has no supported API key\n'
+      printf 'CHECK: secure LLM env file is valid but has no usable provider\n'
     fi
   else
     printf 'CHECK: secure LLM env file is not present yet: %s\n' "$secure_file"
@@ -311,6 +321,8 @@ check_mode() {
     if [[ "$MIGRATION_DEFINITION_COUNT" -gt 0 ]]; then
       require_complete_migration_definitions
       [[ "$MIGRATION_DEFINITION_COUNT" -eq 3 ]] || die "${zshrc_file}: expected exactly one BASE_URL, BASE_API_KEY, and BASE_MODEL definition"
+      [[ "$secure_present" -eq 0 ]] \
+        || die "secure LLM env file already exists; --migrate would refuse to overwrite it while BASE_* definitions remain in ${zshrc_file}"
       printf 'CHECK: ~/.zshrc has 3 literal BASE_* definitions ready for --migrate (no changes made)\n'
     elif [[ "$secure_ready" == '1' ]]; then
       printf 'CHECK: no pending BASE_* migration; secure credentials are available\n'
@@ -333,7 +345,7 @@ migrate_mode() {
   collect_zsh_definitions
 
   if [[ "$MIGRATION_DEFINITION_COUNT" -eq 0 ]]; then
-    if secure_file_is_present && [[ "$REFINE_LLM_ENV_FILE_HAS_API_KEY" == '1' ]]; then
+    if secure_file_is_present && secure_file_has_usable_provider; then
       if [[ "$MIGRATION_SOURCE_BLOCK_COUNT" -eq 1 ]]; then
         printf 'MIGRATE: no pending literal BASE_* definitions; secure file and source block were left unchanged\n'
         return 0
@@ -405,9 +417,13 @@ from_env_mode() {
 
   if secure_file_is_present; then
     refine_llm_env_validate_secure_file "$secure_file" || exit 1
+    secure_file_has_usable_provider \
+      || die 'secure LLM env file has no usable provider; BASE requires both BASE_API_KEY and BASE_URL'
     printf 'FROM-ENV: secure LLM env file already exists; no files changed\n'
     return 0
   fi
+  refine_llm_env_has_usable_provider \
+    || die 'no usable LLM provider configuration found; BASE requires both BASE_API_KEY and BASE_URL'
 
   env_dir="${secure_file%/*}"
   [[ "$env_dir" != "$secure_file" ]] || env_dir='.'
@@ -417,7 +433,7 @@ from_env_mode() {
 
   for key in "${REFINE_LLM_ENV_SUPPORTED_KEYS[@]}"; do
     value="${!key:-}"
-    if [[ -n "$value" ]]; then
+    if refine_llm_env_value_is_nonblank "$value"; then
       write_quoted_assignment "$key" "$value" >> "$tmp_env"
       if refine_llm_env_is_api_key "$key"; then
         found_api=1
@@ -441,6 +457,8 @@ from_file_mode() {
 
   if secure_file_is_present; then
     refine_llm_env_validate_secure_file "$secure_file" || exit 1
+    secure_file_has_usable_provider \
+      || die 'secure LLM env file has no usable provider; BASE requires both BASE_API_KEY and BASE_URL'
     printf 'FROM-FILE: secure LLM env file already exists; no files changed\n'
     return 0
   fi

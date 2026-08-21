@@ -64,13 +64,32 @@ refine_llm_env_is_api_key() {
   esac
 }
 
+refine_llm_env_value_is_nonblank() {
+  [[ -n "${1//[[:space:]]/}" ]]
+}
+
 refine_llm_env_has_api_key() {
-  [[ -n "${REFINE_ANTHROPIC_API_KEY:-}" || \
-    -n "${ANTHROPIC_AUTH_TOKEN:-}" || \
-    -n "${ANTHROPIC_API_KEY:-}" || \
-    -n "${REFINE_OPENAI_API_KEY:-}" || \
-    -n "${OPENAI_API_KEY:-}" || \
-    -n "${BASE_API_KEY:-}" ]]
+  local value
+  for value in "${REFINE_ANTHROPIC_API_KEY:-}" "${ANTHROPIC_AUTH_TOKEN:-}" \
+    "${ANTHROPIC_API_KEY:-}" "${REFINE_OPENAI_API_KEY:-}" \
+    "${OPENAI_API_KEY:-}" "${BASE_API_KEY:-}"; do
+    if refine_llm_env_value_is_nonblank "$value"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+refine_llm_env_has_usable_provider() {
+  if refine_llm_env_value_is_nonblank "${REFINE_ANTHROPIC_API_KEY:-}" || \
+    refine_llm_env_value_is_nonblank "${REFINE_OPENAI_API_KEY:-}" || \
+    refine_llm_env_value_is_nonblank "${ANTHROPIC_AUTH_TOKEN:-}" || \
+    refine_llm_env_value_is_nonblank "${ANTHROPIC_API_KEY:-}" || \
+    refine_llm_env_value_is_nonblank "${OPENAI_API_KEY:-}"; then
+    return 0
+  fi
+  refine_llm_env_value_is_nonblank "${BASE_API_KEY:-}" && \
+    refine_llm_env_value_is_nonblank "${BASE_URL:-}"
 }
 
 refine_llm_env_key_group_state() {
@@ -255,7 +274,8 @@ refine_llm_env_validate_content() {
         ;;
     esac
     seen_keys="${seen_keys}${key} "
-    if refine_llm_env_is_api_key "$key" && [[ -n "$REFINE_LLM_ENV_PARSED_VALUE" ]]; then
+    if refine_llm_env_is_api_key "$key" \
+      && refine_llm_env_value_is_nonblank "$REFINE_LLM_ENV_PARSED_VALUE"; then
       REFINE_LLM_ENV_FILE_HAS_API_KEY=1
     fi
   done < "$path"
@@ -346,7 +366,7 @@ refine_llm_env_load_file() {
       continue
     fi
     value="$REFINE_LLM_ENV_PARSED_VALUE"
-    if [[ -z "${!key:-}" ]]; then
+    if ! refine_llm_env_value_is_nonblank "${!key:-}"; then
       export "$key=$value"
     fi
   done < "$path"
@@ -412,7 +432,7 @@ load_refine_llm_env_impl() {
   fi
   export REFINE_LLM_ENV_SOURCE
 
-  if ! refine_llm_env_has_api_key; then
+  if ! refine_llm_env_has_usable_provider; then
     if [[ "$require_key" != '1' ]]; then
       return 0
     fi
@@ -421,9 +441,9 @@ load_refine_llm_env_impl() {
       project_description="$project_file"
     fi
     if [[ "$secure_exists" == '1' ]]; then
-      refine_llm_env_error "no supported LLM API key loaded; secure file was checked at ${secure_file} and project fallback was ${project_description}; run scripts/configure-llm-env.sh --check"
+      refine_llm_env_error "no usable LLM provider configuration loaded; secure file was checked at ${secure_file} and project fallback was ${project_description}; BASE requires both BASE_API_KEY and BASE_URL; run scripts/configure-llm-env.sh --check"
     else
-      refine_llm_env_error "no supported LLM API key loaded; secure file is absent at ${secure_file} and project fallback was ${project_description}; run scripts/configure-llm-env.sh --check"
+      refine_llm_env_error "no usable LLM provider configuration loaded; secure file is absent at ${secure_file} and project fallback was ${project_description}; BASE requires both BASE_API_KEY and BASE_URL; run scripts/configure-llm-env.sh --check"
     fi
     return 1
   fi

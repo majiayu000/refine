@@ -23,36 +23,45 @@ pub trait LlmClient: Send + Sync {
 /// 从环境变量构建 LLM 客户端。
 ///
 /// 优先级：
-/// 1. Anthropic (`REFINE_ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`)
-/// 2. OpenAI-compatible (`REFINE_OPENAI_API_KEY` / `OPENAI_API_KEY` / `BASE_API_KEY`)
+/// 1. Refine 显式配置（Anthropic 优先于 OpenAI）
+/// 2. 完整的 BASE OpenAI-compatible 配置
+/// 3. 环境中继承的 provider 配置（Anthropic 优先于 OpenAI）
+///
+/// 每个优先级只读取自己的 key、model 和 URL，避免跨配置组拼接。
 pub fn build_llm_client_from_env() -> Option<Arc<dyn LlmClient>> {
-    if let Some(config) = anthropic_config_from_env() {
-        let mut client = ClaudeClient::new(&config.api_key);
-        if let Some(model) = config.model {
-            client = client.with_model(&model);
-        }
-        if let Some(base_url) = config.base_url {
-            client = client.with_base_url(&base_url);
-        }
-        return Some(Arc::new(client));
-    }
+    explicit_anthropic_config_from_env()
+        .map(build_anthropic_client)
+        .or_else(|| explicit_openai_config_from_env().map(build_openai_client))
+        .or_else(|| base_openai_config_from_env().map(build_openai_client))
+        .or_else(|| ambient_anthropic_config_from_env().map(build_anthropic_client))
+        .or_else(|| ambient_openai_config_from_env().map(build_openai_client))
+}
 
-    if let Some(config) = openai_config_from_env() {
-        let mut client = OpenAIClient::new(&config.api_key);
-        if let Some(model) = config.model {
-            client = client.with_model(&model);
-        }
-        if let Some(base_url) = config.base_url {
-            client = client.with_base_url(&base_url);
-        }
-        return Some(Arc::new(client));
+fn build_anthropic_client(config: LlmEnvConfig) -> Arc<dyn LlmClient> {
+    let mut client = ClaudeClient::new(&config.api_key);
+    if let Some(model) = config.model {
+        client = client.with_model(&model);
     }
+    if let Some(base_url) = config.base_url {
+        client = client.with_base_url(&base_url);
+    }
+    Arc::new(client)
+}
 
-    None
+fn build_openai_client(config: LlmEnvConfig) -> Arc<dyn LlmClient> {
+    let mut client = OpenAIClient::new(&config.api_key);
+    if let Some(model) = config.model {
+        client = client.with_model(&model);
+    }
+    if let Some(base_url) = config.base_url {
+        client = client.with_base_url(&base_url);
+    }
+    Arc::new(client)
 }
 
 pub fn build_required_llm_client_from_env() -> Result<Arc<dyn LlmClient>, String> {
-    build_llm_client_from_env().ok_or_else(|| "missing API key".to_string())
+    build_llm_client_from_env()
+        .ok_or_else(|| "missing usable LLM provider configuration".to_string())
 }
 /// Claude 客户端
 pub struct ClaudeClient {
@@ -239,9 +248,11 @@ struct OpenAIMessage {
 }
 
 fn env_var(keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| std::env::var(key).ok())
-        .filter(|value| !value.trim().is_empty())
+    keys.iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    })
 }
 
 fn classify_provider_error(
@@ -328,23 +339,43 @@ struct LlmEnvConfig {
     base_url: Option<String>,
 }
 
-fn anthropic_config_from_env() -> Option<LlmEnvConfig> {
+fn explicit_anthropic_config_from_env() -> Option<LlmEnvConfig> {
     Some(LlmEnvConfig {
-        api_key: env_var(&[
-            "REFINE_ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "ANTHROPIC_API_KEY",
-        ])?,
+        api_key: env_var(&["REFINE_ANTHROPIC_API_KEY"])?,
         model: env_var(&["REFINE_ANTHROPIC_MODEL"]),
-        base_url: env_var(&["REFINE_ANTHROPIC_BASE_URL", "ANTHROPIC_BASE_URL"]),
+        base_url: env_var(&["REFINE_ANTHROPIC_BASE_URL"]),
     })
 }
 
-fn openai_config_from_env() -> Option<LlmEnvConfig> {
+fn explicit_openai_config_from_env() -> Option<LlmEnvConfig> {
     Some(LlmEnvConfig {
-        api_key: env_var(&["REFINE_OPENAI_API_KEY", "OPENAI_API_KEY", "BASE_API_KEY"])?,
-        model: env_var(&["REFINE_OPENAI_MODEL", "BASE_MODEL"]),
-        base_url: env_var(&["REFINE_OPENAI_BASE_URL", "BASE_URL"]),
+        api_key: env_var(&["REFINE_OPENAI_API_KEY"])?,
+        model: env_var(&["REFINE_OPENAI_MODEL"]),
+        base_url: env_var(&["REFINE_OPENAI_BASE_URL"]),
+    })
+}
+
+fn base_openai_config_from_env() -> Option<LlmEnvConfig> {
+    Some(LlmEnvConfig {
+        api_key: env_var(&["BASE_API_KEY"])?,
+        model: env_var(&["BASE_MODEL"]),
+        base_url: Some(env_var(&["BASE_URL"])?),
+    })
+}
+
+fn ambient_anthropic_config_from_env() -> Option<LlmEnvConfig> {
+    Some(LlmEnvConfig {
+        api_key: env_var(&["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"])?,
+        model: None,
+        base_url: env_var(&["ANTHROPIC_BASE_URL"]),
+    })
+}
+
+fn ambient_openai_config_from_env() -> Option<LlmEnvConfig> {
+    Some(LlmEnvConfig {
+        api_key: env_var(&["OPENAI_API_KEY"])?,
+        model: None,
+        base_url: None,
     })
 }
 
@@ -378,81 +409,20 @@ impl LlmClient for MockLlmClient {
     }
 }
 #[cfg(test)]
+#[path = "llm_env_tests.rs"]
+mod env_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-    const LLM_ENV_KEYS: &[&str] = &[
-        "REFINE_ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_API_KEY",
-        "REFINE_ANTHROPIC_MODEL",
-        "REFINE_ANTHROPIC_BASE_URL",
-        "ANTHROPIC_BASE_URL",
-        "REFINE_OPENAI_API_KEY",
-        "OPENAI_API_KEY",
-        "REFINE_OPENAI_MODEL",
-        "REFINE_OPENAI_BASE_URL",
-        "BASE_API_KEY",
-        "BASE_MODEL",
-        "BASE_URL",
-    ];
 
     #[tokio::test]
     async fn test_mock_client() {
         let client = MockLlmClient::new("test response");
         let result = client.complete("hello", None).await.unwrap();
         assert_eq!(result, "test response");
-    }
-
-    #[test]
-    fn openai_config_accepts_base_aliases() {
-        let Ok(_env_lock) = ENV_LOCK.lock() else {
-            panic!("failed to lock env");
-        };
-        with_clean_llm_env(|| {
-            std::env::set_var("BASE_API_KEY", "base-key");
-            std::env::set_var("BASE_MODEL", "base-model");
-            std::env::set_var("BASE_URL", "https://example.test/openai");
-
-            let Some(config) = openai_config_from_env() else {
-                panic!("missing openai config");
-            };
-            assert_eq!(config.api_key, "base-key");
-            assert_eq!(config.model.as_deref(), Some("base-model"));
-            assert_eq!(
-                config.base_url.as_deref(),
-                Some("https://example.test/openai")
-            );
-        });
-    }
-
-    #[test]
-    fn refine_openai_vars_override_base_aliases() {
-        let Ok(_env_lock) = ENV_LOCK.lock() else {
-            panic!("failed to lock env");
-        };
-        with_clean_llm_env(|| {
-            std::env::set_var("REFINE_OPENAI_API_KEY", "refine-key");
-            std::env::set_var("REFINE_OPENAI_MODEL", "refine-model");
-            std::env::set_var("REFINE_OPENAI_BASE_URL", "https://refine.example.test");
-            std::env::set_var("BASE_API_KEY", "base-key");
-            std::env::set_var("BASE_MODEL", "base-model");
-            std::env::set_var("BASE_URL", "https://base.example.test");
-
-            let Some(config) = openai_config_from_env() else {
-                panic!("missing openai config");
-            };
-            assert_eq!(config.api_key, "refine-key");
-            assert_eq!(config.model.as_deref(), Some("refine-model"));
-            assert_eq!(
-                config.base_url.as_deref(),
-                Some("https://refine.example.test")
-            );
-        });
     }
 
     #[test]
@@ -655,25 +625,5 @@ mod tests {
                 .expect("write provider response");
         });
         format!("http://{address}")
-    }
-
-    fn with_clean_llm_env(test: impl FnOnce()) {
-        let saved = LLM_ENV_KEYS
-            .iter()
-            .map(|key| (*key, std::env::var(key).ok()))
-            .collect::<Vec<_>>();
-
-        for key in LLM_ENV_KEYS {
-            std::env::remove_var(key);
-        }
-
-        test();
-
-        for (key, value) in saved {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
     }
 }

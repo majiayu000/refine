@@ -68,6 +68,20 @@ file_mode() {
   fi
 }
 
+assert_incomplete_base_rejected() {
+  local label="$1"
+  shift
+  local output=''
+  if output="$(env -i HOME="$TEST_ROOT" PATH="$PATH" REFINE_LOADER="$LOADER" "$@" \
+    bash -c 'source "$REFINE_LOADER"; load_refine_llm_env' 2>&1)"; then
+    fail "incomplete BASE provider was accepted: ${label}"
+  fi
+  assert_contains "$output" 'BASE requires both BASE_API_KEY and BASE_URL' \
+    "incomplete BASE error was not actionable: ${label}"
+  assert_not_contains "$output" 'incomplete-secret' \
+    "incomplete BASE error leaked its key: ${label}"
+}
+
 unset_supported_command='unset REFINE_ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY REFINE_ANTHROPIC_MODEL REFINE_ANTHROPIC_BASE_URL ANTHROPIC_BASE_URL REFINE_OPENAI_API_KEY OPENAI_API_KEY REFINE_OPENAI_MODEL REFINE_OPENAI_BASE_URL BASE_API_KEY BASE_MODEL BASE_URL'
 
 run_config() {
@@ -100,6 +114,36 @@ assert_not_contains "$process_output" 'secure-secret' 'secure secret appeared in
 assert_not_contains "$process_output" 'project-secret' 'project secret appeared in output'
 printf 'PASS process environment priority\n'
 
+# Whitespace-only process aliases are absent for precedence purposes and must
+# not mask a usable value from the secure file.
+home="$(new_home blank-process-alias)"
+write_text "${home}/.refine/llm.env" "export ANTHROPIC_AUTH_TOKEN='secure-alias-secret'"
+chmod 600 "${home}/.refine/llm.env"
+blank_alias_output="$(env HOME="$home" \
+  REFINE_LLM_ENV_FILE="${home}/.refine/llm.env" \
+  REFINE_LOADER="$LOADER" \
+  bash -c "${unset_supported_command}; export ANTHROPIC_AUTH_TOKEN=' '; source \"\$REFINE_LOADER\"; load_refine_llm_env; [[ \"\$ANTHROPIC_AUTH_TOKEN\" == 'secure-alias-secret' ]]; printf 'blank-alias-fallback-ok\\n'" 2>&1)" \
+  || fail 'blank process alias masked the secure-file value'
+assert_contains "$blank_alias_output" 'blank-alias-fallback-ok' 'blank alias fallback result missing'
+assert_not_contains "$blank_alias_output" 'secure-alias-secret' 'blank alias fallback leaked its secret'
+printf 'PASS blank process alias fallback\n'
+
+# A whitespace-only key in the secure file is likewise absent and must not
+# suppress a usable project fallback.
+home="$(new_home blank-secure-alias)"
+write_text "${home}/.refine/llm.env" "export ANTHROPIC_AUTH_TOKEN=' '"
+chmod 600 "${home}/.refine/llm.env"
+write_text "${home}/project.env" "export ANTHROPIC_API_KEY='project-alias-secret'"
+blank_secure_output="$(env HOME="$home" \
+  REFINE_LLM_ENV_FILE="${home}/.refine/llm.env" \
+  REFINE_LOADER="$LOADER" \
+  REFINE_PROJECT="${home}/project.env" \
+  bash -c "${unset_supported_command}; source \"\$REFINE_LOADER\"; load_refine_llm_env \"\$REFINE_PROJECT\"; [[ \"\$ANTHROPIC_API_KEY\" == 'project-alias-secret' && \"\$REFINE_LLM_ENV_SOURCE\" == 'project-env' ]]; printf 'blank-secure-fallback-ok\\n'" 2>&1)" \
+  || fail 'blank secure alias suppressed the project fallback'
+assert_contains "$blank_secure_output" 'blank-secure-fallback-ok' 'blank secure fallback result missing'
+assert_not_contains "$blank_secure_output" 'project-alias-secret' 'blank secure fallback leaked its secret'
+printf 'PASS blank secure alias fallback\n'
+
 # Lower-priority files are validated before their companion settings are used.
 home="$(new_home process-insecure-lower)"
 write_text "${home}/.refine/llm.env" "export BASE_URL='https://insecure.example.invalid'"
@@ -110,12 +154,19 @@ if env HOME="$home" REFINE_LLM_ENV_FILE="${home}/.refine/llm.env" REFINE_LOADER=
 fi
 printf 'PASS process companion settings remain fail-closed\n'
 
-process_only_output="$(env -i PATH="$PATH" REFINE_LOADER="$LOADER" BASE_API_KEY='process-only-secret' \
+process_only_output="$(env -i PATH="$PATH" REFINE_LOADER="$LOADER" REFINE_OPENAI_API_KEY='process-only-secret' \
   bash -c 'source "$REFINE_LOADER"; load_refine_llm_env; [[ "$REFINE_LLM_ENV_SOURCE" == process ]]; printf "process-only-ok\n"' 2>&1)" \
   || fail 'process-only credentials unexpectedly required HOME'
 assert_contains "$process_only_output" 'process-only-ok' 'process-only result missing'
 assert_not_contains "$process_only_output" 'process-only-secret' 'process-only secret appeared in output'
 printf 'PASS process-only credentials without HOME\n'
+
+assert_incomplete_base_rejected key-only "BASE_API_KEY=incomplete-secret"
+assert_incomplete_base_rejected url-only "BASE_URL=https://incomplete.example.invalid"
+assert_incomplete_base_rejected blank-key "BASE_API_KEY= " \
+  "BASE_URL=https://incomplete.example.invalid"
+assert_incomplete_base_rejected blank-url "BASE_API_KEY=incomplete-secret" "BASE_URL= "
+printf 'PASS incomplete BASE provider rejection\n'
 
 # Server startup may run without an LLM for query-only operation, while still
 # rejecting malformed credential files.
@@ -176,7 +227,8 @@ printf 'PASS exact supported alias allowlist\n'
 
 # A private regular file is accepted and selected in a clean process.
 home="$(new_home secure-success)"
-write_text "${home}/.refine/llm.env" "export BASE_API_KEY='secure-success-secret'"
+write_text "${home}/.refine/llm.env" "export BASE_API_KEY='secure-success-secret'
+export BASE_URL='https://secure-success.example.invalid'"
 chmod 600 "${home}/.refine/llm.env"
 secure_output="$(env HOME="$home" \
   REFINE_LLM_ENV_FILE="${home}/.refine/llm.env" \
@@ -223,6 +275,7 @@ printf 'PASS symlink rejection\n'
 home="$(new_home project-fallback)"
 write_text "${home}/project.env" "# development-only fallback
 export BASE_API_KEY='project-fallback-secret'
+export BASE_URL='https://project-fallback.example.invalid'
 REFINE_DB_PATH=/tmp/refine-test.db"
 project_output="$(env HOME="$home" \
   REFINE_LLM_ENV_FILE="${home}/.refine/llm.env" \
@@ -242,7 +295,7 @@ if missing_output="$(env HOME="$home" \
   bash -c "${unset_supported_command}; source \"\$REFINE_LOADER\"; load_refine_llm_env" 2>&1)"; then
   fail 'missing-key loader probe unexpectedly succeeded'
 fi
-assert_contains "$missing_output" 'no supported LLM API key' 'missing-key error was not actionable'
+assert_contains "$missing_output" 'no usable LLM provider configuration' 'missing-key error was not actionable'
 printf 'PASS missing-key failure\n'
 
 # Every duplicate mode and every pair of distinct modes must be rejected.
@@ -334,7 +387,8 @@ printf 'PASS migration idempotency, backup, and source block\n'
 # A valid secure file with no remaining literals still gets one managed source
 # block and a private backup when the block is missing; repeating it is a no-op.
 home="$(new_home source-block-repair)"
-write_text "${home}/.refine/llm.env" "export BASE_API_KEY='source-block-secret'"
+write_text "${home}/.refine/llm.env" "export BASE_API_KEY='source-block-secret'
+export BASE_URL='https://source-block.example.invalid'"
 chmod 600 "${home}/.refine/llm.env"
 write_text "${home}/.zshrc" '# unrelated interactive setup
 export PATH=/usr/bin:/bin
@@ -358,6 +412,38 @@ cmp -s "$repaired_copy" "${home}/.zshrc" || fail 'source block repeat changed zs
 assert_equal '1' "$(grep -c '# >>> Refine LLM env (managed) >>>' "${home}/.zshrc" || true)" 'source block repeat duplicated the block'
 assert_equal '1' "$(find "${home}/.refine/backups" -type f -name '*.bak' -print | wc -l | tr -d ' ')" 'source block repeat created an unexpected backup'
 printf 'PASS secure-file source block repair and no-op\n'
+
+# Every configuration mode rejects an existing secure file that is syntactically
+# valid but cannot construct a provider.
+home="$(new_home incomplete-existing-secure)"
+write_text "${home}/.refine/llm.env" "export BASE_API_KEY='incomplete-existing-secret'"
+chmod 600 "${home}/.refine/llm.env"
+write_text "${home}/.zshrc" "export BASE_URL='https://pending.example.invalid'
+export BASE_API_KEY='pending-migration-secret'
+export BASE_MODEL='pending-model'"
+write_text "${home}/source.env" "export REFINE_OPENAI_API_KEY='replacement-secret'"
+cp "${home}/.refine/llm.env" "${home}/secure.before"
+for mode in --check --migrate --from-env; do
+  incomplete_existing_output=''
+  if incomplete_existing_output="$(run_config "$home" "$mode" 2>&1)"; then
+    fail "configuration mode accepted an incomplete existing secure file: ${mode}"
+  fi
+  assert_not_contains "$incomplete_existing_output" 'incomplete-existing-secret' \
+    "configuration mode leaked an incomplete existing key: ${mode}"
+  cmp -s "${home}/secure.before" "${home}/.refine/llm.env" \
+    || fail "configuration mode changed an incomplete existing secure file: ${mode}"
+done
+incomplete_existing_output=''
+if incomplete_existing_output="$(run_config "$home" --from-file "${home}/source.env" 2>&1)"; then
+  fail 'from-file accepted an incomplete existing secure file'
+fi
+assert_contains "$incomplete_existing_output" 'no usable provider' \
+  'from-file incomplete existing secure-file error was not actionable'
+assert_not_contains "$incomplete_existing_output" 'replacement-secret' \
+  'from-file incomplete existing secure-file error leaked the replacement key'
+cmp -s "${home}/secure.before" "${home}/.refine/llm.env" \
+  || fail 'from-file changed an incomplete existing secure file'
+printf 'PASS incomplete existing secure-file rejection\n'
 
 # Malformed and duplicate definitions fail closed before either destination is
 # replaced, and diagnostics remain redacted.
@@ -403,6 +489,21 @@ assert_contains "$from_env_load" 'from-env-load-ok' 'from-env load result missin
 assert_not_contains "$from_env_load" 'from-env-secret' 'from-env loaded secret appeared in output'
 [[ ! -e "${home}/.zshrc" ]] || fail 'from-env unexpectedly created or modified zshrc'
 printf 'PASS configuring already-exported variables\n'
+
+home="$(new_home incomplete-from-env)"
+incomplete_from_env_output=''
+if incomplete_from_env_output="$(env HOME="$home" \
+  REFINE_LLM_ENV_FILE="${home}/.refine/llm.env" \
+  CONFIGURE_SCRIPT="$CONFIGURE" \
+  bash -c "${unset_supported_command}; export BASE_API_KEY='incomplete-secret'; bash \"\$CONFIGURE_SCRIPT\" --from-env" 2>&1)"; then
+  fail 'from-env accepted an incomplete BASE provider'
+fi
+assert_contains "$incomplete_from_env_output" 'BASE requires both BASE_API_KEY and BASE_URL' \
+  'from-env incomplete BASE error was not actionable'
+assert_not_contains "$incomplete_from_env_output" 'incomplete-secret' \
+  'from-env incomplete BASE error leaked its key'
+[[ ! -e "${home}/.refine/llm.env" ]] || fail 'from-env wrote an incomplete BASE provider'
+printf 'PASS from-env incomplete BASE rejection\n'
 
 # A legacy repository file can be imported without evaluating unrelated lines
 # or allowing the caller's process credentials to override the explicit source.
