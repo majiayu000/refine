@@ -5,20 +5,35 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${HOME}/.cargo/bin:${PATH:-}"
 
-# Unattended jobs use process credentials or the canonical secure user file.
-# They do not depend on a project checkout or source ~/.zshrc.
-# shellcheck source=scripts/load-llm-env.sh
-source "${SCRIPT_DIR}/load-llm-env.sh"
-if ! load_refine_llm_env; then
-  echo "ERROR: unattended LLM credentials are unavailable; refusing to start ingest" >&2
-  exit 1
-fi
-
 # shellcheck source=scripts/runtime-job-lock.sh
 source "${SCRIPT_DIR}/runtime-job-lock.sh"
 if [[ "${REFINE_RUNTIME_LOCK_ACTIVE:-}" != "1" ]]; then
   run_refine_runtime_job_locked "${SCRIPT_DIR}/daily-refresh.sh" "$@"
   exit $?
+fi
+
+echo "=== $(date) ==="
+
+FAILED_STEPS=()
+
+# Reconcile provenance before LLM credential and quota gates. This operation
+# only reads local Codex archives and updates existing metadata.
+echo "Step 0: backfill Codex session provenance"
+metadata_rc=0
+refine ingest-sessions --provider local --source codex --backfill-session-metadata 2>&1 \
+  || metadata_rc=$?
+if [ "$metadata_rc" -ne 0 ]; then
+  echo "ERROR: Step 0 metadata backfill failed with exit code ${metadata_rc}" >&2
+  FAILED_STEPS+=("session metadata backfill")
+fi
+
+# Unattended LLM work uses process credentials or the canonical secure user
+# file. It does not depend on a project checkout or source ~/.zshrc.
+# shellcheck source=scripts/load-llm-env.sh
+source "${SCRIPT_DIR}/load-llm-env.sh"
+if ! load_refine_llm_env; then
+  echo "ERROR: unattended LLM credentials are unavailable; refusing to start ingest" >&2
+  exit 1
 fi
 
 # shellcheck source=scripts/quota-time.sh
@@ -35,13 +50,12 @@ if [ -f "$QUOTA_FILE" ]; then
     exit 1
   elif [[ "$UNTIL_KEY" > "$NOW_KEY" ]]; then
     echo "LLM quota exhausted until $UNTIL — skipping refresh"
+    if [[ ${#FAILED_STEPS[@]} -gt 0 ]]; then
+      exit 1
+    fi
     exit 0
   fi
 fi
-
-echo "=== $(date) ==="
-
-FAILED_STEPS=()
 
 # Preflight: environment diagnostics for troubleshooting
 echo "Preflight: PATH=$PATH"

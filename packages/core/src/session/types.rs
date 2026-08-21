@@ -31,6 +31,44 @@ pub enum MessageRole {
     System,
 }
 
+/// Provenance reported by the Codex transcript metadata.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionMode {
+    Interactive,
+    Unattended,
+    Subagent,
+    #[default]
+    Unknown,
+}
+
+impl SessionMode {
+    pub fn as_tag(self) -> &'static str {
+        match self {
+            Self::Interactive => "session_mode_interactive",
+            Self::Unattended => "session_mode_unattended",
+            Self::Subagent => "session_mode_subagent",
+            Self::Unknown => "session_mode_unknown",
+        }
+    }
+
+    pub(super) fn merge(self, observed: Self) -> Self {
+        fn precedence(mode: SessionMode) -> u8 {
+            match mode {
+                SessionMode::Unknown => 0,
+                SessionMode::Interactive => 1,
+                SessionMode::Unattended => 2,
+                SessionMode::Subagent => 3,
+            }
+        }
+
+        if precedence(observed) > precedence(self) {
+            observed
+        } else {
+            self
+        }
+    }
+}
+
 /// 会话消息
 #[derive(Debug, Clone)]
 pub struct SessionMessage {
@@ -44,6 +82,7 @@ pub struct SessionMeta {
     pub project: Option<String>,
     pub model: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
+    pub mode: SessionMode,
     /// The final JSONL record ended at EOF before it became valid JSON. The
     /// parsed prefix is useful for inspection, but must not replace a complete
     /// persisted snapshot or advance an incremental ingest cursor.

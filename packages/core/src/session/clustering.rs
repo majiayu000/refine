@@ -20,6 +20,10 @@ const META_TAGS: &[&str] = &[
     "teaching",
     "deep_inquiry",
     "debugging",
+    "session_mode_interactive",
+    "session_mode_unattended",
+    "session_mode_subagent",
+    "session_mode_unknown",
 ];
 
 const GENERIC_PATH_SEGMENTS: &[&str] = &[
@@ -81,10 +85,30 @@ pub struct ClusterResult {
 
 /// 主函数：从全量 observation 生成聚类结果
 pub fn cluster_observations(items: &[Item]) -> ClusterResult {
+    let excluded_doc_ids: HashSet<String> = items
+        .iter()
+        .filter(|item| {
+            item.tags()
+                .iter()
+                .any(|tag| is_excluded_session_mode(tag.as_str()))
+        })
+        .filter_map(|item| item.document_id().map(|id| id.as_str().to_string()))
+        .collect();
+
     // Single filtering pass: compute tags once per item to avoid double allocation.
     let obs_with_tags: Vec<(&Item, Vec<&str>)> = items
         .iter()
         .filter(|i| i.item_type() == ItemType::Observation)
+        .filter(|item| {
+            let excluded_by_document = item
+                .document_id()
+                .is_some_and(|id| excluded_doc_ids.contains(id.as_str()));
+            let excluded_by_tag = item
+                .tags()
+                .iter()
+                .any(|tag| is_excluded_session_mode(tag.as_str()));
+            !excluded_by_document && !excluded_by_tag
+        })
         .map(|item| {
             let tags: Vec<&str> = item.tags().iter().map(|t| t.as_str()).collect();
             (item, tags)
@@ -334,6 +358,10 @@ fn is_collab_mode(tag: &str) -> bool {
     )
 }
 
+fn is_excluded_session_mode(tag: &str) -> bool {
+    matches!(tag, "session_mode_unattended" | "session_mode_subagent")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,5 +484,33 @@ mod tests {
         assert_eq!(cluster.global_stats.total_sessions, 2);
         assert_eq!(cluster.projects["project-a"].session_count, 1);
         assert_eq!(cluster.projects["project-b"].session_count, 2);
+    }
+
+    #[test]
+    fn cluster_observations_excludes_unattended_and_subagent_documents() {
+        let cluster = cluster_observations(&[
+            observation(
+                "interactive",
+                "doc-1",
+                &["project-a", "session_mode_interactive"],
+            ),
+            observation("exec", "doc-2", &["project-a", "session_mode_unattended"]),
+            observation("child", "doc-3", &["project-a", "session_mode_subagent"]),
+            observation("legacy", "doc-4", &["project-a"]),
+        ]);
+
+        assert_eq!(cluster.global_stats.total_sessions, 2);
+        assert_eq!(cluster.projects["project-a"].session_count, 2);
+    }
+
+    #[test]
+    fn excluded_mode_on_one_item_excludes_the_whole_document() {
+        let cluster = cluster_observations(&[
+            observation("summary", "doc-1", &["project-a"]),
+            observation("decision", "doc-1", &["decision", "session_mode_subagent"]),
+        ]);
+
+        assert_eq!(cluster.global_stats.total_sessions, 0);
+        assert!(cluster.projects.is_empty());
     }
 }

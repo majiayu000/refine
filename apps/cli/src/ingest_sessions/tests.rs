@@ -1,12 +1,14 @@
 use super::*;
 use async_trait::async_trait;
 use chrono::TimeZone;
-use refine_core::error::InfraResult;
+use refine_core::error::{InfraError, InfraResult};
 use refine_core::infra::SqliteStore;
-use refine_core::knowledge::{DocumentId, DocumentRepository, Item, ItemRepository, ItemType};
+use refine_core::knowledge::{DocumentId, DocumentRepository, Item, ItemRepository, ItemType, Tag};
 use refine_core::session::discover_sessions_in;
 use std::collections::VecDeque;
 use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 #[test]
@@ -107,6 +109,7 @@ async fn source_filter_requires_explicit_local_provider() {
             latest: None,
             dry_run: true,
             retry_quarantined: false,
+            backfill_session_metadata: false,
         },
         Path::new("/tmp/refine-test.db"),
         doc_store,
@@ -116,6 +119,30 @@ async fn source_filter_requires_explicit_local_provider() {
     .expect_err("source filtering must not guess a platform in remem mode");
 
     assert!(error.to_string().contains("--provider local"));
+}
+
+#[tokio::test]
+async fn metadata_backfill_requires_local_codex_source() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store;
+    let error = handle_ingest_sessions(
+        IngestOptions {
+            source: Some(SessionSource::ClaudeCode),
+            provider: IngestProvider::Local,
+            limit: None,
+            latest: None,
+            dry_run: true,
+            retry_quarantined: false,
+            backfill_session_metadata: true,
+        },
+        Path::new("/tmp/refine-test.db"),
+        doc_store,
+        None,
+    )
+    .await
+    .expect_err("metadata backfill must not classify non-Codex transcripts");
+
+    assert!(error.to_string().contains("--source codex"));
 }
 
 #[async_trait]
@@ -257,6 +284,7 @@ async fn complete_record_appended_during_llm_is_ingested_on_next_pass() {
         url: url.clone(),
         source: SessionSource::ClaudeCode,
         project: None,
+        mode: SessionMode::Unknown,
         captured_at: Utc::now(),
         has_embedded_timestamp: false,
         raw_content: first_raw.clone(),
@@ -296,6 +324,7 @@ async fn complete_record_appended_during_llm_is_ingested_on_next_pass() {
         url: url.clone(),
         source: SessionSource::ClaudeCode,
         project: None,
+        mode: SessionMode::Unknown,
         captured_at: Utc::now(),
         has_embedded_timestamp: false,
         raw_content: appended_raw.clone(),
@@ -336,6 +365,66 @@ fn source_snapshot_uses_full_content_and_preserves_document_time() {
     let backfilled = document_with_source_version(&unversioned, &raw_version);
     assert_eq!(backfilled.updated_at(), original_updated_at);
     assert_eq!(backfilled.source_version(), Some(raw_version.as_str()));
+}
+
+#[tokio::test]
+async fn metadata_backfill_preserves_non_provenance_tags_and_is_idempotent() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store;
+    let mut document = Document::new("remem-raw-session", "raw");
+    document.set_url("remem-raw://existing");
+    doc_store.save(&document).await.unwrap();
+
+    let mut item = Item::new_observation("existing", "existing");
+    item.set_document_id(document.id().clone());
+    item.set_tags(vec![
+        Tag::new("custom-user-tag").unwrap(),
+        Tag::new("debugging").unwrap(),
+        Tag::new("session_mode_unknown").unwrap(),
+    ])
+    .unwrap();
+    item_store.save(&item).await.unwrap();
+
+    assert!(
+        backfill_session_metadata(&doc_store, &document, SessionMode::Unattended, false)
+            .await
+            .unwrap()
+    );
+    let dry_run_items = doc_store
+        .find_items_by_document_id(document.id())
+        .await
+        .unwrap();
+    assert!(dry_run_items[0]
+        .tags()
+        .iter()
+        .any(|tag| tag.as_str() == "session_mode_unknown"));
+
+    assert!(
+        backfill_session_metadata(&doc_store, &document, SessionMode::Unattended, true)
+            .await
+            .unwrap()
+    );
+    let items = doc_store
+        .find_items_by_document_id(document.id())
+        .await
+        .unwrap();
+    let tags: Vec<_> = items[0].tags().iter().map(|tag| tag.as_str()).collect();
+    assert_eq!(
+        tags,
+        ["custom-user-tag", "debugging", "session_mode_unattended"]
+    );
+
+    assert!(
+        !backfill_session_metadata(&doc_store, &document, SessionMode::Unattended, true)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !backfill_session_metadata(&doc_store, &document, SessionMode::Unknown, true)
+            .await
+            .unwrap()
+    );
 }
 
 #[test]
@@ -402,9 +491,61 @@ fn cursor_is_partitioned_by_database_path() {
         None
     );
     assert_ne!(
-        incremental_cursor_path(home, Some(&SessionSource::Codex), &db_a),
-        incremental_cursor_path(home, Some(&SessionSource::Codex), &db_b)
+        incremental_cursor_path(
+            home,
+            Some(&SessionSource::Codex),
+            &db_a,
+            CursorPurpose::Ingest,
+        ),
+        incremental_cursor_path(
+            home,
+            Some(&SessionSource::Codex),
+            &db_b,
+            CursorPurpose::Ingest,
+        )
     );
+}
+
+#[test]
+fn metadata_cursor_is_independent_and_stops_before_missing_document() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let db_path = tmp.path().join("refine.db");
+    fs::write(&db_path, "").unwrap();
+
+    let ingest_path = incremental_cursor_path(
+        home,
+        Some(&SessionSource::Codex),
+        &db_path,
+        CursorPurpose::Ingest,
+    );
+    let metadata_path = incremental_cursor_path(
+        home,
+        Some(&SessionSource::Codex),
+        &db_path,
+        CursorPurpose::Metadata,
+    );
+    assert_ne!(ingest_path, metadata_path);
+
+    let scan_start = UNIX_EPOCH + Duration::from_secs(20_000);
+    let missing_mtime = UNIX_EPOCH + Duration::from_secs(12_000);
+    let failure = cursor_failure(
+        Path::new("/tmp/missing.jsonl"),
+        missing_mtime,
+        "missing_document",
+    );
+    let watermark = safe_cursor_watermark(scan_start, &[missing_mtime]);
+    let state = IngestCursorState {
+        version: INGEST_CURSOR_VERSION,
+        watermark_secs: unix_seconds(watermark),
+        failures: vec![failure],
+    };
+    write_ingest_cursor_at(&metadata_path, &state).unwrap();
+
+    let loaded: IngestCursorState =
+        serde_json::from_str(&fs::read_to_string(&metadata_path).unwrap()).unwrap();
+    assert_eq!(loaded.watermark_secs, 11_999);
+    assert_eq!(loaded.failures[0].reason, "missing_document");
 }
 
 #[test]
@@ -469,7 +610,7 @@ fn read_last_ingest_mtime_at(
     source: Option<&SessionSource>,
     db_path: &Path,
 ) -> Option<SystemTime> {
-    let path = incremental_cursor_path(home, source, db_path);
+    let path = incremental_cursor_path(home, source, db_path, CursorPurpose::Ingest);
     let secs: u64 = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
     Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
 }
@@ -480,7 +621,7 @@ fn write_last_ingest_mtime_at(
     db_path: &Path,
     t: SystemTime,
 ) {
-    let path = incremental_cursor_path(home, source, db_path);
+    let path = incremental_cursor_path(home, source, db_path, CursorPurpose::Ingest);
     let dir = path.parent().unwrap();
     fs::create_dir_all(dir).unwrap();
     let dur = t.duration_since(SystemTime::UNIX_EPOCH).unwrap();
@@ -516,6 +657,7 @@ async fn process_single_session_links_items_to_saved_document_id() {
         url: "file:///tmp/session.jsonl".to_string(),
         source: SessionSource::Codex,
         project: Some("refine".to_string()),
+        mode: SessionMode::Interactive,
         captured_at: Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap(),
         has_embedded_timestamp: true,
         raw_content: "User: fix the ingest bug".to_string(),
@@ -546,6 +688,10 @@ async fn process_single_session_links_items_to_saved_document_id() {
     assert!(linked_items
         .iter()
         .all(|item| item.document_id() == Some(saved_doc.id())));
+    assert!(linked_items.iter().all(|item| item
+        .tags()
+        .iter()
+        .any(|tag| tag.as_str() == "session_mode_interactive")));
 }
 
 #[tokio::test]
@@ -593,6 +739,7 @@ async fn process_single_session_refresh_replaces_old_items_and_preserves_raw_tra
         url: existing_doc.url().to_string(),
         source: SessionSource::Codex,
         project: Some("refine".to_string()),
+        mode: SessionMode::Unknown,
         captured_at: Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap(),
         has_embedded_timestamp: false,
         raw_content: "User: original transcript\nAssistant: final answer\n".to_string(),
@@ -658,6 +805,7 @@ async fn remem_save_removes_superseded_legacy_document_and_facets() {
         url: "remem-raw://v1/local/repo/session-1".to_string(),
         source: SessionSource::RememRaw,
         project: Some("refine".to_string()),
+        mode: SessionMode::Unknown,
         captured_at: Utc.with_ymd_and_hms(2026, 7, 20, 0, 0, 0).unwrap(),
         has_embedded_timestamp: true,
         raw_content: "User: old\nAssistant: new\n".to_string(),
