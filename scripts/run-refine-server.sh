@@ -18,7 +18,7 @@ if ! load_refine_llm_env_optional "$PROJECT_ENV"; then
   exit 1
 fi
 
-if refine_llm_env_has_api_key; then
+if refine_llm_env_has_usable_provider; then
   printf '[refine-server] LLM source=%s\n' "${REFINE_LLM_ENV_SOURCE:-process}"
 else
   printf '[refine-server] LLM credentials unavailable; extraction is disabled\n' >&2

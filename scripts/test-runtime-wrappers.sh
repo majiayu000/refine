@@ -27,7 +27,8 @@ fi
 home="${TEST_ROOT}/home"
 mkdir -p "${home}/.refine"
 chmod 700 "${home}/.refine"
-printf '%s\n' "export BASE_API_KEY='wrapper-secret'" > "${home}/.refine/llm.env"
+printf '%s\n' "export BASE_API_KEY='wrapper-secret'
+export BASE_URL='https://wrapper.example.invalid'" > "${home}/.refine/llm.env"
 chmod 600 "${home}/.refine/llm.env"
 printf '%s\n' 'token-secret' > "${home}/.refine/server.token"
 chmod 600 "${home}/.refine/server.token"
@@ -37,6 +38,7 @@ cat > "$fake_server" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "${BASE_API_KEY:-}" == 'wrapper-secret' ]]
+[[ "${BASE_URL:-}" == 'https://wrapper.example.invalid' ]]
 [[ "${REFINE_API_TOKEN:-}" == 'token-secret' ]]
 printf 'fake-server-ok\n'
 EOF
@@ -125,7 +127,8 @@ done
 daily_home="${TEST_ROOT}/daily-home"
 mkdir -p "${daily_home}/.refine" "${daily_home}/.cargo/bin"
 chmod 700 "${daily_home}/.refine"
-printf '%s\n' "export BASE_API_KEY='daily-secret'" > "${daily_home}/.refine/llm.env"
+printf '%s\n' "export BASE_API_KEY='daily-secret'
+export BASE_URL='https://daily.example.invalid'" > "${daily_home}/.refine/llm.env"
 chmod 600 "${daily_home}/.refine/llm.env"
 cat > "${daily_home}/.cargo/bin/refine" <<'EOF'
 #!/usr/bin/env bash

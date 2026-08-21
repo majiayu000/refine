@@ -172,6 +172,7 @@ install_output="$(env -i \
   CARGO_HOME="$test_cargo_home" \
   PATH="${fake_bin}:/usr/bin:/bin" \
   BASE_API_KEY='process-only-secret' \
+  BASE_URL='https://process-only.example.invalid' \
   REFINE_LLM_ENV_FILE="$custom_llm_env" \
   /bin/bash "${SCRIPT_DIR}/install-local.sh" \
     --no-ui-dev --no-start --cognitive-portrait 2>&1)" \

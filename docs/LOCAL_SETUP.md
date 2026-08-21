@@ -82,6 +82,15 @@ supports the Anthropic aliases `REFINE_ANTHROPIC_API_KEY`,
 `BASE_API_KEY`, together with their URL/model variables. Values are never
 printed by the loader, migration helper, or credential preflight.
 
+Provider selection is separate from credential-source loading. Refine first
+uses explicit `REFINE_*` credentials (Anthropic before OpenAI when both are
+set), then a complete OpenAI-compatible `BASE_API_KEY` + `BASE_URL` pair, then
+ambient Anthropic or OpenAI credentials (again preferring Anthropic). Model and
+URL values never cross these groups, so an inherited `ANTHROPIC_AUTH_TOKEN`
+cannot override or alter an explicitly configured BASE endpoint. Within the
+ambient Anthropic group, non-empty `ANTHROPIC_AUTH_TOKEN` takes precedence over
+`ANTHROPIC_API_KEY`.
+
 The server health response includes `llm_configured` so `doctor-local.sh` can
 detect a query-only server that would reject extraction jobs. Its append-only
 logs include a timestamped startup boundary, making errors from an earlier
