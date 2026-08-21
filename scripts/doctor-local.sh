@@ -26,6 +26,7 @@ fi
 failures=0
 warnings=0
 ui_dev_enabled=1
+runtime_scripts_valid=1
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -89,6 +90,24 @@ file_sha256() {
     sha256sum "$path" | awk '{print $1}'
   else
     return 1
+  fi
+}
+
+file_owner_uid() {
+  local path="$1"
+  if stat -f %u "$path" >/dev/null 2>&1; then
+    stat -f %u "$path"
+  else
+    stat -c %u "$path"
+  fi
+}
+
+file_mode() {
+  local path="$1"
+  if stat -f %Lp "$path" >/dev/null 2>&1; then
+    stat -f %Lp "$path"
+  else
+    stat -c %a "$path"
   fi
 }
 
@@ -267,29 +286,90 @@ check_freshness() {
 }
 
 check_unattended_llm_env() {
-  local llm_env_file="${REFINE_LLM_ENV_FILE:-${HOME}/.refine/llm.env}"
+  local installed_loader="${HOME}/.refine/scripts/load-llm-env.sh"
   local preflight
 
+  if [[ "$runtime_scripts_valid" != "1" ]]; then
+    warn "unattended LLM credential preflight skipped because installed runtime scripts failed integrity checks"
+    return
+  fi
+
   # Reproduce launchd's relevant property: no interactive/process credentials
-  # while using the same project .env fallback as scheduled jobs.
+  # while using the installed loader and no checkout fallback.
+  if [[ ! -f "$installed_loader" ]]; then
+    fail "installed LLM credential loader missing: ${installed_loader}; reinstall Refine"
+    return
+  fi
   # shellcheck disable=SC2016
   if preflight="$(env -i \
     HOME="$HOME" \
     PATH='/usr/bin:/bin:/usr/sbin:/sbin' \
-    REFINE_LLM_ENV_FILE="$llm_env_file" \
     /bin/bash -c '
       set -u
       source "$1"
-      if ! load_refine_llm_env "$2"; then
+      if ! load_refine_llm_env; then
         exit 1
       fi
       printf "source=%s " "${REFINE_LLM_ENV_SOURCE:-none}"
       refine_llm_env_status
-    ' doctor-local "$repo_root/scripts/load-llm-env.sh" "$repo_root/.env" 2>&1)"; then
+    ' doctor-local "$installed_loader" 2>&1)"; then
     pass "unattended LLM credentials: ${preflight}"
   else
     fail "unattended LLM credential preflight failed: ${preflight}"
   fi
+}
+
+check_runtime_scripts() {
+  local name source installed source_hash installed_hash owner_uid mode directory
+  local runtime_scripts=(
+    cognitive-portrait.sh
+    daily-refresh.sh
+    load-llm-env.sh
+    quota-time.sh
+    run-refine-server.sh
+    runtime-job-lock.sh
+    weekly-insights.sh
+  )
+
+  for directory in "${HOME}/.refine" "${HOME}/.refine/scripts"; do
+    if [[ -L "$directory" || ! -d "$directory" ]]; then
+      fail "runtime directory must be a non-symlink directory: ${directory}"
+      runtime_scripts_valid=0
+      return
+    fi
+    owner_uid="$(file_owner_uid "$directory" 2>/dev/null || true)"
+    mode="$(file_mode "$directory" 2>/dev/null || true)"
+    if [[ "$owner_uid" != "$(id -u)" || "$mode" != '700' ]]; then
+      fail "runtime directory has unsafe ownership or mode: ${directory} (owner=${owner_uid:-unknown} mode=${mode:-unknown}; expected current user/700)"
+      runtime_scripts_valid=0
+      return
+    fi
+  done
+
+  for name in "${runtime_scripts[@]}"; do
+    source="${repo_root}/scripts/${name}"
+    installed="${HOME}/.refine/scripts/${name}"
+    if [[ -L "$installed" || ! -f "$installed" || ! -x "$installed" ]]; then
+      fail "installed runtime script must be a regular non-symlink executable: ${installed}"
+      runtime_scripts_valid=0
+      continue
+    fi
+    owner_uid="$(file_owner_uid "$installed" 2>/dev/null || true)"
+    mode="$(file_mode "$installed" 2>/dev/null || true)"
+    if [[ "$owner_uid" != "$(id -u)" || "$mode" != '700' ]]; then
+      fail "installed runtime script has unsafe ownership or mode: ${installed} (owner=${owner_uid:-unknown} mode=${mode:-unknown}; expected current user/700)"
+      runtime_scripts_valid=0
+      continue
+    fi
+    source_hash="$(file_sha256 "$source" 2>/dev/null || true)"
+    installed_hash="$(file_sha256 "$installed" 2>/dev/null || true)"
+    if [[ -n "$source_hash" && "$source_hash" == "$installed_hash" ]]; then
+      pass "installed runtime script matches checkout: $name"
+    else
+      fail "installed runtime script is stale: ${installed}; reinstall Refine"
+      runtime_scripts_valid=0
+    fi
+  done
 }
 
 check_logs() {
@@ -371,6 +451,7 @@ check_install_manifest
 check_launch_agent com.lifcc.refine-server
 check_launch_agent com.lifcc.refine-daily-ingest
 check_launch_agent com.lifcc.refine-weekly-insights
+check_runtime_scripts
 if [[ "$ui_dev_enabled" == "1" ]]; then
   check_launch_agent com.lifcc.refine-ui-dev
 else

@@ -11,7 +11,7 @@ umask 077
 
 usage() {
   cat <<'EOF'
-Usage: scripts/configure-llm-env.sh [--check | --migrate | --from-env]
+Usage: scripts/configure-llm-env.sh [--check | --migrate | --from-env | --from-file PATH]
 
 Modes:
   --check      Validate the secure file and report whether ~/.zshrc is ready
@@ -20,6 +20,8 @@ Modes:
                definitions from ~/.zshrc into ~/.refine/llm.env.
   --from-env   Write supported variables that are already exported in this
                process into ~/.refine/llm.env. This does not edit ~/.zshrc.
+  --from-file  Safely parse supported literal variables from PATH and write
+               them into ~/.refine/llm.env. Other variables are ignored.
 
 The migration mode is intentionally limited to literal definitions. It does
 not evaluate ~/.zshrc, run zsh startup code, or accept shell expressions.
@@ -35,6 +37,7 @@ home_dir="${HOME:-}"
 [[ -n "$home_dir" ]] || die 'HOME is not set'
 
 mode=''
+source_file=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --check)
@@ -48,6 +51,13 @@ while [[ $# -gt 0 ]]; do
     --from-env)
       [[ -z "$mode" ]] || die 'choose exactly one configuration mode'
       mode='from-env'
+      ;;
+    --from-file)
+      [[ -z "$mode" ]] || die 'choose exactly one configuration mode'
+      mode='from-file'
+      shift
+      [[ $# -gt 0 ]] || die '--from-file requires a path'
+      source_file="$1"
       ;;
     -h|--help)
       usage
@@ -422,6 +432,35 @@ from_env_mode() {
   printf 'FROM-ENV: wrote supported exported variables to the secure LLM env file (values withheld)\n'
 }
 
+from_file_mode() {
+  local key
+
+  [[ -n "$source_file" ]] || die '--from-file requires a path'
+  [[ ! -L "$source_file" ]] || die "source LLM env file is a symlink and was rejected: ${source_file}"
+  [[ -f "$source_file" ]] || die "source LLM env file is not a regular file: ${source_file}"
+
+  if secure_file_is_present; then
+    refine_llm_env_validate_secure_file "$secure_file" || exit 1
+    printf 'FROM-FILE: secure LLM env file already exists; no files changed\n'
+    return 0
+  fi
+
+  refine_llm_env_validate_content "$source_file" 0 \
+    || die "source LLM env file contains an invalid supported assignment: ${source_file}"
+  [[ "$REFINE_LLM_ENV_FILE_HAS_API_KEY" == '1' ]] \
+    || die "source LLM env file has no supported API key: ${source_file}"
+
+  # Load only values parsed from the explicit file. Current process values must
+  # not override or supplement a migration source chosen by the user.
+  for key in "${REFINE_LLM_ENV_SUPPORTED_KEYS[@]}"; do
+    unset "$key"
+  done
+  refine_llm_env_load_file "$source_file" 0 0 \
+    || die "cannot parse source LLM env file: ${source_file}"
+  from_env_mode
+  printf 'FROM-FILE: imported supported literal variables (values withheld)\n'
+}
+
 case "$mode" in
   check)
     check_mode
@@ -431,5 +470,8 @@ case "$mode" in
     ;;
   from-env)
     from_env_mode
+    ;;
+  from-file)
+    from_file_mode
     ;;
 esac

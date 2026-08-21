@@ -3,15 +3,13 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-PROJECT_DIR="${SCRIPT_DIR}/.."
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${HOME}/.cargo/bin:${PATH:-}"
-cd "$PROJECT_DIR"
 
-# The loader applies process -> secure user file -> explicit project fallback.
-# It never sources ~/.zshrc or evaluates either env file.
+# Unattended jobs use process credentials or the canonical secure user file.
+# They do not depend on a project checkout or source ~/.zshrc.
 # shellcheck source=scripts/load-llm-env.sh
 source "${SCRIPT_DIR}/load-llm-env.sh"
-if ! load_refine_llm_env "${PROJECT_DIR}/.env"; then
+if ! load_refine_llm_env; then
   echo "ERROR: unattended LLM credentials are unavailable; refusing to start ingest" >&2
   exit 1
 fi

@@ -3,8 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REFINE_BIN="${REFINE_BIN:-${HOME}/.cargo/bin/refine}"
-PROJECT_DIR="${SCRIPT_DIR}/.."
-ENV_FILE="${PROJECT_DIR}/.env"
 LOG_PREFIX="[refine-weekly]"
 FAILED_STEPS=()
 
@@ -12,11 +10,11 @@ log() {
   echo "${LOG_PREFIX} $(date '+%Y-%m-%d %H:%M:%S') $*"
 }
 
-# The loader applies process -> secure user file -> explicit project fallback.
-# It never sources ~/.zshrc or evaluates either env file.
+# Unattended jobs use process credentials or the canonical secure user file.
+# They do not depend on a project checkout or source ~/.zshrc.
 # shellcheck source=scripts/load-llm-env.sh
 source "${SCRIPT_DIR}/load-llm-env.sh"
-if ! load_refine_llm_env "$ENV_FILE"; then
+if ! load_refine_llm_env; then
   log "ERROR: unattended LLM credentials are unavailable; refusing to start ingest"
   exit 1
 fi

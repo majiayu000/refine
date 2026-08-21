@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-PROJECT_DIR=$(cd "${SCRIPT_DIR}/.." && pwd)
+PROJECT_DIR="${REFINE_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 PORTRAIT_DIR="${REFINE_PORTRAIT_DIR:-${PROJECT_DIR}/docs/cognitive-portraits}"
 # 历史产物（05-31 / 06-01 / 06-02）均由 Codex-native skill 生成，故默认 codex。
 AGENT_BIN="${REFINE_PORTRAIT_AGENT:-codex}"
@@ -29,7 +29,7 @@ notify() {
 
 # shellcheck source=scripts/load-llm-env.sh
 source "${SCRIPT_DIR}/load-llm-env.sh"
-if ! load_refine_llm_env "${PROJECT_DIR}/.env" 2>/dev/null; then
+if ! load_refine_llm_env 2>/dev/null; then
   log "WARNING: no provider API key found; continuing with the agent's own authentication"
 fi
 

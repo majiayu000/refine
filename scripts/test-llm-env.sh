@@ -404,4 +404,37 @@ assert_not_contains "$from_env_load" 'from-env-secret' 'from-env loaded secret a
 [[ ! -e "${home}/.zshrc" ]] || fail 'from-env unexpectedly created or modified zshrc'
 printf 'PASS configuring already-exported variables\n'
 
+# A legacy repository file can be imported without evaluating unrelated lines
+# or allowing the caller's process credentials to override the explicit source.
+home="$(new_home from-file)"
+legacy_file="${home}/legacy.env"
+write_text "$legacy_file" "UNRELATED_VALUE=ignored
+export BASE_URL='https://legacy.example.invalid'
+export BASE_API_KEY='from-file-secret'
+export BASE_MODEL='legacy-model'"
+from_file_output="$(env HOME="$home" \
+  REFINE_LLM_ENV_FILE="${home}/.refine/llm.env" \
+  BASE_API_KEY='process-must-not-win' \
+  bash "$CONFIGURE" --from-file "$legacy_file" 2>&1)" || fail 'from-file configuration failed'
+assert_contains "$from_file_output" 'FROM-FILE' 'from-file result missing'
+assert_not_contains "$from_file_output" 'from-file-secret' 'from-file leaked a source secret'
+assert_not_contains "$from_file_output" 'process-must-not-win' 'from-file leaked a process secret'
+from_file_load="$(env HOME="$home" REFINE_LLM_ENV_FILE="${home}/.refine/llm.env" REFINE_LOADER="$LOADER" \
+  bash -c "${unset_supported_command}; source \"\$REFINE_LOADER\"; load_refine_llm_env; [[ \"\$BASE_API_KEY\" == 'from-file-secret' && \"\$BASE_MODEL\" == 'legacy-model' ]]; printf 'from-file-load-ok\\n'" 2>&1)" \
+  || fail 'from-file output did not load'
+assert_contains "$from_file_load" 'from-file-load-ok' 'from-file load result missing'
+assert_equal '600' "$(file_mode "${home}/.refine/llm.env")" 'from-file output mode is not 0600'
+
+home="$(new_home malformed-from-file)"
+malformed_from_file="${home}/legacy.env"
+write_text "$malformed_from_file" 'export BASE_API_KEY=$(printf from-file-malicious-secret)'
+malformed_from_file_output=''
+if malformed_from_file_output="$(run_config "$home" --from-file "$malformed_from_file" 2>&1)"; then
+  fail 'malformed from-file input unexpectedly succeeded'
+fi
+assert_contains "$malformed_from_file_output" 'invalid' 'malformed from-file error was not actionable'
+assert_not_contains "$malformed_from_file_output" 'from-file-malicious-secret' 'malformed from-file leaked a secret'
+[[ ! -e "${home}/.refine/llm.env" ]] || fail 'malformed from-file input wrote secure env file'
+printf 'PASS explicit file import and fail-closed parsing\n'
+
 printf 'All LLM env tests passed\n'
