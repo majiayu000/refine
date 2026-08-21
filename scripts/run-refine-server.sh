@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SERVER_BIN="${1:-${HOME}/.cargo/bin/refine-server}"
-PROJECT_ENV="${2:-${SCRIPT_DIR}/../.env}"
+PROJECT_ENV="${2:-}"
 
 # Mark every process boundary in both append-only launchd logs so an error from
 # an earlier server cannot be mistaken for one from the current process.

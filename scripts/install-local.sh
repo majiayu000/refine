@@ -20,6 +20,8 @@ Options:
 
 Defaults:
   - Installs refine, mirror, and refine-server into Cargo's bin directory.
+  - Copies unattended runtime scripts into ~/.refine/scripts. LaunchAgents use
+    that installed prefix instead of executable paths inside the git checkout.
   - On macOS, writes user LaunchAgents for server, daily ingest, weekly insights,
     and the desktop UI dev service when Bun is available.
   - Uses REFINE_DEV_ANON=1 for loopback-only local dashboard/API access unless
@@ -30,6 +32,8 @@ EOF
 }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+refine_dir="${HOME}/.refine"
+installed_scripts="${refine_dir}/scripts"
 # shellcheck source=scripts/local-ui-contract.sh
 source "${repo_root}/scripts/local-ui-contract.sh"
 launchd_enabled=1
@@ -104,13 +108,45 @@ write_file() {
   local tmp
   tmp="$(mktemp "${path}.tmp.XXXXXX")"
   cat > "$tmp"
-  if [[ -f "$path" ]] && cmp -s "$tmp" "$path"; then
+  if [[ -L "$path" && -d "$path" ]]; then
+    rm -f "$tmp"
+    die "destination is a symlink to a directory: ${path}"
+  elif [[ -e "$path" && ! -f "$path" && ! -L "$path" ]]; then
+    rm -f "$tmp"
+    die "destination is not a regular file: ${path}"
+  elif [[ ! -L "$path" && -f "$path" ]] && cmp -s "$tmp" "$path"; then
     rm -f "$tmp"
     log "unchanged $path"
   else
     mv "$tmp" "$path"
     log "wrote $path"
   fi
+}
+
+install_runtime_scripts() {
+  local name
+  local runtime_scripts=(
+    cognitive-portrait.sh
+    daily-refresh.sh
+    load-llm-env.sh
+    quota-time.sh
+    run-refine-server.sh
+    runtime-job-lock.sh
+    weekly-insights.sh
+  )
+
+  if [[ -L "$installed_scripts" ]]; then
+    die "runtime scripts directory is a symlink and was rejected: ${installed_scripts}"
+  fi
+  mkdir -p "$installed_scripts"
+  chmod 700 "$installed_scripts" || die "cannot secure runtime scripts directory: ${installed_scripts}"
+
+  for name in "${runtime_scripts[@]}"; do
+    [[ -f "${repo_root}/scripts/${name}" ]] || die "missing runtime script: ${repo_root}/scripts/${name}"
+    write_file "${installed_scripts}/${name}" < "${repo_root}/scripts/${name}"
+    chmod 700 "${installed_scripts}/${name}" || die "cannot secure runtime script: ${installed_scripts}/${name}"
+  done
+  log "installed unattended runtime scripts in ${installed_scripts}"
 }
 
 write_server_token_file() {
@@ -127,10 +163,9 @@ write_server_plist() {
   local path="$1"
   local cargo_bin="$2"
   local path_env="$3"
-  local home_xml server_bin_xml wrapper_xml project_env_xml path_xml token_xml="" cors_xml=""
+  local home_xml server_bin_xml wrapper_xml path_xml token_xml="" cors_xml=""
   local server_bin="${cargo_bin}/refine-server"
-  local wrapper="${repo_root}/scripts/run-refine-server.sh"
-  local project_env="${repo_root}/.env"
+  local wrapper="${installed_scripts}/run-refine-server.sh"
   home_xml="$(printf '%s' "$HOME" | xml_escape)"
   path_xml="$(printf '%s' "$path_env" | xml_escape)"
 
@@ -147,7 +182,6 @@ write_server_plist() {
   cors_xml="$(refine_server_trusted_origins_xml "$ui_dev_enabled")"
   server_bin_xml="$(printf '%s' "$server_bin" | xml_escape)"
   wrapper_xml="$(printf '%s' "$wrapper" | xml_escape)"
-  project_env_xml="$(printf '%s' "$project_env" | xml_escape)"
 
   write_file "$path" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -161,7 +195,6 @@ write_server_plist() {
     <string>/bin/bash</string>
     <string>${wrapper_xml}</string>
     <string>${server_bin_xml}</string>
-    <string>${project_env_xml}</string>
   </array>
   <key>WorkingDirectory</key>
   <string>${home_xml}</string>
@@ -291,7 +324,7 @@ write_portrait_plist() {
   local path="$1"
   local agent_bin="$2"
   local path_env="$3"
-  local script_path="${repo_root}/scripts/cognitive-portrait.sh"
+  local script_path="${installed_scripts}/cognitive-portrait.sh"
   local repo_xml script_xml agent_xml path_xml
   repo_xml="$(printf '%s' "$repo_root" | xml_escape)"
   script_xml="$(printf '%s' "$script_path" | xml_escape)"
@@ -320,6 +353,8 @@ write_portrait_plist() {
     <string>${path_xml}</string>
     <key>REFINE_PORTRAIT_AGENT</key>
     <string>${agent_xml}</string>
+    <key>REFINE_ROOT</key>
+    <string>${repo_xml}</string>
   </dict>
   <key>StartCalendarInterval</key>
   <dict>
@@ -371,7 +406,6 @@ disable_plist() {
 
 need_cmd cargo
 
-refine_dir="${HOME}/.refine"
 if [[ -L "$refine_dir" ]]; then
   die "Refine directory is a symlink and was rejected: ${refine_dir}"
 fi
@@ -379,10 +413,42 @@ mkdir -p "$refine_dir"
 chmod 700 "$refine_dir" || die "cannot secure Refine directory: ${refine_dir}"
 
 print_llm_setup_hint() {
-  local llm_env_file="${REFINE_LLM_ENV_FILE:-${refine_dir}/llm.env}"
-  if [[ -z "${REFINE_ANTHROPIC_API_KEY:-}${ANTHROPIC_AUTH_TOKEN:-}${ANTHROPIC_API_KEY:-}${REFINE_OPENAI_API_KEY:-}${OPENAI_API_KEY:-}${BASE_API_KEY:-}" && \
-    ! -f "$llm_env_file" ]]; then
-    log "LLM credentials are not configured for unattended jobs; review then run: bash ${repo_root}/scripts/configure-llm-env.sh --check"
+  if ! canonical_llm_env_ready; then
+    log "WARNING: LLM credentials are not configured for LaunchAgents; review then run: bash ${repo_root}/scripts/configure-llm-env.sh --check"
+  fi
+}
+
+canonical_llm_env_ready() {
+  env -i \
+    HOME="$HOME" \
+    PATH='/usr/bin:/bin:/usr/sbin:/sbin' \
+    /bin/bash -c '
+      source "$1"
+      load_refine_llm_env
+    ' install-local "${repo_root}/scripts/load-llm-env.sh" >/dev/null 2>&1
+}
+
+guard_legacy_project_env_upgrade() {
+  local project_env="${repo_root}/.env" preflight quoted_project_env
+
+  canonical_llm_env_ready && return 0
+  [[ -e "$project_env" || -L "$project_env" ]] || return 0
+  [[ ! -L "$project_env" && -f "$project_env" ]] \
+    || die "legacy repository LLM env is not a regular non-symlink file: ${project_env}"
+
+  if ! preflight="$(env -i \
+    HOME="$HOME" \
+    PATH='/usr/bin:/bin:/usr/sbin:/sbin' \
+    /bin/bash -c '
+      source "$1"
+      load_refine_llm_env_optional "$2"
+      printf "%s" "${REFINE_LLM_ENV_SOURCE:-none}"
+    ' install-local "${repo_root}/scripts/load-llm-env.sh" "$project_env" 2>&1)"; then
+    die "legacy repository LLM env is invalid; no LaunchAgents were changed: ${preflight}"
+  fi
+  if [[ "$preflight" == 'project-env' ]]; then
+    printf -v quoted_project_env '%q' "$project_env"
+    die "legacy repository .env credentials require explicit migration before this upgrade; no LaunchAgents were changed. Run: bash ${repo_root}/scripts/configure-llm-env.sh --from-file ${quoted_project_env}"
   fi
 }
 
@@ -391,6 +457,10 @@ source_commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || printf 'unkno
 [[ "$source_commit" != "unknown" ]] || die "install source is not a Git checkout"
 [[ -z "$(git -C "$repo_root" status --porcelain 2>/dev/null || true)" ]] \
   || die "install source must be clean; commit or stash changes first"
+
+if [[ "$launchd_enabled" == "1" && "$(uname -s)" == "Darwin" ]]; then
+  guard_legacy_project_env_upgrade
+fi
 
 log "installing Rust binaries"
 cargo install --locked --path "${repo_root}/apps/cli"
@@ -458,6 +528,8 @@ fi
 need_cmd launchctl
 need_cmd plutil
 
+install_runtime_scripts
+
 launch_agents="${HOME}/Library/LaunchAgents"
 mkdir -p "$launch_agents" "${HOME}/Library/Logs"
 
@@ -470,8 +542,8 @@ portrait_plist="${launch_agents}/com.lifcc.refine-cognitive-portrait.plist"
 resolve_cognitive_portrait_setting
 
 write_server_plist "$server_plist" "$cargo_bin" "$path_env"
-write_calendar_plist "$daily_plist" "com.lifcc.refine-daily-ingest" "${repo_root}/scripts/daily-refresh.sh" "${HOME}/Library/Logs/refine-daily-ingest.log" 8 0
-write_calendar_plist "$weekly_plist" "com.lifcc.refine-weekly-insights" "${repo_root}/scripts/weekly-insights.sh" "${HOME}/Library/Logs/refine-insights.log" 9 0 0
+write_calendar_plist "$daily_plist" "com.lifcc.refine-daily-ingest" "${installed_scripts}/daily-refresh.sh" "${HOME}/Library/Logs/refine-daily-ingest.log" 8 0
+write_calendar_plist "$weekly_plist" "com.lifcc.refine-weekly-insights" "${installed_scripts}/weekly-insights.sh" "${HOME}/Library/Logs/refine-insights.log" 9 0 0
 if [[ "$ui_dev_enabled" == "1" ]]; then
   write_ui_plist "$ui_plist" "$(command -v bun)" "$path_env"
 fi

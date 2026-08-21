@@ -45,6 +45,7 @@ jobs:
           bash -n scripts/cognitive-portrait.sh
           bash scripts/test-cognitive-portrait.sh
           bash scripts/test-llm-env.sh
+          bash scripts/test-install-local.sh
           bash scripts/test-runtime-wrappers.sh
           bash scripts/test-local-ui-contract.sh
 
