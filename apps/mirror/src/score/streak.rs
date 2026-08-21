@@ -56,7 +56,7 @@ pub fn format_streak(streak: u32) -> Option<String> {
 
 /// Load scores and compute current streak. Convenience wrapper for integration.
 pub fn current_streak() -> u32 {
-    let scores = match super::persistence::load_recent_scores(365) {
+    let scores = match super::persistence::load_score_activity(365) {
         Ok(s) => s,
         Err(_) => return 0,
     };

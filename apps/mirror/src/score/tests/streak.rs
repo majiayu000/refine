@@ -41,6 +41,20 @@ fn test_streak_duplicate_dates_counted_once() {
 }
 
 #[test]
+fn test_streak_spans_old_and_current_score_schemas() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scores.jsonl");
+    let old = make_score_at_date(chrono::NaiveDate::from_ymd_opt(2026, 3, 25).unwrap());
+    std::fs::write(&path, format!("{}\n", serde_json::to_string(&old).unwrap())).unwrap();
+    let current = make_score_at_date(chrono::NaiveDate::from_ymd_opt(2026, 3, 26).unwrap());
+    super::super::persistence::persist_score_to_path(&path, &current).unwrap();
+
+    let activity = super::super::persistence::load_score_activity_from_path(&path, 365).unwrap();
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 3, 26).unwrap();
+    assert_eq!(calculate_streak(&activity, today), 2);
+}
+
+#[test]
 fn test_streak_no_record_today() {
     // Records on 3/24, 3/25 but today is 3/26 -> streak = 0
     let today = chrono::NaiveDate::from_ymd_opt(2026, 3, 26).unwrap();

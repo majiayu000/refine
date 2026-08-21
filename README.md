@@ -95,9 +95,9 @@ mirror profile                      # Cognitive portrait narrative (requires LLM
 
 | Layer | Indicators | What It Measures |
 |-------|-----------|-----------------|
-| **Depth** | Dreyfus level, Decision quality | Are you thinking at a higher level? |
-| **Breadth** | Exploration rate, Deep invest, Fragmentation | Are you investing wisely across projects? |
-| **Collaboration** | Delegation rate, Mode diversity, Bug/decision ratio | Is your AI collaboration healthy? |
+| **Depth** | Dreyfus level, Reason explicitness | Are you thinking at a higher level? |
+| **Breadth** | Exploration rate, Mature project share, One-off project share | Are you investing wisely across projects? |
+| **Collaboration** | Delegation rate, Mode diversity, Bug/decision extraction ratio | Is your AI collaboration healthy? |
 
 **Signal Lights:** 🟢 Green (healthy) / 🟡 Yellow (watch) / 🔴 Red (act now)
 

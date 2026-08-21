@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use fs2::FileExt;
+use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 use std::path::Path;
 
@@ -10,6 +11,35 @@ use super::types::ScoreResult;
 // ── Persistence ──
 
 const SCORE_HISTORY_LIMIT: usize = 365;
+pub(super) const SCORE_SCHEMA_VERSION: u32 = 3;
+
+#[derive(Serialize)]
+struct CurrentScore<'a> {
+    score_schema_version: u32,
+    #[serde(flatten)]
+    score: &'a ScoreResult,
+}
+
+#[derive(Deserialize)]
+struct ScoreSchemaEnvelope {
+    #[serde(default)]
+    score_schema_version: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct ScoreActivity {
+    #[serde(default = "legacy_score_timestamp")]
+    timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+struct HistoryLine {
+    number: usize,
+    json: String,
+}
+
+fn legacy_score_timestamp() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::<chrono::Utc>::UNIX_EPOCH
+}
 
 pub fn persist_score(result: &ScoreResult) -> Result<()> {
     let dir = ensure_mirror_dir()?;
@@ -40,13 +70,8 @@ pub(super) fn persist_score_to_path(path: &Path, result: &ScoreResult) -> Result
 }
 
 fn persist_score_to_path_locked(path: &Path, result: &ScoreResult) -> Result<()> {
-    let mut lines: Vec<String> = match std::fs::read_to_string(path) {
-        Ok(content) => content
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
+    let history = match std::fs::read_to_string(path) {
+        Ok(content) => history_lines_from_content(&content),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => {
             return Err(anyhow::anyhow!(
@@ -56,8 +81,13 @@ fn persist_score_to_path_locked(path: &Path, result: &ScoreResult) -> Result<()>
             ));
         }
     };
+    validate_history_before_append(path, &history)?;
+    let mut lines: Vec<_> = history.into_iter().map(|line| line.json).collect();
 
-    lines.push(serde_json::to_string(result)?);
+    lines.push(serde_json::to_string(&CurrentScore {
+        score_schema_version: SCORE_SCHEMA_VERSION,
+        score: result,
+    })?);
     if lines.len() > SCORE_HISTORY_LIMIT {
         let trim = lines.len() - SCORE_HISTORY_LIMIT;
         lines.drain(0..trim);
@@ -125,6 +155,81 @@ pub fn load_recent_scores(n: usize) -> Result<Vec<ScoreResult>> {
 }
 
 pub(super) fn load_recent_scores_from_path(path: &Path, n: usize) -> Result<Vec<ScoreResult>> {
+    let mut compatible = Vec::new();
+    for line in load_score_history_lines(path)? {
+        match score_schema_version(&line.json, line.number, path)? {
+            None | Some(0..=2) => {}
+            Some(SCORE_SCHEMA_VERSION) => {
+                compatible.push(parse_history_line::<ScoreResult>(
+                    &line.json,
+                    line.number,
+                    path,
+                )?);
+            }
+            Some(version) => return Err(unsupported_schema_error(version, path)),
+        }
+    }
+    let start = compatible.len().saturating_sub(n);
+    Ok(compatible[start..].to_vec())
+}
+
+pub(super) fn load_score_activity(n: usize) -> Result<Vec<ScoreResult>> {
+    let path = mirror_dir().join("scores.jsonl");
+    load_score_activity_from_path(&path, n)
+}
+
+pub(super) fn load_score_activity_from_path(path: &Path, n: usize) -> Result<Vec<ScoreResult>> {
+    let mut all = Vec::new();
+    for line in load_score_history_lines(path)? {
+        let activity = parse_history_line::<ScoreActivity>(&line.json, line.number, path)?;
+        all.push(ScoreResult {
+            timestamp: activity.timestamp,
+            ..ScoreResult::default()
+        });
+    }
+    let start = all.len().saturating_sub(n);
+    Ok(all[start..].to_vec())
+}
+
+fn validate_history_before_append(path: &Path, lines: &[HistoryLine]) -> Result<()> {
+    for line in lines {
+        if let Some(version) = score_schema_version(&line.json, line.number, path)? {
+            if version > SCORE_SCHEMA_VERSION {
+                return Err(unsupported_schema_error(version, path));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn score_schema_version(line: &str, line_no: usize, path: &Path) -> Result<Option<u32>> {
+    Ok(parse_history_line::<ScoreSchemaEnvelope>(line, line_no, path)?.score_schema_version)
+}
+
+fn unsupported_schema_error(version: u32, path: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "failed to load metric history from score history {}: unsupported score schema version {}; current version is {}",
+        path.display(),
+        version,
+        SCORE_SCHEMA_VERSION
+    )
+}
+
+fn parse_history_line<T: for<'de> Deserialize<'de>>(
+    line: &str,
+    line_no: usize,
+    path: &Path,
+) -> Result<T> {
+    serde_json::from_str::<T>(line).with_context(|| {
+        format!(
+            "failed to parse JSON on line {} in score history {}",
+            line_no,
+            path.display()
+        )
+    })
+}
+
+fn load_score_history_lines(path: &Path) -> Result<Vec<HistoryLine>> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -151,15 +256,24 @@ pub(super) fn load_recent_scores_from_path(path: &Path, n: usize) -> Result<Vec<
         if line.is_empty() {
             continue;
         }
-        let parsed = serde_json::from_str::<ScoreResult>(line).with_context(|| {
-            format!(
-                "failed to parse JSON on line {} in score history {}",
-                line_no,
-                path.display()
-            )
-        })?;
-        all.push(parsed);
+        all.push(HistoryLine {
+            number: line_no,
+            json: line.to_owned(),
+        });
     }
-    let start = all.len().saturating_sub(n);
-    Ok(all[start..].to_vec())
+    Ok(all)
+}
+
+fn history_lines_from_content(content: &str) -> Vec<HistoryLine> {
+    content
+        .lines()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            let json = line.trim();
+            (!json.is_empty()).then(|| HistoryLine {
+                number: idx + 1,
+                json: json.to_owned(),
+            })
+        })
+        .collect()
 }
