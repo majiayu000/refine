@@ -153,6 +153,12 @@ write_server_token_file() {
   local path="$1"
 
   [[ -n "${REFINE_API_TOKEN:-}" ]] || die "--token-auth requires REFINE_API_TOKEN in the current environment"
+  [[ "$REFINE_API_TOKEN" != *[[:cntrl:]]* ]] \
+    || die '--token-auth requires a single-line REFINE_API_TOKEN without control characters'
+  [[ "$REFINE_API_TOKEN" != [[:space:]]* && "$REFINE_API_TOKEN" != *[[:space:]] ]] \
+    || die '--token-auth requires REFINE_API_TOKEN without leading or trailing whitespace'
+  LC_ALL=C grep -Eq '^[!-~]+$' <<< "$REFINE_API_TOKEN" \
+    || die '--token-auth requires REFINE_API_TOKEN containing visible ASCII characters only'
   write_file "$path" <<EOF
 ${REFINE_API_TOKEN}
 EOF

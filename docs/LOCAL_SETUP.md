@@ -108,6 +108,20 @@ and passes only that file path to the shared server startup wrapper. The token
 value is not written into the plist. Clients must send
 `Authorization: Bearer <token>`.
 
+After a token-mode install, configure the same value in each bundled client:
+
+- HTTP desktop UI: use the **API Bearer token** field in the Refine sidebar,
+  then select **Apply and refresh**. The native Tauri invoke mode does not show
+  this setting because it does not use HTTP bearer authentication.
+- Browser extension: open the popup, select the gear icon, enter the token,
+  then select **Apply and refresh**. The extension stores it in extension-local
+  storage and sends it only to protected `/v1/*` requests; `/health` discovery
+  remains unauthenticated.
+
+`scripts/doctor-local.sh` automatically reads the installer-managed token file
+for its protected API probe. It rejects unsafe token files and never prints the
+token value.
+
 ## Useful Variants
 
 Install binaries only:

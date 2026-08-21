@@ -44,6 +44,10 @@ export function getAuthToken(): string {
   return client.getAuthToken()
 }
 
+export function getAuthTokenError(): string | null {
+  return client.getAuthTokenError()
+}
+
 export function setAuthToken(token: string): void {
   client.setAuthToken(token)
 }

@@ -23,6 +23,7 @@ export interface RefineApiClient {
   readonly capabilities: ApiCapabilities
   getCapabilities: () => ApiCapabilities
   getAuthToken: () => string
+  getAuthTokenError: () => string | null
   setAuthToken: (token: string) => void
   getItems: (params?: ListItemsParams) => Promise<ItemListResult>
   getItem: (id: string) => Promise<Item | null>

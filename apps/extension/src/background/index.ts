@@ -15,6 +15,7 @@ import {
 } from '../lib/api'
 import {
   discoverCloudApiBase,
+  API_TOKEN_STORAGE_KEY,
   OUTBOX_FLUSH_ALARM,
   OUTBOX_FLUSH_INTERVAL_MINUTES,
   RESET_DAILY_STATS_ALARM,
@@ -23,6 +24,7 @@ import {
   RETRY_MAX_DELAY_MS,
 } from '../lib/config'
 import { OutboxRuntime, type OutboxSnapshot } from '../lib/outbox-runtime'
+import { createInvalidationGuard } from '../lib/invalidation-guard'
 import type {
   ConversationPayload,
   ExtensionStats,
@@ -45,6 +47,7 @@ const DEFAULT_STATS: ExtensionStats = {
 const DEFAULT_SYNC_STATE: SyncState = {}
 
 let cloudStatusCache: CloudStatusCache | null = null
+const cloudStatusGuard = createInvalidationGuard()
 
 interface CloudStatusCache {
   updatedAt: number
@@ -81,11 +84,16 @@ interface FetchRecommendationsMessage {
   }
 }
 
+interface TokenChangedMessage {
+  action: 'tokenChanged'
+}
+
 type BackgroundMessage =
   | EnqueueMessage
   | GetSyncStatusMessage
   | ForceSyncMessage
   | FetchRecommendationsMessage
+  | TokenChangedMessage
 
 function formatQuotaExceededMessage(quota: QuotaStatusResponse): string {
   if (typeof quota.limit === 'number') {
@@ -170,21 +178,27 @@ async function getCloudStatusWithCache(): Promise<{
     }
   }
 
-  const cloudHealthy = await checkCloudHealth()
+  const cacheGeneration = cloudStatusGuard.snapshot()
+
+  const healthReachable = await checkCloudHealth()
+  let cloudHealthy = false
   let remoteTotalItems: number | null = null
   let quota: QuotaStatusResponse | null = null
-  if (cloudHealthy) {
+  if (healthReachable) {
     ;[remoteTotalItems, quota] = await Promise.all([
       fetchCloudTotalItems(),
       fetchQuotaStatus(),
     ])
+    cloudHealthy = remoteTotalItems !== null
   }
 
-  cloudStatusCache = {
-    updatedAt: now,
-    cloudHealthy,
-    remoteTotalItems,
-    quota,
+  if (cloudStatusGuard.isCurrent(cacheGeneration)) {
+    cloudStatusCache = {
+      updatedAt: now,
+      cloudHealthy,
+      remoteTotalItems,
+      quota,
+    }
   }
 
   return {
@@ -337,7 +351,28 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage, _sender, sendR
     return true
   }
 
+  if (message.action === 'tokenChanged') {
+    cloudStatusGuard.invalidate()
+    cloudStatusCache = null
+    flushOutboxWith({ forceRetry: true })
+      .then(() => sendResponse({ ok: true }))
+      .catch((error: unknown) => {
+        sendResponse({
+          ok: false,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      })
+    return true
+  }
+
   return false
+})
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === 'local' && changes[API_TOKEN_STORAGE_KEY]) {
+    cloudStatusGuard.invalidate()
+    cloudStatusCache = null
+  }
 })
 
 chrome.alarms.onAlarm.addListener((alarm) => {

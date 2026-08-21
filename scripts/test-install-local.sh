@@ -31,6 +31,15 @@ assert_not_contains() {
   esac
 }
 
+file_mode() {
+  local path="$1"
+  if stat -f %Lp "$path" >/dev/null 2>&1; then
+    stat -f %Lp "$path"
+  else
+    stat -c %a "$path"
+  fi
+}
+
 fake_bin="${TEST_ROOT}/bin"
 test_home="${TEST_ROOT}/home"
 test_cargo_home="${test_home}/.cargo"
@@ -73,8 +82,87 @@ cat > "${fake_bin}/codex" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
+cat > "${fake_bin}/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+method='GET'
+header=''
+header_transport='none'
+url=''
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -X)
+      method="${2:-}"
+      shift 2
+      ;;
+    -H)
+      if [[ "${2:-}" == '@-' ]]; then
+        IFS= read -r header || true
+        header_transport='stdin'
+      else
+        header="${2:-}"
+        if [[ "$header" == Authorization:* ]]; then
+          printf 'literal-authorization-rejected\n' >> "${CURL_LOG:-/dev/null}"
+          exit 86
+        fi
+      fi
+      shift 2
+      ;;
+    --max-time|-D|-o|-w)
+      shift 2
+      ;;
+    http://*|https://*)
+      url="$1"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+case "$url" in
+  */health)
+    [[ -z "$header" ]] && printf 'GET-health:no-auth\n' >> "${CURL_LOG:-/dev/null}" \
+      || printf 'GET-health:auth\n' >> "${CURL_LOG:-/dev/null}"
+    printf '%s\n' '{"success":true,"llm_configured":true}'
+    ;;
+  */v1/items\?*)
+    if [[ -n "${EXPECTED_TOKEN:-}" && "$header_transport" == 'stdin' && "$header" == "Authorization: Bearer ${EXPECTED_TOKEN}" ]]; then
+      printf 'GET-items:auth-stdin\n' >> "${CURL_LOG:-/dev/null}"
+      printf '%s\n' '{"success":true,"items":[]}'
+    elif [[ "${EXPECT_ANON:-0}" == '1' && -z "$header" ]]; then
+      printf 'GET-items:no-auth\n' >> "${CURL_LOG:-/dev/null}"
+      printf '%s\n' '{"success":true,"items":[]}'
+    else
+      printf 'GET-items:rejected\n' >> "${CURL_LOG:-/dev/null}"
+      printf '%s\n' '{"success":false,"message":"Unauthorized: provide Authorization: Bearer <token>"}'
+    fi
+    ;;
+  */v1/items)
+    if [[ "$method" == 'OPTIONS' ]]; then
+      printf 'HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: http://127.0.0.1:8987\r\nAccess-Control-Allow-Methods: GET\r\n\r\n'
+    fi
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+cat > "${fake_bin}/stat" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+last_arg="${!#}"
+if [[ -n "${FAKE_TOKEN_OWNER:-}" && "$last_arg" == "${FAKE_TOKEN_PATH:-}" && \
+  "${2:-}" == '%u' && ( "${1:-}" == '-f' || "${1:-}" == '-c' ) ]]; then
+  printf '%s\n' "$FAKE_TOKEN_OWNER"
+  exit 0
+fi
+exec /usr/bin/stat "$@"
+EOF
 chmod 700 "${fake_bin}/cargo" "${fake_bin}/uname" \
-  "${fake_bin}/launchctl" "${fake_bin}/plutil" "${fake_bin}/codex"
+  "${fake_bin}/launchctl" "${fake_bin}/plutil" "${fake_bin}/codex" "${fake_bin}/curl" \
+  "${fake_bin}/stat"
 
 custom_llm_env="${TEST_ROOT}/custom-llm.env"
 printf '%s\n' "export BASE_API_KEY='custom-path-secret'" > "$custom_llm_env"
@@ -92,6 +180,39 @@ assert_contains "$install_output" 'WARNING: LLM credentials are not configured f
   'transient credentials suppressed the LaunchAgent warning'
 assert_not_contains "$install_output" 'custom-path-secret' 'installer leaked a custom-path credential'
 assert_not_contains "$install_output" 'process-only-secret' 'installer leaked a process credential'
+
+for invalid_token in $'two\nlines' ' leading-space' 'trailing-space ' '中文-token'; do
+  invalid_token_output=''
+  if invalid_token_output="$(env -i \
+    HOME="$test_home" \
+    CARGO_HOME="$test_cargo_home" \
+    PATH="${fake_bin}:/usr/bin:/bin" \
+    REFINE_API_TOKEN="$invalid_token" \
+    /bin/bash "${SCRIPT_DIR}/install-local.sh" \
+      --no-ui-dev --no-start --token-auth 2>&1)"; then
+    fail 'installer accepted a non-header-safe API token'
+  fi
+  assert_not_contains "$invalid_token_output" "$invalid_token" 'invalid token appeared in installer output'
+done
+
+api_token='doctor-token-secret'
+token_install_output="$(env -i \
+  HOME="$test_home" \
+  CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:/usr/bin:/bin" \
+  REFINE_API_TOKEN="$api_token" \
+  /bin/bash "${SCRIPT_DIR}/install-local.sh" \
+    --no-ui-dev --no-start --token-auth 2>&1)" \
+  || fail 'token-mode install failed'
+token_file="${test_home}/.refine/refine-server.token"
+[[ -f "$token_file" && ! -L "$token_file" ]] || fail 'token-mode install did not write a regular token file'
+[[ "$(file_mode "$token_file")" == '600' ]] \
+  || fail 'token-mode install did not use mode 0600'
+[[ "$(<"$token_file")" == "$api_token" ]] || fail 'token-mode token file has the wrong value'
+assert_not_contains "$token_install_output" "$api_token" 'token-mode installer output leaked the API token'
+if grep -Fq "$api_token" "${test_home}/Library/LaunchAgents/com.lifcc.refine-server.plist"; then
+  fail 'token-mode plist contains the API token value'
+fi
 
 runtime_scripts=(
   cognitive-portrait.sh
@@ -135,6 +256,121 @@ for plist in "$server_plist" "$daily_plist" "$weekly_plist" "$portrait_plist"; d
     fail "LaunchAgent still executes a script from the checkout: $(basename "$plist")"
   fi
 done
+
+curl_log="${TEST_ROOT}/doctor-curl.log"
+: > "$curl_log"
+doctor_token_output="$(env -i \
+  HOME="$test_home" \
+  CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" \
+  CURL_LOG="$curl_log" \
+  EXPECTED_TOKEN="$api_token" \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$doctor_token_output" 'PASS API items endpoint OK' 'Doctor did not authenticate its protected probe'
+assert_not_contains "$doctor_token_output" "$api_token" 'Doctor output leaked the API token'
+grep -Fxq 'GET-health:no-auth' "$curl_log" || fail 'Doctor attached auth to the public health probe'
+grep -Fxq 'GET-items:auth-stdin' "$curl_log" || fail 'Doctor did not pass protected auth through curl stdin'
+if grep -Fq "$api_token" "$curl_log"; then
+  fail 'Doctor curl log leaked the API token'
+fi
+
+rm -f "$token_file"
+: > "$curl_log"
+doctor_anon_output="$(env -i \
+  HOME="$test_home" \
+  CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" \
+  CURL_LOG="$curl_log" \
+  EXPECT_ANON=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$doctor_anon_output" 'PASS API items endpoint OK' 'Doctor broke dev-anon probing'
+grep -Fxq 'GET-items:no-auth' "$curl_log" || fail 'Doctor unexpectedly authenticated a dev-anon probe'
+
+printf '%s\n' "$api_token" > "$token_file"
+chmod 644 "$token_file"
+: > "$curl_log"
+unsafe_token_output="$(env -i \
+  HOME="$test_home" \
+  CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" \
+  CURL_LOG="$curl_log" \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$unsafe_token_output" 'installed API token has unsafe ownership or mode' \
+  'Doctor accepted an unsafe token file mode'
+assert_not_contains "$unsafe_token_output" "$api_token" 'unsafe-token diagnostic leaked the API token'
+if grep -Fq 'GET-items:' "$curl_log"; then
+  fail 'Doctor fell back to a protected probe after rejecting an unsafe token file'
+fi
+
+chmod 600 "$token_file"
+: > "$curl_log"
+wrong_owner_output="$(env -i \
+  HOME="$test_home" \
+  CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" \
+  CURL_LOG="$curl_log" \
+  FAKE_TOKEN_OWNER=999999 \
+  FAKE_TOKEN_PATH="$token_file" \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$wrong_owner_output" 'installed API token has unsafe ownership or mode' \
+  'Doctor accepted a token file owned by another user'
+if grep -Fq 'GET-items:' "$curl_log"; then
+  fail 'Doctor probed protected API after rejecting a foreign-owned token file'
+fi
+
+rm -f "$token_file"
+ln -s "${TEST_ROOT}/custom-llm.env" "$token_file"
+: > "$curl_log"
+symlink_token_output="$(env -i \
+  HOME="$test_home" \
+  CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" \
+  CURL_LOG="$curl_log" \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$symlink_token_output" 'installed API token must be a regular non-symlink file' \
+  'Doctor accepted a symlinked token file'
+if grep -Fq 'GET-items:' "$curl_log"; then
+  fail 'Doctor probed protected API after rejecting a symlinked token file'
+fi
+
+rm -f "$token_file"
+: > "$token_file"
+chmod 600 "$token_file"
+: > "$curl_log"
+empty_token_output="$(env -i \
+  HOME="$test_home" \
+  CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" \
+  CURL_LOG="$curl_log" \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$empty_token_output" 'installed API token is empty or not header-safe' \
+  'Doctor accepted an empty token file'
+if grep -Fq 'GET-items:' "$curl_log"; then
+  fail 'Doctor probed protected API after rejecting an empty token file'
+fi
+
+printf '%s\n%s\n' "$api_token" 'second-line' > "$token_file"
+chmod 600 "$token_file"
+: > "$curl_log"
+multiline_token_output="$(env -i \
+  HOME="$test_home" \
+  CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" \
+  CURL_LOG="$curl_log" \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$multiline_token_output" 'installed API token is empty or not header-safe' \
+  'Doctor accepted a multiline token file'
+assert_not_contains "$multiline_token_output" "$api_token" 'multiline-token diagnostic leaked the API token'
+if grep -Fq 'GET-items:' "$curl_log"; then
+  fail 'Doctor probed protected API after rejecting a multiline token file'
+fi
+
+env -i \
+  HOME="$test_home" \
+  CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:/usr/bin:/bin" \
+  /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start >/dev/null
+[[ ! -e "$token_file" && ! -L "$token_file" ]] || fail 'dev-anon reinstall did not remove the token file'
 
 leaf_name='daily-refresh.sh'
 leaf_installed="${test_home}/.refine/scripts/${leaf_name}"

@@ -19,7 +19,7 @@ interface AppState {
   isSpotlightOpen: boolean
 
   // 操作
-  loadItems: () => Promise<void>
+  loadItems: () => Promise<boolean>
   loadMoreItems: () => Promise<void>
   selectItem: (item: Item | null) => void
   search: (query: string) => Promise<void>
@@ -50,9 +50,11 @@ export const useStore = create<AppState>((set, get) => ({
         nextCursor: result.nextCursor,
         isLoading: false,
       })
+      return true
     } catch (error) {
       console.error('加载失败:', error)
       set({ isLoading: false, isLoadingMore: false })
+      return false
     }
   },
 

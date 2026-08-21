@@ -183,8 +183,36 @@ check_http() {
     fail "server is healthy but LLM extraction is not configured; reinstall to refresh the server wrapper"
   fi
 
-  local items
-  items="$(curl -sS --max-time 3 "${server_url}/v1/items?cursor=0&limit=1" 2>/dev/null || true)"
+  local items token_file="${HOME}/.refine/refine-server.token" token='' token_extra='' token_multiline=0 token_owner token_mode
+  if [[ -L "$token_file" || -e "$token_file" ]]; then
+    if [[ -L "$token_file" || ! -f "$token_file" ]]; then
+      fail "installed API token must be a regular non-symlink file: ${token_file}"
+      return
+    fi
+    token_owner="$(file_owner_uid "$token_file" 2>/dev/null || true)"
+    token_mode="$(file_mode "$token_file" 2>/dev/null || true)"
+    if [[ "$token_owner" != "$(id -u)" || "$token_mode" != '600' ]]; then
+      fail "installed API token has unsafe ownership or mode: ${token_file} (owner=${token_owner:-unknown} mode=${token_mode:-unknown}; expected current user/600)"
+      return
+    fi
+    {
+      IFS= read -r token || true
+      if IFS= read -r token_extra || [[ -n "$token_extra" ]]; then
+        token_multiline=1
+      fi
+    } < "$token_file"
+    if [[ -z "$token" || "$token_multiline" == '1' || "$token" == *[[:cntrl:]]* || "$token" == [[:space:]]* || "$token" == *[[:space:]] ]]; then
+      fail "installed API token is empty or not header-safe: ${token_file}"
+      return
+    fi
+  fi
+
+  if [[ -n "$token" ]]; then
+    items="$(printf 'Authorization: Bearer %s\n' "$token" \
+      | curl -sS --max-time 3 -H @- "${server_url}/v1/items?cursor=0&limit=1" 2>/dev/null || true)"
+  else
+    items="$(curl -sS --max-time 3 "${server_url}/v1/items?cursor=0&limit=1" 2>/dev/null || true)"
+  fi
   if grep -q '"success":true' <<<"$items"; then
     pass "API items endpoint OK"
   elif grep -q 'REFINE_API_TOKEN is not set' <<<"$items"; then
