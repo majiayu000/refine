@@ -1,6 +1,8 @@
 use anyhow::{bail, ensure, Context, Result};
 use chrono::{DateTime, Utc};
-use refine_core::session::{MessageRole, Session, SessionMessage, SessionMeta, SessionSource};
+use refine_core::session::{
+    MessageRole, Session, SessionMessage, SessionMeta, SessionMode, SessionSource,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -360,6 +362,7 @@ fn load_one_session<R: Runner>(runner: &R, summary: RememSessionSummary) -> Resu
                 project: None,
                 model: None,
                 started_at: Some(started_at),
+                mode: SessionMode::Unknown,
                 truncated_tail: false,
             },
         },

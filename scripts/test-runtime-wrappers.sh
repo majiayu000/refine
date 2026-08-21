@@ -133,7 +133,7 @@ chmod 600 "${daily_home}/.refine/llm.env"
 cat > "${daily_home}/.cargo/bin/refine" <<'EOF'
 #!/usr/bin/env bash
 if [[ -n "${FAKE_REFINE_LOG:-}" ]]; then
-  printf 'called\n' >> "$FAKE_REFINE_LOG"
+  printf '%s\n' "$*" >> "$FAKE_REFINE_LOG"
 fi
 exit 0
 EOF
@@ -179,8 +179,8 @@ output=$(env -i HOME="$daily_home" PATH="/usr/bin:/bin" \
   || fail 'daily refresh failed while honoring a precise future quota marker'
 [[ "$output" == *'skipping refresh'* ]] \
   || fail 'daily refresh ignored a precise future quota marker'
-[[ ! -e "$quota_refine_log" ]] \
-  || fail 'daily refresh called refine despite a precise future quota marker'
+[[ "$(cat "$quota_refine_log")" == 'ingest-sessions --provider local --source codex --backfill-session-metadata' ]] \
+  || fail 'daily refresh did not limit quota-gated work to metadata backfill'
 
 printf '%s\n' '2000-01-01T00:00:00Z' \
   > "${daily_home}/.refine/quota_exhausted_until"

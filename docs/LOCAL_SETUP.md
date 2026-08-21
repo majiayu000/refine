@@ -162,7 +162,7 @@ scripts/install-local.sh --no-start
 | Label | Role | Trigger | Log |
 | --- | --- | --- | --- |
 | `com.lifcc.refine-server` | Local API/dashboard | RunAtLoad + KeepAlive | `~/Library/Logs/refine-server.log` |
-| `com.lifcc.refine-daily-ingest` | `~/.refine/scripts/daily-refresh.sh` | Daily 08:00 | `~/Library/Logs/refine-daily-ingest.log` |
+| `com.lifcc.refine-daily-ingest` | `~/.refine/scripts/daily-refresh.sh` (ingest + Codex provenance backfill + Mirror score) | Daily 08:00 | `~/Library/Logs/refine-daily-ingest.log` |
 | `com.lifcc.refine-weekly-insights` | `~/.refine/scripts/weekly-insights.sh` | Sunday 09:00 | `~/Library/Logs/refine-insights.log` |
 | `com.lifcc.refine-cognitive-portrait` | `~/.refine/scripts/cognitive-portrait.sh` (opt-in; repository remains its workspace/output root) | Sunday 10:00 | `~/Library/Logs/refine-portrait.log` |
 | `com.lifcc.refine-ui-dev` | Checkout-bound desktop UI Vite dev server | RunAtLoad + KeepAlive | `.run/launchd-refine-ui.*.log` |

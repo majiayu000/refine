@@ -11,6 +11,7 @@ pub trait DocumentRepository: Send + Sync {
     async fn find_by_id(&self, id: &DocumentId) -> InfraResult<Option<Document>>;
     async fn find_by_url(&self, url: &str) -> InfraResult<Option<Document>>;
     async fn find_recent(&self, offset: usize, limit: usize) -> InfraResult<Vec<Document>>;
+    async fn find_items_by_document_id(&self, id: &DocumentId) -> InfraResult<Vec<Item>>;
     async fn count(&self) -> InfraResult<usize>;
     async fn save(&self, doc: &Document) -> InfraResult<()>;
     async fn save_with_replaced_items(&self, doc: &Document, items: &[Item]) -> InfraResult<()>;

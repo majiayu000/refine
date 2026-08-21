@@ -67,6 +67,15 @@ Mirror now scores three layers with eight live indicators:
 | Collaboration | `mode_diversity` | Higher is better | Count of observed collaboration modes |
 | Collaboration | `bug_decision` | Lower is better | Bugfix count over decision count |
 
+Codex observations also carry one provenance tag derived from transcript
+metadata: `session_mode_interactive`, `session_mode_unattended`,
+`session_mode_subagent`, or `session_mode_unknown`. Mirror excludes only proven
+unattended and subagent documents; unknown legacy data remains included. A
+metadata-only local backfill reconciles these tags onto existing observations
+without another LLM call. Its cursor is independent from normal ingestion and
+stays before parse failures, missing documents, or failed writes so the work is
+retried.
+
 The experiment drops three noisy live indicators:
 
 - `depth_output`, because it mixed deep-inquiry observations with expert-level

@@ -20,7 +20,8 @@ pub use chunking::{chunk_session, needs_chunking, SessionChunk};
 pub use clustering::{cluster_observations, ClusterResult, GlobalStats, ProjectCluster};
 pub use discovery::{discover_sessions, discover_sessions_in, DiscoveredSession};
 pub use facets::{
-    build_facet_prompt, facets_to_items, parse_facet_response, FacetResponse, FACET_SYSTEM_PROMPT,
+    build_facet_prompt, facets_to_items, facets_to_items_with_mode, parse_facet_response,
+    FacetResponse, FACET_SYSTEM_PROMPT,
 };
 pub use filter::{filter_sessions, passes_filter, FilterConfig};
 pub use parser::{parse_session_content, parse_session_file};
@@ -29,4 +30,4 @@ pub use report::{
     build_final_prompt, merge_route_results, RouteResult, INSIGHTS_SYSTEM_PROMPT,
     ROUTE_SYSTEM_PROMPT,
 };
-pub use types::{MessageRole, Session, SessionMessage, SessionMeta, SessionSource};
+pub use types::{MessageRole, Session, SessionMessage, SessionMeta, SessionMode, SessionSource};

@@ -10,15 +10,6 @@ log() {
   echo "${LOG_PREFIX} $(date '+%Y-%m-%d %H:%M:%S') $*"
 }
 
-# Unattended jobs use process credentials or the canonical secure user file.
-# They do not depend on a project checkout or source ~/.zshrc.
-# shellcheck source=scripts/load-llm-env.sh
-source "${SCRIPT_DIR}/load-llm-env.sh"
-if ! load_refine_llm_env; then
-  log "ERROR: unattended LLM credentials are unavailable; refusing to start ingest"
-  exit 1
-fi
-
 # Daily ingestion can run for hours on a backlog. Serialize whole scheduled
 # workflows so weekly analysis never competes for SQLite or LLM capacity.
 # shellcheck source=scripts/runtime-job-lock.sh
@@ -29,6 +20,24 @@ if [[ "${REFINE_RUNTIME_LOCK_ACTIVE:-}" != "1" ]]; then
 fi
 
 log "=== Weekly Insights Run Start ==="
+
+log "Step 0: backfill Codex session provenance"
+metadata_rc=0
+"$REFINE_BIN" ingest-sessions --provider local --source codex \
+  --backfill-session-metadata 2>&1 || metadata_rc=$?
+if [[ "$metadata_rc" -ne 0 ]]; then
+  log "ERROR: Step 0 metadata backfill failed with exit code ${metadata_rc}"
+  FAILED_STEPS+=("session metadata backfill")
+fi
+
+# Unattended LLM work uses process credentials or the canonical secure user
+# file. It does not depend on a project checkout or source ~/.zshrc.
+# shellcheck source=scripts/load-llm-env.sh
+source "${SCRIPT_DIR}/load-llm-env.sh"
+if ! load_refine_llm_env; then
+  log "ERROR: unattended LLM credentials are unavailable; refusing to start ingest"
+  exit 1
+fi
 
 # Preflight: environment diagnostics for troubleshooting
 log "Preflight: PATH=$PATH"

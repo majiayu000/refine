@@ -135,6 +135,9 @@ pub enum Commands {
         /// Explicitly retry sessions previously quarantined for deterministic provider rejection.
         #[arg(long)]
         retry_quarantined: bool,
+        /// Reconcile Codex provenance tags on existing observations without an LLM call.
+        #[arg(long)]
+        backfill_session_metadata: bool,
     },
     /// 生成认知洞察报告
     Insights {
