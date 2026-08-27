@@ -12,8 +12,10 @@ use rusqlite::Connection;
 mod contract;
 mod db_migration;
 mod document_fk_migration;
+pub mod item_link_repair;
 mod llm;
 mod llm_retry;
+mod observation_integrity;
 mod paths;
 pub mod quota_state;
 mod sqlite;
@@ -33,6 +35,7 @@ pub fn prepare_sqlite_db(conn: &Connection) -> InfraResult<()> {
     migrate_documents_add_source_version(&tx)?;
     migrate_documents_url_unique(&tx)?;
     document_fk_migration::migrate_items_document_fk(&tx)?;
+    observation_integrity::ensure_triggers(&tx)?;
     migrate_extraction_jobs_add_lease_columns(&tx)?;
     migrate_extraction_jobs_conversation_fk(&tx)?;
     maybe_rebuild_fts_index(&tx)?;

@@ -8,6 +8,7 @@ mod ingest_sessions;
 mod insights;
 mod insights_checkpoint;
 mod remem_sessions;
+mod repair_item_links;
 mod support;
 
 use anyhow::{Context, Result};
@@ -38,6 +39,9 @@ async fn main() -> Result<()> {
         Some(raw) => PathBuf::from(raw),
         None => resolve_db_path(&[]),
     };
+    if cli.command.is_item_link_maintenance() {
+        return repair_item_links::handle(&cli.command, &db_path);
+    }
     let read_only_preview = cli.command.is_read_only_preview();
     if !read_only_preview {
         ensure_db_dir(&db_path).map_err(|e| anyhow::anyhow!(e))?;

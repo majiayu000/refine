@@ -444,7 +444,7 @@ mod tests {
             let ts = base + Duration::days(days_offset);
             Item::restore(RestoreParams {
                 id: ItemId::new(),
-                item_type: ItemType::Observation,
+                item_type: ItemType::Knowledge,
                 title: format!("item +{}d", days_offset),
                 summary: String::new(),
                 content: String::new(),
@@ -526,7 +526,12 @@ mod tests {
             updated_at: current_ingest,
         })
         .unwrap();
+        // Simulate a historical detached row created before the fail-closed
+        // insertion trigger existed. Production writes cannot create this now.
+        conn.execute_batch("DROP TRIGGER observations_require_document_insert")
+            .unwrap();
         save(&conn, &fallback_observation).unwrap();
+        crate::infra::observation_integrity::ensure_triggers(&conn).unwrap();
 
         let this_week = find_observations_by_event_range(&conn, base - Duration::days(7), base)
             .expect("query current week");

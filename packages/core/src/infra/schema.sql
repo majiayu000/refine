@@ -46,6 +46,22 @@ CREATE TRIGGER IF NOT EXISTS items_au AFTER UPDATE ON items BEGIN
     VALUES (NEW.rowid, NEW.title, NEW.summary, NEW.content, NEW.tags);
 END;
 
+-- Historical detached observations are preserved, but no new session
+-- observation may be inserted or changed to a detached state.
+CREATE TRIGGER IF NOT EXISTS observations_require_document_insert
+BEFORE INSERT ON items
+WHEN NEW.item_type = 'observation' AND NEW.document_id IS NULL
+BEGIN
+    SELECT RAISE(ABORT, 'observation requires document_id');
+END;
+
+CREATE TRIGGER IF NOT EXISTS observations_require_document_update
+BEFORE UPDATE OF item_type, document_id ON items
+WHEN NEW.item_type = 'observation' AND NEW.document_id IS NULL
+BEGIN
+    SELECT RAISE(ABORT, 'observation requires document_id');
+END;
+
 -- Documents 表
 CREATE TABLE IF NOT EXISTS documents (
     id TEXT PRIMARY KEY,

@@ -148,6 +148,30 @@ pub enum Commands {
         #[arg(long)]
         prescription: bool,
     },
+    /// Audit historical session observations that have no Document link.
+    AuditItemLinks {
+        /// Expected deployed detached-row baseline; requires --cutoff.
+        #[arg(long)]
+        baseline_detached_count: Option<u64>,
+        /// RFC3339 deployment cutoff; requires --baseline-detached-count.
+        #[arg(long)]
+        cutoff: Option<String>,
+    },
+    /// Repair the exact historical shadow-Document-ID subset (dry-run by default).
+    RepairItemLinks {
+        /// Immutable historical SQLite evidence file.
+        #[arg(long)]
+        evidence: String,
+        /// Expected SHA-256 of the evidence file.
+        #[arg(long)]
+        evidence_sha256: String,
+        /// Apply the proven plan. Without this flag, no file is changed.
+        #[arg(long)]
+        apply: bool,
+        /// New SQLite backup path. Required with --apply and must not exist.
+        #[arg(long)]
+        backup: Option<String>,
+    },
     /// 搜索文档原文
     DocSearch {
         /// 搜索关键词
@@ -169,7 +193,19 @@ pub enum Commands {
 
 impl Commands {
     pub(crate) fn is_read_only_preview(&self) -> bool {
-        matches!(self, Self::IngestSessions { dry_run: true, .. })
+        matches!(
+            self,
+            Self::IngestSessions { dry_run: true, .. }
+                | Self::AuditItemLinks { .. }
+                | Self::RepairItemLinks { apply: false, .. }
+        )
+    }
+
+    pub(crate) fn is_item_link_maintenance(&self) -> bool {
+        matches!(
+            self,
+            Self::AuditItemLinks { .. } | Self::RepairItemLinks { .. }
+        )
     }
 }
 
