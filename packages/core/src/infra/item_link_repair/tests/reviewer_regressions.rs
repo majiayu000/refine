@@ -91,7 +91,7 @@ fn immediate_repair_snapshot_blocks_competing_document_and_item_writes() {
 }
 
 #[test]
-fn apply_schema_rejects_missing_ledger_pk_fk_and_immutable_body() {
+fn apply_schema_rejects_missing_ledger_pk_business_fks_and_bad_immutable_body() {
     let temp = TempDir::new().unwrap();
 
     let missing_pk = temp.path().join("missing-pk.db");
@@ -108,19 +108,23 @@ fn apply_schema_rejects_missing_ledger_pk_fk_and_immutable_body() {
     let error = schema_validation::validate_apply_schema(&conn).unwrap_err();
     assert!(error.to_string().contains("not the primary key"));
 
-    let missing_fk = temp.path().join("missing-fk.db");
-    seed_current(&missing_fk, &[("doc", "summary", vec!["item"])]);
-    let conn = Connection::open(&missing_fk).unwrap();
+    let business_fk = temp.path().join("business-fk.db");
+    seed_current(&business_fk, &[("doc", "summary", vec!["item"])]);
+    let conn = Connection::open(&business_fk).unwrap();
     replace_ledger(
         &conn,
         "CREATE TABLE item_link_repair_ledger (
            item_id TEXT PRIMARY KEY, target_document_id TEXT NOT NULL,
            evidence_sha256 TEXT NOT NULL, rule_version TEXT NOT NULL,
-           applied_at TEXT NOT NULL
+           applied_at TEXT NOT NULL,
+           FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE RESTRICT,
+           FOREIGN KEY (target_document_id) REFERENCES documents(id) ON DELETE RESTRICT
          );",
     );
     let error = schema_validation::validate_apply_schema(&conn).unwrap_err();
-    assert!(error.to_string().contains("foreign key"));
+    assert!(error
+        .to_string()
+        .contains("must not reference mutable business rows"));
 
     let bad_trigger = temp.path().join("bad-trigger.db");
     seed_current(&bad_trigger, &[("doc", "summary", vec!["item"])]);
@@ -143,5 +147,15 @@ fn replace_ledger(conn: &Connection, create_table: &str) {
     )
     .unwrap();
     conn.execute_batch(create_table).unwrap();
-    super::super::super::observation_integrity::ensure_triggers(conn).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER item_link_repair_ledger_no_update
+         BEFORE UPDATE ON item_link_repair_ledger BEGIN
+           SELECT RAISE(ABORT, 'item_link_repair_ledger is append-only');
+         END;
+         CREATE TRIGGER item_link_repair_ledger_no_delete
+         BEFORE DELETE ON item_link_repair_ledger BEGIN
+           SELECT RAISE(ABORT, 'item_link_repair_ledger is append-only');
+         END;",
+    )
+    .unwrap();
 }

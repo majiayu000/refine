@@ -35,7 +35,7 @@ pub(super) fn validate_apply_schema(conn: &Connection) -> InfraResult<()> {
         ],
     )?;
     require_primary_key(conn)?;
-    require_foreign_keys(conn)?;
+    require_link_constraints(conn)?;
     require_trigger_bodies(conn)
 }
 
@@ -55,47 +55,30 @@ fn require_primary_key(conn: &Connection) -> InfraResult<()> {
     }
 }
 
-fn require_foreign_keys(conn: &Connection) -> InfraResult<()> {
-    let item_fk = matching_fk_count(conn, "item_link_repair_ledger", "item_id", "items", "id")?;
-    let document_fk = matching_fk_count(
-        conn,
-        "item_link_repair_ledger",
-        "target_document_id",
-        "documents",
-        "id",
-    )?;
-    let item_document_fk = matching_fk_count(conn, "items", "document_id", "documents", "id")?;
-    if item_fk == 1 && document_fk == 1 && item_document_fk == 1 {
+fn require_link_constraints(conn: &Connection) -> InfraResult<()> {
+    let ledger_foreign_keys: u64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('item_link_repair_ledger')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    let item_document_fk = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('items')
+             WHERE \"from\" = 'document_id' AND \"table\" = 'documents' AND \"to\" = 'id'
+               AND UPPER(on_delete) IN ('RESTRICT', 'NO ACTION')",
+            [],
+            |row| row.get::<_, u64>(0),
+        )
+        .map_err(db_error)?;
+    if ledger_foreign_keys == 0 && item_document_fk == 1 {
         Ok(())
     } else {
         Err(schema_error(
-            "repair ledger or item link is missing a fail-closed foreign key",
+            "repair ledger must not reference mutable business rows, and item links require a fail-closed document foreign key",
         ))
     }
-}
-
-fn matching_fk_count(
-    conn: &Connection,
-    table: &str,
-    from: &str,
-    target_table: &str,
-    target_column: &str,
-) -> InfraResult<u64> {
-    let sql = match table {
-        "items" => {
-            "SELECT COUNT(*) FROM pragma_foreign_key_list('items')
-                    WHERE \"from\" = ?1 AND \"table\" = ?2 AND \"to\" = ?3
-                      AND UPPER(on_delete) IN ('RESTRICT', 'NO ACTION')"
-        }
-        "item_link_repair_ledger" => {
-            "SELECT COUNT(*) FROM pragma_foreign_key_list('item_link_repair_ledger')
-             WHERE \"from\" = ?1 AND \"table\" = ?2 AND \"to\" = ?3
-               AND UPPER(on_delete) IN ('RESTRICT', 'NO ACTION')"
-        }
-        _ => return Err(schema_error("unsupported foreign-key table")),
-    };
-    conn.query_row(sql, (from, target_table, target_column), |row| row.get(0))
-        .map_err(db_error)
 }
 
 fn require_trigger_bodies(conn: &Connection) -> InfraResult<()> {
