@@ -114,6 +114,9 @@ pub async fn run(
         Commands::DeepInquiry => {
             anyhow::bail!("'refine deep-inquiry' has been removed. Use 'mirror score' instead.");
         }
+        Commands::AuditItemLinks { .. } | Commands::RepairItemLinks { .. } => {
+            anyhow::bail!("item-link maintenance commands must run before opening SqliteStore");
+        }
     }
 }
 

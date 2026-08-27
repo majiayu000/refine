@@ -32,6 +32,10 @@ use cursor::{
     cursor_failure, lock_incremental_cursor, lock_session_mutations, read_last_ingest_mtime,
     safe_cursor_watermark, write_last_ingest_mtime, CursorPurpose,
 };
+
+pub(crate) fn lock_session_mutations_for_repair(db_path: &Path) -> Result<std::fs::File> {
+    cursor::try_lock_session_mutations(db_path)
+}
 use provenance::backfill_session_metadata;
 use worker::{process_pending_sessions, PendingSession};
 

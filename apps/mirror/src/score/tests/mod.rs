@@ -3,8 +3,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 
 use refine_core::error::InfraResult;
-use refine_core::infra::{LlmClient, SqliteStore};
-use refine_core::knowledge::Item;
+use refine_core::infra::LlmClient;
 use refine_core::session::{ClusterResult, DataQualityStats, GlobalStats, ProjectCluster};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -38,11 +37,7 @@ impl LlmClient for CountingLlm {
 
 #[tokio::test]
 async fn score_handler_rejects_detached_only_cohort_before_persist_or_advice() {
-    let store = Arc::new(SqliteStore::in_memory().unwrap());
-    store
-        .save(&Item::new_observation("detached", "legacy evidence"))
-        .await
-        .unwrap();
+    let (_fixture, store) = crate::test_support::legacy_detached_store();
     let llm = Arc::new(CountingLlm {
         calls: AtomicUsize::new(0),
     });

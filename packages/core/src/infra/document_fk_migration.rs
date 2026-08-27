@@ -281,6 +281,56 @@ mod tests {
         assert_eq!(foreign_key_violation_count(&conn), 0);
     }
 
+    #[test]
+    fn pre_fk_dangling_observation_is_normalized_before_guards_are_installed() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        configure_sqlite_connection(&conn).expect("configure database");
+        seed_dangling_observation_without_fk(&conn);
+
+        prepare_sqlite_db(&conn).expect("upgrade dangling pre-FK observation");
+
+        assert_eq!(
+            conn.query_row(
+                "SELECT document_id FROM items WHERE id = 'dangling-observation'",
+                [],
+                |row| row.get::<_, Option<String>>(0)
+            )
+            .expect("read normalized observation"),
+            None
+        );
+        assert_eq!(
+            items_document_delete_action(&conn).as_deref(),
+            Some("RESTRICT")
+        );
+        assert_eq!(foreign_key_violation_count(&conn), 0);
+        assert_eq!(
+            scalar(
+                &conn,
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'trigger' AND name IN (
+                   'observations_require_document_insert',
+                   'observations_require_document_update'
+                 )"
+            ),
+            2
+        );
+
+        let error = conn
+            .execute(
+                "INSERT INTO items
+                   (id, item_type, title, summary, content, tags, source,
+                    created_at, updated_at, document_id, excerpt)
+                 VALUES
+                   ('new-detached', 'observation', 'New', 'New', '', '[]', 'test',
+                    '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', NULL, NULL)",
+                [],
+            )
+            .expect_err("post-migration guard must reject new detached observation");
+        assert!(error
+            .to_string()
+            .contains("observation requires document_id"));
+    }
+
     fn items_document_delete_action(conn: &Connection) -> Option<String> {
         conn.query_row(
             "SELECT on_delete FROM pragma_foreign_key_list('items')
@@ -389,5 +439,44 @@ mod tests {
             "#,
         )
         .expect("seed SET NULL schema");
+    }
+
+    fn seed_dangling_observation_without_fk(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE documents (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                raw_content TEXT NOT NULL,
+                source TEXT NOT NULL,
+                url TEXT NOT NULL,
+                captured_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE items (
+                id TEXT PRIMARY KEY,
+                item_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                content TEXT NOT NULL,
+                tags TEXT NOT NULL,
+                source TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                document_id TEXT,
+                excerpt TEXT
+            );
+            INSERT INTO items
+              (id, item_type, title, summary, content, tags, source,
+               created_at, updated_at, document_id, excerpt)
+            VALUES
+              ('dangling-observation', 'observation', 'Legacy observation', 'S', 'C',
+               '[]', 'legacy', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+               'missing-document', NULL);
+            PRAGMA user_version = 1;
+            "#,
+        )
+        .expect("seed pre-FK dangling observation schema");
     }
 }

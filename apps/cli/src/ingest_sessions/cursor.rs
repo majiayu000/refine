@@ -179,6 +179,16 @@ pub(super) fn lock_session_mutations(db_path: &Path) -> Result<std::fs::File> {
     lock_file(&lock_path)
 }
 
+pub(super) fn try_lock_session_mutations(db_path: &Path) -> Result<std::fs::File> {
+    let home =
+        dirs::home_dir().context("home directory is unavailable for session mutation lock")?;
+    let lock_path = home.join(".refine").join("ingest-cursors").join(format!(
+        "session-mutations-{}.lock",
+        encode_path_for_filename(db_path)
+    ));
+    try_lock_file(&lock_path)
+}
+
 fn lock_file(lock_path: &Path) -> Result<std::fs::File> {
     let parent = lock_path
         .parent()
@@ -197,6 +207,28 @@ fn lock_file(lock_path: &Path) -> Result<std::fs::File> {
     Ok(lock)
 }
 
+fn try_lock_file(lock_path: &Path) -> Result<std::fs::File> {
+    let parent = lock_path
+        .parent()
+        .context("session ingest lock has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let lock = options
+        .open(lock_path)
+        .with_context(|| format!("failed to open {}", lock_path.display()))?;
+    lock.try_lock_exclusive().with_context(|| {
+        format!(
+            "session mutation lock is already held: {}",
+            lock_path.display()
+        )
+    })?;
+    Ok(lock)
+}
+
 pub(super) fn unix_seconds(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
@@ -211,5 +243,19 @@ pub(super) fn cursor_failure(
         path_sha256: format!("{digest:x}"),
         modified_at_secs: unix_seconds(modified_at),
         reason: reason.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[test]
+    fn held_session_mutation_lock_fails_fast_for_repair() {
+        let temp = tempfile::tempdir().unwrap();
+        let lock_path = temp.path().join("session-mutations.lock");
+        let _held = lock_file(&lock_path).unwrap();
+        let error = try_lock_file(&lock_path).unwrap_err();
+        assert!(error.to_string().contains("already held"));
     }
 }

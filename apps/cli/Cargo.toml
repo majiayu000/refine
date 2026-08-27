@@ -28,4 +28,5 @@ fs2 = "0.4"
 [dev-dependencies]
 async-trait.workspace = true
 filetime = "0.2"
+rusqlite.workspace = true
 tempfile = "3"

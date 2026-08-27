@@ -7,6 +7,8 @@ mod lang;
 mod motd;
 mod profile;
 mod score;
+#[cfg(test)]
+mod test_support;
 mod weekly;
 
 use anyhow::{Context, Result};

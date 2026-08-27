@@ -155,24 +155,62 @@ pub(super) fn save(conn: &Connection, item: &Item) -> InfraResult<()> {
         .map(serde_json::to_string)
         .transpose()
         .map_err(|e| InfraError::Serialization(e.to_string()))?;
+    let created_at = item.created_at().to_rfc3339();
+    let updated_at = item.updated_at().to_rfc3339();
+    let document_id = item.document_id().map(|id| id.as_str().to_string());
 
-    conn.execute(
-        "INSERT OR REPLACE INTO items (id, item_type, title, summary, content, tags, source, created_at, updated_at, document_id, excerpt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        params![
-            item.id().as_str(),
-            item.item_type().as_str(),
-            item.title(),
-            item.summary(),
-            item.content(),
-            tags_json,
-            source_json,
-            item.created_at().to_rfc3339(),
-            item.updated_at().to_rfc3339(),
-            item.document_id().map(|id| id.as_str().to_string()),
-            item.excerpt(),
-        ],
-    )
-    .map_err(|e| InfraError::Database(e.to_string()))?;
+    let values = params![
+        item.id().as_str(),
+        item.item_type().as_str(),
+        item.title(),
+        item.summary(),
+        item.content(),
+        tags_json,
+        source_json,
+        created_at,
+        updated_at,
+        document_id,
+        item.excerpt(),
+    ];
+    let updated = conn
+        .execute(
+            "UPDATE items SET
+               item_type = ?2,
+               title = ?3,
+               summary = ?4,
+               content = ?5,
+               tags = ?6,
+               source = ?7,
+               created_at = ?8,
+               updated_at = ?9,
+               document_id = ?10,
+               excerpt = ?11
+             WHERE id = ?1",
+            values,
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    if updated == 0 {
+        conn.execute(
+            "INSERT INTO items
+           (id, item_type, title, summary, content, tags, source,
+            created_at, updated_at, document_id, excerpt)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                item.id().as_str(),
+                item.item_type().as_str(),
+                item.title(),
+                item.summary(),
+                item.content(),
+                tags_json,
+                source_json,
+                created_at,
+                updated_at,
+                document_id,
+                item.excerpt(),
+            ],
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    }
 
     Ok(())
 }
@@ -444,7 +482,7 @@ mod tests {
             let ts = base + Duration::days(days_offset);
             Item::restore(RestoreParams {
                 id: ItemId::new(),
-                item_type: ItemType::Observation,
+                item_type: ItemType::Knowledge,
                 title: format!("item +{}d", days_offset),
                 summary: String::new(),
                 content: String::new(),
@@ -526,7 +564,12 @@ mod tests {
             updated_at: current_ingest,
         })
         .unwrap();
+        // Simulate a historical detached row created before the fail-closed
+        // insertion trigger existed. Production writes cannot create this now.
+        conn.execute_batch("DROP TRIGGER observations_require_document_insert")
+            .unwrap();
         save(&conn, &fallback_observation).unwrap();
+        crate::infra::observation_integrity::ensure_triggers(&conn).unwrap();
 
         let this_week = find_observations_by_event_range(&conn, base - Duration::days(7), base)
             .expect("query current week");
