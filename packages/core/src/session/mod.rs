@@ -18,7 +18,8 @@ pub use aggregation::{aggregate_observations, format_report, AggregationReport};
 pub use analysis_routes::{plan_routes, AnalysisRoute};
 pub use chunking::{chunk_session, needs_chunking, SessionChunk};
 pub use clustering::{
-    cluster_observations, ClusterResult, DataQualityStats, GlobalStats, ProjectCluster,
+    cluster_observations, eligible_observations, ClusterResult, DataQualityStats, GlobalStats,
+    ProjectCluster,
 };
 pub use discovery::{discover_sessions, discover_sessions_in, DiscoveredSession};
 pub use facets::{
@@ -29,7 +30,8 @@ pub use filter::{filter_sessions, passes_filter, FilterConfig};
 pub use parser::{parse_session_content, parse_session_file};
 pub use prescription::{build_prescription_prompt, PRESCRIPTION_SYSTEM_PROMPT};
 pub use report::{
-    build_final_prompt, format_data_quality_stats, merge_route_results, RouteResult,
-    INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
+    build_final_prompt, build_final_prompt_with_delta, format_data_quality_stats,
+    merge_route_results, merge_route_results_with_budget, RouteResult, INSIGHTS_SYSTEM_PROMPT,
+    ROUTE_SYSTEM_PROMPT,
 };
 pub use types::{MessageRole, Session, SessionMessage, SessionMeta, SessionMode, SessionSource};

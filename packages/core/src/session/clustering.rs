@@ -125,6 +125,35 @@ pub struct ClusterResult {
     pub untagged_count: usize,
 }
 
+/// Return the exact observation cohort used by clustering and reports.
+///
+/// Keeping this filter public prevents source manifests from reimplementing a
+/// subtly different denominator. A session is excluded as a whole when any
+/// linked observation identifies it as unattended or a subagent.
+pub fn eligible_observations(items: &[Item]) -> Vec<&Item> {
+    let observations: Vec<&Item> = items
+        .iter()
+        .filter(|item| item.item_type() == ItemType::Observation)
+        .collect();
+    let excluded_doc_ids: HashSet<String> = observations
+        .iter()
+        .filter(|item| {
+            item.tags()
+                .iter()
+                .any(|tag| is_excluded_session_mode(tag.as_str()))
+        })
+        .filter_map(|item| item.document_id().map(|id| id.as_str().to_string()))
+        .collect();
+
+    observations
+        .into_iter()
+        .filter(|item| {
+            item.document_id()
+                .is_some_and(|id| !excluded_doc_ids.contains(id.as_str()))
+        })
+        .collect()
+}
+
 /// 主函数：从全量 observation 生成聚类结果
 pub fn cluster_observations(items: &[Item]) -> ClusterResult {
     let observations: Vec<&Item> = items
@@ -152,22 +181,17 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
         .filter_map(|item| item.document_id())
         .filter(|id| excluded_doc_ids.contains(id.as_str()))
         .count();
-    let eligible_observations = linked_observations - mode_excluded_observations;
+    let eligible_observation_count = linked_observations - mode_excluded_observations;
 
     // Single filtering pass: compute tags once per item to avoid double allocation.
-    let obs_with_tags: Vec<(&Item, Vec<&str>)> = items
-        .iter()
-        .filter(|i| i.item_type() == ItemType::Observation)
-        .filter(|item| {
-            item.document_id()
-                .is_some_and(|id| !excluded_doc_ids.contains(id.as_str()))
-        })
+    let obs_with_tags: Vec<(&Item, Vec<&str>)> = eligible_observations(items)
+        .into_iter()
         .map(|item| {
             let tags: Vec<&str> = item.tags().iter().map(|t| t.as_str()).collect();
             (item, tags)
         })
         .collect();
-    debug_assert_eq!(obs_with_tags.len(), eligible_observations);
+    debug_assert_eq!(obs_with_tags.len(), eligible_observation_count);
 
     let mut eligible_item_ids: Vec<&str> = obs_with_tags
         .iter()
@@ -184,7 +208,7 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
         linked_observations,
         detached_observations,
         mode_excluded_observations,
-        eligible_observations,
+        eligible_observations: eligible_observation_count,
         cohort_identity: format!("sha256:{:x}", cohort_hasher.finalize()),
     };
 

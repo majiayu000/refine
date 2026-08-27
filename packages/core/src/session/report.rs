@@ -29,6 +29,41 @@ pub fn merge_route_results(results: &[RouteResult]) -> String {
     out
 }
 
+/// Merge route outputs under a Unicode-character budget without starving
+/// routes with larger ids. Every route receives the same content allocation,
+/// and the starting route rotates with the cohort-derived seed.
+pub fn merge_route_results_with_budget(
+    results: &[RouteResult],
+    max_chars: usize,
+    rotation_seed: usize,
+) -> String {
+    if results.is_empty() || max_chars == 0 {
+        return String::new();
+    }
+
+    let mut sorted = results.to_vec();
+    sorted.sort_by_key(|route| route.route_id);
+    let rotation = rotation_seed % sorted.len();
+    sorted.rotate_left(rotation);
+
+    let overhead: usize = sorted
+        .iter()
+        .map(|route| route.route_title.chars().count() + 14)
+        .sum();
+    let per_route = max_chars.saturating_sub(overhead) / sorted.len();
+    let mut output = String::new();
+    for route in sorted {
+        output.push_str(&format!("## {}\n\n", route.route_title));
+        let content_chars = route.content.chars().count();
+        output.extend(route.content.chars().take(per_route));
+        if content_chars > per_route {
+            output.push_str("\n... (route 按公平预算截断)");
+        }
+        output.push_str("\n\n---\n\n");
+    }
+    output
+}
+
 /// 格式化全局统计摘要
 pub fn format_global_stats(stats: &GlobalStats) -> String {
     let mut out = format!(
@@ -88,6 +123,18 @@ pub fn build_final_prompt(
     quality: &DataQualityStats,
     with_prescription: bool,
 ) -> String {
+    build_final_prompt_with_delta(combined_analysis, stats, quality, None, with_prescription)
+}
+
+/// Build a delta-first final prompt. `delta_summary` is deterministic evidence
+/// computed from two equivalent event-time windows, not an LLM inference.
+pub fn build_final_prompt_with_delta(
+    combined_analysis: &str,
+    stats: &GlobalStats,
+    quality: &DataQualityStats,
+    delta_summary: Option<&str>,
+    with_prescription: bool,
+) -> String {
     let stats_summary = format_global_stats(stats);
     let quality_summary = format_data_quality_stats(quality);
     let trend_guard = if quality.is_degraded() {
@@ -110,17 +157,25 @@ pub fn build_final_prompt(
     };
 
     // 截断 combined_analysis 确保不超限
-    let max_analysis = MAX_FINAL_CONTEXT - stats_summary.len() - 2000;
-    let analysis = if combined_analysis.len() > max_analysis {
+    let reserved_chars = stats_summary.chars().count() + 2000;
+    let max_analysis = MAX_FINAL_CONTEXT.saturating_sub(reserved_chars);
+    let analysis = if combined_analysis.chars().count() > max_analysis {
         let truncated: String = combined_analysis.chars().take(max_analysis).collect();
         format!("{}\n\n... (部分分析因篇幅截断)", truncated)
     } else {
         combined_analysis.to_string()
     };
 
+    let delta = delta_summary
+        .unwrap_or("未提供可比较的前一等长窗口。本报告是显式全历史 snapshot，不输出跨期变化。");
+
     format!(
         r#"以下是对一位开发者 {sessions} 个 AI 编程会话的多维度分析结果。
 请综合所有分析，生成一份完整的洞察报告。
+
+## Delta-first contract
+报告开头必须先写新增、消失、反转和证据缺口；只有完成变化解释后，才写稳定基线。
+{delta}
 
 ## 全局数据
 {stats}
@@ -138,8 +193,11 @@ pub fn build_final_prompt(
 
 # Session Insights Report
 
-## 概览
-一段话概括整体状态，附关键数字。引用具体项目名。
+## 本期变化
+依次写新增、消失、反转和证据缺口。没有证据时明确写“不可判定”，不得补猜。
+
+## 稳定基线
+一段话概括仍然成立的整体状态，附关键数字并引用具体项目名。
 
 ## 你在做什么（按项目）
 对每个重要项目写一段叙事。用第二人称"你在 xx 中做了 xx"。
@@ -160,6 +218,7 @@ Dreyfus 阶段评估（按领域）、学习深度。仅当有显式时序证据
 ## AI 协作效能
 当前模式分析和具体优化建议。{prescription_section}"#,
         sessions = stats.total_sessions,
+        delta = delta,
         stats = stats_summary,
         quality = quality_summary,
         trend_guard = trend_guard,
@@ -223,5 +282,45 @@ mod tests {
         assert!(prompt.contains("DEGRADED"));
         assert!(prompt.contains("不得据此输出跨期趋势"));
         assert!(prompt.contains("趋势不可判定"));
+    }
+
+    #[test]
+    fn fair_merge_counts_unicode_and_keeps_every_route() {
+        let results: Vec<RouteResult> = (1..=4)
+            .map(|id| RouteResult {
+                route_id: id,
+                route_title: format!("路由{id}"),
+                content: format!("证据{id}{}", "中".repeat(100)),
+            })
+            .collect();
+        let merged = merge_route_results_with_budget(&results, 160, 3);
+        for id in 1..=4 {
+            assert!(merged.contains(&format!("## 路由{id}")));
+            assert!(merged.contains(&format!("证据{id}")));
+        }
+        assert!(merged.find("## 路由4").unwrap() < merged.find("## 路由1").unwrap());
+    }
+
+    #[test]
+    fn delta_prompt_leads_with_changes_before_baseline() {
+        let stats = GlobalStats {
+            total_sessions: 1,
+            total_decisions: 0,
+            total_bugfixes: 0,
+            total_summaries: 1,
+            cognitive_levels: Default::default(),
+            collaboration_modes: Default::default(),
+            tool_frequency: Default::default(),
+            project_ranking: vec![("refine".into(), 1)],
+        };
+        let prompt = build_final_prompt_with_delta(
+            "analysis",
+            &stats,
+            &DataQualityStats::default(),
+            Some("新增: refine"),
+            false,
+        );
+        assert!(prompt.find("## 本期变化").unwrap() < prompt.find("## 稳定基线").unwrap());
+        assert!(prompt.contains("新增: refine"));
     }
 }

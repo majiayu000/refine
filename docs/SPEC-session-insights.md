@@ -33,7 +33,8 @@ selector、排序、游标、计数和首尾时间；只有 remem 可执行文�
 refine ingest-sessions [--provider auto|remem|local] [--limit N | --latest N] [--dry-run]
 refine ingest-sessions --provider local [--source claude|codex]
 refine ingest-sessions --legacy-local-scan [--source claude|codex]  # deprecated alias
-refine insights [--period 30]
+refine insights [--period 30]          # 当前 30 天 vs 前一等长 30 天
+refine insights --all                 # 显式全历史 snapshot，无跨期趋势
 ```
 
 ### 数据流
@@ -192,6 +193,54 @@ CLI stdout 和保存的 `session-insights-v2` 文档必须写明窗口、cohort 
 cohort 做当前窗口描述，但禁止输出跨期增减、改善或退化结论。eligible 为 0 时
 直接失败，不生成空口径报告。Insights checkpoint signature 包含完整数据质量统计
 和 cohort identity；关联质量或 eligible item set 变化后不得复用旧路由结果。
+
+#### 窗口、Delta 与可复现 Manifest
+
+`refine insights` 默认分析当前 7 个 event-time 日，并与 cutoff 之前的前一等长
+7 日窗口比较。`--period N` 改变两个窗口的等长跨度。全历史必须显式使用
+`--all`，文档 title、URL 和 manifest mode 均标记为 `snapshot`，不得把连续
+snapshot 的差异写成趋势。
+
+保存的报告第一段是 `refine-insights-manifest-v1` JSON，至少记录：
+
+- 唯一 cutoff 与 current/previous 的 event-time start/end；
+- 两个窗口各自的 input、linked、detached、mode-excluded、eligible、linked
+  ratio、status、cohort contract identity 和 exact cohort identity；
+- eligible cohort 按来源的 observation/session 数与 freshest event time，以及
+  platform-unknown 数；
+- LLM model identity、prompt identity/version、binary identity、source revision。
+
+运行时无法证明的 revision 或 event-time 边界写为 `unknown`/`null`，禁止从目录名、
+模型名或其他弱信号猜测。checkpoint 同时绑定窗口、cutoff、current/previous cohort、
+完整 manifest identity、model、prompt 和 source revision；其中任一变化都不得续跑旧结果。
+
+报告必须先陈述新增、消失、反转与证据缺口，再陈述稳定基线。比较只允许使用相同
+`linked-interactive-v1` cohort contract。任一窗口为 `DEGRADED` 时，所有跨期数字和
+趋势结论 fail closed；可以保留各窗口的静态事实与证据缺口。
+
+最终合并上下文按 Unicode scalar 字符统一计量。每条 route 获得相同预算，起始 route
+随 cohort identity 轮转，避免固定 route id 顺序长期饿死后排路由。
+
+#### Source expansion contract
+
+当前可识别 Session 来源只有本地 `claude-code-session` 与 `codex-session`。Codex 是
+一等来源，并未缺席。`remem-raw-session` 只证明 archive provider，不证明上游平台；
+在 remem 保存并透传稳定 upstream platform identity 前，报告必须把它计为
+`platform_unknown`，不得重标为 Claude 或 Codex。
+
+Grok/Gemini 的旧 knowledge documents 不属于 Session，不进入 observation/session
+分子或分母。新来源只有同时满足以下门槛才可以进入认知趋势：
+
+1. 稳定且可去重的 session identity；
+2. 可验证的 event time 和 project；
+3. 端到端保留的 upstream platform/provider provenance；
+4. 映射到相同 Facet schema、相同 cohort contract 和模式排除规则；
+5. freshness 落在 current window 内，且 current/previous 两个窗口各至少有 10 个
+   eligible sessions；任一窗口不足 10 个时只披露静态来源计数，不进入趋势。
+
+remem 的扩展路径是 raw archive contract 新增并稳定输出 upstream platform identity，
+Refine provider 校验该字段、保存到 Session Document 的结构化 provenance，再由 manifest
+读取该持久化字段。字段缺失或历史记录不可证明时继续为 unknown，不从消息文本反推。
 
 回归 fixture 固定重现问题发现时的口径差异：旧混合口径为 3,786 sessions、
 59,424 decisions、28,538 bugfixes；严格 linked cohort 必须得到 3,786、16,461、
