@@ -139,6 +139,135 @@ fn apply_schema_rejects_missing_ledger_pk_business_fks_and_bad_immutable_body() 
     assert!(error.to_string().contains("unexpected body"));
 }
 
+#[test]
+fn apply_schema_behavior_probe_is_rollback_only_when_guards_are_valid() {
+    let temp = TempDir::new().unwrap();
+    let current = temp.path().join("valid-guard-probe.db");
+    seed_current(&current, &[("doc", "summary", vec!["item"])]);
+    let conn = Connection::open(&current).unwrap();
+    let before = validator_probe_counts(&conn);
+
+    schema_validation::validate_apply_schema(&conn).unwrap();
+
+    assert_eq!(validator_probe_counts(&conn), before);
+}
+
+#[test]
+fn apply_schema_behavior_probe_rejects_noop_observation_update_without_pollution() {
+    let temp = TempDir::new().unwrap();
+    let current = temp.path().join("noop-observation-update.db");
+    seed_current(&current, &[("doc", "summary", vec!["item"])]);
+    let conn = Connection::open(&current).unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER observations_require_document_update;
+         CREATE TRIGGER observations_require_document_update
+         BEFORE UPDATE OF item_type, document_id ON items
+         WHEN 0 AND NEW.item_type = 'observation' AND NEW.document_id IS NULL
+           AND NOT (
+             OLD.item_type = 'observation' AND OLD.document_id IS NULL
+           )
+         BEGIN
+           SELECT RAISE(ABORT, 'observation requires document_id');
+         END;",
+    )
+    .unwrap();
+    let before = validator_probe_counts(&conn);
+
+    let error = schema_validation::validate_apply_schema(&conn).unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("allowed a linked row to become detached"));
+    assert_eq!(validator_probe_counts(&conn), before);
+}
+
+#[test]
+fn apply_schema_behavior_probe_rejects_noop_observation_insert_without_pollution() {
+    let temp = TempDir::new().unwrap();
+    let current = temp.path().join("noop-observation-insert.db");
+    seed_current(&current, &[("doc", "summary", vec!["item"])]);
+    let conn = Connection::open(&current).unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER observations_require_document_insert;
+         CREATE TRIGGER observations_require_document_insert
+         BEFORE INSERT ON items
+         WHEN 0 AND NEW.item_type = 'observation' AND NEW.document_id IS NULL
+         BEGIN
+           SELECT RAISE(ABORT, 'observation requires document_id');
+         END;",
+    )
+    .unwrap();
+    let before = validator_probe_counts(&conn);
+
+    let error = schema_validation::validate_apply_schema(&conn).unwrap_err();
+
+    assert!(error.to_string().contains("allowed a new detached row"));
+    assert_eq!(validator_probe_counts(&conn), before);
+}
+
+#[test]
+fn apply_schema_behavior_probe_rejects_noop_ledger_update_without_pollution() {
+    let temp = TempDir::new().unwrap();
+    let current = temp.path().join("noop-ledger-update.db");
+    seed_current(&current, &[("doc", "summary", vec!["item"])]);
+    let conn = Connection::open(&current).unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER item_link_repair_ledger_no_update;
+         CREATE TRIGGER item_link_repair_ledger_no_update
+         BEFORE UPDATE ON item_link_repair_ledger WHEN 0 BEGIN
+           SELECT RAISE(ABORT, 'item_link_repair_ledger is append-only');
+         END;",
+    )
+    .unwrap();
+    let before = validator_probe_counts(&conn);
+
+    let error = schema_validation::validate_apply_schema(&conn).unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("ledger update guard is ineffective"));
+    assert_eq!(validator_probe_counts(&conn), before);
+}
+
+#[test]
+fn apply_schema_behavior_probe_rejects_noop_ledger_delete_without_pollution() {
+    let temp = TempDir::new().unwrap();
+    let current = temp.path().join("noop-ledger-delete.db");
+    seed_current(&current, &[("doc", "summary", vec!["item"])]);
+    let conn = Connection::open(&current).unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER item_link_repair_ledger_no_delete;
+         CREATE TRIGGER item_link_repair_ledger_no_delete
+         BEFORE DELETE ON item_link_repair_ledger WHEN 0 BEGIN
+           SELECT RAISE(ABORT, 'item_link_repair_ledger is append-only');
+         END;",
+    )
+    .unwrap();
+    let before = validator_probe_counts(&conn);
+
+    let error = schema_validation::validate_apply_schema(&conn).unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("ledger delete guard is ineffective"));
+    assert_eq!(validator_probe_counts(&conn), before);
+}
+
+fn validator_probe_counts(conn: &Connection) -> (i64, i64, i64, i64) {
+    (
+        conn.query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))
+            .unwrap(),
+        conn.query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+            .unwrap(),
+        conn.query_row("SELECT COUNT(*) FROM item_link_repair_ledger", [], |row| {
+            row.get(0)
+        })
+        .unwrap(),
+        conn.query_row("SELECT COUNT(*) FROM items_fts", [], |row| row.get(0))
+            .unwrap(),
+    )
+}
+
 fn replace_ledger(conn: &Connection, create_table: &str) {
     conn.execute_batch(
         "DROP TRIGGER item_link_repair_ledger_no_update;
