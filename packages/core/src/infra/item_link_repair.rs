@@ -273,7 +273,7 @@ fn build_plan_from_rows(
         .collect();
 
     let mut stats = RepairStats::default();
-    let mut evidence_claims = Vec::new();
+    let mut group_claims = Vec::new();
     for (evidence_document_id, mut items) in groups {
         items.sort_by(|left, right| left.id.cmp(&right.id));
         let exact_matches: Vec<(&EvidenceItem, &CurrentDocument)> = items
@@ -287,40 +287,56 @@ fn build_plan_from_rows(
                 })
             })
             .collect();
+        let claimed_targets: HashSet<String> = exact_matches
+            .iter()
+            .map(|(_, target)| target.id.clone())
+            .collect();
 
         if exact_matches.len() != 1 {
-            if items.iter().any(|item| {
-                title_counts
-                    .get(&item.title)
-                    .is_some_and(|count| *count > 1)
-            }) {
+            if exact_matches.len() > 1
+                || items.iter().any(|item| {
+                    title_counts
+                        .get(&item.title)
+                        .is_some_and(|count| *count > 1)
+                })
+            {
                 stats.ambiguous_groups += 1;
             } else {
                 stats.unproven_groups += 1;
             }
+            group_claims.push((claimed_targets, None));
             continue;
         }
         let (summary, target) = exact_matches[0];
-        evidence_claims.push(RepairCandidate {
-            evidence_document_id,
-            target_document_id: target.id.clone(),
-            summary_title: summary.title.clone(),
-            item_ids: items.into_iter().map(|item| item.id).collect(),
-        });
+        group_claims.push((
+            claimed_targets,
+            Some(RepairCandidate {
+                evidence_document_id,
+                target_document_id: target.id.clone(),
+                summary_title: summary.title.clone(),
+                item_ids: items.into_iter().map(|item| item.id).collect(),
+            }),
+        ));
     }
 
     let mut target_claims: HashMap<String, usize> = HashMap::new();
-    for candidate in &evidence_claims {
-        *target_claims
-            .entry(candidate.target_document_id.clone())
-            .or_default() += 1;
+    for (claimed_targets, _) in &group_claims {
+        for target_document_id in claimed_targets {
+            *target_claims.entry(target_document_id.clone()).or_default() += 1;
+        }
     }
     let mut candidates = Vec::new();
-    for candidate in evidence_claims {
-        if target_claims[&candidate.target_document_id] != 1 {
+    for (claimed_targets, candidate) in group_claims {
+        if claimed_targets
+            .iter()
+            .any(|target| target_claims[target] != 1)
+        {
             stats.target_conflicts += 1;
             continue;
         }
+        let Some(candidate) = candidate else {
+            continue;
+        };
         let mut group_valid = true;
         for item_id in &candidate.item_ids {
             match current_items.get(item_id) {

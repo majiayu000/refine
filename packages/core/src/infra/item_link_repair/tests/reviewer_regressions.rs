@@ -22,6 +22,48 @@ fn invalid_second_group_still_blocks_the_shared_target() {
 }
 
 #[test]
+fn multiple_matches_in_one_group_block_an_exact_group_claiming_the_same_target() {
+    let plan = build_plan_from_rows(
+        vec![
+            evidence_item("exact-group", "exact-item", "shared", 1_000),
+            evidence_item("multiple-group", "multiple-1", "shared", 1_000),
+            evidence_item("multiple-group", "multiple-2", "shared", 1_000),
+        ],
+        vec![current_document("shared-target", "shared", 1_000)],
+        detached_items(&["exact-item", "multiple-1", "multiple-2"]),
+        "hash".into(),
+    );
+
+    assert_eq!(plan.stats.ambiguous_groups, 1);
+    assert_eq!(plan.stats.target_conflicts, 2);
+    assert_eq!(plan.stats.candidate_groups, 0);
+    assert_eq!(plan.stats.candidate_items, 0);
+}
+
+#[test]
+fn multiple_matches_for_a_distinct_target_do_not_block_an_exact_group() {
+    let plan = build_plan_from_rows(
+        vec![
+            evidence_item("exact-group", "exact-item", "exact", 1_000),
+            evidence_item("multiple-group", "multiple-1", "multiple", 2_000),
+            evidence_item("multiple-group", "multiple-2", "multiple", 2_000),
+        ],
+        vec![
+            current_document("exact-target", "exact", 1_000),
+            current_document("multiple-target", "multiple", 2_000),
+        ],
+        detached_items(&["exact-item", "multiple-1", "multiple-2"]),
+        "hash".into(),
+    );
+
+    assert_eq!(plan.stats.ambiguous_groups, 1);
+    assert_eq!(plan.stats.target_conflicts, 0);
+    assert_eq!(plan.stats.candidate_groups, 1);
+    assert_eq!(plan.stats.candidate_items, 1);
+    assert_eq!(plan.candidates[0].target_document_id, "exact-target");
+}
+
+#[test]
 fn audit_orders_rfc3339_offsets_by_actual_instant() {
     let temp = TempDir::new().unwrap();
     let current = temp.path().join("current.db");
