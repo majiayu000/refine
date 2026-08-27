@@ -8,6 +8,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use super::paths::stale_db_candidates;
 
+mod legacy_import;
+
 /// Result of a `migrate_stale_dbs` run.
 pub enum MigrationReport {
     /// No legacy files were found; nothing was done.
@@ -113,23 +115,7 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
             return Err(format!("failed to attach {}: {}", candidate.display(), e));
         }
 
-        let result: Result<usize, String> = (|| {
-            let tx = conn
-                .unchecked_transaction()
-                .map_err(|e| format!("failed to start migration transaction: {e}"))?;
-            let rows = copy_all_tables(&tx, "refine_migration_src", candidate)?;
-            let signature_after = source_signature(candidate)?;
-            if signature_after != signature_before {
-                return Err(format!(
-                    "legacy DB {} changed while its migration snapshot was imported; retry migration",
-                    candidate.display()
-                ));
-            }
-            save_migration_state(&tx, candidate, &signature_after, &content_hash)?;
-            tx.commit()
-                .map_err(|e| format!("failed to commit migration transaction: {e}"))?;
-            Ok(rows)
-        })();
+        let result = legacy_import::run(&conn, candidate, &signature_before, &content_hash);
         drop(conn);
         let rows =
             result.map_err(|e| format!("migration of {} failed: {}", candidate.display(), e))?;

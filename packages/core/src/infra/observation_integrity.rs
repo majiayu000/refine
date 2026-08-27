@@ -40,3 +40,32 @@ pub(super) fn ensure_triggers(conn: &Connection) -> InfraResult<()> {
     .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(())
 }
+
+pub(super) fn suspend_for_legacy_import(conn: &Connection) -> InfraResult<()> {
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS observations_require_document_insert;
+         DROP TRIGGER IF EXISTS observations_require_document_update;",
+    )
+    .map_err(|e| InfraError::Database(e.to_string()))
+}
+
+pub(super) fn verify_triggers(conn: &Connection) -> InfraResult<()> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'trigger' AND name IN (
+               'observations_require_document_insert',
+               'observations_require_document_update'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    if count == 2 {
+        Ok(())
+    } else {
+        Err(InfraError::Database(format!(
+            "observation document invariant verification failed: expected 2 triggers, found {count}"
+        )))
+    }
+}

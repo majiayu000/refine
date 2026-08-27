@@ -48,12 +48,12 @@ async fn main() -> Result<()> {
         ensure_db_dir(&db_path).map_err(|e| anyhow::anyhow!(e))?;
     }
     if !read_only_preview {
-        match migrate_stale_dbs(&db_path) {
-            Ok(MigrationReport::NoOp) => {}
-            Ok(MigrationReport::Migrated {
+        match migrate_stale_dbs(&db_path).map_err(anyhow::Error::msg)? {
+            MigrationReport::NoOp => {}
+            MigrationReport::Migrated {
                 sources,
                 rows_copied,
-            }) => {
+            } => {
                 eprintln!(
                     "[refine] migrated {} row(s) from legacy DB(s): {}",
                     rows_copied,
@@ -64,7 +64,6 @@ async fn main() -> Result<()> {
                         .join(", ")
                 );
             }
-            Err(e) => eprintln!("[refine] warning: DB migration failed (continuing): {e}"),
         }
     }
 
