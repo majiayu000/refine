@@ -36,11 +36,12 @@ user-visible short and full advice are always rendered deterministically by the
 service. LLM free text is never an authorization or output boundary.
 
 The action card uses the same named-project denominator as fragmentation:
-`other` and zero-session entries are not eligible candidates. Non-green
-fragmentation with no named candidate fails closed. With one named candidate,
-that project can be promoted but cannot also be stopped; with two or more, the
-highest-volume candidate is promoted and the lowest-volume candidate is
-stopped. Candidate evidence comes from the window that triggered
+`other` and zero-session entries are not eligible candidates. When no named
+candidate exists, the action card is omitted without aborting the weekly report;
+the signal table and data-quality evidence remain visible. With one named
+candidate, that project can be promoted but cannot also be stopped; with two or
+more, the highest-volume candidate is promoted and the lowest-volume candidate
+is stopped. Candidate evidence comes from the window that triggered
 consolidation: a non-green rolling-90-day fragmentation signal selects the
 rolling-90-day cluster, even when the recent window is healthy; otherwise a
 recent-only trigger selects the rolling-7-day cluster.
@@ -107,6 +108,7 @@ validation errors other than a missing file are returned clearly.
 - structured-LLM bypass, negation, and short-output tests;
 - cache revision, score timestamp, policy, and cohort binding tests;
 - action-card 0/1/2 named-project boundary tests;
+- synthetic-`other` weekly integration test proving safe card omission;
 - long-term fragmentation with an old one-off and two healthy recent projects;
 - deep-invest-only Deepen-card and window-accurate fallback evidence tests;
 - rolling-90-day profile writer-to-advice-loader round trip;

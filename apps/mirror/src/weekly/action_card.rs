@@ -38,11 +38,9 @@ pub(super) fn build_weekly_action_card(
             &project.project_name,
         )
     });
-    let promote = projects.first().copied().ok_or_else(|| {
-        anyhow::anyhow!(
-            "portfolio action card requires at least one named active project; refusing to render decisions from the 'other' bucket"
-        )
-    })?;
+    let Some(promote) = projects.first().copied() else {
+        return Ok(None);
+    };
 
     let mut lines = Vec::new();
     lines.push(t!("## Weekly Action Card", "## 下周行动卡").to_string());
@@ -519,15 +517,15 @@ mod tests {
     }
 
     #[test]
-    fn fragmented_portfolio_without_named_projects_fails_closed() {
+    fn fragmented_portfolio_without_named_projects_omits_action_card() {
         let score = score_with_breadth(vec![
             indicator("exploration", 20.0, Signal::Green),
             indicator("fragmentation", 40.0, Signal::Red),
         ]);
         let cluster = cluster(vec![project("other", 8, None)]);
-        let error = build_weekly_action_card(&score, &score, &cluster, &cluster).unwrap_err();
-        assert!(error.to_string().contains("named active project"));
-        assert!(error.to_string().contains("'other' bucket"));
+        assert!(build_weekly_action_card(&score, &score, &cluster, &cluster)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
