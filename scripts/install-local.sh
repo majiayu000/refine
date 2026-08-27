@@ -14,6 +14,8 @@ Options:
   --token-auth      Require REFINE_API_TOKEN instead of local dev anonymous API access.
   --cognitive-portrait
                     Install the opt-in biweekly cognitive portrait LaunchAgent.
+  --cognitive-portrait-root PATH
+                    Use PATH as the stable portrait workspace and output root.
   --no-cognitive-portrait
                     Disable and remove the cognitive portrait LaunchAgent.
   -h, --help        Show this help.
@@ -41,6 +43,8 @@ start_services=1
 ui_dev_enabled=1
 auth_mode="dev-anon"
 cognitive_portrait_enabled="auto"
+cognitive_portrait_root=""
+cognitive_portrait_root_explicit=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -58,6 +62,19 @@ while [[ $# -gt 0 ]]; do
       ;;
     --cognitive-portrait)
       cognitive_portrait_enabled=1
+      ;;
+    --cognitive-portrait-root)
+      shift
+      if [[ $# -eq 0 ]]; then
+        echo "--cognitive-portrait-root requires a path" >&2
+        exit 2
+      fi
+      cognitive_portrait_root="$1"
+      cognitive_portrait_root_explicit=1
+      ;;
+    --cognitive-portrait-root=*)
+      cognitive_portrait_root="${1#*=}"
+      cognitive_portrait_root_explicit=1
       ;;
     --no-cognitive-portrait)
       cognitive_portrait_enabled=0
@@ -331,8 +348,10 @@ write_portrait_plist() {
   local agent_bin="$2"
   local path_env="$3"
   local script_path="${installed_scripts}/cognitive-portrait.sh"
-  local repo_xml script_xml agent_xml path_xml
-  repo_xml="$(printf '%s' "$repo_root" | xml_escape)"
+  local portrait_dir="${cognitive_portrait_root}/docs/cognitive-portraits"
+  local repo_xml portrait_dir_xml script_xml agent_xml path_xml
+  repo_xml="$(printf '%s' "$cognitive_portrait_root" | xml_escape)"
+  portrait_dir_xml="$(printf '%s' "$portrait_dir" | xml_escape)"
   script_xml="$(printf '%s' "$script_path" | xml_escape)"
   agent_xml="$(printf '%s' "$agent_bin" | xml_escape)"
   path_xml="$(printf '%s' "$path_env" | xml_escape)"
@@ -361,6 +380,8 @@ write_portrait_plist() {
     <string>${agent_xml}</string>
     <key>REFINE_ROOT</key>
     <string>${repo_xml}</string>
+    <key>REFINE_PORTRAIT_DIR</key>
+    <string>${portrait_dir_xml}</string>
   </dict>
   <key>StartCalendarInterval</key>
   <dict>
@@ -468,14 +489,6 @@ if [[ "$launchd_enabled" == "1" && "$(uname -s)" == "Darwin" ]]; then
   guard_legacy_project_env_upgrade
 fi
 
-log "installing Rust binaries"
-cargo install --locked --path "${repo_root}/apps/cli"
-cargo install --locked --path "${repo_root}/apps/mirror"
-cargo install --locked --path "${repo_root}/apps/server"
-
-cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
-path_env="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${cargo_bin}"
-
 resolve_cognitive_portrait_setting() {
   if [[ "$cognitive_portrait_enabled" != "auto" ]]; then
     return
@@ -487,6 +500,71 @@ resolve_cognitive_portrait_setting() {
     cognitive_portrait_enabled=0
   fi
 }
+
+plist_value() {
+  local path="$1"
+  local key="$2"
+  /usr/libexec/PlistBuddy -c "Print :${key}" "$path" 2>/dev/null || true
+}
+
+validate_cognitive_portrait_root() {
+  local root="$1"
+  [[ -n "$root" ]] || die "cognitive portrait root is empty"
+  [[ "$root" == /* ]] || die "cognitive portrait root must be absolute: ${root}"
+  [[ "$root" != *$'\n'* && "$root" != *$'\r'* && "$root" != *$'\t'* ]] \
+    || die "cognitive portrait root must not contain control characters"
+  [[ ! -L "$root" && -d "$root" ]] \
+    || die "cognitive portrait root must be an existing non-symlink directory: ${root}"
+  [[ ! -L "${root}/skills/cognitive-portrait" \
+    && -f "${root}/skills/cognitive-portrait/SKILL.md" ]] \
+    || die "cognitive portrait root is missing skills/cognitive-portrait/SKILL.md: ${root}"
+  [[ ! -L "${root}/docs/cognitive-portraits" \
+    && -d "${root}/docs/cognitive-portraits" \
+    && -f "${root}/docs/cognitive-portraits/INDEX.md" ]] \
+    || die "cognitive portrait root is missing docs/cognitive-portraits/INDEX.md: ${root}"
+}
+
+resolve_cognitive_portrait_root() {
+  [[ "$cognitive_portrait_enabled" == "1" ]] || {
+    cognitive_portrait_root=""
+    return
+  }
+
+  if [[ "$cognitive_portrait_root_explicit" != "1" ]]; then
+    local install_manifest="${HOME}/.refine/install-manifest"
+    local portrait_plist="${HOME}/Library/LaunchAgents/com.lifcc.refine-cognitive-portrait.plist"
+    [[ ! -L "$install_manifest" ]] \
+      || die "install manifest is a symlink and cannot preserve a portrait root: ${install_manifest}"
+    [[ ! -L "$portrait_plist" ]] \
+      || die "legacy cognitive portrait plist is a symlink and cannot be preserved: ${portrait_plist}"
+    if [[ -f "$install_manifest" ]]; then
+      cognitive_portrait_root="$(awk -F= '$1 == "cognitive_portrait_root" {sub(/^[^=]*=/, ""); print; exit}' "$install_manifest")"
+    fi
+    if [[ -z "$cognitive_portrait_root" && -f "$portrait_plist" ]]; then
+      cognitive_portrait_root="$(plist_value "$portrait_plist" 'EnvironmentVariables:REFINE_ROOT')"
+    fi
+    if [[ -z "$cognitive_portrait_root" ]]; then
+      cognitive_portrait_root="$repo_root"
+    fi
+  fi
+  validate_cognitive_portrait_root "$cognitive_portrait_root"
+}
+
+if [[ "$launchd_enabled" == "1" && "$(uname -s)" == "Darwin" ]]; then
+  resolve_cognitive_portrait_setting
+  resolve_cognitive_portrait_root
+else
+  cognitive_portrait_enabled=0
+  cognitive_portrait_root=""
+fi
+
+log "installing Rust binaries"
+cargo install --locked --path "${repo_root}/apps/cli"
+cargo install --locked --path "${repo_root}/apps/mirror"
+cargo install --locked --path "${repo_root}/apps/server"
+
+cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+path_env="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${cargo_bin}"
 
 write_install_manifest() {
   [[ -z "$(git -C "$repo_root" status --porcelain 2>/dev/null || true)" ]] \
@@ -500,13 +578,18 @@ source_dirty=0
 refine_sha256=$(file_sha256 "${cargo_bin}/refine")
 mirror_sha256=$(file_sha256 "${cargo_bin}/mirror")
 refine_server_sha256=$(file_sha256 "${cargo_bin}/refine-server")
+refine_bin=${cargo_bin}/refine
+mirror_bin=${cargo_bin}/mirror
+refine_server_bin=${cargo_bin}/refine-server
 installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 cognitive_portrait_enabled=${cognitive_portrait_enabled}
+cognitive_portrait_root=${cognitive_portrait_root}
+cognitive_portrait_dir=${cognitive_portrait_root:+${cognitive_portrait_root}/docs/cognitive-portraits}
+cognitive_portrait_agent=${portrait_agent_bin:-}
 EOF
 }
 
 if [[ "$launchd_enabled" != "1" || "$(uname -s)" != "Darwin" ]]; then
-  cognitive_portrait_enabled=0
   write_install_manifest
   print_llm_setup_hint
   if [[ "$launchd_enabled" != "1" ]]; then
@@ -544,8 +627,6 @@ daily_plist="${launch_agents}/com.lifcc.refine-daily-ingest.plist"
 weekly_plist="${launch_agents}/com.lifcc.refine-weekly-insights.plist"
 ui_plist="${launch_agents}/com.lifcc.refine-ui-dev.plist"
 portrait_plist="${launch_agents}/com.lifcc.refine-cognitive-portrait.plist"
-
-resolve_cognitive_portrait_setting
 
 write_server_plist "$server_plist" "$cargo_bin" "$path_env"
 write_calendar_plist "$daily_plist" "com.lifcc.refine-daily-ingest" "${installed_scripts}/daily-refresh.sh" "${HOME}/Library/Logs/refine-daily-ingest.log" 8 0

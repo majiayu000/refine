@@ -117,6 +117,12 @@ manifest_value() {
   awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$path"
 }
 
+plist_value() {
+  local path="$1"
+  local key="$2"
+  /usr/libexec/PlistBuddy -c "Print :${key}" "$path" 2>/dev/null || true
+}
+
 check_cmd() {
   local cmd="$1"
   if have_cmd "$cmd"; then
@@ -128,6 +134,7 @@ check_cmd() {
 
 check_launch_agent() {
   local label="$1"
+  shift
   local plist="${HOME}/Library/LaunchAgents/${label}.plist"
 
   if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -145,6 +152,23 @@ check_launch_agent() {
     return
   fi
 
+  local index=0 expected actual extra
+  for expected in "$@"; do
+    actual="$(plist_value "$plist" "ProgramArguments:${index}")"
+    if [[ "$actual" == "$expected" ]]; then
+      pass "LaunchAgent binding matches: ${label} ProgramArguments[${index}]"
+    else
+      fail "LaunchAgent binding mismatch: ${label} ProgramArguments[${index}] expected=${expected} actual=${actual:-missing}"
+    fi
+    index=$((index + 1))
+  done
+  if [[ "$index" -gt 0 ]]; then
+    extra="$(plist_value "$plist" "ProgramArguments:${index}")"
+    if [[ -n "$extra" ]]; then
+      fail "LaunchAgent has unexpected ProgramArguments[${index}]: ${label}"
+    fi
+  fi
+
   local state
   state="$(launchctl print "gui/$(id -u)/${label}" 2>&1 || true)"
   if grep -q 'state = running' <<<"$state"; then
@@ -159,6 +183,37 @@ check_launch_agent() {
 
   if grep -q 'last exit code = [1-9]' <<<"$state"; then
     warn "$label has a non-zero last exit code"
+  fi
+}
+
+check_disabled_launch_agent() {
+  local label="$1"
+  local port="${2:-}"
+  local plist="${HOME}/Library/LaunchAgents/${label}.plist"
+  local state
+
+  if [[ -e "$plist" || -L "$plist" ]]; then
+    fail "disabled LaunchAgent plist still exists: ${plist}"
+  else
+    pass "disabled LaunchAgent plist absent: ${label}"
+  fi
+
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    warn "launchd unavailable on this OS; skipped disabled-label check for $label"
+  elif state="$(launchctl print "gui/$(id -u)/${label}" 2>&1)"; then
+    fail "disabled LaunchAgent is still loaded: ${label}"
+  else
+    pass "disabled LaunchAgent label unloaded: ${label}"
+  fi
+
+  if [[ -n "$port" ]]; then
+    if ! have_cmd lsof; then
+      fail "missing lsof; cannot prove disabled service port ${port} is closed"
+    elif lsof -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | grep -q .; then
+      fail "disabled service still listens on TCP port ${port}: ${label}"
+    else
+      pass "disabled service port is not listening: ${port}"
+    fi
   fi
 }
 
@@ -252,18 +307,106 @@ check_install_manifest() {
     fail "installed source mismatch: root=${expected_root} commit=${expected_commit} installed_dirty=${installed_dirty}; current=${repo_root}@${current_commit} current_dirty=${current_dirty}"
   fi
 
-  local name manifest_key binary expected_hash actual_hash
+  local name manifest_key manifest_bin_key binary expected_binary expected_hash actual_hash
   for name in refine mirror refine-server; do
     binary="$(command -v "$name" 2>/dev/null || true)"
     manifest_key="${name//-/_}_sha256"
+    manifest_bin_key="${name//-/_}_bin"
+    expected_binary="$(manifest_value "$manifest_bin_key" "$manifest")"
     expected_hash="$(manifest_value "$manifest_key" "$manifest")"
     actual_hash="$(file_sha256 "$binary" 2>/dev/null || true)"
+    if [[ -n "$binary" && "$binary" == "$expected_binary" ]]; then
+      pass "installed binary path matches manifest: $name"
+    else
+      fail "installed binary path mismatch: $name"
+    fi
     if [[ -n "$binary" && -n "$expected_hash" && "$expected_hash" == "$actual_hash" ]]; then
       pass "installed binary hash matches: $name"
     else
       fail "installed binary hash mismatch: $name"
     fi
   done
+}
+
+validate_portrait_root() {
+  local root="$1"
+  [[ -n "$root" && "$root" == /* ]] || return 1
+  [[ "$root" != *$'\n'* && "$root" != *$'\r'* && "$root" != *$'\t'* ]] || return 1
+  [[ ! -L "$root" && -d "$root" ]] || return 1
+  [[ ! -L "${root}/skills/cognitive-portrait" \
+    && -f "${root}/skills/cognitive-portrait/SKILL.md" ]] || return 1
+  [[ ! -L "${root}/docs/cognitive-portraits" \
+    && -d "${root}/docs/cognitive-portraits" \
+    && -f "${root}/docs/cognitive-portraits/INDEX.md" ]] || return 1
+}
+
+check_cognitive_portrait() {
+  local manifest="$1"
+  local plist="${HOME}/Library/LaunchAgents/com.lifcc.refine-cognitive-portrait.plist"
+  local root portrait_dir agent log_path latest
+  root="$(manifest_value cognitive_portrait_root "$manifest")"
+  portrait_dir="$(manifest_value cognitive_portrait_dir "$manifest")"
+  agent="$(manifest_value cognitive_portrait_agent "$manifest")"
+  log_path="${HOME}/Library/Logs/refine-portrait.log"
+
+  if validate_portrait_root "$root"; then
+    pass "cognitive portrait root valid: ${root}"
+  else
+    fail "cognitive portrait root invalid: ${root:-missing}"
+  fi
+  if [[ "$portrait_dir" == "${root}/docs/cognitive-portraits" && -d "$portrait_dir" ]]; then
+    pass "cognitive portrait output directory valid: ${portrait_dir}"
+  else
+    fail "cognitive portrait output directory mismatch: ${portrait_dir:-missing}"
+  fi
+  if [[ -n "$agent" && "$agent" == /* && ! -L "$agent" && -f "$agent" && -x "$agent" ]]; then
+    pass "cognitive portrait agent executable valid"
+  else
+    fail "cognitive portrait agent executable invalid: ${agent:-missing}"
+  fi
+
+  check_launch_agent com.lifcc.refine-cognitive-portrait \
+    /bin/bash "${HOME}/.refine/scripts/cognitive-portrait.sh"
+  if [[ -f "$plist" ]]; then
+    if [[ "$(plist_value "$plist" WorkingDirectory)" == "$root" ]]; then
+      pass "cognitive portrait WorkingDirectory matches manifest"
+    else
+      fail "cognitive portrait WorkingDirectory mismatches manifest"
+    fi
+    if [[ "$(plist_value "$plist" 'EnvironmentVariables:REFINE_ROOT')" == "$root" ]]; then
+      pass "cognitive portrait REFINE_ROOT matches manifest"
+    else
+      fail "cognitive portrait REFINE_ROOT mismatches manifest"
+    fi
+    if [[ "$(plist_value "$plist" 'EnvironmentVariables:REFINE_PORTRAIT_DIR')" == "$portrait_dir" ]]; then
+      pass "cognitive portrait REFINE_PORTRAIT_DIR matches manifest"
+    else
+      fail "cognitive portrait REFINE_PORTRAIT_DIR mismatches manifest"
+    fi
+    if [[ "$(plist_value "$plist" 'EnvironmentVariables:REFINE_PORTRAIT_AGENT')" == "$agent" ]]; then
+      pass "cognitive portrait agent matches manifest"
+    else
+      fail "cognitive portrait agent mismatches manifest"
+    fi
+    if [[ "$(plist_value "$plist" StandardOutPath)" == "$log_path" \
+      && "$(plist_value "$plist" StandardErrorPath)" == "$log_path" ]]; then
+      pass "cognitive portrait log binding valid"
+    else
+      fail "cognitive portrait log binding mismatch"
+    fi
+  fi
+
+  if [[ ! -L "$log_path" && -f "$log_path" ]]; then
+    pass "cognitive portrait log exists: ${log_path} ($(mtime_text "$log_path"))"
+  else
+    fail "cognitive portrait log missing or unsafe: ${log_path}"
+  fi
+  latest="$(find "$portrait_dir" -maxdepth 1 -type f -name 'cognitive-portrait-*.md' 2>/dev/null | sort | tail -1 || true)"
+  if [[ -n "$latest" ]]; then
+    pass "cognitive portrait latest artifact: ${latest} ($(mtime_text "$latest"))"
+  else
+    fail "cognitive portrait latest artifact missing: ${portrait_dir}"
+  fi
 }
 
 check_db() {
@@ -476,18 +619,27 @@ check_cmd mirror
 check_cmd refine-server
 check_install_manifest
 
-check_launch_agent com.lifcc.refine-server
-check_launch_agent com.lifcc.refine-daily-ingest
-check_launch_agent com.lifcc.refine-weekly-insights
+install_manifest="${HOME}/.refine/install-manifest"
+refine_server_bin=""
+if [[ -f "$install_manifest" ]]; then
+  refine_server_bin="$(manifest_value refine_server_bin "$install_manifest")"
+fi
+check_launch_agent com.lifcc.refine-server \
+  /bin/bash "${HOME}/.refine/scripts/run-refine-server.sh" "$refine_server_bin"
+check_launch_agent com.lifcc.refine-daily-ingest \
+  /bin/bash "${HOME}/.refine/scripts/daily-refresh.sh"
+check_launch_agent com.lifcc.refine-weekly-insights \
+  /bin/bash "${HOME}/.refine/scripts/weekly-insights.sh"
 check_runtime_scripts
 if [[ "$ui_dev_enabled" == "1" ]]; then
   check_launch_agent com.lifcc.refine-ui-dev
 else
-  pass "desktop UI dev service skipped"
+  check_disabled_launch_agent com.lifcc.refine-ui-dev 8987
 fi
-install_manifest="${HOME}/.refine/install-manifest"
 if [[ -f "$install_manifest" && "$(manifest_value cognitive_portrait_enabled "$install_manifest")" == "1" ]]; then
-  check_launch_agent com.lifcc.refine-cognitive-portrait
+  check_cognitive_portrait "$install_manifest"
+else
+  check_disabled_launch_agent com.lifcc.refine-cognitive-portrait
 fi
 
 check_unattended_llm_env

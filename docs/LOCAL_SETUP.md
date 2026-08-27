@@ -27,6 +27,8 @@ The installer is idempotent. It can be used for first install and for upgrades f
 - Copies unattended runtime scripts into `~/.refine/scripts`. The server,
   daily ingest, weekly insights, and optional cognitive portrait LaunchAgents
   execute from that installed prefix rather than from the git checkout.
+- Records the clean install source and the optional cognitive portrait workspace
+  as separate paths in `~/.refine/install-manifest`.
 - Installs desktop UI dependencies with `bun install` when Bun is available.
 - Writes macOS user LaunchAgents under `~/Library/LaunchAgents/`.
 - Starts or reloads the local server and UI dev service. The server uses the
@@ -151,6 +153,40 @@ This also unloads and removes an existing `com.lifcc.refine-ui-dev` LaunchAgent.
 scripts/doctor-local.sh --no-ui-dev
 ```
 
+The disabled-mode check is strict: the plist must be absent, the launchd label
+must be unloaded, and TCP port `8987` must not have a listener.
+
+Enable the biweekly cognitive portrait with an explicit stable workspace:
+
+```bash
+scripts/install-local.sh --cognitive-portrait \
+  --cognitive-portrait-root /absolute/path/to/refine-portrait-workspace
+```
+
+The workspace must already exist, must not be a symlink, and must contain both
+`skills/cognitive-portrait/SKILL.md` and
+`docs/cognitive-portraits/INDEX.md`. Paths containing spaces are supported.
+The installer binds `WorkingDirectory` and `REFINE_ROOT` to that workspace and
+binds `REFINE_PORTRAIT_DIR` to its `docs/cognitive-portraits` archive.
+
+On later installs, omit `--cognitive-portrait-root`: the installer preserves the
+root recorded in the manifest. When upgrading a legacy plist that has no
+manifest root, a valid `REFINE_ROOT` is preserved and promoted into the new
+manifest. An invalid, missing, relative, or symlinked legacy root stops the
+upgrade before binaries or LaunchAgents are changed. To move the archive,
+create and verify the new workspace first, then pass the explicit option once.
+
+Disable the portrait job with:
+
+```bash
+scripts/install-local.sh --no-cognitive-portrait
+```
+
+Doctor treats a remaining portrait plist or loaded label as an orphan. When the
+job is enabled, Doctor verifies the manifest/plist root, output directory,
+agent executable, log binding, and latest archived portrait without reading or
+printing credential values.
+
 Write LaunchAgents without starting them:
 
 ```bash
@@ -175,7 +211,8 @@ Run:
 scripts/doctor-local.sh
 ```
 
-The doctor checks installed binaries, LaunchAgents, a launchd-like clean
+The doctor checks installed binary paths and hashes, exact LaunchAgent program
+arguments, a launchd-like clean
 environment credential preflight, `/health`, a protected `/v1/*` API route,
 database freshness, log files, and UI dependencies. It fails when unattended
 credentials are missing or the secure file has invalid ownership, type, or
