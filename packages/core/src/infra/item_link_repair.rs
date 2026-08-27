@@ -254,10 +254,10 @@ fn build_plan_from_rows(
             .iter()
             .filter_map(|item| {
                 unique_documents.get(&item.title).and_then(|document| {
-                    let delta_ms = (document.created_at - item.created_at)
-                        .num_milliseconds()
-                        .unsigned_abs();
-                    (delta_ms <= 1_000).then_some((item, document))
+                    (document.created_at - item.created_at)
+                        .num_nanoseconds()
+                        .is_some_and(|delta| delta.unsigned_abs() <= 1_000_000_000)
+                        .then_some((item, document))
                 })
             })
             .collect();
