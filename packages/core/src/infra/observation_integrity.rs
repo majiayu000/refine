@@ -10,9 +10,13 @@ pub(super) fn ensure_triggers(conn: &Connection) -> InfraResult<()> {
         BEGIN
             SELECT RAISE(ABORT, 'observation requires document_id');
         END;
-        CREATE TRIGGER IF NOT EXISTS observations_require_document_update
+        DROP TRIGGER IF EXISTS observations_require_document_update;
+        CREATE TRIGGER observations_require_document_update
         BEFORE UPDATE OF item_type, document_id ON items
         WHEN NEW.item_type = 'observation' AND NEW.document_id IS NULL
+          AND NOT (
+            OLD.item_type = 'observation' AND OLD.document_id IS NULL
+          )
         BEGIN
             SELECT RAISE(ABORT, 'observation requires document_id');
         END;

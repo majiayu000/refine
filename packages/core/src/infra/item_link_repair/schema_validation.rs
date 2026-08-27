@@ -101,10 +101,10 @@ fn require_trigger_bodies(conn: &Connection) -> InfraResult<()> {
         let (name, sql) = row.map_err(db_error)?;
         triggers.insert(name, normalize_sql(&sql));
     }
-    let requirements = [
+    let requirements: [(&str, &[&str]); 4] = [
         (
             "observations_require_document_insert",
-            [
+            &[
                 "before insert on items",
                 "new.item_type = 'observation'",
                 "new.document_id is null",
@@ -113,16 +113,17 @@ fn require_trigger_bodies(conn: &Connection) -> InfraResult<()> {
         ),
         (
             "observations_require_document_update",
-            [
+            &[
                 "before update of item_type, document_id on items",
                 "new.item_type = 'observation'",
                 "new.document_id is null",
+                "and not ( old.item_type = 'observation' and old.document_id is null )",
                 "raise(abort, 'observation requires document_id')",
             ],
         ),
         (
             "item_link_repair_ledger_no_update",
-            [
+            &[
                 "before update on item_link_repair_ledger",
                 "item_link_repair_ledger is append-only",
                 "raise(abort",
@@ -131,7 +132,7 @@ fn require_trigger_bodies(conn: &Connection) -> InfraResult<()> {
         ),
         (
             "item_link_repair_ledger_no_delete",
-            [
+            &[
                 "before delete on item_link_repair_ledger",
                 "item_link_repair_ledger is append-only",
                 "raise(abort",
