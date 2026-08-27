@@ -1,11 +1,11 @@
 # Cognitive Portrait — 历史归档索引
 
-> 长期认知画像归档目录。每份报告记录一个时间点的全量认知快照。
+> 长期认知画像归档目录。v0-v3 是历史全量快照；v4 默认记录 current/previous 90d 可比窗口。
 > 详细架构和演进路线见 [SPEC.md](./SPEC.md)。
 
 ## 报告清单
 
-| date | version | sessions | total_lines | L1 | L2 | L3 | L4 | 生成模式 | 达标 |
+| date | version | sessions | total_lines | L1 | L2 | L3 | L4 | 生成模式 | 历史状态 |
 |---|---|---|---|---|---|---|---|---|---|
 | [2026-03-21](./cognitive-portrait-2026-03-21-v0.md) | v0 | 1565 | 999 | ✅ | ✅ | ✅ | ✅ | 2 sub-agent (手工) | ✅ |
 | [2026-04-08](./cognitive-portrait-2026-04-08-v2.md) | v2 PoC | 3919 | 1364 | 261 | 284 | 330 | 338 | 4 sub-agent (PoC dispatcher) | ✅ |
@@ -39,14 +39,14 @@
 | v0 | archived | 2 sub-agent 手工 | ~978 | 早期实验，jsonl 落盘需重组 |
 | v1 | deprecated | 单 agent 单线程 | 419 | 输出衰减，不达 600 行下限 |
 | v2 PoC | archived | 4 sub-agent + 手工 dispatcher | 1364 | 验证 multi-agent 假设 |
-| v3 | current | 4 sub-agent + skill 自动 dispatcher | 1418 | Skill 自动 dispatcher 跑通（2026-04-09） |
-| v4 | current | v3 + launchd 双周自动化 | ≥ 800 | Phase 3 已落地（2026-07-23），调度见下 |
-| v5 | spec | v4 + 处方追踪 + 自我演进 | ≥ 800 | Phase 4 |
+| v3 | archived | 4 sub-agent + ad-hoc SQL | variable | 历史报告保留，停止新增 |
+| v4 | current | deterministic bundle + 4 agents + evidence gate | evidence-based | 默认 current/previous 90d |
+| v5 | spec | v4 + 处方追踪 + 自我演进 | evidence-based | Phase 4 |
 
 ## Phase 路线图
 
 - **Phase 1（已完成）**: 止血 + 建归档 — v2 PoC 跑通，1364 行 ✅
-- **Phase 2（进行中）**: 改 SKILL.md 把 PoC 固化为 v3 — 见 [SPEC.md](./SPEC.md) §4
+- **Phase 2（已归档）**: v3 并行画像保留为历史实现，不再新增
 - **Phase 3（已落地 2026-07-23）**: launchd 自动化 — 运行
   `scripts/install-local.sh --cognitive-portrait` 显式启用；安装器管理
   `~/Library/LaunchAgents/com.lifcc.refine-cognitive-portrait.plist`。每周日 10:00
@@ -55,16 +55,21 @@
   已于 2026-07-23 `launchctl load` 生效。agent 以 `--sandbox workspace-write` 运行（最小权限，
   可用 `REFINE_PORTRAIT_SANDBOX` 覆盖）；plist 使用安装时发现的 agent 绝对路径及其
   runtime PATH。升级 agent runtime 后重新运行安装命令即可刷新。
+- **Phase 3.1（当前）**: v4 固定 cutoff 证据 bundle + evidence quality gate，见 [SPEC.md](./SPEC.md)
 - **Phase 4（长期）**: 处方追踪 + 指标自校准 + 自我演进
 
 ## 命名约定
 
 ```
-cognitive-portrait-{YYYY-MM-DD}-v{N}.md
+cognitive-portrait-{YYYY-MM-DD}-v4.md
+evidence/cognitive-portrait-{YYYY-MM-DD}-v4.bundle.json
+evidence/cognitive-portrait-{YYYY-MM-DD}-v4.quality.json
 ```
 
 - `{YYYY-MM-DD}`: 报告生成日期
-- `v{N}`: skill 版本（v0/v1/v2/v3/v4/v5）
+- `v4`: 当前 skill/collector 合约版本；历史 v0-v3 文件名保持不变
+- `bundle.json`: 同一 cutoff/read snapshot 的可追溯证据
+- `quality.json`: factual traceability、unsupported number、可比性、novelty 和 action verifiability 门禁结果
 
 ## 不要做的事
 

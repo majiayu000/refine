@@ -1,6 +1,6 @@
 # refine 数据管道与产出链路
 
-> 梳理日期：2026-04-09
+> 梳理日期：2026-04-09；链路 9 于 2026-08-28 更新为 v4
 > 研究范围：refine Rust workspace (`apps/cli`, `apps/mirror`, `packages/core`) + 相关 launchd 任务 + Claude Code skill
 > 研究方法：只读研究，不执行任何命令
 
@@ -14,7 +14,7 @@
 - 1 条核心 LLM 聚合链路（`refine insights --prescription`，~10+1 次 LLM 并发）
 - 4 条 mirror 子命令（`score` / `motd` / `dashboard` / `weekly` / `profile`）
 - 2 条由 launchd 调度的 shell 脚本（daily/weekly）
-- 1 条 in-repo skill（`cognitive-portrait`，在 `skills/` 目录，通过符号链接接入 Claude Code，读 refine.db）
+- 1 条 in-repo skill（`cognitive-portrait`，通过版本化 collector 间接读取同快照 event-time cohort）
 
 **核心结论**：除 `ingest-sessions` 外，所有链路都是对已经落库的 Observation 数据做聚合加工。`refine insights --prescription` 是 LLM 调用最重、耗时最长的链路（~11 次 LLM，10 并发）；`mirror score` 在原始职责"纯 SQL 聚合"之外，会先为当前 score/cohort 生成确定性 advice，并可选调用一次 LLM 做结构化 policy 确认。
 
@@ -79,8 +79,8 @@ auto/remem: remem raw archive；local: filesystem scan
 
 ┌─────────────────────────────────────────────────────────────┐
 │ 链路 9: cognitive-portrait skill (外部)                     │
-│   读 refine.db + 调 4 个 sub-agent 写 L1/L2/L3/L4           │
-│   → docs/cognitive-portraits/cognitive-portrait-*.md        │
+│   deterministic bundle + 4 agents + evidence quality gate  │
+│   → v4 report + bundle.json + quality.json                 │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -226,20 +226,20 @@ auto/remem: remem raw archive；local: filesystem scan
 
 ---
 
-### 链路 9: cognitive-portrait skill（in-repo Claude Code skill）
+### 链路 9: cognitive-portrait v4 skill（in-repo Codex/Claude skill）
 
 | 字段 | 内容 |
 |---|---|
 | 命令入口 | Claude Code skill 触发词："认知画像" / "cognitive portrait" / "认知分析" / "分析我的成长" |
 | 代码位置 | `skills/cognitive-portrait/SKILL.md` + `prompts/`（在 refine 代码库中；`~/.claude/skills/cognitive-portrait` 为符号链接，见 `docs/setup-skills.md`）|
-| 触发方式 | 用户在 Claude Code 对话中触发 |
-| 数据来源 | 直接用 `sqlite3` 读 refine.db + 调 `mirror score` 命令 |
-| 处理步骤 | 1) Dispatcher 跑 SQL 采集 8 个数据文件到 `/tmp/cp_data_*.txt`；2) 派发 4 个 Task sub-agent 并行（W-14 文件所有权隔离），分别写 L1/L2/L3/L4 markdown；3) Dispatcher 合并写盘 |
-| LLM 调用 | **是**；在 Claude Code 内部通过 sub-agent 调用（4 路并行），不经过 refine 的 `LlmClient`，也不走 refine 的环境变量链路 |
-| 输出目标 | `docs/cognitive-portraits/cognitive-portrait-<date>-v3.md` |
-| 输出 schema | ~1200 行结构化 markdown（L1/L2/L3/L4 四层） |
-| 依赖 | 依赖链路 1 产出的 Observation；依赖链路 2（`refine insights --prescription`）7 天内的报告作为 sub-agent 的上下文；依赖链路 3 `mirror score` 的输出 |
-| 已知问题 | skill 前置检查：insights 报告 other 占比 >80% 说明 clustering 有问题；v1 单 agent 输出衰减导致 L4 仅 ~70 行，v3 改 multi-agent 解决 |
+| 触发方式 | `scripts/cognitive-portrait.sh` 双周调度或用户交互触发 |
+| 数据来源 | `refine cognitive-portrait collect` 复用 Session Insights 的同一 SQLite read snapshot、source allowlist、strict eligible cohort 和 manifest builder；默认 current/previous 90d event time |
+| 处理步骤 | 1) 无 LLM collector 输出 deterministic JSON bundle；2) 4 个 agent 只读同一 bundle 并行写 L1-L4；3) 合并 v4 candidate；4) validator 检查证据、数字、可比性、novelty 和 action；5) 通过后才写 INDEX，失败隔离 |
+| LLM 调用 | collector/validator **0 次**；L1-L4 生成 **4 路并行**，不经过 Refine `LlmClient` |
+| 输出目标 | `cognitive-portrait-<date>-v4.md` + `evidence/*.bundle.json` + `evidence/*.quality.json` |
+| 输出 schema | 4 层 Markdown；事实绑定 evidence ID/JSON pointer；处方绑定 owner/due/verify；不设行数门槛 |
+| 依赖 | 依赖链路 1 的 first-class session Observation；不依赖链路 2 的叙事输出或链路 3 的 score 文本 |
+| 已知边界 | remem upstream platform 暂为 unknown；Grok/Gemini knowledge-only 不进入 session 分母；unsupported/detached 数据使趋势不可比较 |
 
 ---
 
@@ -270,7 +270,7 @@ auto/remem: remem raw archive；local: filesystem scan
 ### 3. 稳定性风险
 
 - **链路 5 `mirror weekly`** 历史上最脆弱：单次 LLM 调用，重试耗尽即整个命令失败；被 `daily-refresh.sh` 周日路径用 `|| echo` 兜底；`extract_suggestions()` 还依赖固定的 markdown section header 匹配，LLM 措辞漂移会让"上周建议"回填失败。
-- **链路 2 `insights` 的 route 失败处理**：某一路 LLM 调用失败后，内容被写为字符串 "分析失败: <error>"，这段字符串**会原样进入最终 merge 的 prompt**，进而出现在持久化到 DB 的正式报告里。下游链路 9 (cognitive-portrait) 的前置检查有"other 占比 >80%"告警，但没检测这种 "分析失败" 字面量。
+- 链路 9 不再消费链路 2 的叙事报告；其事实层由 deterministic bundle 独立生成，因此链路 2 的 LLM 文本失败不会污染画像事实证据。
 - **链路 2 的 `period` 参数是死代码**：`#[allow(dead_code)]` 标注，但 CLI 仍暴露 `--period` — 用户设置后静默被忽略（U-26 声明-执行鸿沟）。
 - **链路 3 和链路 4 共用 `persist_score`**：每次运行 dashboard 或 score 都追加一行历史，personal baseline 计算会被"频繁运行 dashboard"污染。
 
@@ -279,7 +279,7 @@ auto/remem: remem raw archive；local: filesystem scan
 - **三条链路重复调用 `cluster_observations + score::compute`**：链路 3 `score` / 链路 4 `dashboard` / 链路 5 `weekly` / 链路 7 `profile` 都做这一步（weekly 还做两次，this_week + last_week）。目前是每次同步调用纯函数，没有命中问题，但重构时应考虑提取为共享助手。
 - **两处 `save_report_to_document` 的调用点** (链路 5 weekly、链路 7 profile) 已经被抽到 `document_save.rs`，但链路 2 `insights` 仍直接 `Document::new + set_title + set_url + doc_store.save`，可以统一。
 - **链路 3 advice + 链路 5 weekly suggestions + 链路 7 profile** 都是 "用户可见的短叙事"，三者用的 system prompt / 调用约定完全独立，没有公共 prompt helper。
-- **外部链路 9 与内部链路 2 存在语义重叠**：两者都是"认知分析报告"。链路 2 偏向统计 + LLM 合并（单模型 10 路合成），链路 9 偏向 agent 叙事（4 个 layer sub-agent 分写）。链路 9 依赖链路 2 的输出作为 context — 这意味着 insights 报告质量越差，画像质量也越差。
+- 链路 9 与链路 2 共享 manifest/cohort 口径，但不共享叙事输出：Insights 负责短周期 delta，画像负责四层长期综合，避免一份 LLM 文本成为另一份报告的事实来源。
 
 ---
 

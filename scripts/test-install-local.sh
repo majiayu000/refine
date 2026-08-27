@@ -308,12 +308,14 @@ if grep -Fq "$api_token" "${test_home}/Library/LaunchAgents/com.lifcc.refine-ser
 fi
 
 runtime_scripts=(
+  collect-cognitive-portrait.sh
   cognitive-portrait.sh
   daily-refresh.sh
   load-llm-env.sh
   quota-time.sh
   run-refine-server.sh
   runtime-job-lock.sh
+  validate-cognitive-portrait.sh
   weekly-insights.sh
 )
 for name in "${runtime_scripts[@]}"; do
@@ -349,6 +351,10 @@ grep -Fxq "cognitive_portrait_root=${portrait_root}" "${test_home}/.refine/insta
   || fail 'install manifest did not separate the portrait root from install source'
 grep -Fxq "source_root=${REPO_ROOT}" "${test_home}/.refine/install-manifest" \
   || fail 'install manifest lost its source checkout'
+grep -Fxq "cognitive_portrait_collector=${test_home}/.refine/scripts/collect-cognitive-portrait.sh" "${test_home}/.refine/install-manifest" \
+  || fail 'install manifest lost the cognitive portrait collector binding'
+grep -Fxq "cognitive_portrait_validator=${test_home}/.refine/scripts/validate-cognitive-portrait.sh" "${test_home}/.refine/install-manifest" \
+  || fail 'install manifest lost the cognitive portrait validator binding'
 
 mkdir -p "${test_home}/Library/Logs"
 printf '%s\n' 'portrait fixture log' > "${test_home}/Library/Logs/refine-portrait.log"
@@ -490,6 +496,30 @@ assert_contains "$healthy_doctor_output" 'PASS cognitive portrait WorkingDirecto
   'Doctor did not validate the portrait workspace contract'
 assert_contains "$healthy_doctor_output" 'PASS cognitive portrait latest artifact:' \
   'Doctor did not validate the latest portrait artifact'
+assert_contains "$healthy_doctor_output" 'PASS cognitive portrait collector path binding matches manifest' \
+  'Doctor did not validate the portrait collector path binding'
+assert_contains "$healthy_doctor_output" 'PASS cognitive portrait collector hash matches manifest' \
+  'Doctor did not validate the portrait collector hash'
+assert_contains "$healthy_doctor_output" 'PASS cognitive portrait validator path binding matches manifest' \
+  'Doctor did not validate the portrait validator path binding'
+assert_contains "$healthy_doctor_output" 'PASS cognitive portrait validator hash matches manifest' \
+  'Doctor did not validate the portrait validator hash'
+
+installed_collector="${test_home}/.refine/scripts/collect-cognitive-portrait.sh"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 99' > "$installed_collector"
+chmod 700 "$installed_collector"
+stale_collector_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$stale_collector_output" 'cognitive portrait collector hash mismatch' \
+  'Doctor accepted a collector whose hash differs from the manifest'
+assert_contains "$stale_collector_output" 'installed runtime script is stale:' \
+  'Doctor accepted a collector whose hash differs from the checkout'
+env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
+  /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start >/dev/null
+cmp -s "${SCRIPT_DIR}/collect-cognitive-portrait.sh" "$installed_collector" \
+  || fail 'repeated install did not repair the cognitive portrait collector'
 
 daily_plist_target="${TEST_ROOT}/daily-plist-target"
 mv "$daily_plist" "$daily_plist_target"

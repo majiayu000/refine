@@ -183,7 +183,7 @@ fn source_stats(sources: BTreeMap<String, SourceAccumulator>) -> Vec<SourceStats
         .collect()
 }
 
-fn report_source(document_source: &str) -> &str {
+pub(crate) fn report_source(document_source: &str) -> &str {
     match document_source {
         "claude-code-session" => "claude",
         "codex-session" => "codex",

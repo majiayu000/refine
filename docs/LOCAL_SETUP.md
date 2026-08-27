@@ -168,6 +168,10 @@ The workspace must already exist, must not be a symlink, and must contain both
 `docs/cognitive-portraits/INDEX.md`. Paths containing spaces are supported.
 The installer binds `WorkingDirectory` and `REFINE_ROOT` to that workspace and
 binds `REFINE_PORTRAIT_DIR` to its `docs/cognitive-portraits` archive.
+It also installs the deterministic `collect-cognitive-portrait.sh` and
+`validate-cognitive-portrait.sh` dependencies beside the scheduler wrapper,
+records their paths and SHA-256 hashes in the install manifest, and preserves
+the generated v4 bundle/quality artifacts under the portrait archive.
 
 On later installs, omit `--cognitive-portrait-root`: the installer preserves the
 root recorded in the manifest. When upgrading a legacy plist that has no
@@ -184,8 +188,8 @@ scripts/install-local.sh --no-cognitive-portrait
 
 Doctor treats a remaining portrait plist or loaded label as an orphan. When the
 job is enabled, Doctor verifies the manifest/plist root, output directory,
-agent executable, log binding, and latest archived portrait without reading or
-printing credential values.
+agent executable, collector/validator path and hash bindings, log binding, and
+latest archived portrait without reading or printing credential values.
 
 Write LaunchAgents without starting them:
 
