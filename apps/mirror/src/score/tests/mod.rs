@@ -1,8 +1,13 @@
 use super::*;
+use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 
-use refine_core::session::{ClusterResult, GlobalStats, ProjectCluster};
+use refine_core::error::InfraResult;
+use refine_core::infra::{LlmClient, SqliteStore};
+use refine_core::knowledge::Item;
+use refine_core::session::{ClusterResult, DataQualityStats, GlobalStats, ProjectCluster};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod baseline;
 mod compute;
@@ -17,6 +22,46 @@ fn required_advice_rejects_empty_observations() {
         .expect_err("required advice must fail without observations");
     assert!(error.to_string().contains("cannot be generated"));
     assert!(finish_without_observations(false, "no observations").is_ok());
+}
+
+struct CountingLlm {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl LlmClient for CountingLlm {
+    async fn complete(&self, _prompt: &str, _system: Option<&str>) -> InfraResult<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok("unused".into())
+    }
+}
+
+#[tokio::test]
+async fn score_handler_rejects_detached_only_cohort_before_persist_or_advice() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    store
+        .save(&Item::new_observation("detached", "legacy evidence"))
+        .await
+        .unwrap();
+    let llm = Arc::new(CountingLlm {
+        calls: AtomicUsize::new(0),
+    });
+    let dir = tempfile::tempdir().unwrap();
+
+    let error = handle_score(
+        store,
+        Some(llm.clone()),
+        None,
+        true,
+        true,
+        &dir.path().join("refine.db"),
+    )
+    .await
+    .expect_err("detached-only cohort must fail closed");
+
+    assert!(error.to_string().contains("No eligible linked"));
+    assert!(error.to_string().contains("refusing to persist"));
+    assert_eq!(llm.calls.load(Ordering::SeqCst), 0);
 }
 
 pub(super) fn make_cluster(
@@ -62,6 +107,7 @@ pub(super) fn make_cluster(
             tool_frequency: HashMap::new(),
             project_ranking: Vec::new(),
         },
+        data_quality: DataQualityStats::default(),
         untagged_count: 0,
     }
 }
@@ -111,6 +157,7 @@ pub(super) fn make_cluster_with_data(
             tool_frequency: HashMap::new(),
             project_ranking: Vec::new(),
         },
+        data_quality: DataQualityStats::default(),
         untagged_count: 0,
     }
 }

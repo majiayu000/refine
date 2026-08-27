@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use refine_core::session::RouteResult;
+use refine_core::session::{DataQualityStats, RouteResult};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 #[cfg(unix)]
@@ -8,7 +8,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_ENV: &str = "REFINE_INSIGHTS_CHECKPOINT_PATH";
-pub(crate) const CHECKPOINT_VERSION: u32 = 2;
+pub(crate) const CHECKPOINT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DatasetSignature {
@@ -22,6 +22,8 @@ pub(crate) struct DatasetSignature {
     pub llm_identity: String,
     #[serde(default)]
     pub prompt_identity: String,
+    #[serde(default)]
+    pub data_quality: DataQualityStats,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -175,6 +177,7 @@ mod tests {
             period_days: None,
             llm_identity: "test:model-a:endpoint-a".into(),
             prompt_identity: "insights:test-v1".into(),
+            data_quality: DataQualityStats::default(),
         };
         let mut checkpoint = InsightsCheckpoint::empty(signature);
         checkpoint.extend([RouteResult {
@@ -203,6 +206,7 @@ mod tests {
             period_days: None,
             llm_identity: "test:model-a:endpoint-a".into(),
             prompt_identity: "insights:test-v1".into(),
+            data_quality: DataQualityStats::default(),
         };
         let mut checkpoint = InsightsCheckpoint::empty(signature.clone());
         checkpoint.extend([RouteResult {
@@ -228,6 +232,20 @@ mod tests {
         };
         let reset = InsightsCheckpoint::load_matching_from(&path, llm_mismatch).unwrap();
         assert!(reset.route_results.is_empty());
+
+        let quality_mismatch = DatasetSignature {
+            data_quality: DataQualityStats {
+                input_observations: 3,
+                linked_observations: 2,
+                detached_observations: 1,
+                mode_excluded_observations: 0,
+                eligible_observations: 2,
+                cohort_identity: "sha256:changed".into(),
+            },
+            ..checkpoint.signature.clone()
+        };
+        let reset = InsightsCheckpoint::load_matching_from(&path, quality_mismatch).unwrap();
+        assert!(reset.route_results.is_empty());
     }
 
     #[cfg(unix)]
@@ -244,6 +262,7 @@ mod tests {
             period_days: Some(30),
             llm_identity: "private-provider".into(),
             prompt_identity: "prompt".into(),
+            data_quality: DataQualityStats::default(),
         };
         atomic_write_json(&path, &InsightsCheckpoint::empty(signature)).unwrap();
         assert_eq!(

@@ -116,6 +116,14 @@ pub async fn handle_score(
         );
     }
     let cluster = cluster_observations(&items);
+    if cluster.data_quality.eligible_observations == 0 {
+        anyhow::bail!(
+            "No eligible linked interactive observations in the score window (input {}, detached {}, mode-excluded {}); refusing to persist an empty score or generate advice",
+            cluster.data_quality.input_observations,
+            cluster.data_quality.detached_observations,
+            cluster.data_quality.mode_excluded_observations,
+        );
+    }
     let config = crate::config::load();
     let result = compute(&cluster, &config.targets);
 

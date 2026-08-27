@@ -2,7 +2,7 @@
 //!
 //! 将 10 路 LLM 分析结果合并为最终报告
 
-use super::clustering::GlobalStats;
+use super::clustering::{DataQualityStats, GlobalStats};
 use serde::{Deserialize, Serialize};
 
 const MAX_FINAL_CONTEXT: usize = 30_000;
@@ -67,13 +67,34 @@ pub fn format_global_stats(stats: &GlobalStats) -> String {
     out
 }
 
+/// Visible cohort metadata shared by prompts and persisted reports.
+pub fn format_data_quality_stats(quality: &DataQualityStats) -> String {
+    format!(
+        "状态: {} | 输入观测: {} | 已关联: {} ({:.1}%) | 脱链排除: {} | 模式排除: {} | 合格 cohort: {}",
+        quality.status_label(),
+        quality.input_observations,
+        quality.linked_observations,
+        quality.linked_ratio() * 100.0,
+        quality.detached_observations,
+        quality.mode_excluded_observations,
+        quality.eligible_observations,
+    )
+}
+
 /// 构建最终报告的 LLM prompt
 pub fn build_final_prompt(
     combined_analysis: &str,
     stats: &GlobalStats,
+    quality: &DataQualityStats,
     with_prescription: bool,
 ) -> String {
     let stats_summary = format_global_stats(stats);
+    let quality_summary = format_data_quality_stats(quality);
+    let trend_guard = if quality.is_degraded() {
+        "数据质量为 DEGRADED。脱链观测已从全部统计和证据中排除；不得据此输出跨期趋势、增减或改善/退化结论。"
+    } else {
+        "当前输入是单一窗口聚合；只有各维度分析提供显式时序证据时，才可输出趋势结论。"
+    };
 
     let prescription_section = if with_prescription {
         r#"
@@ -104,6 +125,10 @@ pub fn build_final_prompt(
 ## 全局数据
 {stats}
 
+## Cohort 与数据质量
+{quality}
+{trend_guard}
+
 ## 各维度分析
 {analysis}
 
@@ -126,7 +151,7 @@ pub fn build_final_prompt(
 反复出现的问题，用表格展示: | 问题类型 | 频率 | 典型例子 | 预防建议 |
 
 ## 认知状态
-Dreyfus 阶段评估（按领域）、学习深度、成长趋势。
+Dreyfus 阶段评估（按领域）、学习深度。仅当有显式时序证据且数据质量允许时写成长趋势，否则明确写“趋势不可判定”。
 
 ## 技术雷达
 | 环 | 技术/工具 | 说明 |
@@ -136,6 +161,8 @@ Dreyfus 阶段评估（按领域）、学习深度、成长趋势。
 当前模式分析和具体优化建议。{prescription_section}"#,
         sessions = stats.total_sessions,
         stats = stats_summary,
+        quality = quality_summary,
+        trend_guard = trend_guard,
         analysis = analysis,
     )
 }
@@ -169,5 +196,32 @@ mod tests {
         ];
         let merged = merge_route_results(&results);
         assert!(merged.find("## A").unwrap() < merged.find("## C").unwrap());
+    }
+
+    #[test]
+    fn degraded_final_prompt_forbids_trend_claims() {
+        let stats = GlobalStats {
+            total_sessions: 1,
+            total_decisions: 1,
+            total_bugfixes: 0,
+            total_summaries: 1,
+            cognitive_levels: Default::default(),
+            collaboration_modes: Default::default(),
+            tool_frequency: Default::default(),
+            project_ranking: vec![("refine".into(), 1)],
+        };
+        let quality = DataQualityStats {
+            input_observations: 3,
+            linked_observations: 2,
+            detached_observations: 1,
+            mode_excluded_observations: 0,
+            eligible_observations: 2,
+            cohort_identity: "sha256:test".into(),
+        };
+
+        let prompt = build_final_prompt("analysis", &stats, &quality, false);
+        assert!(prompt.contains("DEGRADED"));
+        assert!(prompt.contains("不得据此输出跨期趋势"));
+        assert!(prompt.contains("趋势不可判定"));
     }
 }

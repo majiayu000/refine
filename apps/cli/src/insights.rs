@@ -6,15 +6,31 @@ use chrono::{Duration, Utc};
 use refine_core::infra::{llm_with_retry_policy, LlmClient, LlmRetryPolicy};
 use refine_core::knowledge::{Document, DocumentRepository, ItemRepository};
 use refine_core::session::{
-    build_final_prompt, cluster_observations, merge_route_results, plan_routes, RouteResult,
-    INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
+    build_final_prompt, cluster_observations, format_data_quality_stats, merge_route_results,
+    plan_routes, DataQualityStats, RouteResult, INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
 };
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 const DEFAULT_LLM_CONCURRENCY: usize = 4;
 const FINAL_REPORT_REQUEST_TIMEOUT_MILLIS: u64 = 300_000;
-const INSIGHTS_PROMPT_IDENTITY: &str = "insights-v2:route-v1:final-v1";
+const INSIGHTS_PROMPT_IDENTITY: &str = "insights-v2:route-v2:final-v2";
+
+fn insights_window_label(period: Option<usize>) -> String {
+    match period {
+        Some(days) => format!("rolling {days} days (event time)"),
+        None => "all available observations".to_string(),
+    }
+}
+
+fn report_with_metadata(report: &str, period: Option<usize>, quality: &DataQualityStats) -> String {
+    format!(
+        "> Window: {}\n> Cohort: linked observations excluding unattended/subagent documents\n> Data quality: {}\n\n{}",
+        insights_window_label(period),
+        format_data_quality_stats(quality),
+        report,
+    )
+}
 
 fn llm_concurrency() -> Result<usize> {
     match std::env::var("REFINE_INSIGHTS_CONCURRENCY") {
@@ -90,6 +106,21 @@ pub async fn handle_insights(
     // Step 1: 本地聚类（纯 Rust，无 LLM）
     let cluster_result = cluster_observations(&observations);
     let stats = &cluster_result.global_stats;
+    let quality = &cluster_result.data_quality;
+
+    println!(
+        "Cohort: {}\nWindow: {}\n",
+        format_data_quality_stats(quality),
+        insights_window_label(options.period),
+    );
+    if quality.eligible_observations == 0 {
+        anyhow::bail!(
+            "没有可用于分析的已关联交互观测（输入 {}，脱链 {}，模式排除 {}）；拒绝生成空或错口径报告",
+            quality.input_observations,
+            quality.detached_observations,
+            quality.mode_excluded_observations,
+        );
+    }
 
     println!(
         "聚类完成: {} 个项目, {} sessions, {} decisions, {} bugs\n",
@@ -112,6 +143,7 @@ pub async fn handle_insights(
         period_days: options.period,
         llm_identity: client.cache_identity(),
         prompt_identity: INSIGHTS_PROMPT_IDENTITY.to_string(),
+        data_quality: quality.clone(),
     };
     let mut checkpoint = InsightsCheckpoint::load_matching(signature)?;
 
@@ -214,7 +246,7 @@ pub async fn handle_insights(
 
     // Step 4: 合并 + 最终报告
     let combined = merge_route_results(&checkpoint.route_results);
-    let final_prompt = build_final_prompt(&combined, stats, options.with_prescription);
+    let final_prompt = build_final_prompt(&combined, stats, quality, options.with_prescription);
 
     let report = llm_with_retry_policy(
         &client,
@@ -236,10 +268,11 @@ pub async fn handle_insights(
         )
     })?;
 
-    println!("{}", report);
+    let persisted_report = report_with_metadata(&report, options.period, quality);
+    println!("{}", persisted_report);
 
     // Step 5: 保存
-    let mut doc = Document::new("session-insights-v2", &report);
+    let mut doc = Document::new("session-insights-v2", &persisted_report);
     let title = format!(
         "Session Insights v2 {}",
         doc.created_at().format("%Y-%m-%d %H:%M")
@@ -257,7 +290,8 @@ pub async fn handle_insights(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_llm_concurrency;
+    use super::{parse_llm_concurrency, report_with_metadata};
+    use refine_core::session::DataQualityStats;
 
     #[test]
     fn insights_concurrency_requires_a_positive_integer() {
@@ -280,5 +314,27 @@ mod tests {
             policy.request_timeout_millis,
             FINAL_REPORT_REQUEST_TIMEOUT_MILLIS
         );
+    }
+
+    #[test]
+    fn persisted_report_exposes_window_cohort_and_degraded_quality() {
+        let report = report_with_metadata(
+            "# Session Insights Report\n\nbody",
+            Some(30),
+            &DataQualityStats {
+                input_observations: 10,
+                linked_observations: 8,
+                detached_observations: 2,
+                mode_excluded_observations: 3,
+                eligible_observations: 5,
+                cohort_identity: "sha256:test".into(),
+            },
+        );
+
+        assert!(report.contains("rolling 30 days (event time)"));
+        assert!(report.contains("linked observations excluding unattended/subagent"));
+        assert!(report.contains("DEGRADED"));
+        assert!(report.contains("脱链排除: 2"));
+        assert!(report.contains("# Session Insights Report"));
     }
 }

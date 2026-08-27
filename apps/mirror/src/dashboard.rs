@@ -83,6 +83,14 @@ pub async fn handle_dashboard(
     }
 
     let cluster = cluster_observations(&items);
+    if cluster.data_quality.eligible_observations == 0 {
+        anyhow::bail!(
+            "No eligible linked interactive observations in the dashboard window (input {}, detached {}, mode-excluded {}); refusing to persist an empty score",
+            cluster.data_quality.input_observations,
+            cluster.data_quality.detached_observations,
+            cluster.data_quality.mode_excluded_observations,
+        );
+    }
     let config = crate::config::load();
     let result = score::compute(&cluster, &config.targets);
     score::persist_score(&result).context("Failed to persist score")?;
@@ -280,6 +288,8 @@ fn display_width(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use refine_core::infra::SqliteStore;
+    use refine_core::knowledge::Item;
 
     #[test]
     fn test_padded_row_no_panic() {
@@ -322,5 +332,21 @@ mod tests {
     fn test_truncate() {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("hello world", 5), "hello…");
+    }
+
+    #[tokio::test]
+    async fn dashboard_handler_rejects_detached_only_cohort_before_persist() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        store
+            .save(&Item::new_observation("detached", "legacy evidence"))
+            .await
+            .unwrap();
+
+        let error = handle_dashboard(store, None, true)
+            .await
+            .expect_err("detached-only cohort must fail closed");
+
+        assert!(error.to_string().contains("No eligible linked"));
+        assert!(error.to_string().contains("refusing to persist"));
     }
 }

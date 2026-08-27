@@ -53,6 +53,24 @@ pub fn plan_routes(cluster: &ClusterResult) -> Vec<AnalysisRoute> {
         routes.push(build_friction_deep_dive(routes.len() + 1, cluster));
     }
 
+    let quality = &cluster.data_quality;
+    let trend_guard = if quality.is_degraded() {
+        "数据质量为 DEGRADED；脱链观测已排除。禁止输出跨期趋势、增减或改善/退化判断。"
+    } else {
+        "这是单一 cohort 聚合；没有显式时序证据时，不得推断趋势。"
+    };
+    let cohort_header = format!(
+        "## Cohort contract\neligible linked observations: {} | detached excluded: {} | mode excluded: {} | linked ratio: {:.1}%\n{}\n\n",
+        quality.eligible_observations,
+        quality.detached_observations,
+        quality.mode_excluded_observations,
+        quality.linked_ratio() * 100.0,
+        trend_guard,
+    );
+    for route in &mut routes {
+        route.prompt.insert_str(0, &cohort_header);
+    }
+
     routes
 }
 

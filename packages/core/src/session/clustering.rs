@@ -3,6 +3,8 @@
 //! 将 9740 条 observation 按项目分组、去重、统计，无 LLM 调用
 
 use crate::knowledge::{Item, ItemType};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 const META_TAGS: &[&str] = &[
@@ -75,17 +77,61 @@ pub struct GlobalStats {
     pub project_ranking: Vec<(String, usize)>,
 }
 
+/// Quality and cohort identity for one clustering input.
+///
+/// The analytics cohort is deliberately strict: an observation is eligible
+/// only when it is linked to a source document and that document is not tagged
+/// as an unattended or subagent session. The three terminal buckets therefore
+/// satisfy `input = detached + mode_excluded + eligible`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataQualityStats {
+    pub input_observations: usize,
+    pub linked_observations: usize,
+    pub detached_observations: usize,
+    pub mode_excluded_observations: usize,
+    pub eligible_observations: usize,
+    /// Stable identity of the exact eligible item set, used by checkpoints.
+    pub cohort_identity: String,
+}
+
+impl DataQualityStats {
+    pub fn linked_ratio(&self) -> f64 {
+        if self.input_observations == 0 {
+            1.0
+        } else {
+            self.linked_observations as f64 / self.input_observations as f64
+        }
+    }
+
+    pub fn is_degraded(&self) -> bool {
+        self.detached_observations > 0
+    }
+
+    pub fn status_label(&self) -> &'static str {
+        if self.is_degraded() {
+            "DEGRADED"
+        } else {
+            "OK"
+        }
+    }
+}
+
 /// 聚类结果
 #[derive(Debug)]
 pub struct ClusterResult {
     pub projects: HashMap<String, ProjectCluster>,
     pub global_stats: GlobalStats,
+    pub data_quality: DataQualityStats,
     pub untagged_count: usize,
 }
 
 /// 主函数：从全量 observation 生成聚类结果
 pub fn cluster_observations(items: &[Item]) -> ClusterResult {
-    let excluded_doc_ids: HashSet<String> = items
+    let observations: Vec<&Item> = items
+        .iter()
+        .filter(|item| item.item_type() == ItemType::Observation)
+        .collect();
+    let excluded_doc_ids: HashSet<String> = observations
         .iter()
         .filter(|item| {
             item.tags()
@@ -95,25 +141,52 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
         .filter_map(|item| item.document_id().map(|id| id.as_str().to_string()))
         .collect();
 
+    let input_observations = observations.len();
+    let linked_observations = observations
+        .iter()
+        .filter(|item| item.document_id().is_some())
+        .count();
+    let detached_observations = input_observations - linked_observations;
+    let mode_excluded_observations = observations
+        .iter()
+        .filter_map(|item| item.document_id())
+        .filter(|id| excluded_doc_ids.contains(id.as_str()))
+        .count();
+    let eligible_observations = linked_observations - mode_excluded_observations;
+
     // Single filtering pass: compute tags once per item to avoid double allocation.
     let obs_with_tags: Vec<(&Item, Vec<&str>)> = items
         .iter()
         .filter(|i| i.item_type() == ItemType::Observation)
         .filter(|item| {
-            let excluded_by_document = item
-                .document_id()
-                .is_some_and(|id| excluded_doc_ids.contains(id.as_str()));
-            let excluded_by_tag = item
-                .tags()
-                .iter()
-                .any(|tag| is_excluded_session_mode(tag.as_str()));
-            !excluded_by_document && !excluded_by_tag
+            item.document_id()
+                .is_some_and(|id| !excluded_doc_ids.contains(id.as_str()))
         })
         .map(|item| {
             let tags: Vec<&str> = item.tags().iter().map(|t| t.as_str()).collect();
             (item, tags)
         })
         .collect();
+    debug_assert_eq!(obs_with_tags.len(), eligible_observations);
+
+    let mut eligible_item_ids: Vec<&str> = obs_with_tags
+        .iter()
+        .map(|(item, _)| item.id().as_str())
+        .collect();
+    eligible_item_ids.sort_unstable();
+    let mut cohort_hasher = Sha256::new();
+    for id in eligible_item_ids {
+        cohort_hasher.update(id.as_bytes());
+        cohort_hasher.update([0]);
+    }
+    let data_quality = DataQualityStats {
+        input_observations,
+        linked_observations,
+        detached_observations,
+        mode_excluded_observations,
+        eligible_observations,
+        cohort_identity: format!("sha256:{:x}", cohort_hasher.finalize()),
+    };
 
     // Phase 0: Build doc_id → project mapping (reuses precomputed tags)
     let mut doc_project_map: HashMap<String, String> = HashMap::new();
@@ -267,6 +340,7 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
             tool_frequency: global_tools,
             project_ranking,
         },
+        data_quality,
         untagged_count,
     }
 }
@@ -369,6 +443,14 @@ mod tests {
     use chrono::Utc;
 
     fn observation(id: &str, doc_id: &str, tags: &[&str]) -> Item {
+        observation_with_document(id, Some(doc_id), tags)
+    }
+
+    fn detached_observation(id: &str, tags: &[&str]) -> Item {
+        observation_with_document(id, None, tags)
+    }
+
+    fn observation_with_document(id: &str, doc_id: Option<&str>, tags: &[&str]) -> Item {
         let now = Utc::now();
         Item::restore(RestoreParams {
             id: ItemId::from(id),
@@ -378,7 +460,7 @@ mod tests {
             content: "进展:\n- shipped one step\n\n问题:\n- what next?".to_string(),
             tags: tags.iter().map(|tag| Tag::new(tag).unwrap()).collect(),
             source: None,
-            document_id: Some(DocumentId::from(doc_id)),
+            document_id: doc_id.map(DocumentId::from),
             excerpt: None,
             created_at: now,
             updated_at: now,
@@ -501,6 +583,10 @@ mod tests {
 
         assert_eq!(cluster.global_stats.total_sessions, 2);
         assert_eq!(cluster.projects["project-a"].session_count, 2);
+        assert_eq!(cluster.data_quality.input_observations, 4);
+        assert_eq!(cluster.data_quality.linked_observations, 4);
+        assert_eq!(cluster.data_quality.mode_excluded_observations, 2);
+        assert_eq!(cluster.data_quality.eligible_observations, 2);
     }
 
     #[test]
@@ -512,5 +598,89 @@ mod tests {
 
         assert_eq!(cluster.global_stats.total_sessions, 0);
         assert!(cluster.projects.is_empty());
+    }
+
+    #[test]
+    fn detached_facets_are_excluded_from_all_analytics() {
+        let cluster = cluster_observations(&[
+            observation(
+                "linked-summary",
+                "doc-1",
+                &["project-a", "session_mode_unknown"],
+            ),
+            observation("linked-decision", "doc-1", &["project-a", "decision"]),
+            observation("linked-bug", "doc-1", &["project-a", "bugfix"]),
+            detached_observation("detached-decision", &["project-b", "decision"]),
+            detached_observation("detached-bug", &["project-b", "bugfix"]),
+        ]);
+
+        assert_eq!(cluster.global_stats.total_sessions, 1);
+        assert_eq!(cluster.global_stats.total_decisions, 1);
+        assert_eq!(cluster.global_stats.total_bugfixes, 1);
+        assert_eq!(
+            cluster.global_stats.project_ranking,
+            vec![("project-a".into(), 1)]
+        );
+        assert!(!cluster.projects.contains_key("project-b"));
+        assert_eq!(cluster.data_quality.input_observations, 5);
+        assert_eq!(cluster.data_quality.linked_observations, 3);
+        assert_eq!(cluster.data_quality.detached_observations, 2);
+        assert_eq!(cluster.data_quality.mode_excluded_observations, 0);
+        assert_eq!(cluster.data_quality.eligible_observations, 3);
+        assert!((cluster.data_quality.linked_ratio() - 0.6).abs() < f64::EPSILON);
+        assert!(cluster.data_quality.is_degraded());
+    }
+
+    #[test]
+    fn strict_cohort_matches_the_documented_production_baseline_fixture() {
+        const SESSIONS: usize = 3_786;
+        const LINKED_DECISIONS: usize = 16_461;
+        const LINKED_BUGFIXES: usize = 9_135;
+        const REPORTED_DECISIONS: usize = 59_424;
+        const REPORTED_BUGFIXES: usize = 28_538;
+
+        let mut items = Vec::with_capacity(SESSIONS + REPORTED_DECISIONS + REPORTED_BUGFIXES);
+        for index in 0..SESSIONS {
+            items.push(observation(
+                &format!("summary-{index}"),
+                &format!("doc-{index}"),
+                &["baseline", "session_mode_unknown"],
+            ));
+        }
+        for index in 0..LINKED_DECISIONS {
+            items.push(observation(
+                &format!("linked-decision-{index}"),
+                &format!("doc-{}", index % SESSIONS),
+                &["baseline", "decision"],
+            ));
+        }
+        for index in 0..LINKED_BUGFIXES {
+            items.push(observation(
+                &format!("linked-bugfix-{index}"),
+                &format!("doc-{}", index % SESSIONS),
+                &["baseline", "bugfix"],
+            ));
+        }
+        for index in LINKED_DECISIONS..REPORTED_DECISIONS {
+            items.push(detached_observation(
+                &format!("detached-decision-{index}"),
+                &["baseline", "decision"],
+            ));
+        }
+        for index in LINKED_BUGFIXES..REPORTED_BUGFIXES {
+            items.push(detached_observation(
+                &format!("detached-bugfix-{index}"),
+                &["baseline", "bugfix"],
+            ));
+        }
+
+        let cluster = cluster_observations(&items);
+        assert_eq!(cluster.global_stats.total_sessions, SESSIONS);
+        assert_eq!(cluster.global_stats.total_decisions, LINKED_DECISIONS);
+        assert_eq!(cluster.global_stats.total_bugfixes, LINKED_BUGFIXES);
+        assert_eq!(
+            cluster.data_quality.detached_observations,
+            (REPORTED_DECISIONS - LINKED_DECISIONS) + (REPORTED_BUGFIXES - LINKED_BUGFIXES)
+        );
     }
 }

@@ -5,8 +5,8 @@ use crate::score::{self, layer_display, Signal};
 use anyhow::Result;
 use refine_core::infra::{llm_with_retry, LlmClient};
 use refine_core::knowledge::{DocumentRepository, Item, ItemRepository, ItemType};
-use refine_core::session::{cluster_observations, ClusterResult};
-use std::collections::HashMap;
+use refine_core::session::{cluster_observations, format_data_quality_stats, ClusterResult};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 struct ProjectStat {
@@ -88,14 +88,21 @@ fn extract_profile_data(
 
     // Session complexity: count observations per document_id
     let mut doc_obs_count: HashMap<String, usize> = HashMap::new();
+    let eligible_doc_ids: HashSet<&str> = cluster
+        .projects
+        .values()
+        .flat_map(|project| project.doc_ids.iter().map(String::as_str))
+        .collect();
     for item in items
         .iter()
         .filter(|i| i.item_type() == ItemType::Observation)
     {
         if let Some(doc_id) = item.document_id() {
-            *doc_obs_count
-                .entry(doc_id.as_str().to_string())
-                .or_insert(0) += 1;
+            if eligible_doc_ids.contains(doc_id.as_str()) {
+                *doc_obs_count
+                    .entry(doc_id.as_str().to_string())
+                    .or_insert(0) += 1;
+            }
         }
     }
 
@@ -182,6 +189,17 @@ fn build_profile_prompt(data: &ProfileData, cluster: &ClusterResult) -> String {
     ));
     lines.push(String::new());
     lines.push(format!("Current signal lights: {}", data.score_summary));
+    lines.push(String::new());
+    lines.push(format!(
+        "Cohort and data quality: {}",
+        format_data_quality_stats(&cluster.data_quality)
+    ));
+    if cluster.data_quality.is_degraded() {
+        lines.push(
+            "Detached observations were excluded. Do not claim historical improvement, decline, or other cross-window trends."
+                .to_string(),
+        );
+    }
 
     // Per-project facet dimensions (total budget capped to avoid LLM context overflow)
     let mut facet_chars_used: usize = 0;
@@ -234,6 +252,14 @@ fn system_prompt() -> &'static str {
     )
 }
 
+fn profile_with_metadata(narrative: &str, cluster: &ClusterResult) -> String {
+    format!(
+        "> Cohort: linked observations excluding unattended/subagent documents\n> Data quality: {}\n\n{}",
+        format_data_quality_stats(&cluster.data_quality),
+        narrative,
+    )
+}
+
 fn format_score_summary(score: &score::ScoreResult) -> String {
     score
         .layers
@@ -250,7 +276,7 @@ fn format_score_summary(score: &score::ScoreResult) -> String {
         .join(", ")
 }
 
-fn save_profile_summary(data: &ProfileData) -> Result<()> {
+fn save_profile_summary(data: &ProfileData, cluster: &ClusterResult) -> Result<()> {
     let dir = ensure_mirror_dir()?;
     let path = dir.join("profile-summary.txt");
     let mut lines = Vec::new();
@@ -269,6 +295,10 @@ fn save_profile_summary(data: &ProfileData) -> Result<()> {
         data.decision_bugfix_ratio
     ));
     lines.push(format!("signals: {}", data.score_summary));
+    lines.push(format!(
+        "data-quality: {}",
+        format_data_quality_stats(&cluster.data_quality)
+    ));
     std::fs::write(&path, lines.join("\n"))?;
     Ok(())
 }
@@ -289,6 +319,14 @@ pub async fn handle_profile(
     }
 
     let cluster = cluster_observations(&items);
+    if cluster.data_quality.eligible_observations == 0 {
+        anyhow::bail!(
+            "No eligible linked interactive observations (input {}, detached {}, mode-excluded {}); refusing to generate a profile",
+            cluster.data_quality.input_observations,
+            cluster.data_quality.detached_observations,
+            cluster.data_quality.mode_excluded_observations,
+        );
+    }
     let config = crate::config::load();
     let score_result = score::compute(&cluster, &config.targets);
     let score_summary = format_score_summary(&score_result);
@@ -305,12 +343,13 @@ pub async fn handle_profile(
         .await
         .map_err(|e| anyhow::anyhow!("LLM profile generation failed: {}", e))?;
 
-    println!("{}", narrative);
+    let persisted_narrative = profile_with_metadata(&narrative, &cluster);
+    println!("{}", persisted_narrative);
 
-    save_profile_summary(&data)?;
+    save_profile_summary(&data, &cluster)?;
     let doc_id = save_report_to_document(
         &doc_repo,
-        &narrative,
+        &persisted_narrative,
         SaveDocumentOptions {
             source: "mirror-profile",
             title_prefix: "Mirror Profile",
@@ -326,7 +365,7 @@ pub async fn handle_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use refine_core::session::{ClusterResult, GlobalStats, ProjectCluster};
+    use refine_core::session::{ClusterResult, DataQualityStats, GlobalStats, ProjectCluster};
     use std::collections::{HashMap, HashSet};
 
     fn make_cluster() -> ClusterResult {
@@ -417,6 +456,14 @@ mod tests {
                 tool_frequency: HashMap::new(),
                 project_ranking: vec![("proj-a".to_string(), 50), ("proj-b".to_string(), 20)],
             },
+            data_quality: DataQualityStats {
+                input_observations: 450,
+                linked_observations: 450,
+                detached_observations: 0,
+                mode_excluded_observations: 0,
+                eligible_observations: 450,
+                cohort_identity: "sha256:test-profile".into(),
+            },
             untagged_count: 0,
         }
     }
@@ -476,6 +523,15 @@ mod tests {
         assert!(prompt.contains("proj-a"));
         assert!(prompt.contains("100 decisions vs 50 bugfixes"));
         assert!(prompt.contains("Depth G, Breadth Y"));
+        assert!(prompt.contains("data quality"));
+    }
+
+    #[test]
+    fn persisted_profile_exposes_cohort_and_quality() {
+        let report = profile_with_metadata("profile body", &make_cluster());
+        assert!(report.contains("linked observations excluding unattended/subagent"));
+        assert!(report.contains("Data quality: 状态: OK"));
+        assert!(report.ends_with("profile body"));
     }
 
     #[test]

@@ -169,6 +169,34 @@ parser；`local` 路径使用以下 JSONL 规则。`--legacy-local-scan` 只是
 
 ### 聚合分析维度
 
+#### Cohort 与数据质量合同
+
+所有 Session Insights 指标、项目排名、路由 prompt 和最终报告使用同一个
+eligible cohort。Observation 必须同时满足：
+
+1. `document_id` 指向一个现存 Session Document；
+2. 同一 Document 的 Observation 中没有
+   `session_mode_unattended` 或 `session_mode_subagent` 标签。
+
+`session_mode_interactive` 和已关联的 `session_mode_unknown` 保留。脱链
+Observation 不删除、不猜测归属，但不得进入 session、decision、bugfix、project、
+cognitive、collaboration 的任何分子、分母、排名或 prompt 证据。
+
+`ClusterResult.data_quality` 暴露 input、linked、detached、mode-excluded、eligible
+计数、linked ratio 和 eligible item set 的稳定 identity。三类终态满足
+`input = detached + mode-excluded + eligible`，且
+`linked = mode-excluded + eligible`。
+
+CLI stdout 和保存的 `session-insights-v2` 文档必须写明窗口、cohort 和上述质量
+统计。存在 detached Observation 时状态为 `DEGRADED`，可以对严格 eligible
+cohort 做当前窗口描述，但禁止输出跨期增减、改善或退化结论。eligible 为 0 时
+直接失败，不生成空口径报告。Insights checkpoint signature 包含完整数据质量统计
+和 cohort identity；关联质量或 eligible item set 变化后不得复用旧路由结果。
+
+回归 fixture 固定重现问题发现时的口径差异：旧混合口径为 3,786 sessions、
+59,424 decisions、28,538 bugfixes；严格 linked cohort 必须得到 3,786、16,461、
+9,135。该 fixture 仅用于测试，不是生产阈值。
+
 #### L1 认知演进
 - **Dreyfus 迁移**：按 `domain` 分组，追踪 `depth` 从 syntax→design 的变化
 - **Bloom 认知层级**：`cognitive_level` 的分布趋势

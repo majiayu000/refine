@@ -11,7 +11,7 @@ use super::types::ScoreResult;
 // ── Persistence ──
 
 const SCORE_HISTORY_LIMIT: usize = 365;
-pub(super) const SCORE_SCHEMA_VERSION: u32 = 3;
+pub(super) const SCORE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Serialize)]
 struct CurrentScore<'a> {
@@ -158,7 +158,7 @@ pub(super) fn load_recent_scores_from_path(path: &Path, n: usize) -> Result<Vec<
     let mut compatible = Vec::new();
     for line in load_score_history_lines(path)? {
         match score_schema_version(&line.json, line.number, path)? {
-            None | Some(0..=2) => {}
+            None | Some(0..=3) => {}
             Some(SCORE_SCHEMA_VERSION) => {
                 compatible.push(parse_history_line::<ScoreResult>(
                     &line.json,

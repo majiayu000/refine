@@ -283,7 +283,7 @@ mod tests {
     use super::*;
     use crate::score::{LayerScore, ScoreResult};
     use chrono::{DateTime, Utc};
-    use refine_core::session::GlobalStats;
+    use refine_core::session::{DataQualityStats, GlobalStats};
     use std::collections::HashMap;
 
     fn indicator(name: &str, actual: f64, signal: Signal) -> Indicator {
@@ -355,6 +355,7 @@ mod tests {
                 tool_frequency: HashMap::new(),
                 project_ranking,
             },
+            data_quality: DataQualityStats::default(),
             untagged_count: 0,
         }
     }
