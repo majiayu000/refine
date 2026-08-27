@@ -141,9 +141,12 @@ pub enum Commands {
     },
     /// 生成认知洞察报告
     Insights {
-        /// 分析最近 N 天（默认全部）
-        #[arg(short, long)]
+        /// 分析最近 N 天并比较前一等长窗口（默认 7 天）
+        #[arg(short, long, conflicts_with = "all")]
         period: Option<usize>,
+        /// 显式生成全历史 snapshot；不输出跨期趋势
+        #[arg(long, conflicts_with = "period")]
+        all: bool,
         /// 生成 L4 处方（需要 LLM）
         #[arg(long)]
         prescription: bool,
@@ -275,5 +278,22 @@ mod tests {
         let error = IngestProvider::resolve(provider, legacy_local_scan)
             .expect_err("remem and the local alias contradict each other");
         assert!(error.to_string().contains("--provider local"));
+    }
+
+    #[test]
+    fn insights_requires_explicit_all_for_full_history() {
+        let cli = Cli::try_parse_from(["refine", "insights"]).unwrap();
+        let Commands::Insights { period, all, .. } = cli.command else {
+            panic!("expected insights");
+        };
+        assert_eq!(period.unwrap_or(7), 7);
+        assert!(!all);
+
+        let cli = Cli::try_parse_from(["refine", "insights", "--all"]).unwrap();
+        let Commands::Insights { all, .. } = cli.command else {
+            panic!("expected insights");
+        };
+        assert!(all);
+        assert!(Cli::try_parse_from(["refine", "insights", "--all", "--period", "7"]).is_err());
     }
 }

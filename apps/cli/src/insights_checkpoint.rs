@@ -8,7 +8,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_ENV: &str = "REFINE_INSIGHTS_CHECKPOINT_PATH";
-pub(crate) const CHECKPOINT_VERSION: u32 = 3;
+pub(crate) const CHECKPOINT_VERSION: u32 = 5;
+const RESUME_MAX_AGE_HOURS: i64 = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DatasetSignature {
@@ -23,6 +24,22 @@ pub(crate) struct DatasetSignature {
     #[serde(default)]
     pub prompt_identity: String,
     #[serde(default)]
+    pub window_start: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub window_end: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub event_time_cutoff: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub previous_cohort_identity: Option<String>,
+    #[serde(default)]
+    pub manifest_identity: String,
+    #[serde(default)]
+    pub source_revision: String,
+    #[serde(default)]
+    pub binary_identity: String,
+    #[serde(default)]
+    pub route_identity: String,
+    #[serde(default)]
     pub data_quality: DataQualityStats,
 }
 
@@ -34,6 +51,63 @@ pub(crate) struct InsightsCheckpoint {
 }
 
 impl InsightsCheckpoint {
+    /// Reuse the exact event-time cutoff only for a recent, configuration-
+    /// compatible interrupted run. The complete manifest is still compared by
+    /// `load_matching` after both windows have been loaded.
+    pub(crate) fn reusable_cutoff(
+        period_days: Option<usize>,
+        with_prescription: bool,
+        llm_identity: &str,
+        prompt_identity: &str,
+        source_revision: &str,
+    ) -> Result<Option<DateTime<Utc>>> {
+        let path = checkpoint_path()?;
+        Self::reusable_cutoff_from(
+            &path,
+            period_days,
+            with_prescription,
+            llm_identity,
+            prompt_identity,
+            source_revision,
+        )
+    }
+
+    fn reusable_cutoff_from(
+        path: &Path,
+        period_days: Option<usize>,
+        with_prescription: bool,
+        llm_identity: &str,
+        prompt_identity: &str,
+        source_revision: &str,
+    ) -> Result<Option<DateTime<Utc>>> {
+        if source_revision == "unknown" {
+            return Ok(None);
+        }
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("读取 insights checkpoint 失败: {}", path.display()));
+            }
+        };
+        let checkpoint: Self = serde_json::from_str(&content).with_context(|| {
+            format!("insights checkpoint 损坏，拒绝静默忽略: {}", path.display())
+        })?;
+        let age = Utc::now().signed_duration_since(checkpoint.updated_at);
+        let compatible = checkpoint.signature.checkpoint_version == CHECKPOINT_VERSION
+            && checkpoint.signature.period_days == period_days
+            && checkpoint.signature.with_prescription == with_prescription
+            && checkpoint.signature.llm_identity == llm_identity
+            && checkpoint.signature.prompt_identity == prompt_identity
+            && checkpoint.signature.source_revision == source_revision
+            && age >= chrono::Duration::zero()
+            && age <= chrono::Duration::hours(RESUME_MAX_AGE_HOURS);
+        Ok(compatible
+            .then_some(checkpoint.signature.event_time_cutoff)
+            .flatten())
+    }
+
     pub(crate) fn load_matching(signature: DatasetSignature) -> Result<Self> {
         let path = checkpoint_path()?;
         Self::load_matching_from(&path, signature)
@@ -177,6 +251,14 @@ mod tests {
             period_days: None,
             llm_identity: "test:model-a:endpoint-a".into(),
             prompt_identity: "insights:test-v1".into(),
+            window_start: None,
+            window_end: None,
+            event_time_cutoff: None,
+            previous_cohort_identity: None,
+            manifest_identity: "sha256:manifest-a".into(),
+            source_revision: "revision-a".into(),
+            binary_identity: "sha256:binary-a".into(),
+            route_identity: "sha256:route-a".into(),
             data_quality: DataQualityStats::default(),
         };
         let mut checkpoint = InsightsCheckpoint::empty(signature);
@@ -206,6 +288,14 @@ mod tests {
             period_days: None,
             llm_identity: "test:model-a:endpoint-a".into(),
             prompt_identity: "insights:test-v1".into(),
+            window_start: None,
+            window_end: None,
+            event_time_cutoff: None,
+            previous_cohort_identity: None,
+            manifest_identity: "sha256:manifest-a".into(),
+            source_revision: "revision-a".into(),
+            binary_identity: "sha256:binary-a".into(),
+            route_identity: "sha256:route-a".into(),
             data_quality: DataQualityStats::default(),
         };
         let mut checkpoint = InsightsCheckpoint::empty(signature.clone());
@@ -239,6 +329,7 @@ mod tests {
                 linked_observations: 2,
                 detached_observations: 1,
                 mode_excluded_observations: 0,
+                source_excluded_observations: 0,
                 eligible_observations: 2,
                 cohort_identity: "sha256:changed".into(),
             },
@@ -246,6 +337,72 @@ mod tests {
         };
         let reset = InsightsCheckpoint::load_matching_from(&path, quality_mismatch).unwrap();
         assert!(reset.route_results.is_empty());
+
+        let manifest_mismatch = DatasetSignature {
+            manifest_identity: "sha256:manifest-b".into(),
+            ..checkpoint.signature.clone()
+        };
+        let reset = InsightsCheckpoint::load_matching_from(&path, manifest_mismatch).unwrap();
+        assert!(reset.route_results.is_empty());
+    }
+
+    #[test]
+    fn reusable_cutoff_requires_matching_run_contract() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("checkpoint.json");
+        let cutoff = Utc::now();
+        let signature = DatasetSignature {
+            checkpoint_version: CHECKPOINT_VERSION,
+            observation_count: 1,
+            latest_updated_at: Utc::now(),
+            with_prescription: true,
+            period_days: Some(7),
+            llm_identity: "model".into(),
+            prompt_identity: "prompt".into(),
+            window_start: None,
+            window_end: None,
+            event_time_cutoff: Some(cutoff),
+            previous_cohort_identity: None,
+            manifest_identity: "manifest".into(),
+            source_revision: "revision".into(),
+            binary_identity: "sha256:binary".into(),
+            route_identity: "sha256:route".into(),
+            data_quality: DataQualityStats::default(),
+        };
+        atomic_write_json(&path, &InsightsCheckpoint::empty(signature)).unwrap();
+
+        let reusable = InsightsCheckpoint::reusable_cutoff_from(
+            &path,
+            Some(7),
+            true,
+            "model",
+            "prompt",
+            "revision",
+        )
+        .unwrap();
+        assert_eq!(reusable, Some(cutoff));
+
+        let mismatched = InsightsCheckpoint::reusable_cutoff_from(
+            &path,
+            Some(30),
+            true,
+            "model",
+            "prompt",
+            "revision",
+        )
+        .unwrap();
+        assert_eq!(mismatched, None);
+
+        let unknown_revision = InsightsCheckpoint::reusable_cutoff_from(
+            &path,
+            Some(7),
+            true,
+            "model",
+            "prompt",
+            "unknown",
+        )
+        .unwrap();
+        assert_eq!(unknown_revision, None);
     }
 
     #[cfg(unix)]
@@ -262,6 +419,14 @@ mod tests {
             period_days: Some(30),
             llm_identity: "private-provider".into(),
             prompt_identity: "prompt".into(),
+            window_start: None,
+            window_end: None,
+            event_time_cutoff: None,
+            previous_cohort_identity: None,
+            manifest_identity: "sha256:manifest".into(),
+            source_revision: "revision".into(),
+            binary_identity: "sha256:binary".into(),
+            route_identity: "sha256:route".into(),
             data_quality: DataQualityStats::default(),
         };
         atomic_write_json(&path, &InsightsCheckpoint::empty(signature)).unwrap();

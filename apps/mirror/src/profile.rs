@@ -1,13 +1,16 @@
-use crate::config::ensure_mirror_dir;
 use crate::document_save::{save_report_to_document, SaveDocumentOptions};
 use crate::lang::t;
 use crate::score::{self, layer_display, Signal};
 use anyhow::Result;
+use chrono::{Duration, Utc};
 use refine_core::infra::{llm_with_retry, LlmClient};
 use refine_core::knowledge::{DocumentRepository, Item, ItemRepository, ItemType};
 use refine_core::session::{cluster_observations, format_data_quality_stats, ClusterResult};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+#[cfg(test)]
+use std::path::Path;
 
 struct ProjectStat {
     name: String,
@@ -254,7 +257,7 @@ fn system_prompt() -> &'static str {
 
 fn profile_with_metadata(narrative: &str, cluster: &ClusterResult) -> String {
     format!(
-        "> Cohort: linked observations excluding unattended/subagent documents\n> Data quality: {}\n\n{}",
+        "> Cohort: linked observations excluding unattended/subagent documents\n> Window: rolling 90 days (event time)\n> Data quality: {}\n\n{}",
         format_data_quality_stats(&cluster.data_quality),
         narrative,
     )
@@ -276,9 +279,7 @@ fn format_score_summary(score: &score::ScoreResult) -> String {
         .join(", ")
 }
 
-fn save_profile_summary(data: &ProfileData, cluster: &ClusterResult) -> Result<()> {
-    let dir = ensure_mirror_dir()?;
-    let path = dir.join("profile-summary.txt");
+fn profile_summary_text(data: &ProfileData, cluster: &ClusterResult) -> String {
     let mut lines = Vec::new();
     lines.push(format!(
         "{} sessions, {} projects",
@@ -299,8 +300,31 @@ fn save_profile_summary(data: &ProfileData, cluster: &ClusterResult) -> Result<(
         "data-quality: {}",
         format_data_quality_stats(&cluster.data_quality)
     ));
-    std::fs::write(&path, lines.join("\n"))?;
-    Ok(())
+    lines.join("\n")
+}
+
+fn save_profile_summary(data: &ProfileData, cluster: &ClusterResult) -> Result<()> {
+    crate::advice::save_profile_context(
+        &profile_summary_text(data, cluster),
+        "rolling 90 days (event time)",
+        &cluster.data_quality.cohort_identity,
+    )
+}
+
+#[cfg(test)]
+fn save_profile_summary_to_path(
+    data: &ProfileData,
+    cluster: &ClusterResult,
+    path: &Path,
+    generated_at: chrono::DateTime<Utc>,
+) -> Result<()> {
+    crate::advice::save_profile_context_to_path(
+        path,
+        &profile_summary_text(data, cluster),
+        "rolling 90 days (event time)",
+        &cluster.data_quality.cohort_identity,
+        generated_at,
+    )
 }
 
 pub async fn handle_profile(
@@ -308,20 +332,30 @@ pub async fn handle_profile(
     doc_repo: Arc<dyn DocumentRepository>,
     llm: Arc<dyn LlmClient>,
 ) -> Result<()> {
+    let now = Utc::now();
     let items = item_repo
-        .find_all()
+        .find_observations_by_event_range(
+            now - Duration::days(crate::advice::LONG_TERM_WINDOW_DAYS),
+            now,
+        )
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     if items.is_empty() {
-        println!("{}", t!("No observations found.", "未找到观测数据。"));
+        println!(
+            "{}",
+            t!(
+                "No observations found in the rolling 90-day event-time window.",
+                "滚动 90 天事件时间窗口内未找到观测数据。"
+            )
+        );
         return Ok(());
     }
 
     let cluster = cluster_observations(&items);
     if cluster.data_quality.eligible_observations == 0 {
         anyhow::bail!(
-            "No eligible linked interactive observations (input {}, detached {}, mode-excluded {}); refusing to generate a profile",
+            "No eligible linked interactive observations in the rolling 90-day event-time window (input {}, detached {}, mode-excluded {}); refusing to generate a profile",
             cluster.data_quality.input_observations,
             cluster.data_quality.detached_observations,
             cluster.data_quality.mode_excluded_observations,
@@ -461,8 +495,9 @@ mod tests {
                 linked_observations: 450,
                 detached_observations: 0,
                 mode_excluded_observations: 0,
+                source_excluded_observations: 0,
                 eligible_observations: 450,
-                cohort_identity: "sha256:test-profile".into(),
+                cohort_identity: format!("sha256:{}", "a".repeat(64)),
             },
             untagged_count: 0,
         }
@@ -488,6 +523,31 @@ mod tests {
         assert!((data.project_stats[0].delegation_pct - 60.0).abs() < f64::EPSILON);
 
         assert_eq!(data.project_stats[1].name, "proj-b");
+    }
+
+    #[test]
+    fn rolling_90_day_profile_writer_round_trips_into_advice_loader() {
+        let cluster = make_cluster();
+        let data = extract_profile_data(&cluster, "Depth G, Breadth Y", &[]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile-summary.json");
+        let now = Utc::now();
+
+        save_profile_summary_to_path(&data, &cluster, &path, now - Duration::hours(1)).unwrap();
+        let loaded = crate::advice::load_profile_context_from_path(
+            &path,
+            now,
+            &cluster.data_quality.cohort_identity,
+        )
+        .unwrap()
+        .expect("rolling-90-day profile should be accepted by advice");
+
+        assert!(loaded.contains("window=rolling 90 days (event time)"));
+        assert!(loaded.contains("70 sessions, 2 projects"));
+        assert!(loaded.contains(&format!(
+            "cohort_identity={}",
+            cluster.data_quality.cohort_identity
+        )));
     }
 
     #[test]

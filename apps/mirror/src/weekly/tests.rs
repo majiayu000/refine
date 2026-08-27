@@ -114,6 +114,7 @@ fn cluster_with_project_evidence() -> ClusterResult {
             linked_observations: 1,
             detached_observations: 0,
             mode_excluded_observations: 0,
+            source_excluded_observations: 0,
             eligible_observations: 1,
             cohort_identity: "sha256:test-weekly".into(),
         },
@@ -186,6 +187,7 @@ fn test_build_weekly_report_with_prior_data_shows_delta() {
         linked_observations: 1,
         detached_observations: 0,
         mode_excluded_observations: 0,
+        source_excluded_observations: 0,
         eligible_observations: 1,
         cohort_identity: "sha256:last-week".into(),
     };
@@ -237,6 +239,7 @@ fn degraded_quality_suppresses_week_over_week_trend() {
         linked_observations: 2,
         detached_observations: 1,
         mode_excluded_observations: 0,
+        source_excluded_observations: 0,
         eligible_observations: 2,
         cohort_identity: "sha256:degraded".into(),
     };
@@ -300,6 +303,63 @@ fn test_build_weekly_report_includes_action_card_from_same_cluster() {
     assert!(report.contains("Weekly Action Card"));
     assert!(report.contains("codex-tool"));
     assert!(report.contains("validate Codex session attribution"));
+}
+
+#[test]
+fn fragmented_other_only_cohort_keeps_weekly_report_without_action_card() {
+    let score = ScoreResult {
+        layers: [
+            LayerScore {
+                name: "depth".into(),
+                signal: Signal::Green,
+                indicators: Vec::new(),
+            },
+            LayerScore {
+                name: "breadth".into(),
+                signal: Signal::Red,
+                indicators: vec![
+                    Indicator {
+                        name: "exploration".into(),
+                        actual: 20.0,
+                        target: ">15%".into(),
+                        signal: Signal::Green,
+                    },
+                    Indicator {
+                        name: "deep_invest".into(),
+                        actual: 5.0,
+                        target: "15-30%".into(),
+                        signal: Signal::Red,
+                    },
+                    Indicator {
+                        name: "fragmentation".into(),
+                        actual: 40.0,
+                        target: "<20%".into(),
+                        signal: Signal::Red,
+                    },
+                ],
+            },
+            LayerScore {
+                name: "collaboration".into(),
+                signal: Signal::Green,
+                indicators: Vec::new(),
+            },
+        ],
+        tension: None,
+        timestamp: Utc::now(),
+    };
+    let mut other = cluster_with_project_evidence();
+    let mut project = other.projects.remove("codex-tool").unwrap();
+    project.project_name = "other".into();
+    other.projects.insert("other".into(), project);
+    other.global_stats.project_ranking = vec![("other".into(), 1)];
+
+    let report = build_weekly_report_with_portfolio(&score, None, &other, &score, &other)
+        .expect("synthetic-only cohort must not abort the weekly report");
+
+    assert!(report.contains("This Week Signals"));
+    assert!(report.contains("One-off Project Share=40.0"));
+    assert!(report.contains("Data quality:"));
+    assert!(!report.contains("Weekly Action Card"));
 }
 
 #[test]

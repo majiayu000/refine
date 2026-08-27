@@ -273,7 +273,7 @@ pub fn handle_motd() -> Result<()> {
         .unwrap_or_else(|| "general".to_string());
 
     let mut advice_stale = false;
-    let tip = match crate::advice::load_cached() {
+    let tip = match crate::advice::load_cached_for_score(current) {
         Ok(Some(cached)) if !cached.is_stale() => cached.advice,
         Ok(Some(_)) => {
             advice_stale = true;

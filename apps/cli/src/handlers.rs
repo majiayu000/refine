@@ -84,6 +84,7 @@ pub async fn run(
         }
         Commands::Insights {
             period,
+            all,
             prescription,
         } => {
             let llm_client = Some(build_llm_client_from_env()?);
@@ -91,7 +92,8 @@ pub async fn run(
             let doc_store: Arc<dyn DocumentRepository> = store.clone();
             handle_insights(
                 InsightsOptions {
-                    period,
+                    period: if all { None } else { Some(period.unwrap_or(7)) },
+                    all_snapshot: all,
                     with_prescription: prescription,
                 },
                 item_store,

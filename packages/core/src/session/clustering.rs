@@ -81,14 +81,17 @@ pub struct GlobalStats {
 ///
 /// The analytics cohort is deliberately strict: an observation is eligible
 /// only when it is linked to a source document and that document is not tagged
-/// as an unattended or subagent session. The three terminal buckets therefore
-/// satisfy `input = detached + mode_excluded + eligible`.
+/// as an unattended or subagent session. Source-aware callers additionally
+/// reject observations linked to non-session document sources. The terminal
+/// buckets satisfy `input = detached + mode_excluded + source_excluded + eligible`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataQualityStats {
     pub input_observations: usize,
     pub linked_observations: usize,
     pub detached_observations: usize,
     pub mode_excluded_observations: usize,
+    #[serde(default)]
+    pub source_excluded_observations: usize,
     pub eligible_observations: usize,
     /// Stable identity of the exact eligible item set, used by checkpoints.
     pub cohort_identity: String,
@@ -104,7 +107,7 @@ impl DataQualityStats {
     }
 
     pub fn is_degraded(&self) -> bool {
-        self.detached_observations > 0
+        self.detached_observations > 0 || self.source_excluded_observations > 0
     }
 
     pub fn status_label(&self) -> &'static str {
@@ -123,6 +126,35 @@ pub struct ClusterResult {
     pub global_stats: GlobalStats,
     pub data_quality: DataQualityStats,
     pub untagged_count: usize,
+}
+
+/// Return the exact observation cohort used by clustering and reports.
+///
+/// Keeping this filter public prevents source manifests from reimplementing a
+/// subtly different denominator. A session is excluded as a whole when any
+/// linked observation identifies it as unattended or a subagent.
+pub fn eligible_observations(items: &[Item]) -> Vec<&Item> {
+    let observations: Vec<&Item> = items
+        .iter()
+        .filter(|item| item.item_type() == ItemType::Observation)
+        .collect();
+    let excluded_doc_ids: HashSet<String> = observations
+        .iter()
+        .filter(|item| {
+            item.tags()
+                .iter()
+                .any(|tag| is_excluded_session_mode(tag.as_str()))
+        })
+        .filter_map(|item| item.document_id().map(|id| id.as_str().to_string()))
+        .collect();
+
+    observations
+        .into_iter()
+        .filter(|item| {
+            item.document_id()
+                .is_some_and(|id| !excluded_doc_ids.contains(id.as_str()))
+        })
+        .collect()
 }
 
 /// 主函数：从全量 observation 生成聚类结果
@@ -152,22 +184,17 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
         .filter_map(|item| item.document_id())
         .filter(|id| excluded_doc_ids.contains(id.as_str()))
         .count();
-    let eligible_observations = linked_observations - mode_excluded_observations;
+    let eligible_observation_count = linked_observations - mode_excluded_observations;
 
     // Single filtering pass: compute tags once per item to avoid double allocation.
-    let obs_with_tags: Vec<(&Item, Vec<&str>)> = items
-        .iter()
-        .filter(|i| i.item_type() == ItemType::Observation)
-        .filter(|item| {
-            item.document_id()
-                .is_some_and(|id| !excluded_doc_ids.contains(id.as_str()))
-        })
+    let obs_with_tags: Vec<(&Item, Vec<&str>)> = eligible_observations(items)
+        .into_iter()
         .map(|item| {
             let tags: Vec<&str> = item.tags().iter().map(|t| t.as_str()).collect();
             (item, tags)
         })
         .collect();
-    debug_assert_eq!(obs_with_tags.len(), eligible_observations);
+    debug_assert_eq!(obs_with_tags.len(), eligible_observation_count);
 
     let mut eligible_item_ids: Vec<&str> = obs_with_tags
         .iter()
@@ -184,7 +211,8 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
         linked_observations,
         detached_observations,
         mode_excluded_observations,
-        eligible_observations,
+        source_excluded_observations: 0,
+        eligible_observations: eligible_observation_count,
         cohort_identity: format!("sha256:{:x}", cohort_hasher.finalize()),
     };
 
