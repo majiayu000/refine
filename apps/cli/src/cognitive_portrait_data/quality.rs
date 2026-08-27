@@ -1,6 +1,10 @@
 use super::bundle::CognitivePortraitBundle;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fs;
+use std::path::Path;
+
+use anyhow::{Context, Result};
 
 pub(crate) const PORTRAIT_QUALITY_GATE_VERSION: &str = "cognitive-portrait-quality-v1";
 const DEFAULT_NOVELTY_RATE: f64 = 0.60;
@@ -23,6 +27,13 @@ pub(crate) struct PortraitQualityReport {
     pub novelty_rate: Option<f64>,
     pub repetition_rate: Option<f64>,
     pub errors: Vec<String>,
+}
+
+pub(super) fn write_quality_report(path: &Path, report: &PortraitQualityReport) -> Result<()> {
+    let mut json = serde_json::to_string_pretty(report).context("serialize portrait quality")?;
+    json.push('\n');
+    fs::write(path, json)
+        .with_context(|| format!("write portrait quality report {}", path.display()))
 }
 
 pub(crate) fn validate_portrait(
@@ -192,7 +203,16 @@ fn required_field(line: &str, field: &str) -> bool {
 
 fn contains_trend_claim(candidate: &str) -> bool {
     const TREND_MARKERS: &[&str] = &[
-        "[趋势]", "→", "同比", "环比", "较上期", "上升", "下降", "增加", "减少", "反转",
+        "[趋势]",
+        "→",
+        "同比",
+        "环比",
+        "较上期",
+        "上升",
+        "下降",
+        "增加",
+        "减少",
+        "反转",
     ];
     candidate.lines().any(|line| {
         (line.contains("[事实]") || line.contains("[推断"))

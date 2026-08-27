@@ -11,9 +11,9 @@ fail() {
   exit 1
 }
 
-REFINE_TEST_BIN="${REFINE_TEST_BIN:-${PROJECT_DIR}/target/debug/refine}"
-if [[ ! -x "$REFINE_TEST_BIN" ]]; then
+if [[ -z "${REFINE_TEST_BIN:-}" ]]; then
   cargo build -q -p refine-cli --bin refine
+  REFINE_TEST_BIN="${PROJECT_DIR}/target/debug/refine"
 fi
 
 db="${TEST_ROOT}/fixture.db"

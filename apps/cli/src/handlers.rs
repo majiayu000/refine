@@ -1,4 +1,5 @@
-use crate::cli::{Commands, IngestProvider};
+use crate::cli::{CognitivePortraitCommands, Commands, IngestProvider};
+use crate::cognitive_portrait_data;
 use crate::ingest_sessions::{handle_ingest_sessions, IngestOptions};
 use crate::insights::{handle_insights, InsightsOptions};
 use crate::support::{build_llm_client_from_env, format_item, parse_item_type};
@@ -102,6 +103,26 @@ pub async fn run(
             )
             .await
         }
+        Commands::CognitivePortrait {
+            command:
+                CognitivePortraitCommands::Collect {
+                    period,
+                    cutoff,
+                    output,
+                },
+        } => {
+            let item_store: Arc<dyn ItemRepository> = store;
+            cognitive_portrait_data::collect_to_file(
+                item_store.as_ref(),
+                cutoff.as_deref(),
+                period,
+                &output,
+            )
+            .await
+        }
+        Commands::CognitivePortrait {
+            command: CognitivePortraitCommands::Validate { .. },
+        } => anyhow::bail!("cognitive portrait validation must run before opening SqliteStore"),
         Commands::Docs { limit } => handle_docs(limit, store).await,
         Commands::DocShow { id } => handle_doc_show(&id, store).await,
         Commands::DocSearch { query, limit } => handle_doc_search(&query, limit, store).await,

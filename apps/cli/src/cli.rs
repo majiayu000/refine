@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::fmt;
+use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum IngestProvider {
@@ -52,6 +53,37 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Commands,
+}
+
+#[derive(Subcommand)]
+pub enum CognitivePortraitCommands {
+    /// Collect a versioned current/previous evidence bundle without an LLM.
+    Collect {
+        /// Equal current/previous rolling window length.
+        #[arg(long, default_value = "90")]
+        period: usize,
+        /// Fixed RFC3339 cutoff; defaults to the current UTC time.
+        #[arg(long)]
+        cutoff: Option<String>,
+        /// Destination JSON bundle.
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Validate a candidate portrait against its deterministic bundle.
+    Validate {
+        /// Versioned collector bundle.
+        #[arg(long)]
+        bundle: PathBuf,
+        /// Candidate portrait markdown.
+        #[arg(long)]
+        portrait: PathBuf,
+        /// Optional previous portrait for novelty/repetition checks.
+        #[arg(long)]
+        previous: Option<PathBuf>,
+        /// Destination quality report JSON (written on pass and failure).
+        #[arg(long)]
+        output: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -151,6 +183,11 @@ pub enum Commands {
         #[arg(long)]
         prescription: bool,
     },
+    /// Deterministic cognitive portrait data and quality operations.
+    CognitivePortrait {
+        #[command(subcommand)]
+        command: CognitivePortraitCommands,
+    },
     /// Audit historical session observations that have no Document link.
     AuditItemLinks {
         /// Expected deployed detached-row baseline; requires --cutoff.
@@ -201,6 +238,9 @@ impl Commands {
             Self::IngestSessions { dry_run: true, .. }
                 | Self::AuditItemLinks { .. }
                 | Self::RepairItemLinks { apply: false, .. }
+                | Self::CognitivePortrait {
+                    command: CognitivePortraitCommands::Collect { .. }
+                }
         )
     }
 
@@ -208,6 +248,15 @@ impl Commands {
         matches!(
             self,
             Self::AuditItemLinks { .. } | Self::RepairItemLinks { .. }
+        )
+    }
+
+    pub(crate) fn is_cognitive_portrait_validation(&self) -> bool {
+        matches!(
+            self,
+            Self::CognitivePortrait {
+                command: CognitivePortraitCommands::Validate { .. }
+            }
         )
     }
 }
@@ -295,5 +344,49 @@ mod tests {
         };
         assert!(all);
         assert!(Cli::try_parse_from(["refine", "insights", "--all", "--period", "7"]).is_err());
+    }
+
+    #[test]
+    fn cognitive_portrait_collect_defaults_to_rolling_ninety_days() {
+        let cli = Cli::try_parse_from([
+            "refine",
+            "cognitive-portrait",
+            "collect",
+            "--output",
+            "bundle.json",
+        ])
+        .unwrap();
+        let Commands::CognitivePortrait {
+            command:
+                CognitivePortraitCommands::Collect {
+                    period,
+                    cutoff,
+                    output,
+                },
+        } = cli.command
+        else {
+            panic!("expected cognitive portrait collect");
+        };
+        assert_eq!(period, 90);
+        assert!(cutoff.is_none());
+        assert_eq!(output, PathBuf::from("bundle.json"));
+    }
+
+    #[test]
+    fn cognitive_portrait_validate_is_storage_independent() {
+        let cli = Cli::try_parse_from([
+            "refine",
+            "cognitive-portrait",
+            "validate",
+            "--bundle",
+            "bundle.json",
+            "--portrait",
+            "portrait.md",
+            "--output",
+            "quality.json",
+        ])
+        .unwrap();
+        assert!(cli.command.is_cognitive_portrait_validation());
+        assert!(!cli.command.is_item_link_maintenance());
     }
 }

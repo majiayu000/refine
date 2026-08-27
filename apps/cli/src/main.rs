@@ -3,6 +3,7 @@
 //! 知识管理命令行工具
 
 mod cli;
+mod cognitive_portrait_data;
 mod handlers;
 mod ingest_sessions;
 mod insights;
@@ -14,7 +15,7 @@ mod support;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use cli::Cli;
+use cli::{Cli, CognitivePortraitCommands, Commands};
 use refine_core::infra::{
     ensure_db_dir, migrate_stale_dbs, resolve_db_path, MigrationReport, SqliteStore,
 };
@@ -42,6 +43,26 @@ async fn main() -> Result<()> {
     };
     if cli.command.is_item_link_maintenance() {
         return repair_item_links::handle(&cli.command, &db_path);
+    }
+    if cli.command.is_cognitive_portrait_validation() {
+        let Commands::CognitivePortrait {
+            command:
+                CognitivePortraitCommands::Validate {
+                    bundle,
+                    portrait,
+                    previous,
+                    output,
+                },
+        } = &cli.command
+        else {
+            unreachable!("validation predicate and command diverged")
+        };
+        return cognitive_portrait_data::validate_files(
+            bundle,
+            portrait,
+            previous.as_deref(),
+            output,
+        );
     }
     let read_only_preview = cli.command.is_read_only_preview();
     if !read_only_preview {
