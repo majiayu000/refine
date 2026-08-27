@@ -10,7 +10,7 @@ pub(super) fn build_weekly_action_card(
     recent_cluster: &ClusterResult,
 ) -> Result<Option<Vec<String>>> {
     let policy = crate::advice::portfolio_policy(long_term, recent)?;
-    let has_non_green = [
+    let policy_non_green = [
         &policy.long_exploration,
         &policy.long_fragmentation,
         &policy.recent_exploration,
@@ -18,6 +18,8 @@ pub(super) fn build_weekly_action_card(
     ]
     .iter()
     .any(|indicator| indicator.signal != Signal::Green);
+    let has_non_green =
+        policy_non_green || deep_invest_is_non_green(long_term) || deep_invest_is_non_green(recent);
     if !has_non_green {
         return Ok(None);
     }
@@ -47,8 +49,14 @@ pub(super) fn build_weekly_action_card(
     lines.push(String::new());
     lines.push(format!("{}:", t!("Trigger", "触发原因")));
     lines.push(window_trigger("90d", &policy.long_exploration));
+    if let Some(indicator) = breadth_indicator(long_term, "deep_invest") {
+        lines.push(window_trigger("90d", indicator));
+    }
     lines.push(window_trigger("90d", &policy.long_fragmentation));
     lines.push(window_trigger("7d", &policy.recent_exploration));
+    if let Some(indicator) = breadth_indicator(recent, "deep_invest") {
+        lines.push(window_trigger("7d", indicator));
+    }
     lines.push(window_trigger("7d", &policy.recent_fragmentation));
     lines.push(String::new());
     lines.push(format!(
@@ -74,12 +82,12 @@ pub(super) fn build_weekly_action_card(
                     format!(
                         "Promote {}: protect the main line and verify `{}`.",
                         promote.project_name,
-                        project_evidence(promote)
+                        project_evidence(promote, candidate_window)
                     ),
                     format!(
                         "晋升 {}：保护主线，并验证「{}」。",
                         promote.project_name,
-                        project_evidence(promote)
+                        project_evidence(promote, candidate_window)
                     )
                 )
             ));
@@ -102,7 +110,7 @@ pub(super) fn build_weekly_action_card(
                     ),
                 }
             ));
-            lines.push(format!("- {}", stop_decision(stop)));
+            lines.push(format!("- {}", stop_decision(stop, candidate_window)));
             lines.push(format!(
                 "- {}",
                 t!(
@@ -119,12 +127,12 @@ pub(super) fn build_weekly_action_card(
                     format!(
                         "Inside {}, test one adjacent hypothesis from `{}` and record a keep/stop decision.",
                         promote.project_name,
-                        project_evidence(promote)
+                        project_evidence(promote, candidate_window)
                     ),
                     format!(
                         "在 {} 内，从「{}」验证一个相邻假设，并记录保留或退出决定。",
                         promote.project_name,
-                        project_evidence(promote)
+                        project_evidence(promote, candidate_window)
                     )
                 )
             ));
@@ -136,13 +144,13 @@ pub(super) fn build_weekly_action_card(
                 t!(
                     format!(
                         "Hold the current portfolio and turn `{}` in {} into one named validation.",
-                        project_evidence(promote),
+                        project_evidence(promote, candidate_window),
                         promote.project_name
                     ),
                     format!(
                         "保持当前组合，把 {} 中的「{}」变成一项具名验证。",
                         promote.project_name,
-                        project_evidence(promote)
+                        project_evidence(promote, candidate_window)
                     )
                 )
             ));
@@ -180,18 +188,18 @@ fn candidate_cohort<'a>(
     }
 }
 
-fn stop_decision(project: Option<&ProjectCluster>) -> String {
+fn stop_decision(project: Option<&ProjectCluster>, candidate_window: CandidateWindow) -> String {
     match project {
         Some(project) => t!(
             format!(
                 "Stop {} unless `{}` produces a named result by week end.",
                 project.project_name,
-                project_evidence(project)
+                project_evidence(project, candidate_window)
             ),
             format!(
                 "退出 {}，除非「{}」在周末前产出具名结果。",
                 project.project_name,
-                project_evidence(project)
+                project_evidence(project, candidate_window)
             )
         ),
         None => t!(
@@ -199,6 +207,24 @@ fn stop_decision(project: Option<&ProjectCluster>) -> String {
             "退出：没有可单独退出的具名线程；新增项目数保持为零。".to_string()
         ),
     }
+}
+
+fn breadth_indicator<'a>(score: &'a ScoreResult, name: &str) -> Option<&'a Indicator> {
+    score
+        .layers
+        .iter()
+        .find(|layer| layer.name == "breadth")
+        .and_then(|layer| {
+            layer
+                .indicators
+                .iter()
+                .find(|indicator| indicator.name == name)
+        })
+}
+
+fn deep_invest_is_non_green(score: &ScoreResult) -> bool {
+    breadth_indicator(score, "deep_invest")
+        .is_some_and(|indicator| indicator.signal != Signal::Green)
 }
 
 fn window_trigger(window: &str, indicator: &Indicator) -> String {
@@ -211,7 +237,7 @@ fn window_trigger(window: &str, indicator: &Indicator) -> String {
     )
 }
 
-fn project_evidence(project: &ProjectCluster) -> String {
+fn project_evidence(project: &ProjectCluster, candidate_window: CandidateWindow) -> String {
     if let Some(item) = [
         &project.question_items,
         &project.progress_items,
@@ -234,16 +260,28 @@ fn project_evidence(project: &ProjectCluster) -> String {
         return truncate_chars(&format!("bugfix: {}", bugfix), 120);
     }
 
-    t!(
-        format!(
-            "{} had {} sessions this week; use the 10% block to produce one concrete validation note.",
-            project.project_name, project.session_count
+    match candidate_window {
+        CandidateWindow::Rolling90Days => t!(
+            format!(
+                "{} had {} sessions over the past 90 days; use a bounded block to produce one concrete validation note.",
+                project.project_name, project.session_count
+            ),
+            format!(
+                "{} 过去 90 天有 {} 个 session；用一个有边界的时间块产出一条具体验证证据。",
+                project.project_name, project.session_count
+            )
         ),
-        format!(
-            "{} 本周有 {} 个 session；用 10% 时间块产出一条具体验证证据。",
-            project.project_name, project.session_count
-        )
-    )
+        CandidateWindow::Rolling7Days => t!(
+            format!(
+                "{} had {} sessions this week; use the 10% block to produce one concrete validation note.",
+                project.project_name, project.session_count
+            ),
+            format!(
+                "{} 本周有 {} 个 session；用 10% 时间块产出一条具体验证证据。",
+                project.project_name, project.session_count
+            )
+        ),
+    }
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
@@ -407,6 +445,30 @@ mod tests {
     }
 
     #[test]
+    fn non_green_deep_invest_emits_deepen_card_when_other_breadth_metrics_are_green() {
+        let long_term = score_with_breadth(vec![
+            indicator("exploration", 20.0, Signal::Green),
+            indicator("deep_invest", 18.0, Signal::Yellow),
+            indicator("fragmentation", 5.0, Signal::Green),
+        ]);
+        let recent = score_with_breadth(vec![
+            indicator("exploration", 25.0, Signal::Green),
+            indicator("deep_invest", 16.0, Signal::Red),
+            indicator("fragmentation", 4.0, Signal::Green),
+        ]);
+        let cluster = cluster(vec![project("main-work", 4, None)]);
+
+        let card = build_weekly_action_card(&long_term, &recent, &cluster, &cluster)
+            .unwrap()
+            .expect("non-green deep investment should emit an action card")
+            .join("\n");
+
+        assert!(card.contains("Deepen"));
+        assert!(card.contains("90d Mature Project Share 18.0%"));
+        assert!(card.contains("7d Mature Project Share 16.0%"));
+    }
+
+    #[test]
     fn low_exploration_only_when_both_windows_low_and_fragmentation_green() {
         let long_term = score_with_breadth(vec![
             indicator("exploration", 5.2, Signal::Red),
@@ -532,6 +594,8 @@ mod tests {
 
         assert!(card.contains("Decision cohort: rolling 90 days (event time)"));
         assert!(card.contains("Promote healthy-core"));
+        assert!(card.contains("healthy-core had 12 sessions over the past 90 days"));
+        assert!(!card.contains("healthy-core had 12 sessions this week"));
         assert!(card.contains("Stop old-one-off"));
         assert!(!card.contains("Stop healthy-secondary"));
     }

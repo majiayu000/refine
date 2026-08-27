@@ -45,6 +45,13 @@ consolidation: a non-green rolling-90-day fragmentation signal selects the
 rolling-90-day cluster, even when the recent window is healthy; otherwise a
 recent-only trigger selects the rolling-7-day cluster.
 
+An action card is emitted when exploration, mature-project share
+(`deep_invest`), or fragmentation is non-green in either window. A non-green
+`deep_invest` signal with green exploration and fragmentation selects the
+Deepen policy. Session-count fallback evidence names its actual candidate
+window: “past 90 days” for the long-term cohort and “this week” for the recent
+cohort.
+
 Before any optional LLM call, `mirror score` writes the current deterministic
 policy to cache. Cache revision v5 binds policy, current score timestamp,
 rolling-90-day cohort identity, and rolling-7-day cohort identity. If the
@@ -101,5 +108,6 @@ validation errors other than a missing file are returned clearly.
 - cache revision, score timestamp, policy, and cohort binding tests;
 - action-card 0/1/2 named-project boundary tests;
 - long-term fragmentation with an old one-off and two healthy recent projects;
+- deep-invest-only Deepen-card and window-accurate fallback evidence tests;
 - rolling-90-day profile writer-to-advice-loader round trip;
 - `cargo test -p mirror` and formatting checks.
