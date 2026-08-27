@@ -57,7 +57,7 @@ pub fn write_statusline(
     _db_path: &Path,
     trends: Option<&PersonalTrends>,
 ) -> Result<()> {
-    let short = match crate::advice::load_cached() {
+    let short = match crate::advice::load_cached_for_score(result) {
         Ok(Some(cached)) if cached.is_stale() => {
             crate::lang::t!("⚠️ advice stale", "⚠️ 建议已过期").to_string()
         }

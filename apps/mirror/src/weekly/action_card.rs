@@ -1,13 +1,14 @@
 use crate::lang::t;
 use crate::score::{self, Indicator, ScoreResult, Signal};
+use anyhow::Result;
 use refine_core::session::{ClusterResult, ProjectCluster};
 
 pub(super) fn build_weekly_action_card(
     long_term: &ScoreResult,
     recent: &ScoreResult,
     cluster: &ClusterResult,
-) -> Option<Vec<String>> {
-    let policy = crate::advice::portfolio_policy(long_term, recent).ok()?;
+) -> Result<Option<Vec<String>>> {
+    let policy = crate::advice::portfolio_policy(long_term, recent)?;
     let has_non_green = [
         &policy.long_exploration,
         &policy.long_fragmentation,
@@ -17,13 +18,14 @@ pub(super) fn build_weekly_action_card(
     .iter()
     .any(|indicator| indicator.signal != Signal::Green);
     if !has_non_green {
-        return None;
+        return Ok(None);
     }
 
     let mut projects = cluster
         .projects
         .values()
         .filter(|project| project.session_count > 0)
+        .filter(|project| project.project_name != "other")
         .collect::<Vec<_>>();
     projects.sort_by_key(|project| {
         (
@@ -31,7 +33,11 @@ pub(super) fn build_weekly_action_card(
             &project.project_name,
         )
     });
-    let promote = projects.first().copied()?;
+    let promote = projects.first().copied().ok_or_else(|| {
+        anyhow::anyhow!(
+            "portfolio action card requires at least one named active project; refusing to render decisions from the 'other' bucket"
+        )
+    })?;
 
     let mut lines = Vec::new();
     lines.push(t!("## Weekly Action Card", "## 下周行动卡").to_string());
@@ -44,9 +50,12 @@ pub(super) fn build_weekly_action_card(
     lines.push(String::new());
     match policy.mode {
         crate::advice::PortfolioMode::PromoteHoldStop => {
-            let stop = projects.last().copied().unwrap_or(promote);
+            let stop = projects
+                .last()
+                .copied()
+                .filter(|project| project.project_name != promote.project_name);
             let hold = projects.get(1).copied().filter(|project| {
-                project.project_name != stop.project_name
+                stop.is_none_or(|stop| project.project_name != stop.project_name)
                     && project.project_name != promote.project_name
             });
             lines.push(format!("{}:", t!("Portfolio decision", "项目组合决策")));
@@ -84,21 +93,7 @@ pub(super) fn build_weekly_action_card(
                     ),
                 }
             ));
-            lines.push(format!(
-                "- {}",
-                t!(
-                    format!(
-                        "Stop {} unless `{}` produces a named result by week end.",
-                        stop.project_name,
-                        project_evidence(stop)
-                    ),
-                    format!(
-                        "退出 {}，除非「{}」在周末前产出具名结果。",
-                        stop.project_name,
-                        project_evidence(stop)
-                    )
-                )
-            ));
+            lines.push(format!("- {}", stop_decision(stop)));
             lines.push(format!(
                 "- {}",
                 t!(
@@ -144,7 +139,28 @@ pub(super) fn build_weekly_action_card(
             ));
         }
     }
-    Some(lines)
+    Ok(Some(lines))
+}
+
+fn stop_decision(project: Option<&ProjectCluster>) -> String {
+    match project {
+        Some(project) => t!(
+            format!(
+                "Stop {} unless `{}` produces a named result by week end.",
+                project.project_name,
+                project_evidence(project)
+            ),
+            format!(
+                "退出 {}，除非「{}」在周末前产出具名结果。",
+                project.project_name,
+                project_evidence(project)
+            )
+        ),
+        None => t!(
+            "Stop: no separate named thread is eligible; keep additions at zero.".to_string(),
+            "退出：没有可单独退出的具名线程；新增项目数保持为零。".to_string()
+        ),
+    }
 }
 
 fn window_trigger(window: &str, indicator: &Indicator) -> String {
@@ -323,6 +339,7 @@ mod tests {
         ]);
 
         let card = build_weekly_action_card(&long_term, &recent, &cluster)
+            .unwrap()
             .expect("expected action card for non-green breadth indicators")
             .join("\n");
 
@@ -346,7 +363,9 @@ mod tests {
         ]);
         let cluster = cluster(vec![project("main-work", 12, None)]);
 
-        assert!(build_weekly_action_card(&score, &score, &cluster).is_none());
+        assert!(build_weekly_action_card(&score, &score, &cluster)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -361,7 +380,7 @@ mod tests {
         ]);
         let cluster = cluster(vec![project("active-without-evidence", 3, None)]);
 
-        let card = match build_weekly_action_card(&long_term, &recent, &cluster) {
+        let card = match build_weekly_action_card(&long_term, &recent, &cluster).unwrap() {
             Some(card) => card.join("\n"),
             None => panic!("expected fallback card for non-green breadth indicators"),
         };
@@ -386,7 +405,7 @@ mod tests {
         project.decision_titles = vec!["keep the release path explicit".to_string()];
         let cluster = cluster(vec![project]);
 
-        let card = match build_weekly_action_card(&long_term, &recent, &cluster) {
+        let card = match build_weekly_action_card(&long_term, &recent, &cluster).unwrap() {
             Some(card) => card.join("\n"),
             None => panic!("expected card for decision-only project evidence"),
         };
@@ -395,5 +414,53 @@ mod tests {
         assert!(card.contains("decision: keep the release path explicit"));
         assert!(card.contains("Deepen"));
         assert!(!card.contains("Bounded exploration"));
+    }
+
+    #[test]
+    fn fragmented_portfolio_without_named_projects_fails_closed() {
+        let score = score_with_breadth(vec![
+            indicator("exploration", 20.0, Signal::Green),
+            indicator("fragmentation", 40.0, Signal::Red),
+        ]);
+        let cluster = cluster(vec![project("other", 8, None)]);
+        let error = build_weekly_action_card(&score, &score, &cluster).unwrap_err();
+        assert!(error.to_string().contains("named active project"));
+        assert!(error.to_string().contains("'other' bucket"));
+    }
+
+    #[test]
+    fn one_named_project_is_promoted_but_never_stopped() {
+        let score = score_with_breadth(vec![
+            indicator("exploration", 20.0, Signal::Green),
+            indicator("fragmentation", 40.0, Signal::Red),
+        ]);
+        let cluster = cluster(vec![project("only-project", 8, None)]);
+        let card = build_weekly_action_card(&score, &score, &cluster)
+            .unwrap()
+            .unwrap()
+            .join("\n");
+        assert!(card.contains("Promote only-project"));
+        assert!(!card.contains("Stop only-project"));
+        assert!(card.contains("no separate named thread is eligible"));
+    }
+
+    #[test]
+    fn two_named_projects_promote_and_stop_different_projects() {
+        let score = score_with_breadth(vec![
+            indicator("exploration", 20.0, Signal::Green),
+            indicator("fragmentation", 40.0, Signal::Red),
+        ]);
+        let cluster = cluster(vec![
+            project("core", 8, None),
+            project("side", 1, None),
+            project("other", 20, None),
+        ]);
+        let card = build_weekly_action_card(&score, &score, &cluster)
+            .unwrap()
+            .unwrap()
+            .join("\n");
+        assert!(card.contains("Promote core"));
+        assert!(card.contains("Stop side"));
+        assert!(!card.contains("Promote other"));
     }
 }

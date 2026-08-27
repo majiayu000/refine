@@ -148,7 +148,7 @@ pub async fn handle_weekly(
         last_comparison,
         &this_cluster,
         &long_term_score,
-    );
+    )?;
 
     println!("{}", report);
 
@@ -225,7 +225,7 @@ fn build_weekly_report_with_portfolio(
     last: Option<(&ScoreResult, &DataQualityStats)>,
     cluster: &ClusterResult,
     long_term: &ScoreResult,
-) -> String {
+) -> Result<String> {
     let now = Utc::now();
     let week_num = now.iso_week().week();
     let year = now.iso_week().year();
@@ -336,12 +336,12 @@ fn build_weekly_report_with_portfolio(
         }
     }
 
-    if let Some(action_card) = action_card::build_weekly_action_card(long_term, this, cluster) {
+    if let Some(action_card) = action_card::build_weekly_action_card(long_term, this, cluster)? {
         lines.push(String::new());
         lines.extend(action_card);
     }
 
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -350,7 +350,29 @@ fn build_weekly_report(
     last: Option<(&ScoreResult, &DataQualityStats)>,
     cluster: &ClusterResult,
 ) -> String {
-    build_weekly_report_with_portfolio(this, last, cluster, this)
+    let mut portfolio = this.clone();
+    if let Some(breadth) = portfolio
+        .layers
+        .iter_mut()
+        .find(|layer| layer.name == "breadth")
+    {
+        for name in ["exploration", "fragmentation"] {
+            if !breadth
+                .indicators
+                .iter()
+                .any(|indicator| indicator.name == name)
+            {
+                breadth.indicators.push(crate::score::Indicator {
+                    name: name.to_string(),
+                    actual: if name == "exploration" { 20.0 } else { 5.0 },
+                    target: String::new(),
+                    signal: Signal::Green,
+                });
+            }
+        }
+    }
+    build_weekly_report_with_portfolio(&portfolio, last, cluster, &portfolio)
+        .expect("weekly report fixture must include valid portfolio inputs")
 }
 
 #[cfg(test)]

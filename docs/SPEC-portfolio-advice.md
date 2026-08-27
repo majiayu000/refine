@@ -30,9 +30,25 @@ The policy is ordered by guard strength, not indicator declaration order:
 The regression fixture `90d exploration=14.4%, 7d exploration=29.2%, one-off
 share=35-48%` must select consolidation, never expansion.
 
-The deterministic action card and the LLM prompt use the same computed policy.
-An LLM response that contradicts the policy is discarded and replaced with the
-deterministic recommendation.
+The deterministic action card and the LLM acknowledgement prompt use the same
+computed policy. The LLM returns only a structured policy acknowledgement;
+user-visible short and full advice are always rendered deterministically by the
+service. LLM free text is never an authorization or output boundary.
+
+The action card uses the same named-project denominator as fragmentation:
+`other` and zero-session entries are not eligible candidates. Non-green
+fragmentation with no named candidate fails closed. With one named candidate,
+that project can be promoted but cannot also be stopped; with two or more, the
+highest-volume candidate is promoted and the lowest-volume candidate is
+stopped.
+
+Before any optional LLM call, `mirror score` writes the current deterministic
+policy to cache. Cache revision v5 binds policy, current score timestamp,
+rolling-90-day cohort identity, and rolling-7-day cohort identity. If the
+portfolio cohort cannot be computed, the previous cache is invalidated.
+Statusline and MOTD only read a cache whose score timestamp exactly matches the
+current score, so an older Explore recommendation cannot survive a failed or
+disabled LLM call.
 
 ## Profile context contract
 
@@ -45,16 +61,20 @@ Profile context is stored as a versioned JSON envelope containing:
 - `cohort_identity`;
 - the summary text.
 
-Advice injects it only when the schema and source revision are supported and
-the generation timestamp is less than 14 days old. Legacy text, malformed JSON,
-future timestamps, unsupported revisions, and stale summaries are excluded.
-Read errors other than a missing file are returned to the user; malformed or
-unsupported content is reported and excluded rather than silently injected.
+Advice injects it only when the schema and source revision are supported, the
+generation timestamp is less than 14 days old, and `cohort_identity` is a
+strict `sha256:<64hex>` value exactly matching the expected rolling-90-day
+advice cohort. The envelope records the relationship as
+`exact-source-snapshot`; an injected prompt records it as `exact-match`. Legacy
+text, malformed JSON, weak identities, future timestamps, unsupported
+revisions, stale summaries, and different cohorts are never injected. Read or
+validation errors other than a missing file are returned clearly.
 
 ## Files
 
-- `apps/mirror/src/advice.rs`: shared policy, deterministic fallback, guarded
-  LLM advice, profile-context loading.
+- `apps/mirror/src/advice.rs` and `apps/mirror/src/advice/`: shared policy,
+  deterministic rendering, score-bound cache, structured LLM acknowledgement,
+  and profile-context validation.
 - `apps/mirror/src/score.rs`: compute and pass the rolling-7-day score alongside
   the rolling-90-day score.
 - `apps/mirror/src/weekly.rs`: compute and pass a rolling-90-day score alongside
@@ -68,7 +88,9 @@ unsupported content is reported and excluded rather than silently injected.
 - combination-matrix tests for fragmentation, exploration, and recent-window
   overrides;
 - fixed 14.4/29.2/35-48 regression;
-- stale, legacy, malformed, unsupported-revision, and fresh profile-context
-  tests;
-- guarded-LLM fallback tests;
+- stale, legacy, malformed, weak-identity, different-cohort, and fresh exact
+  profile-context tests;
+- structured-LLM bypass, negation, and short-output tests;
+- cache revision, score timestamp, policy, and cohort binding tests;
+- action-card 0/1/2 named-project boundary tests;
 - `cargo test -p mirror` and formatting checks.

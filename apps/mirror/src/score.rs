@@ -193,10 +193,29 @@ pub async fn handle_score(
     }
 
     let mut advice_error = None;
-    if let Some(llm) = llm {
-        match compute_portfolio_advice_scores(&repo, now).await {
-            Ok((long_term, recent)) => {
-                match crate::advice::generate_and_cache(&long_term, &recent, &llm).await {
+    match compute_portfolio_advice_scores(&repo, now).await {
+        Ok(portfolio) => {
+            match crate::advice::cache_current_deterministic(
+                &portfolio.long_term,
+                &portfolio.recent,
+                result.timestamp,
+                &portfolio.long_cohort_identity,
+                &portfolio.recent_cohort_identity,
+            ) {
+                Ok(_) => {}
+                Err(error) => advice_error = Some(error),
+            }
+            if let Some(llm) = llm {
+                match crate::advice::generate_and_cache(
+                    &portfolio.long_term,
+                    &portfolio.recent,
+                    &llm,
+                    result.timestamp,
+                    &portfolio.long_cohort_identity,
+                    &portfolio.recent_cohort_identity,
+                )
+                .await
+                {
                     Ok(advice) => {
                         println!("\n  {} {}", crate::lang::t!("Advice:", "建议:"), advice)
                     }
@@ -205,16 +224,22 @@ pub async fn handle_score(
                         advice_error = Some(error);
                     }
                 }
+            } else if require_advice {
+                advice_error = Some(anyhow::anyhow!(
+                    "LLM advice is required but no supported API key is configured"
+                ));
             }
-            Err(error) => {
-                tracing::error!("portfolio advice metrics failed: {}", error);
+        }
+        Err(error) => {
+            tracing::error!("portfolio advice metrics failed: {}", error);
+            if let Err(invalidation_error) = crate::advice::invalidate_cached() {
+                advice_error = Some(invalidation_error.context(format!(
+                    "portfolio metrics failed ({error}); stale advice cache also could not be invalidated"
+                )));
+            } else {
                 advice_error = Some(error);
             }
         }
-    } else if require_advice {
-        advice_error = Some(anyhow::anyhow!(
-            "LLM advice is required but no supported API key is configured"
-        ));
     }
 
     if let Err(e) = write_statusline(&result, db_path, trends.as_ref()) {
@@ -228,10 +253,17 @@ pub async fn handle_score(
     Ok(())
 }
 
+struct PortfolioAdviceScores {
+    long_term: ScoreResult,
+    recent: ScoreResult,
+    long_cohort_identity: String,
+    recent_cohort_identity: String,
+}
+
 async fn compute_portfolio_advice_scores(
     repo: &Arc<dyn ItemRepository>,
     now: DateTime<Utc>,
-) -> Result<(ScoreResult, ScoreResult)> {
+) -> Result<PortfolioAdviceScores> {
     let long_term_items = repo
         .find_observations_by_event_range(now - chrono::Duration::days(90), now)
         .await
@@ -255,10 +287,12 @@ async fn compute_portfolio_advice_scores(
     }
 
     let config = crate::config::load();
-    Ok((
-        compute(&long_term, &config.targets),
-        compute(&recent, &config.targets),
-    ))
+    Ok(PortfolioAdviceScores {
+        long_term: compute(&long_term, &config.targets),
+        recent: compute(&recent, &config.targets),
+        long_cohort_identity: long_term.data_quality.cohort_identity,
+        recent_cohort_identity: recent.data_quality.cohort_identity,
+    })
 }
 
 fn finish_without_observations(require_advice: bool, message: &str) -> Result<()> {
