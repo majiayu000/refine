@@ -321,6 +321,164 @@ async fn item_document_id_requires_existing_document() {
 }
 
 #[tokio::test]
+async fn direct_document_delete_rejects_linked_items_without_detaching_them() {
+    let store = SqliteStore::in_memory().expect("failed to create sqlite store");
+    let mut document = Document::new("claude", "raw content");
+    document.set_url("https://claude.ai/chat/restrict-delete");
+    let mut item = Item::new_knowledge("Restrict linked item", "summary");
+    item.set_document_id(document.id().clone());
+    refine_core::knowledge::DocumentRepository::save_with_replaced_items(
+        &store,
+        &document,
+        &[item.clone()],
+    )
+    .await
+    .expect("save linked aggregate");
+
+    let error = refine_core::knowledge::DocumentRepository::delete(&store, document.id())
+        .await
+        .expect_err("direct parent deletion must fail while linked items exist");
+    assert!(
+        error.to_string().contains("FOREIGN KEY constraint failed"),
+        "unexpected error: {error}"
+    );
+
+    assert!(
+        refine_core::knowledge::DocumentRepository::find_by_id(&store, document.id())
+            .await
+            .expect("find preserved document")
+            .is_some()
+    );
+    let preserved = store
+        .find_by_id(item.id())
+        .await
+        .expect("find preserved item")
+        .expect("linked item should remain");
+    assert_eq!(preserved.document_id(), Some(document.id()));
+    assert_eq!(
+        store
+            .search_text("restrict", 0, 10)
+            .await
+            .expect("search preserved FTS entry")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn aggregate_document_delete_removes_items_and_conversation_references_atomically() {
+    let store = SqliteStore::in_memory().expect("failed to create sqlite store");
+    let mut document = Document::new("claude", "raw content");
+    document.set_url("https://claude.ai/chat/aggregate-delete");
+    let mut item = Item::new_knowledge("Aggregate delete item", "summary");
+    item.set_document_id(document.id().clone());
+    refine_core::knowledge::DocumentRepository::save_with_replaced_items(
+        &store,
+        &document,
+        &[item.clone()],
+    )
+    .await
+    .expect("save linked aggregate");
+
+    let mut conversation =
+        build_conversation("conv-aggregate-delete", ConversationStatus::Processed);
+    conversation.item_ids = vec![item.id().to_string()];
+    store
+        .upsert_conversation(&conversation)
+        .await
+        .expect("save conversation reference");
+
+    refine_core::knowledge::DocumentRepository::delete_documents_with_items(
+        &store,
+        &[document.id().clone()],
+    )
+    .await
+    .expect("delete aggregate");
+
+    assert!(
+        refine_core::knowledge::DocumentRepository::find_by_id(&store, document.id())
+            .await
+            .expect("find deleted document")
+            .is_none()
+    );
+    assert!(store
+        .find_by_id(item.id())
+        .await
+        .expect("find deleted item")
+        .is_none());
+    let loaded_conversation = store
+        .find_conversation_by_id(&conversation.id)
+        .await
+        .expect("find conversation")
+        .expect("conversation should remain");
+    assert!(loaded_conversation.item_ids.is_empty());
+    assert!(store
+        .search_text("aggregate", 0, 10)
+        .await
+        .expect("search deleted FTS entry")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn aggregate_document_delete_failure_rolls_back_items_documents_and_references() {
+    let store = SqliteStore::in_memory().expect("failed to create sqlite store");
+    let mut document = Document::new("claude", "raw content");
+    document.set_url("https://claude.ai/chat/aggregate-rollback");
+    let mut item = Item::new_knowledge("Rollback linked item", "summary");
+    item.set_document_id(document.id().clone());
+    refine_core::knowledge::DocumentRepository::save_with_replaced_items(
+        &store,
+        &document,
+        &[item.clone()],
+    )
+    .await
+    .expect("save linked aggregate");
+
+    let mut conversation =
+        build_conversation("conv-aggregate-rollback", ConversationStatus::Processed);
+    conversation.item_ids = vec![item.id().to_string()];
+    store
+        .upsert_conversation(&conversation)
+        .await
+        .expect("save conversation reference");
+
+    let error = refine_core::knowledge::DocumentRepository::delete_documents_with_items(
+        &store,
+        &[document.id().clone(), DocumentId::from("missing-document")],
+    )
+    .await
+    .expect_err("missing second document must roll back the whole transaction");
+    assert!(error.to_string().contains("missing-document"));
+
+    assert!(
+        refine_core::knowledge::DocumentRepository::find_by_id(&store, document.id())
+            .await
+            .expect("find rolled back document")
+            .is_some()
+    );
+    let preserved = store
+        .find_by_id(item.id())
+        .await
+        .expect("find rolled back item")
+        .expect("item delete should roll back");
+    assert_eq!(preserved.document_id(), Some(document.id()));
+    let loaded_conversation = store
+        .find_conversation_by_id(&conversation.id)
+        .await
+        .expect("find conversation")
+        .expect("conversation should remain");
+    assert_eq!(loaded_conversation.item_ids, vec![item.id().to_string()]);
+    assert_eq!(
+        store
+            .search_text("rollback", 0, 10)
+            .await
+            .expect("search rolled back FTS entry")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn save_with_replaced_items_replaces_document_items_in_one_call() {
     let store = SqliteStore::in_memory().expect("failed to create sqlite store");
     let mut doc = Document::new("claude", "raw content");

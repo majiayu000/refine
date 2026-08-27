@@ -11,6 +11,7 @@ use rusqlite::Connection;
 
 mod contract;
 mod db_migration;
+mod document_fk_migration;
 mod llm;
 mod llm_retry;
 mod paths;
@@ -19,7 +20,7 @@ mod sqlite;
 
 const FTS_BOOTSTRAP_USER_VERSION: i64 = 1;
 const ALLOWED_COLUMN_EXISTS_TABLES: &[&str] = &["items", "documents", "extraction_jobs"];
-const ALLOWED_FOREIGN_KEY_TABLES: &[&str] = &["items", "extraction_jobs"];
+const ALLOWED_FOREIGN_KEY_TABLES: &[&str] = &["extraction_jobs"];
 
 pub fn prepare_sqlite_db(conn: &Connection) -> InfraResult<()> {
     let tx = conn
@@ -31,7 +32,7 @@ pub fn prepare_sqlite_db(conn: &Connection) -> InfraResult<()> {
     migrate_items_add_document_columns(&tx)?;
     migrate_documents_add_source_version(&tx)?;
     migrate_documents_url_unique(&tx)?;
-    migrate_items_document_fk(&tx)?;
+    document_fk_migration::migrate_items_document_fk(&tx)?;
     migrate_extraction_jobs_add_lease_columns(&tx)?;
     migrate_extraction_jobs_conversation_fk(&tx)?;
     maybe_rebuild_fts_index(&tx)?;
@@ -286,68 +287,6 @@ fn foreign_key_exists(
     }
 
     Ok(false)
-}
-
-fn migrate_items_document_fk(conn: &Connection) -> InfraResult<()> {
-    if foreign_key_exists(conn, "items", "document_id", "documents")? {
-        return Ok(());
-    }
-
-    conn.execute_batch(
-        r#"
-        DROP TRIGGER IF EXISTS items_ai;
-        DROP TRIGGER IF EXISTS items_ad;
-        DROP TRIGGER IF EXISTS items_au;
-        UPDATE items
-        SET document_id = NULL
-        WHERE document_id IS NOT NULL
-          AND NOT EXISTS (
-              SELECT 1 FROM documents WHERE documents.id = items.document_id
-          );
-        ALTER TABLE items RENAME TO items_without_document_fk;
-        CREATE TABLE items (
-            id TEXT PRIMARY KEY,
-            item_type TEXT NOT NULL,
-            title TEXT NOT NULL,
-            summary TEXT NOT NULL,
-            content TEXT NOT NULL,
-            tags TEXT NOT NULL,
-            source TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            document_id TEXT,
-            excerpt TEXT,
-            FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE SET NULL
-        );
-        INSERT INTO items
-          (rowid, id, item_type, title, summary, content, tags, source,
-           created_at, updated_at, document_id, excerpt)
-        SELECT rowid, id, item_type, title, summary, content, tags, source,
-               created_at, updated_at, document_id, excerpt
-        FROM items_without_document_fk;
-        DROP TABLE items_without_document_fk;
-        CREATE INDEX IF NOT EXISTS idx_items_type ON items(item_type);
-        CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at);
-        CREATE INDEX IF NOT EXISTS idx_items_document ON items(document_id);
-        CREATE TRIGGER IF NOT EXISTS items_ai AFTER INSERT ON items BEGIN
-            INSERT INTO items_fts(rowid, title, summary, content, tags)
-            VALUES (NEW.rowid, NEW.title, NEW.summary, NEW.content, NEW.tags);
-        END;
-        CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON items BEGIN
-            INSERT INTO items_fts(items_fts, rowid, title, summary, content, tags)
-            VALUES('delete', OLD.rowid, OLD.title, OLD.summary, OLD.content, OLD.tags);
-        END;
-        CREATE TRIGGER IF NOT EXISTS items_au AFTER UPDATE ON items BEGIN
-            INSERT INTO items_fts(items_fts, rowid, title, summary, content, tags)
-            VALUES('delete', OLD.rowid, OLD.title, OLD.summary, OLD.content, OLD.tags);
-            INSERT INTO items_fts(rowid, title, summary, content, tags)
-            VALUES (NEW.rowid, NEW.title, NEW.summary, NEW.content, NEW.tags);
-        END;
-        "#,
-    )
-    .map_err(|e| InfraError::Database(e.to_string()))?;
-
-    Ok(())
 }
 
 fn migrate_extraction_jobs_conversation_fk(conn: &Connection) -> InfraResult<()> {

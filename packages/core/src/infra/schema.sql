@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS items (
     updated_at TEXT NOT NULL,
     document_id TEXT,
     excerpt TEXT,
-    FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE SET NULL
+    FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_items_type ON items(item_type);
