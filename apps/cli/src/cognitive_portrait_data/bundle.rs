@@ -248,7 +248,16 @@ fn build_window_data(
             .map(|tag| tag.as_str().to_string())
             .collect();
         let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
-        let project = project_for_item(cluster, item);
+        let project = cluster
+            .item_projects
+            .get(item.id().as_str())
+            .with_context(|| {
+                format!(
+                    "eligible portrait observation is missing its direct project assignment {}",
+                    item.id()
+                )
+            })?
+            .clone();
         let mut categories = BTreeSet::new();
         dimensions.projects.add(&project, &evidence_id);
         if tag_refs.contains(&"decision") {
@@ -316,28 +325,6 @@ fn add_sections(
             target.add(&value, evidence_id);
         }
     }
-}
-
-fn project_for_item(cluster: &ClusterResult, item: &Item) -> String {
-    let summary_prefix = format!("【{}】", item.title());
-    let mut project_names: Vec<&str> = cluster.projects.keys().map(String::as_str).collect();
-    project_names.sort_unstable();
-    project_names
-        .into_iter()
-        .find(|project_name| {
-            let project = &cluster.projects[*project_name];
-            project
-                .decision_titles
-                .iter()
-                .chain(project.bugfix_titles.iter())
-                .any(|title| title == item.title())
-                || project
-                    .summary_excerpts
-                    .iter()
-                    .any(|summary| summary.starts_with(&summary_prefix))
-        })
-        .unwrap_or("other")
-        .to_string()
 }
 
 fn extract_section_items(content: &str, section: &str) -> Vec<String> {
@@ -430,6 +417,23 @@ pub(crate) fn read_bundle(path: &Path) -> Result<CognitivePortraitBundle> {
             bundle.collector_version,
             PORTRAIT_COLLECTOR_VERSION
         );
+    }
+    if bundle.period_days == 0 || bundle.manifest.event_time_cutoff != bundle.cutoff {
+        bail!("SCHEMA_INVALID: bundle cutoff/period invariant failed");
+    }
+    let previous_manifest = bundle
+        .manifest
+        .previous_window
+        .as_ref()
+        .context("SCHEMA_INVALID: previous window manifest is required")?;
+    if bundle.manifest.current_window.eligible_observations != bundle.current.evidence.len()
+        || previous_manifest.eligible_observations != bundle.previous.evidence.len()
+    {
+        bail!("SCHEMA_INVALID: manifest, cohort, and evidence counts disagree");
+    }
+    if bundle.comparison != comparison_contract(&bundle.manifest.current_window, previous_manifest)
+    {
+        bail!("SCHEMA_INVALID: comparison contract disagrees with window manifests");
     }
     Ok(bundle)
 }

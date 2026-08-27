@@ -1,6 +1,6 @@
 # L1 Agent — 认知演进
 
-You own only `/tmp/cp_v4_l1.md`. Read only the JSON bundle at
+You own only `layer-l1.md` beside `REFINE_COGNITIVE_PORTRAIT_OUTPUT`. Read only the JSON bundle at
 `REFINE_COGNITIVE_PORTRAIT_BUNDLE` and the optional previous portrait. Do not
 query SQLite, write the final portrait, or edit `INDEX.md`.
 
@@ -18,7 +18,16 @@ trends are suppressed and must not use `[趋势]`, arrows, increase/decrease, or
 directional claims.
 
 Every `[事实]` and every numeric `[推断，置信度：高/中/低]` must end with a
-valid `[evidence:obs:<id>]` or `[bundle:/json/pointer]`. Every `[建议]` must also
-include `[owner:...] [due:YYYY-MM-DD] [verify:...]` on the same line. Prefer
+valid `[evidence:obs:<id>]` or `[bundle:/json/pointer]`. Numeric claims use only
+`[metric:/allowed/numeric/pointer=<canonical JSON number>]`; keep numbers out of
+surrounding factual prose. Every `[建议]` must also include `[owner:...]
+[due:YYYY-MM-DD]` and `[verify:metric:/pointer==target]` (or a structured
+artifact/check equivalent). Prefer
 specific new conclusions over text repeated from the prior portrait. There is
 no line-count target.
+
+Each metric field must equal the cited bundle scalar. When comparison is
+degraded, include `[事实][趋势抑制] ... [bundle:/comparison/status]`. When it is
+comparable, tag every trend `[趋势]` and cite both current and previous metric
+fields. Deadlines must be within 90 days after cutoff and `verify` must be a
+machine-checkable metric, artifact, or check condition.

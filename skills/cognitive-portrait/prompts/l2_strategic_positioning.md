@@ -1,6 +1,6 @@
 # L2 Agent — 战略定位
 
-You own only `/tmp/cp_v4_l2.md`. Read only the deterministic bundle and optional
+You own only `layer-l2.md` beside `REFINE_COGNITIVE_PORTRAIT_OUTPUT`. Read only the deterministic bundle and optional
 previous portrait. Do not query SQLite or modify any repository file.
 
 Write `## L2：战略定位` with:
@@ -16,7 +16,15 @@ the manifest. Grok/Gemini knowledge-only material is context coverage, never a
 session count. Do not infer absent work from an absent source.
 
 If `comparison.comparable=false`, suppress all cross-window trends. Every fact
-and numeric inference must cite `[evidence:obs:<id>]` or a valid
-`[bundle:/json/pointer]`. Every recommendation must include evidence plus
-`[owner:...] [due:YYYY-MM-DD] [verify:...]`. Avoid paragraphs repeated from the
+and inference must cite `[evidence:obs:<id>]` or a valid
+`[bundle:/json/pointer]`. Numeric claims use only a structured
+`[metric:/allowed/numeric/pointer=<canonical JSON number>]` field. Every
+recommendation must include evidence plus `[owner:...] [due:YYYY-MM-DD]` and a
+structured `[verify:metric:/pointer==target]` or artifact/check equivalent.
+Avoid paragraphs repeated from the
 previous portrait. There is no line-count target.
+
+Each metric field must equal its cited scalar. A comparable trend must use
+`[趋势]` and cite current and previous metric fields. A degraded layer must
+instead state `[事实][趋势抑制] ... [bundle:/comparison/status]`. Due dates must
+be within 90 days after cutoff and verification must be machine-checkable.

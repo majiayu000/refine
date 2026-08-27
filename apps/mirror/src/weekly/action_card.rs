@@ -376,6 +376,7 @@ mod tests {
                 .into_iter()
                 .map(|project| (project.project_name.clone(), project))
                 .collect(),
+            item_projects: HashMap::new(),
             global_stats: GlobalStats {
                 total_sessions: 0,
                 total_decisions: 0,

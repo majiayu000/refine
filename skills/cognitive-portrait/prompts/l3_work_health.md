@@ -1,6 +1,6 @@
 # L3 Agent — 工作方式健康度
 
-You own only `/tmp/cp_v4_l3.md`. Read only the bundle and optional prior
+You own only `layer-l3.md` beside `REFINE_COGNITIVE_PORTRAIT_OUTPUT`. Read only the bundle and optional prior
 portrait. Do not query SQLite or change the final report/index.
 
 Write `## L3：工作方式健康度` with:
@@ -15,7 +15,13 @@ friction. Never combine detached/unsupported numerators with linked-session
 denominators. If comparison is degraded, describe only the current window and
 the reason trends are unavailable.
 
-All facts and numeric inferences require a valid evidence ID or bundle JSON
-pointer. Every `[建议]` requires evidence plus owner, due date, and verification
-condition on the same line. Favor novel mechanisms and concrete frictions over
+All facts require a valid evidence ID or bundle JSON pointer. Numeric claims use
+only `[metric:/allowed/numeric/pointer=<canonical JSON number>]` and keep numbers
+out of surrounding factual prose. Every `[建议]` requires evidence plus owner,
+due date, and structured metric/artifact/check verification on the same line. Favor novel mechanisms and concrete frictions over
 generic productivity prose. There is no line-count target.
+
+Each metric field must equal its cited scalar. Comparable trends require
+`[趋势]` plus current and previous metric fields; degraded data requires an explicit
+`[事实][趋势抑制]` status claim and no directional prose. Due dates must be valid
+and no later than 90 days after cutoff; verification must be machine-checkable.

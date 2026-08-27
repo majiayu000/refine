@@ -15,7 +15,9 @@ Require all of the following or stop with a specific error:
 - `REFINE_COGNITIVE_PORTRAIT_BUNDLE` points to a readable JSON bundle.
 - The bundle has `schema_version=1` and
   `collector_version=cognitive-portrait-collector-v1`.
-- `docs/cognitive-portraits/` and all four prompt templates exist.
+- `REFINE_COGNITIVE_PORTRAIT_OUTPUT` names the only final candidate file this
+  invocation may write; its parent is the unique writable staging directory.
+- All four prompt templates exist at the trusted skill path.
 - `comparison.status` is read before any cross-period claim is planned.
 
 `REFINE_COGNITIVE_PORTRAIT_PREVIOUS` is an optional read-only prior portrait
@@ -42,6 +44,8 @@ previous 90 days.
 If collection reports `NO_CORE_DATA` or `SCHEMA_INVALID`, stop. If the bundle
 reports `DEGRADED`, analysis may describe the evidence gap, but all trend,
 direction, increase/decrease, and current-versus-previous claims are forbidden.
+Include one `[事实][趋势抑制]` line bound to
+`[bundle:/comparison/status]` so suppression is explicit.
 
 ## Stage 2 — four parallel layers
 
@@ -50,44 +54,41 @@ Dispatch four independent agents in parallel. Each receives:
 - the same read-only bundle path;
 - the optional previous portrait path;
 - exactly one prompt under `skills/cognitive-portrait/prompts/`;
-- exactly one owned output file `/tmp/cp_v4_l{1..4}.md`.
+- exactly one owned layer file beside `REFINE_COGNITIVE_PORTRAIT_OUTPUT`, named
+  `layer-l{1..4}.md`.
 
 No layer may write another layer, the final report, `INDEX.md`, the bundle, or
 the database. A layer must cite claims with one of these machine-readable forms:
 
 - `[evidence:obs:<item-id>]` for an observation in the bundle;
-- `[bundle:/json/pointer]` for an aggregate or manifest field.
+- `[bundle:/json/pointer]` for a non-numeric aggregate or manifest field;
+- `[metric:/allowed/numeric/pointer=<canonical JSON number>]` for a numeric
+  claim. Keep numeric tokens out of the surrounding factual prose.
 
-Every `[事实]` claim must have a valid reference. Any numeric `[事实]` or
-`[推断，置信度：高/中/低]` claim must have one too. Every `[建议]` must carry
-valid evidence plus `[owner:...] [due:YYYY-MM-DD] [verify:...]` on the same
-line. Do not cite knowledge-only Grok/Gemini sources as sessions.
+Every `[事实]` claim must have a valid reference. Numeric claims use only the
+structured metric field; free-prose numbers fail closed. A comparable
+cross-window statement must be tagged `[趋势]` and cite structured current and
+previous metrics. Every `[建议]` must carry allowlisted evidence, a meaningful
+owner, a due date no later than 90 days after the bundle cutoff, and one of
+`[verify:metric:/pointer==target]`, `[verify:artifact:name==present]`, or
+`[verify:check:name==pass]`. Do not cite knowledge-only Grok/Gemini sources as
+sessions.
 
-## Stage 3 — merge, validate, then archive
+## Stage 3 — merge only; wrapper validates and archives
 
 1. Confirm all four layer files exist and keep their L1-L4 boundaries.
-2. Merge them into
-   `docs/cognitive-portraits/cognitive-portrait-{YYYY-MM-DD}-v4.md` with a
+2. Merge them only into `REFINE_COGNITIVE_PORTRAIT_OUTPUT` with a
    header that records bundle schema, collector version, cutoff, window, cohort
    status, source revision, and binary identity.
 3. Do not use line count, table count, or prose volume as a pass condition.
-4. Validate before touching `INDEX.md`:
+4. Return zero only after the candidate is completely written. Do not run the
+   validator, publish evidence, write a final archive name, or touch `INDEX.md`.
 
-```bash
-args=(
-  --bundle "$REFINE_COGNITIVE_PORTRAIT_BUNDLE"
-  --portrait "$candidate"
-  --output "$(mktemp "${TMPDIR:-/tmp}/refine-portrait-layer-quality.XXXXXX")"
-)
-if [[ -n "${REFINE_COGNITIVE_PORTRAIT_PREVIOUS:-}" ]]; then
-  args+=(--previous "$REFINE_COGNITIVE_PORTRAIT_PREVIOUS")
-fi
-scripts/validate-cognitive-portrait.sh "${args[@]}"
-```
-
-5. Only after a zero exit may the dispatcher add the v4 row to `INDEX.md`.
-6. If validation fails, do not update the index. Return non-zero. The scheduled
-   wrapper restores the previous index and moves the candidate into `.failed/`.
+The scheduled wrapper owns the trusted bundle, validator, fixed report name,
+kernel-backed lock, archive, and index. It hash-checks trusted inputs after the
+agent exits, validates the staged candidate, rejects collisions/symlinks/hard
+links, and publishes the report, evidence, and index transactionally. No agent
+or layer may overwrite a prior artifact.
 
 The validator requires complete factual traceability, zero unsupported numeric
 claims, comparable cohorts for any trend claim, at least 60% paragraph novelty

@@ -31,8 +31,8 @@ INSERT INTO documents (id,title,raw_content,source,url,captured_at,created_at,up
  ('stale-doc','stale','raw','codex-session','codex://stale','2026-01-01T00:00:00Z','2026-08-27T00:00:00Z','2026-08-27T00:00:00Z');
 
 INSERT INTO items (id,item_type,title,summary,content,tags,source,created_at,updated_at,document_id,excerpt) VALUES
- ('codex-item','observation','Codex decision','summary','知识:\n- cohort contract\n阻力:\n- stale source','["refine","decision","competent"]',NULL,'2026-08-27T00:00:00Z','2026-08-27T00:00:00Z','codex-doc','codex evidence'),
- ('remem-item','observation','Remem summary','summary','模式:\n- preserve unknown provenance','["refine","delegation"]',NULL,'2026-08-27T00:00:00Z','2026-08-27T00:00:00Z','remem-doc','remem evidence'),
+ ('codex-item','observation','Shared title','summary','知识:\n- cohort contract\n阻力:\n- stale source','["zeta","decision","competent"]',NULL,'2026-08-27T00:00:00Z','2026-08-27T00:00:00Z','codex-doc','codex evidence'),
+ ('remem-item','observation','Shared title','summary','模式:\n- preserve unknown provenance','["alpha","delegation"]',NULL,'2026-08-27T00:00:00Z','2026-08-27T00:00:00Z','remem-doc','remem evidence'),
  ('grok-item','observation','Grok legacy note','summary','知识:\n- legacy note','["refine"]',NULL,'2026-08-27T00:00:00Z','2026-08-27T00:00:00Z','grok-doc','grok evidence'),
  ('claude-item','observation','Claude bugfix','summary','模式:\n- verify current head','["refine","bugfix","review"]',NULL,'2026-08-27T00:00:00Z','2026-08-27T00:00:00Z','claude-doc','claude evidence'),
  ('stale-item','observation','Recent ingest old event','summary','知识:\n- should be excluded','["refine"]',NULL,'2026-08-27T00:00:00Z','2026-08-27T00:00:00Z','stale-doc','stale evidence');
@@ -60,16 +60,20 @@ jq -e '.manifest.current_window.unsupported_source_counts[0].source == "grok-kno
   || fail 'Grok knowledge-only source was not disclosed'
 jq -e '.current.metrics.total_sessions == 2 and .comparison.status == "DEGRADED" and (.comparison.comparable | not)' "$bundle" >/dev/null \
   || fail 'unsupported source did not suppress trend comparability'
+jq -e '.current.metrics.project_ranking == [["alpha",1],["zeta",1]]' "$bundle" >/dev/null \
+  || fail 'equal-count project ranking is not name-stable'
+jq -e '.current.evidence | map({key:.item_id,value:.project}) | from_entries == {"codex-item":"zeta","remem-item":"alpha"}' "$bundle" >/dev/null \
+  || fail 'same-title observations were not assigned by direct item/project identity'
 jq -e '.current.evidence | map(.item_id) | index("stale-item") == null' "$bundle" >/dev/null \
   || fail 'recent ingest time overrode old event time'
 
 candidate="${TEST_ROOT}/candidate.md"
 previous="${TEST_ROOT}/previous.md"
 quality="${TEST_ROOT}/quality.json"
-printf '%s\n\n%s\n\n%s\n' \
-  '# 认知画像 v4' \
-  '[事实] 当前窗口 session 数为 2。[bundle:/current/metrics/total_sessions]' \
-  '[建议] 修复 unsupported 来源后再比较。[bundle:/comparison/status] [owner:lifcc] [due:2026-09-01] [verify:comparison.status 为 OK]' \
+printf '%b\n\n%b\n\n%b\n' \
+  '# 认知画像 v4\n\n## L1：认知演进' \
+  '[事实] 当前窗口 session 总量见机器指标。[metric:/current/metrics/total_sessions=2]\n\n[事实][趋势抑制] 当前窗口不可比较。[bundle:/comparison/status]' \
+  '[建议] 修复 unsupported 来源后再比较。[bundle:/comparison/status] [owner:lifcc] [due:2026-09-01] [verify:metric:/comparison/status==OK]\n\n这一段足够长的本期分析用于确认相对上一份画像确实包含新的证据解释。\n\n## L2：战略定位\n\n本层记录项目来源边界。\n\n## L3：工作方式健康度\n\n本层记录摩擦与协作边界。\n\n## L4：成长处方\n\n本层记录可验证的行动边界。' \
   > "$candidate"
 printf '%s\n\n%s\n' '# 旧画像' '这是与本期完全不同的旧画像段落，用于验证内容的新颖度门禁。' > "$previous"
 REFINE_COGNITIVE_PORTRAIT_REFINE_BIN="$REFINE_TEST_BIN" \
@@ -78,9 +82,9 @@ REFINE_COGNITIVE_PORTRAIT_REFINE_BIN="$REFINE_TEST_BIN" \
 jq -e '.passed and .factual_traceability_rate == 1 and .unsupported_number_rate == 0 and .action_verifiability_rate == 1' "$quality" >/dev/null \
   || fail 'valid candidate failed evidence quality gate'
 
-printf '%s\n\n%s\n' \
-  '[事实][趋势] session 从 1→2。[bundle:/current/metrics/total_sessions]' \
-  '[建议] 继续。[bundle:/comparison/status] [owner:lifcc] [due:2026-09-01] [verify:重跑]' \
+printf '%b\n\n%b\n' \
+  '# 认知画像 v4\n\n## L1：认知演进\n\n[事实][趋势] session 跨窗口变化。[metric:/current/metrics/total_sessions=2]\n\n[事实][趋势抑制] 当前窗口不可比较。[bundle:/comparison/status]' \
+  '[建议] 继续。[bundle:/comparison/status] [owner:lifcc] [due:2026-09-01] [verify:metric:/comparison/status==OK]\n\n## L2：战略定位\n\n本层记录项目来源边界。\n\n## L3：工作方式健康度\n\n本层记录摩擦与协作边界。\n\n## L4：成长处方\n\n本层记录可验证的行动边界。' \
   > "$candidate"
 if REFINE_COGNITIVE_PORTRAIT_REFINE_BIN="$REFINE_TEST_BIN" \
   "${SCRIPT_DIR}/validate-cognitive-portrait.sh" \

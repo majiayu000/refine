@@ -1,211 +1,358 @@
 #!/usr/bin/env bash
-# 定期触发 cognitive-portrait skill 生成认知画像。
-# launchd 只支持"按周"，双周节流在本脚本内按最新产物日期判定。
+# Generate a cognitive portrait through an untrusted-agent staging boundary.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-PROJECT_DIR="${REFINE_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
-PORTRAIT_DIR="${REFINE_PORTRAIT_DIR:-${PROJECT_DIR}/docs/cognitive-portraits}"
-# 历史产物（05-31 / 06-01 / 06-02）均由 Codex-native skill 生成，故默认 codex。
-AGENT_BIN="${REFINE_PORTRAIT_AGENT:-codex}"
-# 节流阈值（天）。低于此间隔直接跳过，避免每周重复 4 路 agent 的 LLM 成本。
-MIN_INTERVAL_DAYS="${REFINE_PORTRAIT_MIN_INTERVAL_DAYS:-13}"
-# 无人值守运行必须显式指定沙箱策略：workspace-write 允许 agent 把画像写进
-# PORTRAIT_DIR，但不给工作区以外的写权限。不要默认用
-# --dangerously-bypass-approvals-and-sandbox：那是交互式 shell 里的个人选择，
-# 定时任务无人监督，权限必须取最小可用集。
-AGENT_SANDBOX="${REFINE_PORTRAIT_SANDBOX:-workspace-write}"
-MIRROR_DIR="${REFINE_PORTRAIT_MIRROR_DIR:-${HOME}/.mirror}"
-COLLECTOR_SCRIPT="${REFINE_PORTRAIT_COLLECTOR:-${SCRIPT_DIR}/collect-cognitive-portrait.sh}"
-VALIDATOR_SCRIPT="${REFINE_PORTRAIT_VALIDATOR:-${SCRIPT_DIR}/validate-cognitive-portrait.sh}"
-LOG_PREFIX="[refine-portrait]"
-INDEX_FILE="${PORTRAIT_DIR}/INDEX.md"
-
-log() {
-  echo "${LOG_PREFIX} $(date '+%Y-%m-%d %H:%M:%S') $*"
-}
-
-notify() {
-  osascript -e "display notification \"$1\" with title \"$2\"" 2>&1 || true
-}
-
-# shellcheck source=scripts/load-llm-env.sh
-source "${SCRIPT_DIR}/load-llm-env.sh"
-if ! load_refine_llm_env 2>/dev/null; then
-  log "WARNING: no provider API key found; continuing with the agent's own authentication"
+# shellcheck source=scripts/runtime-job-lock.sh
+source "${SCRIPT_DIR}/runtime-job-lock.sh"
+if [[ "${REFINE_RUNTIME_LOCK_ACTIVE:-}" != "1" ]]; then
+  export REFINE_RUNTIME_JOB_LOCK_WAIT_SECONDS="${REFINE_PORTRAIT_LOCK_WAIT_SECONDS:-0}"
+  supervisor=""
+  forward_lock_signal() {
+    local signal="$1" status="$2"
+    [[ -z "$supervisor" ]] || kill -"$signal" -- "-$supervisor" 2>/dev/null \
+      || kill -"$signal" "$supervisor" 2>/dev/null || true
+    wait "$supervisor" 2>/dev/null || true
+    exit "$status"
+  }
+  /usr/bin/perl -MPOSIX=setsid -e 'setsid() or die "setsid failed: $!"; exec @ARGV or die "exec failed: $!"' -- \
+    bash -c 'source "$1"; shift; run_refine_runtime_job_locked "$@"' \
+    refine-portrait-lock "${SCRIPT_DIR}/runtime-job-lock.sh" "${SCRIPT_DIR}/cognitive-portrait.sh" "$@" &
+  supervisor=$!
+  trap 'forward_lock_signal HUP 129' HUP
+  trap 'forward_lock_signal INT 130' INT
+  trap 'forward_lock_signal TERM 143' TERM
+  status=0
+  wait "$supervisor" || status=$?
+  trap - HUP INT TERM
+  exit "$status"
 fi
 
-log "=== Cognitive Portrait Run Start ==="
-log "Preflight: PATH=$PATH"
-log "Preflight: PROJECT_DIR=${PROJECT_DIR} PORTRAIT_DIR=${PORTRAIT_DIR} AGENT_BIN=${AGENT_BIN}"
-log "Preflight: LLM source=${REFINE_LLM_ENV_SOURCE:-none} $(refine_llm_env_status)"
+PROJECT_DIR="${REFINE_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+PORTRAIT_DIR="${REFINE_PORTRAIT_DIR:-${PROJECT_DIR}/docs/cognitive-portraits}"
+INDEX_FILE="${PORTRAIT_DIR}/INDEX.md"
+AGENT_BIN="${REFINE_PORTRAIT_AGENT:-codex}"
+AGENT_SANDBOX="${REFINE_PORTRAIT_SANDBOX:-workspace-write}"
+MIN_INTERVAL_DAYS="${REFINE_PORTRAIT_MIN_INTERVAL_DAYS:-13}"
+COLLECTOR_SCRIPT="${REFINE_PORTRAIT_COLLECTOR:-${SCRIPT_DIR}/collect-cognitive-portrait.sh}"
+VALIDATOR_SCRIPT="${REFINE_PORTRAIT_VALIDATOR:-${SCRIPT_DIR}/validate-cognitive-portrait.sh}"
+SKILL_FILE="${REFINE_PORTRAIT_SKILL:-${PROJECT_DIR}/skills/cognitive-portrait/SKILL.md}"
+STATE_ROOT="${REFINE_PORTRAIT_STATE_ROOT:-${HOME}/.mirror/cognitive-portrait-runs}"
+STAGING_ROOT="${REFINE_PORTRAIT_STAGING_ROOT:-${TMPDIR:-/tmp}}"
+LOG_PREFIX="[refine-portrait]"
 
-if [[ ! -d "$PORTRAIT_DIR" ]]; then
-  log "ERROR: 画像归档目录不存在: ${PORTRAIT_DIR}"
-  notify "画像归档目录不存在: ${PORTRAIT_DIR}" "Refine Cognitive Portrait 失败"
+log() { echo "${LOG_PREFIX} $(date '+%Y-%m-%d %H:%M:%S') $*"; }
+
+notify() {
+  command -v osascript >/dev/null 2>&1 || return 0
+  osascript - "$1" "$2" <<'APPLESCRIPT' 2>&1 || true
+on run argv
+  display notification (item 1 of argv) with title (item 2 of argv)
+end run
+APPLESCRIPT
+}
+
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
+file_identity() {
+  stat -f '%d:%i:%l' "$1" 2>/dev/null || stat -c '%d:%i:%h' "$1" 2>/dev/null
+}
+
+directory_identity() {
+  [[ -d "$1" && ! -L "$1" ]] || return 1
+  stat -f '%d:%i' "$1" 2>/dev/null || stat -c '%d:%i' "$1" 2>/dev/null
+}
+
+require_private_regular() {
+  [[ -f "$1" && ! -L "$1" ]] || return 1
+  [[ "$(file_identity "$1" | awk -F: '{print $3}')" == "1" ]]
+}
+
+atomic_copy() {
+  local source="$1" destination="$2" parent temporary
+  parent=$(dirname "$destination")
+  [[ -d "$parent" && ! -L "$parent" ]] || return 1
+  temporary=$(mktemp "${parent}/.portrait-publish.XXXXXX") || return 1
+  if ! cp -p -- "$source" "$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  chmod 600 "$temporary" 2>/dev/null || true
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  mv -- "$temporary" "$destination"
+}
+
+tree_fingerprint() {
+  local root="$1"
+  find "$root" -type f -print | LC_ALL=C sort | while IFS= read -r file; do
+    printf '%s  %s\n' "$(sha256_file "$file")" "${file#"${root}"/}"
+  done
+}
+
+log "=== Cognitive Portrait Run Start ==="
+if [[ ! -d "$PORTRAIT_DIR" || -L "$PORTRAIT_DIR" ]]; then
+  log "ERROR: portrait archive must be a real directory: ${PORTRAIT_DIR}"
+  exit 1
+fi
+PORTRAIT_DIR_ID=$(directory_identity "$PORTRAIT_DIR")
+if [[ ! -f "$INDEX_FILE" || -L "$INDEX_FILE" ]] || ! require_private_regular "$INDEX_FILE"; then
+  log "ERROR: INDEX.md must be a regular single-link file"
+  exit 1
+fi
+if [[ ! -x "$COLLECTOR_SCRIPT" || ! -x "$VALIDATOR_SCRIPT" || ! -f "$SKILL_FILE" ]]; then
+  log "ERROR: trusted collector, validator, or skill is unavailable"
+  exit 1
+fi
+SKILL_DIR=$(dirname "$SKILL_FILE")
+if find "$SKILL_DIR" \( -type l -o -type f -links +1 \) -print -quit | grep -q .; then
+  log "ERROR: trusted skill tree contains a symlink or hard-linked file"
+  exit 1
+fi
+if ! command -v "$AGENT_BIN" >/dev/null 2>&1; then
+  log "ERROR: agent executable not found: ${AGENT_BIN}"
+  notify "agent 未找到" "Refine Cognitive Portrait 失败"
+  exit 1
+fi
+if find "$PORTRAIT_DIR" \( -type l -o -type f -links +1 \) -print -quit | grep -q .; then
+  log "ERROR: archive contains a symlink or hard-linked file"
+  exit 1
+fi
+if [[ -e "${PORTRAIT_DIR}/.failed" && ! -d "${PORTRAIT_DIR}/.failed" ]] \
+  || [[ -L "${PORTRAIT_DIR}/.failed" ]]; then
+  log "ERROR: .failed must be an ordinary directory when present"
   exit 1
 fi
 
-# 双周节流：取最新 cognitive-portrait-YYYY-MM-DD-vN.md 的文件名日期。
-# 依赖 skill 的命名约定（见 docs/cognitive-portraits/INDEX.md「命名约定」）；
-# 若命名变化，节流失效并退化为每周执行（多跑不丢数据，可接受）。
-latest=$(ls "${PORTRAIT_DIR}"/cognitive-portrait-*.md 2>/dev/null | sort | tail -1 || true)
+latest=$(find "$PORTRAIT_DIR" -maxdepth 1 -type f -name 'cognitive-portrait-*.md' -print \
+  | LC_ALL=C sort | tail -1 || true)
 if [[ -n "$latest" ]]; then
   base=$(basename "$latest")
-  date_part=$(echo "$base" | sed -n 's/^cognitive-portrait-\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\)-.*$/\1/p')
+  date_part=$(sed -n 's/^cognitive-portrait-\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\)-.*$/\1/p' <<<"$base")
   if [[ -n "$date_part" ]]; then
-    last_epoch=$(date -j -f '%Y-%m-%d' "$date_part" '+%s' 2>/dev/null || echo "")
+    last_epoch=$(date -j -f '%Y-%m-%d' "$date_part" '+%s' 2>/dev/null \
+      || date -d "$date_part" '+%s' 2>/dev/null || true)
     if [[ -n "$last_epoch" ]]; then
       age_days=$(( ($(date '+%s') - last_epoch) / 86400 ))
       if (( age_days < MIN_INTERVAL_DAYS )); then
-        log "SKIP: 上一份画像 ${age_days} 天前生成（${base}），未达 ${MIN_INTERVAL_DAYS} 天节流间隔"
-        log "=== Cognitive Portrait Run End ==="
+        log "SKIP: previous portrait is ${age_days} days old"
         exit 0
       fi
-      log "上一份画像 ${age_days} 天前生成（${base}），继续执行"
-    else
-      log "WARNING: 无法解析日期 ${date_part}，跳过节流判定"
     fi
-  else
-    log "WARNING: 文件名不符合命名约定: ${base}，跳过节流判定"
   fi
-else
-  log "归档目录暂无历史画像，直接执行"
 fi
 
-if ! command -v "$AGENT_BIN" >/dev/null 2>&1; then
-  log "ERROR: agent 可执行文件未找到: ${AGENT_BIN}（launchd PATH 通常不含用户级 bin，请用 REFINE_PORTRAIT_AGENT 指定绝对路径）"
-  notify "agent 未找到: ${AGENT_BIN}" "Refine Cognitive Portrait 失败"
+if [[ -L "$STATE_ROOT" ]]; then
+  log "ERROR: refusing symlink run-state root"
   exit 1
 fi
-if [[ ! -x "$COLLECTOR_SCRIPT" || ! -x "$VALIDATOR_SCRIPT" ]]; then
-  log "ERROR: collector/validator 不可执行: ${COLLECTOR_SCRIPT} / ${VALIDATOR_SCRIPT}"
+if [[ ! -d "$STAGING_ROOT" ]]; then
+  log "ERROR: agent staging root must be a real directory"
   exit 1
 fi
-if [[ -L "$MIRROR_DIR" ]]; then
-  log "ERROR: refusing symlink Mirror state directory: ${MIRROR_DIR}"
-  exit 1
-fi
-mkdir -p "$MIRROR_DIR"
-chmod 700 "$MIRROR_DIR" 2>/dev/null || true
-
-start_marker=$(mktemp "${TMPDIR:-/tmp}/refine-portrait-start.XXXXXX")
-index_snapshot=$(mktemp "${TMPDIR:-/tmp}/refine-portrait-index.XXXXXX")
-bundle_file=$(mktemp "${TMPDIR:-/tmp}/refine-portrait-bundle.XXXXXX")
-quality_file=$(mktemp "${TMPDIR:-/tmp}/refine-portrait-quality.XXXXXX")
-index_existed=0
+STAGING_ROOT=$(cd "$STAGING_ROOT" && pwd -P)
+mkdir -p "$STATE_ROOT"
+chmod 700 "$STATE_ROOT" 2>/dev/null || true
+trusted_dir=$(mktemp -d "${STATE_ROOT}/trusted.XXXXXX")
+staging_dir=$(mktemp -d "${STAGING_ROOT%/}/refine-portrait-agent.XXXXXX")
+chmod 700 "$trusted_dir" "$staging_dir"
+bundle_file="${trusted_dir}/bundle.json"
+quality_file="${trusted_dir}/quality.json"
+candidate_trusted="${trusted_dir}/candidate.md"
+agent_bundle="${staging_dir}/bundle.json"
+agent_previous="${staging_dir}/previous.md"
+agent_candidate="${staging_dir}/candidate.md"
+archive_snapshot="${trusted_dir}/archive.before"
+mkdir "$archive_snapshot"
+cp -R "${PORTRAIT_DIR}/." "$archive_snapshot/"
+archive_before=$(tree_fingerprint "$PORTRAIT_DIR")
+collector_hash=$(sha256_file "$COLLECTOR_SCRIPT")
+validator_hash=$(sha256_file "$VALIDATOR_SCRIPT")
+skill_hash=$(tree_fingerprint "$SKILL_DIR")
 run_committed=0
 agent_pid=""
-if [[ -f "$INDEX_FILE" ]]; then
-  cp "$INDEX_FILE" "$index_snapshot"
-  index_existed=1
-fi
+published_report=""
+published_bundle=""
+published_quality=""
 
-quarantine_portrait() {
-  local portrait="$1"
-  local failed_dir="${PORTRAIT_DIR}/.failed"
-  local destination
-  mkdir -p "$failed_dir"
-  chmod 700 "$failed_dir" 2>/dev/null || true
-  destination="${failed_dir}/$(basename "$portrait").$(date -u +%Y%m%dT%H%M%SZ).failed"
-  mv "$portrait" "$destination"
-  log "隔离未完成画像: ${destination}"
+restore_archive_file() {
+  local snapshot="$1" destination="$2" parent temporary
+  parent=$(dirname "$destination")
+  [[ "$(directory_identity "$PORTRAIT_DIR" 2>/dev/null || true)" == "$PORTRAIT_DIR_ID" ]] || return 1
+  [[ "$parent" == "$PORTRAIT_DIR" || "$parent" == "${PORTRAIT_DIR}/evidence" ]] || return 1
+  [[ -d "$parent" && ! -L "$parent" ]] || return 1
+  rm -f -- "$destination" || return 1
+  temporary=$(mktemp "${parent}/.portrait-restore.XXXXXX") || return 1
+  cp -p -- "$snapshot" "$temporary" || { rm -f -- "$temporary"; return 1; }
+  mv -f -- "$temporary" "$destination"
 }
 
-restore_portrait_index() {
-  if [[ "$index_existed" == "1" ]]; then
-    cp "$index_snapshot" "$INDEX_FILE"
-  else
-    rm -f "$INDEX_FILE"
-  fi
+restore_archive() {
+  local current relative snapshot destination
+  [[ "$(directory_identity "$PORTRAIT_DIR" 2>/dev/null || true)" == "$PORTRAIT_DIR_ID" ]] || return 1
+  while IFS= read -r current; do
+    relative=${current#"${PORTRAIT_DIR}"/}
+    [[ -f "${archive_snapshot}/${relative}" ]] || rm -f -- "$current" || true
+  done < <(find "$PORTRAIT_DIR" -type f -print)
+  while IFS= read -r current; do
+    [[ -L "$current" ]] && rm -f -- "$current" || true
+  done < <(find "$PORTRAIT_DIR" -type l -print 2>/dev/null || true)
+  while IFS= read -r snapshot; do
+    relative=${snapshot#"${archive_snapshot}"/}
+    destination="${PORTRAIT_DIR}/${relative}"
+    mkdir -p "$(dirname "$destination")"
+    restore_archive_file "$snapshot" "$destination" || return 1
+  done < <(find "$archive_snapshot" -type f -print)
 }
 
-cleanup_incomplete_run() {
-  local exit_status=$?
-  local candidate
+cleanup() {
+  local status=$?
   trap - EXIT HUP INT TERM
   if [[ "$run_committed" != "1" ]]; then
-    while IFS= read -r candidate; do
-      [[ -n "$candidate" ]] && quarantine_portrait "$candidate"
-    done < <(find "$PORTRAIT_DIR" -maxdepth 1 -name 'cognitive-portrait-*.md' -newer "$start_marker" 2>/dev/null || true)
-    restore_portrait_index
+    [[ -z "$published_report" ]] || rm -f -- "$published_report" || true
+    [[ -z "$published_bundle" ]] || rm -f -- "$published_bundle" || true
+    [[ -z "$published_quality" ]] || rm -f -- "$published_quality" || true
+    restore_archive || log "ERROR: archive rollback could not be completed safely"
   fi
-  rm -f "$start_marker" "$index_snapshot" "$bundle_file" "$quality_file"
-  exit "$exit_status"
+  chmod 700 "$staging_dir" 2>/dev/null || true
+  rm -rf -- "$staging_dir" "$trusted_dir"
+  exit "$status"
 }
 
 forward_agent_signal() {
-  local signal="$1"
-  local exit_status="$2"
-  if [[ -n "$agent_pid" ]]; then
-    kill -"$signal" -- "-$agent_pid" 2>/dev/null || kill -"$signal" "$agent_pid" 2>/dev/null || true
-  fi
-  exit "$exit_status"
+  local signal="$1" status="$2"
+  [[ -z "$agent_pid" ]] || kill -"$signal" -- "-$agent_pid" 2>/dev/null \
+    || kill -"$signal" "$agent_pid" 2>/dev/null || true
+  exit "$status"
 }
-
-trap cleanup_incomplete_run EXIT
+trap cleanup EXIT
 trap 'forward_agent_signal HUP 129' HUP
 trap 'forward_agent_signal INT 130' INT
 trap 'forward_agent_signal TERM 143' TERM
 
 cutoff=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-log "采集 deterministic evidence bundle: cutoff=${cutoff} period=90d"
 if ! "$COLLECTOR_SCRIPT" --period 90 --cutoff "$cutoff" --output "$bundle_file"; then
-  log "ERROR: cognitive portrait collector 失败；不启动 agent"
-  notify "画像证据采集失败，详见 refine-portrait.log" "Refine Cognitive Portrait 失败"
+  log "ERROR: deterministic collector failed"
   exit 1
 fi
-export REFINE_COGNITIVE_PORTRAIT_BUNDLE="$bundle_file"
-export REFINE_COGNITIVE_PORTRAIT_PREVIOUS="${latest:-}"
+require_private_regular "$bundle_file" || { log "ERROR: collector output is unsafe"; exit 1; }
+bundle_hash=$(sha256_file "$bundle_file")
+cp -p "$bundle_file" "$agent_bundle"
+chmod 600 "$agent_bundle" 2>/dev/null || true
+if [[ -n "$latest" ]]; then
+  cp -p "$latest" "$agent_previous"
+  chmod 400 "$agent_previous" 2>/dev/null || true
+fi
 
-log "执行 agent: ${AGENT_BIN} exec --sandbox ${AGENT_SANDBOX} --add-dir ${MIRROR_DIR}"
+export REFINE_COGNITIVE_PORTRAIT_BUNDLE="$agent_bundle"
+export REFINE_COGNITIVE_PORTRAIT_PREVIOUS="${agent_previous:-}"
+export REFINE_COGNITIVE_PORTRAIT_OUTPUT="$agent_candidate"
+prompt="Read ${SKILL_FILE} and generate one cognitive portrait from the supplied bundle. Write only ${agent_candidate}; do not edit the repository, archive, evidence, input bundle, validator, or history."
+log "running untrusted agent in isolated staging directory"
 rc=0
-(cd "$PROJECT_DIR" && exec /usr/bin/perl -MPOSIX=setsid -e 'setsid() or die "setsid failed: $!"; exec @ARGV or die "exec failed: $!"' -- \
-  "$AGENT_BIN" exec --sandbox "$AGENT_SANDBOX" --add-dir "$MIRROR_DIR" \
-  "运行 cognitive-portrait 技能，生成本期认知画像") 2>&1 &
+(cd "$staging_dir" && exec /usr/bin/perl -MPOSIX=setsid -e 'setsid() or die "setsid failed: $!"; exec @ARGV or die "exec failed: $!"' -- \
+  env -u REFINE_ROOT -u REFINE_PORTRAIT_DIR -u REFINE_PORTRAIT_COLLECTOR \
+    -u REFINE_PORTRAIT_VALIDATOR -u REFINE_PORTRAIT_SKILL -u REFINE_PORTRAIT_STATE_ROOT \
+    -u REFINE_PORTRAIT_STAGING_ROOT \
+    "$AGENT_BIN" exec --ephemeral --sandbox "$AGENT_SANDBOX" "$prompt") 2>&1 &
 agent_pid=$!
 wait "$agent_pid" || rc=$?
 agent_pid=""
 
-# 产物校验：必须出现一份比本次启动更新的画像文件，否则视为静默阉割（U-29）。
-new_portrait=$(find "$PORTRAIT_DIR" -maxdepth 1 -name 'cognitive-portrait-*.md' -newer "$start_marker" 2>/dev/null | head -1 || true)
-
-if [[ -z "$new_portrait" ]]; then
-  log "ERROR: agent 退出但未产出新画像（agent exit code ${rc}）"
-  notify "agent 退出但未产出新画像，详见 refine-portrait.log" "Refine Cognitive Portrait 失败"
-  exit 1
-fi
-
 if [[ "$rc" -ne 0 ]]; then
-  log "ERROR: agent 以非零状态退出: ${rc}（已产出 ${new_portrait}，但结果可能不完整）"
-  notify "agent 非零退出 (${rc})，详见 refine-portrait.log" "Refine Cognitive Portrait 失败"
+  log "ERROR: agent exited ${rc}"
+  exit 1
+fi
+if [[ "$(sha256_file "$COLLECTOR_SCRIPT")" != "$collector_hash" \
+  || "$(sha256_file "$VALIDATOR_SCRIPT")" != "$validator_hash" \
+  || "$(tree_fingerprint "$SKILL_DIR")" != "$skill_hash" ]]; then
+  log "ERROR: trusted collector, validator, or skill changed during agent run"
+  exit 1
+fi
+if [[ "$(sha256_file "$bundle_file")" != "$bundle_hash" ]]; then
+  log "ERROR: trusted evidence bundle changed during agent run"
+  exit 1
+fi
+archive_after=$(tree_fingerprint "$PORTRAIT_DIR")
+if [[ "$archive_after" != "$archive_before" ]]; then
+  log "ERROR: agent attempted to mutate portrait history"
+  exit 1
+fi
+if [[ $(find "$staging_dir" -maxdepth 1 -type f ! -name bundle.json ! -name previous.md \
+  ! -name candidate.md ! -name 'layer-l[1-4].md' | wc -l | tr -d ' ') != 0 ]]; then
+  log "ERROR: agent produced unexpected staging artifacts"
+  exit 1
+fi
+if ! require_private_regular "$agent_candidate"; then
+  log "ERROR: candidate must be a regular single-link file"
+  exit 1
+fi
+chmod 500 "$staging_dir" 2>/dev/null || true
+candidate_hash=$(sha256_file "$agent_candidate")
+cp -p -- "$agent_candidate" "$candidate_trusted"
+require_private_regular "$candidate_trusted" || { log "ERROR: trusted candidate copy is unsafe"; exit 1; }
+if [[ "$(sha256_file "$candidate_trusted")" != "$candidate_hash" ]]; then
+  log "ERROR: candidate changed while crossing the trust boundary"
   exit 1
 fi
 
-validator_args=(--bundle "$bundle_file" --portrait "$new_portrait" --output "$quality_file")
-[[ -n "${latest:-}" ]] && validator_args+=(--previous "$latest")
+validator_args=(--bundle "$bundle_file" --portrait "$candidate_trusted" --output "$quality_file")
+[[ -n "$latest" ]] && validator_args+=(--previous "$latest")
 if ! "$VALIDATOR_SCRIPT" "${validator_args[@]}"; then
-  log "ERROR: 新画像未通过 evidence quality gate: ${new_portrait}"
-  notify "新画像质量门禁失败，已隔离" "Refine Cognitive Portrait 失败"
+  log "ERROR: candidate failed evidence quality gates"
   exit 1
 fi
+require_private_regular "$quality_file" || { log "ERROR: validator output is unsafe"; exit 1; }
 
-new_base=$(basename "$new_portrait")
-new_date=$(sed -n 's/^cognitive-portrait-\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\)-.*$/\1/p' <<<"$new_base")
-if [[ ! -f "$INDEX_FILE" ]] || ! grep -Eq "^\|[[:space:]]*(\\[)?${new_date}([[:space:]]|\\]|\\()" "$INDEX_FILE"; then
-  log "ERROR: 新画像未写入归档索引: ${new_base}"
-  notify "新画像未写入 INDEX.md，已隔离" "Refine Cognitive Portrait 失败"
-  exit 1
-fi
-
-run_committed=1
+report_date=$(date '+%Y-%m-%d')
+new_base="cognitive-portrait-${report_date}-v4.md"
+report_destination="${PORTRAIT_DIR}/${new_base}"
 evidence_dir="${PORTRAIT_DIR}/evidence"
+if [[ -e "$evidence_dir" && ! -d "$evidence_dir" ]] || [[ -L "$evidence_dir" ]]; then
+  log "ERROR: evidence path is unsafe"
+  exit 1
+fi
 mkdir -p "$evidence_dir"
-chmod 700 "$evidence_dir" 2>/dev/null || true
-mv "$bundle_file" "${evidence_dir}/${new_base%.md}.bundle.json"
-mv "$quality_file" "${evidence_dir}/${new_base%.md}.quality.json"
-rm -f "$start_marker" "$index_snapshot"
+bundle_destination="${evidence_dir}/${new_base%.md}.bundle.json"
+quality_destination="${evidence_dir}/${new_base%.md}.quality.json"
+for destination in "$report_destination" "$bundle_destination" "$quality_destination"; do
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    log "ERROR: refusing to overwrite ${destination}"
+    exit 1
+  fi
+done
+
+atomic_copy "$bundle_file" "$bundle_destination"
+published_bundle="$bundle_destination"
+atomic_copy "$quality_file" "$quality_destination"
+published_quality="$quality_destination"
+atomic_copy "$candidate_trusted" "$report_destination"
+published_report="$report_destination"
+index_stage="${trusted_dir}/INDEX.next.md"
+index_row="| [${report_date}](./${new_base}) | v4 | bundle | evidence | ✅ | ✅ | ✅ | ✅ | deterministic collector + gated agent | ✅ |"
+awk -v row="$index_row" '
+  BEGIN { in_reports = 0; inserted = 0; previous_was_table = 0 }
+  $0 == "## 报告清单" { in_reports = 1 }
+  in_reports && !inserted && previous_was_table && $0 !~ /^\|/ {
+    print row
+    inserted = 1
+  }
+  { print; previous_was_table = in_reports && $0 ~ /^\|/ }
+  END { if (!inserted) print row }
+' "$INDEX_FILE" > "$index_stage"
+restore_archive_file "$index_stage" "$INDEX_FILE"
+run_committed=1
 trap - EXIT HUP INT TERM
-log "画像已生成: ${new_portrait}"
-notify "认知画像已生成: $(basename "$new_portrait")" "Refine Cognitive Portrait"
+chmod 700 "$staging_dir" 2>/dev/null || true
+rm -rf -- "$staging_dir" "$trusted_dir"
+log "portrait published: ${report_destination}"
+notify "认知画像已生成: ${new_base}" "Refine Cognitive Portrait"
 log "=== Cognitive Portrait Run End ==="

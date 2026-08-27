@@ -3,141 +3,240 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TEST_ROOT=$(mktemp -d)
+REPORT_DATE=$(date '+%Y-%m-%d')
+REPORT_BASE="cognitive-portrait-${REPORT_DATE}-v4"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
-fail() {
-  echo "FAIL: $*" >&2
-  exit 1
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+prepare_case() {
+  local name="$1"
+  local root="${TEST_ROOT}/${name}"
+  mkdir -p "$root/project/skills/cognitive-portrait" "$root/portraits/evidence" \
+    "$root/bin" "$root/home" "$root/state"
+  printf '# Index\n' > "$root/portraits/INDEX.md"
+  printf '# prior\n' > "$root/portraits/cognitive-portrait-2026-01-01-v3.md"
+  printf '# trusted skill\n' > "$root/project/skills/cognitive-portrait/SKILL.md"
+  cat > "$root/bin/fake-agent" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -z "${FAKE_AGENT_LOG:-}" ]] || printf 'started\n' >> "$FAKE_AGENT_LOG"
+case "${FAKE_AGENT_MODE:-normal}" in
+  normal) printf '# candidate\n' > "$REFINE_COGNITIVE_PORTRAIT_OUTPUT" ;;
+  exit) printf '# incomplete\n' > "$REFINE_COGNITIVE_PORTRAIT_OUTPUT"; exit 7 ;;
+  tamper-bundle)
+    printf '{"metric":999}\n' > "$REFINE_COGNITIVE_PORTRAIT_BUNDLE"
+    printf '# candidate\n' > "$REFINE_COGNITIVE_PORTRAIT_OUTPUT"
+    ;;
+  tamper-history)
+    printf 'attacker index\n' > "$FAKE_INDEX_TARGET"
+    printf 'attacker history\n' > "$FAKE_HISTORY_TARGET"
+    printf '# candidate\n' > "$REFINE_COGNITIVE_PORTRAIT_OUTPUT"
+    ;;
+  index-symlink)
+    rm -f -- "$FAKE_INDEX_TARGET"
+    ln -s "$FAKE_VICTIM" "$FAKE_INDEX_TARGET"
+    printf '# candidate\n' > "$REFINE_COGNITIVE_PORTRAIT_OUTPUT"
+    exit 7
+    ;;
+  candidate-symlink) ln -s "$FAKE_VICTIM" "$REFINE_COGNITIVE_PORTRAIT_OUTPUT" ;;
+  tamper-validator)
+    printf '#!/usr/bin/env bash\nprintf exploited > "%s"\n' "$FAKE_VALIDATOR_MARKER" > "$FAKE_VALIDATOR_TARGET"
+    chmod 700 "$FAKE_VALIDATOR_TARGET"
+    printf '# candidate\n' > "$REFINE_COGNITIVE_PORTRAIT_OUTPUT"
+    ;;
+  swap-directory)
+    mv "$FAKE_PORTRAIT_TARGET" "${FAKE_PORTRAIT_TARGET}.moved"
+    ln -s "$FAKE_VICTIM" "$FAKE_PORTRAIT_TARGET"
+    printf '# candidate\n' > "$REFINE_COGNITIVE_PORTRAIT_OUTPUT"
+    ;;
+  sleep)
+    printf '# candidate\n' > "$REFINE_COGNITIVE_PORTRAIT_OUTPUT"
+    (sleep 10; printf survived > "$FAKE_DESCENDANT_MARKER") &
+    wait
+    ;;
+  *) exit 90 ;;
+esac
+EOF
+  cat > "$root/bin/fake-collector" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+output=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in --output) output="$2"; shift 2 ;; *) shift ;; esac
+done
+printf '{"metric":1}\n' > "$output"
+EOF
+  cat > "$root/bin/fake-validator" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+output="" bundle=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output) output="$2"; shift 2 ;;
+    --bundle) bundle="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ -z "${FAKE_VALIDATOR_MARKER:-}" ]] || printf called > "$FAKE_VALIDATOR_MARKER"
+grep -q '"metric":1' "$bundle"
+printf '{"passed":true}\n' > "$output"
+exit "${FAKE_VALIDATOR_EXIT:-0}"
+EOF
+  chmod 700 "$root/bin/fake-agent" "$root/bin/fake-collector" "$root/bin/fake-validator"
 }
 
 run_case() {
-  local case_name="$1"
-  local agent_exit="$2"
-  local update_index="$3"
-  local validator_exit="${4:-0}"
-  local case_root="${TEST_ROOT}/${case_name}"
-  local portrait_dir="${case_root}/portraits"
-  local bin_dir="${case_root}/bin"
-  mkdir -p "$portrait_dir" "$bin_dir" "${case_root}/home"
-  printf '# Index\n' > "${portrait_dir}/INDEX.md"
-  cat > "${bin_dir}/fake-agent" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-portrait="${REFINE_PORTRAIT_DIR}/cognitive-portrait-2026-08-12-v9.md"
-printf '# candidate\n' > "$portrait"
-if [[ "$FAKE_UPDATE_INDEX" == "1" ]]; then
-  printf '| 2026-08-12 | sessions | lines |\n' >> "${REFINE_PORTRAIT_DIR}/INDEX.md"
-fi
-if [[ -n "${FAKE_AGENT_SLEEP:-}" ]]; then
-  (sleep "$FAKE_AGENT_SLEEP"; printf 'descendant-survived\n' > "${REFINE_PORTRAIT_DIR}/descendant.txt") &
-  wait
-fi
-exit "$FAKE_AGENT_EXIT"
-EOF
-  cat > "${bin_dir}/fake-collector" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-output=""
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --output) output="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-[[ -n "$output" ]]
-printf '{"schema_version":1,"collector_version":"cognitive-portrait-collector-v1"}\n' > "$output"
-EOF
-  cat > "${bin_dir}/fake-validator" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-output=""
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --output) output="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-[[ -n "$output" ]]
-printf '{"passed":%s}\n' "$( [[ "${FAKE_VALIDATOR_EXIT:-0}" == "0" ]] && echo true || echo false )" > "$output"
-exit "${FAKE_VALIDATOR_EXIT:-0}"
-EOF
-  chmod 700 "${bin_dir}/fake-agent" "${bin_dir}/fake-collector" "${bin_dir}/fake-validator"
-
-  env -i HOME="${case_root}/home" PATH="${bin_dir}:/usr/bin:/bin" \
-    REFINE_PORTRAIT_DIR="$portrait_dir" \
-    REFINE_PORTRAIT_AGENT="${bin_dir}/fake-agent" \
-    REFINE_PORTRAIT_COLLECTOR="${bin_dir}/fake-collector" \
-    REFINE_PORTRAIT_VALIDATOR="${bin_dir}/fake-validator" \
+  local name="$1" mode="${2:-normal}" validator_exit="${3:-0}"
+  local root="${TEST_ROOT}/${name}"
+  prepare_case "$name"
+  env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" \
+    REFINE_ROOT="$root/project" \
+    REFINE_PORTRAIT_DIR="$root/portraits" \
+    REFINE_PORTRAIT_STATE_ROOT="$root/state" \
+    REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" \
+    REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector" \
+    REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" \
     REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
-    FAKE_AGENT_EXIT="$agent_exit" FAKE_UPDATE_INDEX="$update_index" \
-    FAKE_VALIDATOR_EXIT="$validator_exit" \
-    bash "${SCRIPT_DIR}/cognitive-portrait.sh"
+    FAKE_AGENT_MODE="$mode" FAKE_VALIDATOR_EXIT="$validator_exit" \
+    FAKE_INDEX_TARGET="$root/portraits/INDEX.md" \
+    FAKE_HISTORY_TARGET="$root/portraits/cognitive-portrait-2026-01-01-v3.md" \
+    FAKE_PORTRAIT_TARGET="$root/portraits" \
+    FAKE_VALIDATOR_TARGET="$root/bin/fake-validator" \
+    FAKE_VALIDATOR_MARKER="$root/validator.called" \
+    FAKE_VICTIM="$root/victim" \
+    bash "$SCRIPT_DIR/cognitive-portrait.sh"
 }
 
-run_case success 0 1 || fail 'complete indexed portrait was rejected'
-[[ -f "${TEST_ROOT}/success/portraits/cognitive-portrait-2026-08-12-v9.md" ]] \
-  || fail 'complete portrait was not retained'
-[[ -f "${TEST_ROOT}/success/portraits/evidence/cognitive-portrait-2026-08-12-v9.bundle.json" ]] \
-  || fail 'passing portrait bundle was not archived'
-[[ -f "${TEST_ROOT}/success/portraits/evidence/cognitive-portrait-2026-08-12-v9.quality.json" ]] \
-  || fail 'passing portrait quality report was not archived'
+run_case success
+[[ -f "$TEST_ROOT/success/portraits/${REPORT_BASE}.md" ]] || fail 'report not published'
+[[ -f "$TEST_ROOT/success/portraits/evidence/${REPORT_BASE}.bundle.json" ]] || fail 'bundle not published'
+[[ -f "$TEST_ROOT/success/portraits/evidence/${REPORT_BASE}.quality.json" ]] || fail 'quality not published'
+grep -q "$REPORT_BASE" "$TEST_ROOT/success/portraits/INDEX.md" || fail 'index not updated by host'
 
-if run_case nonzero 7 1; then
-  fail 'nonzero agent run was accepted'
+run_case nonzero exit && fail 'nonzero agent accepted'
+[[ ! -e "$TEST_ROOT/nonzero/portraits/${REPORT_BASE}.md" ]] || fail 'failed candidate entered archive'
+
+run_case validator-fail normal 9 && fail 'validator failure accepted'
+[[ ! -e "$TEST_ROOT/validator-fail/portraits/${REPORT_BASE}.md" ]] || fail 'failed validation published report'
+[[ "$(cat "$TEST_ROOT/validator-fail/portraits/INDEX.md")" == '# Index' ]] || fail 'failed validation changed index'
+
+prepare_case evidence-file
+rm -rf "$TEST_ROOT/evidence-file/portraits/evidence"
+printf unsafe > "$TEST_ROOT/evidence-file/portraits/evidence"
+run_root="$TEST_ROOT/evidence-file"
+if env -i HOME="$run_root/home" PATH="$run_root/bin:/usr/bin:/bin" \
+  REFINE_ROOT="$run_root/project" REFINE_PORTRAIT_DIR="$run_root/portraits" \
+  REFINE_PORTRAIT_STATE_ROOT="$run_root/state" REFINE_PORTRAIT_AGENT="$run_root/bin/fake-agent" \
+  REFINE_PORTRAIT_COLLECTOR="$run_root/bin/fake-collector" REFINE_PORTRAIT_VALIDATOR="$run_root/bin/fake-validator" \
+  REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 FAKE_AGENT_MODE=normal FAKE_VALIDATOR_EXIT=0 \
+  bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
+  fail 'evidence path file accepted'
 fi
-[[ ! -f "${TEST_ROOT}/nonzero/portraits/cognitive-portrait-2026-08-12-v9.md" ]] \
-  || fail 'failed portrait remained eligible for throttling'
-find "${TEST_ROOT}/nonzero/portraits/.failed" -type f -name '*.failed' | grep -q . \
-  || fail 'failed portrait was not quarantined'
-[[ "$(cat "${TEST_ROOT}/nonzero/portraits/INDEX.md")" == '# Index' ]] \
-  || fail 'failed run left a dangling index entry'
+[[ ! -e "$run_root/portraits/${REPORT_BASE}.md" ]] || fail 'transaction left report'
 
-run_case quality-failure 0 1 9 && fail 'quality gate failure was accepted'
-[[ ! -f "${TEST_ROOT}/quality-failure/portraits/cognitive-portrait-2026-08-12-v9.md" ]] \
-  || fail 'quality-gate failure remained in the archive'
-find "${TEST_ROOT}/quality-failure/portraits/.failed" -type f -name '*.failed' | grep -q . \
-  || fail 'quality-gate failure was not quarantined'
-[[ "$(cat "${TEST_ROOT}/quality-failure/portraits/INDEX.md")" == '# Index' ]] \
-  || fail 'quality-gate failure left a dangling index entry'
-
-if run_case missing-index 0 0; then
-  fail 'unindexed portrait was accepted'
+prepare_case failed-file
+printf unsafe > "$TEST_ROOT/failed-file/portraits/.failed"
+root="$TEST_ROOT/failed-file"
+if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
+  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state" \
+  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector" \
+  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+  FAKE_AGENT_MODE=normal bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
+  fail '.failed regular file accepted'
 fi
-[[ ! -f "${TEST_ROOT}/missing-index/portraits/cognitive-portrait-2026-08-12-v9.md" ]] \
-  || fail 'unindexed portrait remained eligible for throttling'
+[[ ! -e "$root/portraits/${REPORT_BASE}.md" ]] || fail '.failed preflight left report'
 
-interrupt_root="${TEST_ROOT}/interrupted"
-mkdir -p "${interrupt_root}/portraits" "${interrupt_root}/bin" "${interrupt_root}/home"
-printf '# Index\n' > "${interrupt_root}/portraits/INDEX.md"
-cp "${TEST_ROOT}/success/bin/fake-agent" "${interrupt_root}/bin/fake-agent"
-cp "${TEST_ROOT}/success/bin/fake-collector" "${interrupt_root}/bin/fake-collector"
-cp "${TEST_ROOT}/success/bin/fake-validator" "${interrupt_root}/bin/fake-validator"
-env -i HOME="${interrupt_root}/home" PATH="${interrupt_root}/bin:/usr/bin:/bin" \
-  REFINE_PORTRAIT_DIR="${interrupt_root}/portraits" \
-  REFINE_PORTRAIT_AGENT="${interrupt_root}/bin/fake-agent" \
-  REFINE_PORTRAIT_COLLECTOR="${interrupt_root}/bin/fake-collector" \
-  REFINE_PORTRAIT_VALIDATOR="${interrupt_root}/bin/fake-validator" \
-  REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
-  FAKE_AGENT_EXIT=0 FAKE_UPDATE_INDEX=1 FAKE_AGENT_SLEEP=10 \
-  bash "${SCRIPT_DIR}/cognitive-portrait.sh" >/dev/null 2>&1 &
-wrapper_pid=$!
-for _attempt in 1 2 3 4 5; do
-  [[ -f "${interrupt_root}/portraits/cognitive-portrait-2026-08-12-v9.md" ]] && break
-  sleep 1
+run_case bundle-tamper tamper-bundle
+grep -q '"metric":1' "$TEST_ROOT/bundle-tamper/portraits/evidence/${REPORT_BASE}.bundle.json" \
+  || fail 'agent bundle copy replaced trusted archived bundle'
+
+run_case history-tamper tamper-history && fail 'history mutation accepted'
+[[ "$(cat "$TEST_ROOT/history-tamper/portraits/INDEX.md")" == '# Index' ]] || fail 'index was not restored'
+[[ "$(cat "$TEST_ROOT/history-tamper/portraits/cognitive-portrait-2026-01-01-v3.md")" == '# prior' ]] \
+  || fail 'history was not restored'
+
+prepare_case index-symlink
+printf 'victim-safe\n' > "$TEST_ROOT/index-symlink/victim"
+root="$TEST_ROOT/index-symlink"
+if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
+  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state" \
+  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector" \
+  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+  FAKE_AGENT_MODE=index-symlink FAKE_INDEX_TARGET="$root/portraits/INDEX.md" FAKE_VICTIM="$root/victim" \
+  bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
+  fail 'index symlink attack accepted'
+fi
+[[ "$(cat "$root/victim")" == 'victim-safe' ]] || fail 'rollback followed index symlink'
+[[ ! -L "$root/portraits/INDEX.md" && "$(cat "$root/portraits/INDEX.md")" == '# Index' ]] \
+  || fail 'index was not safely restored'
+
+prepare_case candidate-symlink
+printf 'victim-safe\n' > "$TEST_ROOT/candidate-symlink/victim"
+root="$TEST_ROOT/candidate-symlink"
+if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
+  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state" \
+  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector" \
+  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+  FAKE_AGENT_MODE=candidate-symlink FAKE_VICTIM="$root/victim" bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
+  fail 'candidate symlink accepted'
+fi
+[[ "$(cat "$root/victim")" == 'victim-safe' ]] || fail 'candidate handling changed victim'
+
+run_case validator-tamper tamper-validator && fail 'validator tamper accepted'
+[[ ! -e "$TEST_ROOT/validator-tamper/validator.called" ]] || fail 'modified validator executed'
+
+for path_kind in report evidence; do
+  prepare_case "${path_kind}-symlink"
+  root="$TEST_ROOT/${path_kind}-symlink"
+  printf 'victim-safe\n' > "$root/victim"
+  if [[ "$path_kind" == report ]]; then
+    ln -s "$root/victim" "$root/portraits/${REPORT_BASE}.md"
+  else
+    ln -s "$root/victim" "$root/portraits/evidence/${REPORT_BASE}.bundle.json"
+  fi
+  if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
+    REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state" \
+    REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector" \
+    REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+    FAKE_AGENT_MODE=normal bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
+    fail "${path_kind} symlink accepted"
+  fi
+  [[ "$(cat "$root/victim")" == 'victim-safe' ]] || fail "${path_kind} symlink changed victim"
 done
-interrupt_started=$(date +%s)
-kill -TERM "$wrapper_pid"
-if wait "$wrapper_pid"; then
-  fail 'interrupted portrait wrapper exited successfully'
+
+prepare_case directory-swap
+root="$TEST_ROOT/directory-swap"
+mkdir "$root/victim-dir"
+printf 'victim-safe\n' > "$root/victim-dir/victim"
+if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
+  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state" \
+  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector" \
+  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+  FAKE_AGENT_MODE=swap-directory FAKE_PORTRAIT_TARGET="$root/portraits" FAKE_VICTIM="$root/victim-dir" \
+  bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
+  fail 'portrait directory swap accepted'
 fi
-interrupt_elapsed=$(( $(date +%s) - interrupt_started ))
-[[ "$interrupt_elapsed" -lt 5 ]] || fail "interrupted wrapper waited ${interrupt_elapsed}s for the child"
-[[ ! -f "${interrupt_root}/portraits/cognitive-portrait-2026-08-12-v9.md" ]] \
-  || fail 'interrupted portrait remained eligible for throttling'
-[[ "$(cat "${interrupt_root}/portraits/INDEX.md")" == '# Index' ]] \
-  || fail 'interrupted run left a dangling index entry'
+[[ "$(cat "$root/victim-dir/victim")" == 'victim-safe' ]] || fail 'directory swap changed victim'
+
+concurrent="$TEST_ROOT/concurrent"
+prepare_case concurrent
+common=(HOME="$concurrent/home" PATH="$concurrent/bin:/usr/bin:/bin" REFINE_ROOT="$concurrent/project"
+  REFINE_PORTRAIT_DIR="$concurrent/portraits" REFINE_PORTRAIT_STATE_ROOT="$concurrent/state"
+  REFINE_PORTRAIT_AGENT="$concurrent/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$concurrent/bin/fake-collector"
+  REFINE_PORTRAIT_VALIDATOR="$concurrent/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0
+  REFINE_PORTRAIT_LOCK_WAIT_SECONDS=0 FAKE_AGENT_MODE=sleep FAKE_AGENT_LOG="$concurrent/agent.log"
+  FAKE_DESCENDANT_MARKER="$concurrent/descendant")
+env -i "${common[@]}" bash "$SCRIPT_DIR/cognitive-portrait.sh" > "$concurrent/first.log" 2>&1 &
+first=$!
+for _ in 1 2 3 4 5; do [[ -e "$concurrent/agent.log" ]] && break; sleep 1; done
+if env -i "${common[@]}" FAKE_AGENT_MODE=normal bash "$SCRIPT_DIR/cognitive-portrait.sh" >/dev/null 2>&1; then
+  fail 'concurrent run acquired lock'
+fi
+kill -TERM "$first"
+wait "$first" && fail 'interrupted run succeeded'
 sleep 1
-[[ ! -e "${interrupt_root}/portraits/descendant.txt" ]] \
-  || fail 'interrupted wrapper left an agent descendant running'
+[[ ! -e "$concurrent/descendant" ]] || fail 'agent descendant survived interruption'
+[[ ! -e "$concurrent/portraits/${REPORT_BASE}.md" ]] || fail 'interrupted staging published report'
 
 echo 'All cognitive portrait wrapper tests passed'

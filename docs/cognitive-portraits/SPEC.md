@@ -61,17 +61,26 @@ Every factual claim binds to one or more of:
 ```text
 [evidence:obs:<item-id>]
 [bundle:/valid/json/pointer]
+[metric:/allowed/numeric/json/pointer=<canonical JSON number>]
 ```
 
-Every numeric fact or inference needs the same support. Every action carries:
+Numeric facts and inferences use only the structured `metric` form. Numeric
+tokens in free factual prose (including scientific notation, percent,
+thousands separators, full-width digits, and Chinese numerals) fail closed.
+Metadata/version pointers are not metric pointers. Every action carries:
 
 ```text
-[owner:<person>] [due:YYYY-MM-DD] [verify:<observable condition>]
+[owner:<person>] [due:YYYY-MM-DD] [verify:metric:/pointer<operator>target]
+[verify:artifact:<name>==present|absent]
+[verify:check:<name>==pass|fail]
 ```
 
 When `comparison.comparable=false`, trend markers and current-to-previous
-directional claims are forbidden. A degraded report may describe the current
-window and the evidence gap only.
+directional claims are forbidden and the report must include an explicit
+`[事实][趋势抑制]` claim bound to `/comparison/status`. A comparable trend must
+use `[趋势]` and bind both current and previous structured metric fields. A
+pointer that merely exists does not support an unrelated number. A degraded
+report may describe the current window and the evidence gap only.
 
 ## Quality gate
 
@@ -82,10 +91,21 @@ The gate replaces all raw line-count requirements. A candidate passes only when:
 - trends are absent when the cohort is not comparable;
 - paragraph novelty is at least 60% relative to the previous portrait when one
   exists;
-- every recommendation has evidence, owner, deadline, and verification.
+- every recommendation has allowlisted evidence, a meaningful owner, a deadline
+  within 90 days of the bundle cutoff, and a structured verification target.
 
-A failed gate returns non-zero. The scheduled wrapper restores the old index
-and quarantines the candidate. Only a passing run archives:
+The four exact L1-L4 main headings are mandatory and ordered. Deadlines must be
+valid bounded ISO dates. Fenced/indented code, frontmatter, HTML comments, link
+destinations, HTML metadata, and machine fields are excluded from rendered
+structure and novelty checks, so metadata-only edits do not count as insight.
+
+A failed gate returns non-zero. One kernel-backed lock owns a run. The scheduled
+wrapper gives the untrusted agent a unique writable staging directory and an
+untrusted bundle copy; the trusted bundle, validator, skill, archive, history,
+and index remain outside that writable root and are hash checked. The agent
+writes only `candidate.md`. The host validates and atomically publishes the
+fixed v4 report name, evidence, and index row; failed candidates never enter the
+archive or throttle scan. Existing names, symlinks, and hard links fail closed.
 
 ```text
 cognitive-portrait-YYYY-MM-DD-v4.md

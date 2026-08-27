@@ -58,6 +58,7 @@ fn make_score_result(signals: [Signal; 3]) -> ScoreResult {
 fn empty_cluster() -> ClusterResult {
     ClusterResult {
         projects: HashMap::new(),
+        item_projects: HashMap::new(),
         global_stats: GlobalStats {
             total_sessions: 0,
             total_decisions: 0,
@@ -99,6 +100,7 @@ fn cluster_with_project_evidence() -> ClusterResult {
 
     ClusterResult {
         projects,
+        item_projects: HashMap::new(),
         global_stats: GlobalStats {
             total_sessions: 1,
             total_decisions: 0,

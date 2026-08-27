@@ -92,6 +92,7 @@ pub(super) fn make_cluster(
     }
     ClusterResult {
         projects: project_map,
+        item_projects: HashMap::new(),
         global_stats: GlobalStats {
             total_sessions: 100,
             total_decisions: decisions,
@@ -142,6 +143,7 @@ pub(super) fn make_cluster_with_data(
     }
     ClusterResult {
         projects: project_map,
+        item_projects: HashMap::new(),
         global_stats: GlobalStats {
             total_sessions,
             total_decisions: decisions,
