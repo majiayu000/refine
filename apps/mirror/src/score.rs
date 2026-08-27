@@ -75,6 +75,7 @@ pub async fn handle_score(
     if all && since.is_some() {
         anyhow::bail!("--all and --since are mutually exclusive");
     }
+    let now = Utc::now();
     let items = if all {
         repo.find_all()
             .await
@@ -87,9 +88,9 @@ pub async fn handle_score(
                 .ok_or_else(|| anyhow::anyhow!("invalid date"))?
                 .and_utc()
         } else {
-            Utc::now() - chrono::Duration::days(90)
+            now - chrono::Duration::days(90)
         };
-        repo.find_observations_by_event_range(cutoff, Utc::now())
+        repo.find_observations_by_event_range(cutoff, now)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?
     };
@@ -193,10 +194,20 @@ pub async fn handle_score(
 
     let mut advice_error = None;
     if let Some(llm) = llm {
-        match crate::advice::generate_and_cache(&result, &llm).await {
-            Ok(advice) => println!("\n  {} {}", crate::lang::t!("Advice:", "建议:"), advice),
+        match compute_portfolio_advice_scores(&repo, now).await {
+            Ok((long_term, recent)) => {
+                match crate::advice::generate_and_cache(&long_term, &recent, &llm).await {
+                    Ok(advice) => {
+                        println!("\n  {} {}", crate::lang::t!("Advice:", "建议:"), advice)
+                    }
+                    Err(error) => {
+                        tracing::error!("advice generation failed: {}", error);
+                        advice_error = Some(error);
+                    }
+                }
+            }
             Err(error) => {
-                tracing::error!("advice generation failed: {}", error);
+                tracing::error!("portfolio advice metrics failed: {}", error);
                 advice_error = Some(error);
             }
         }
@@ -215,6 +226,39 @@ pub async fn handle_score(
         }
     }
     Ok(())
+}
+
+async fn compute_portfolio_advice_scores(
+    repo: &Arc<dyn ItemRepository>,
+    now: DateTime<Utc>,
+) -> Result<(ScoreResult, ScoreResult)> {
+    let long_term_items = repo
+        .find_observations_by_event_range(now - chrono::Duration::days(90), now)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to load rolling-90-day advice cohort: {error}"))?;
+    let recent_items = repo
+        .find_observations_by_event_range(now - chrono::Duration::days(7), now)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to load rolling-7-day advice cohort: {error}"))?;
+
+    let long_term = cluster_observations(&long_term_items);
+    let recent = cluster_observations(&recent_items);
+    if long_term.data_quality.eligible_observations == 0 {
+        anyhow::bail!(
+            "portfolio advice requires eligible linked observations in the rolling-90-day window"
+        );
+    }
+    if recent.data_quality.eligible_observations == 0 {
+        anyhow::bail!(
+            "portfolio advice requires eligible linked observations in the rolling-7-day window"
+        );
+    }
+
+    let config = crate::config::load();
+    Ok((
+        compute(&long_term, &config.targets),
+        compute(&recent, &config.targets),
+    ))
 }
 
 fn finish_without_observations(require_advice: bool, message: &str) -> Result<()> {

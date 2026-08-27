@@ -1,4 +1,3 @@
-use crate::config::ensure_mirror_dir;
 use crate::document_save::{save_report_to_document, SaveDocumentOptions};
 use crate::lang::t;
 use crate::score::{self, layer_display, Signal};
@@ -277,8 +276,6 @@ fn format_score_summary(score: &score::ScoreResult) -> String {
 }
 
 fn save_profile_summary(data: &ProfileData, cluster: &ClusterResult) -> Result<()> {
-    let dir = ensure_mirror_dir()?;
-    let path = dir.join("profile-summary.txt");
     let mut lines = Vec::new();
     lines.push(format!(
         "{} sessions, {} projects",
@@ -299,8 +296,11 @@ fn save_profile_summary(data: &ProfileData, cluster: &ClusterResult) -> Result<(
         "data-quality: {}",
         format_data_quality_stats(&cluster.data_quality)
     ));
-    std::fs::write(&path, lines.join("\n"))?;
-    Ok(())
+    crate::advice::save_profile_context(
+        &lines.join("\n"),
+        "all eligible linked interactive observations (event-time source history)",
+        &cluster.data_quality.cohort_identity,
+    )
 }
 
 pub async fn handle_profile(

@@ -69,6 +69,7 @@ pub async fn handle_weekly(
     let now = Utc::now();
     let week_ago = now - Duration::days(7);
     let two_weeks_ago = now - Duration::days(14);
+    let ninety_days_ago = now - Duration::days(90);
 
     let this_week = item_repo
         .find_observations_by_event_range(week_ago, now)
@@ -76,6 +77,10 @@ pub async fn handle_weekly(
         .map_err(|e| anyhow::anyhow!("{}", e))?;
     let last_week = item_repo
         .find_observations_by_event_range(two_weeks_ago, week_ago)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let long_term_items = item_repo
+        .find_observations_by_event_range(ninety_days_ago, now)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -117,6 +122,13 @@ pub async fn handle_weekly(
         );
     }
     let this_score = score::compute(&this_cluster, &config.targets);
+    let long_term_cluster = cluster_observations(&long_term_items);
+    if long_term_cluster.data_quality.eligible_observations == 0 {
+        anyhow::bail!(
+            "No eligible linked interactive observations in the rolling-90-day portfolio window; refusing to generate portfolio advice"
+        );
+    }
+    let long_term_score = score::compute(&long_term_cluster, &config.targets);
 
     let last_cluster = if !last_week.is_empty() {
         Some(cluster_observations(&last_week))
@@ -131,7 +143,12 @@ pub async fn handle_weekly(
         .zip(last_cluster.as_ref())
         .map(|(score, cluster)| (score, &cluster.data_quality));
 
-    let report = build_weekly_report(&this_score, last_comparison, &this_cluster);
+    let report = build_weekly_report_with_portfolio(
+        &this_score,
+        last_comparison,
+        &this_cluster,
+        &long_term_score,
+    );
 
     println!("{}", report);
 
@@ -203,10 +220,11 @@ fn signal_delta(current: Signal, previous: Signal) -> &'static str {
     }
 }
 
-fn build_weekly_report(
+fn build_weekly_report_with_portfolio(
     this: &ScoreResult,
     last: Option<(&ScoreResult, &DataQualityStats)>,
     cluster: &ClusterResult,
+    long_term: &ScoreResult,
 ) -> String {
     let now = Utc::now();
     let week_num = now.iso_week().week();
@@ -318,12 +336,21 @@ fn build_weekly_report(
         }
     }
 
-    if let Some(action_card) = action_card::build_weekly_action_card(this, cluster) {
+    if let Some(action_card) = action_card::build_weekly_action_card(long_term, this, cluster) {
         lines.push(String::new());
         lines.extend(action_card);
     }
 
     lines.join("\n")
+}
+
+#[cfg(test)]
+fn build_weekly_report(
+    this: &ScoreResult,
+    last: Option<(&ScoreResult, &DataQualityStats)>,
+    cluster: &ClusterResult,
+) -> String {
+    build_weekly_report_with_portfolio(this, last, cluster, this)
 }
 
 #[cfg(test)]
