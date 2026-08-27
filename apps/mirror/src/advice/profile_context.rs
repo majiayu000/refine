@@ -34,24 +34,39 @@ pub(crate) fn save_profile_context(
     window: &str,
     cohort_identity: &str,
 ) -> Result<()> {
-    validate_cohort_identity(cohort_identity, "profile")?;
     let dir = crate::config::ensure_mirror_dir()?;
+    save_profile_context_to_path(
+        &dir.join("profile-summary.json"),
+        summary,
+        window,
+        cohort_identity,
+        Utc::now(),
+    )
+}
+
+pub(crate) fn save_profile_context_to_path(
+    path: &Path,
+    summary: &str,
+    window: &str,
+    cohort_identity: &str,
+    generated_at: DateTime<Utc>,
+) -> Result<()> {
+    validate_cohort_identity(cohort_identity, "profile")?;
     let context = ProfileContext {
         schema_version: SCHEMA_VERSION,
         source_revision: SOURCE_REVISION.to_string(),
-        generated_at: Utc::now(),
+        generated_at,
         window: window.to_string(),
         cohort_identity: cohort_identity.to_string(),
         cohort_relation: COHORT_RELATION.to_string(),
         summary: summary.to_string(),
     };
     let json = serde_json::to_string_pretty(&context)?;
-    std::fs::write(dir.join("profile-summary.json"), json)
-        .context("failed to write versioned profile summary")?;
+    std::fs::write(path, json).context("failed to write versioned profile summary")?;
     Ok(())
 }
 
-pub(super) fn load_profile_context_from_path(
+pub(crate) fn load_profile_context_from_path(
     path: &Path,
     now: DateTime<Utc>,
     expected_cohort_identity: &str,
@@ -161,6 +176,30 @@ mod tests {
             .expect("fresh exact profile context");
         assert!(loaded.contains("schema_version=2"));
         assert!(loaded.contains("source_revision=mirror-profile-context-v2"));
+        assert!(loaded.contains("cohort_relation=exact-match"));
+    }
+
+    #[test]
+    fn writer_output_loads_for_the_same_rolling_90_day_cohort() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile-summary.json");
+        let now = Utc::now();
+        let cohort = identity('c');
+
+        save_profile_context_to_path(
+            &path,
+            "12 sessions, 2 projects",
+            "rolling 90 days (event time)",
+            &cohort,
+            now - Duration::hours(1),
+        )
+        .unwrap();
+
+        let loaded = load_profile_context_from_path(&path, now, &cohort)
+            .unwrap()
+            .expect("writer output should load for its exact cohort");
+        assert!(loaded.contains("window=rolling 90 days (event time)"));
+        assert!(loaded.contains(&format!("cohort_identity={cohort}")));
         assert!(loaded.contains("cohort_relation=exact-match"));
     }
 

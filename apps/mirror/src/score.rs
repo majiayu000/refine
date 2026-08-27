@@ -265,7 +265,10 @@ async fn compute_portfolio_advice_scores(
     now: DateTime<Utc>,
 ) -> Result<PortfolioAdviceScores> {
     let long_term_items = repo
-        .find_observations_by_event_range(now - chrono::Duration::days(90), now)
+        .find_observations_by_event_range(
+            now - chrono::Duration::days(crate::advice::LONG_TERM_WINDOW_DAYS),
+            now,
+        )
         .await
         .map_err(|error| anyhow::anyhow!("failed to load rolling-90-day advice cohort: {error}"))?;
     let recent_items = repo

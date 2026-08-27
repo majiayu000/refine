@@ -6,7 +6,8 @@ use refine_core::session::{ClusterResult, ProjectCluster};
 pub(super) fn build_weekly_action_card(
     long_term: &ScoreResult,
     recent: &ScoreResult,
-    cluster: &ClusterResult,
+    long_term_cluster: &ClusterResult,
+    recent_cluster: &ClusterResult,
 ) -> Result<Option<Vec<String>>> {
     let policy = crate::advice::portfolio_policy(long_term, recent)?;
     let has_non_green = [
@@ -20,6 +21,8 @@ pub(super) fn build_weekly_action_card(
     if !has_non_green {
         return Ok(None);
     }
+
+    let (candidate_window, cluster) = candidate_cohort(&policy, long_term_cluster, recent_cluster);
 
     let mut projects = cluster
         .projects
@@ -47,6 +50,12 @@ pub(super) fn build_weekly_action_card(
     lines.push(window_trigger("90d", &policy.long_fragmentation));
     lines.push(window_trigger("7d", &policy.recent_exploration));
     lines.push(window_trigger("7d", &policy.recent_fragmentation));
+    lines.push(String::new());
+    lines.push(format!(
+        "{}: {}",
+        t!("Decision cohort", "决策候选窗口"),
+        candidate_window.label()
+    ));
     lines.push(String::new());
     match policy.mode {
         crate::advice::PortfolioMode::PromoteHoldStop => {
@@ -140,6 +149,35 @@ pub(super) fn build_weekly_action_card(
         }
     }
     Ok(Some(lines))
+}
+
+#[derive(Clone, Copy)]
+enum CandidateWindow {
+    Rolling90Days,
+    Rolling7Days,
+}
+
+impl CandidateWindow {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Rolling90Days => t!("rolling 90 days (event time)", "滚动 90 天（事件时间）"),
+            Self::Rolling7Days => t!("rolling 7 days (event time)", "滚动 7 天（事件时间）"),
+        }
+    }
+}
+
+fn candidate_cohort<'a>(
+    policy: &crate::advice::PortfolioPolicy,
+    long_term_cluster: &'a ClusterResult,
+    recent_cluster: &'a ClusterResult,
+) -> (CandidateWindow, &'a ClusterResult) {
+    if policy.mode == crate::advice::PortfolioMode::PromoteHoldStop
+        && policy.long_fragmentation.signal != Signal::Green
+    {
+        (CandidateWindow::Rolling90Days, long_term_cluster)
+    } else {
+        (CandidateWindow::Rolling7Days, recent_cluster)
+    }
 }
 
 fn stop_decision(project: Option<&ProjectCluster>) -> String {
@@ -338,7 +376,7 @@ mod tests {
             ),
         ]);
 
-        let card = build_weekly_action_card(&long_term, &recent, &cluster)
+        let card = build_weekly_action_card(&long_term, &recent, &cluster, &cluster)
             .unwrap()
             .expect("expected action card for non-green breadth indicators")
             .join("\n");
@@ -363,7 +401,7 @@ mod tests {
         ]);
         let cluster = cluster(vec![project("main-work", 12, None)]);
 
-        assert!(build_weekly_action_card(&score, &score, &cluster)
+        assert!(build_weekly_action_card(&score, &score, &cluster, &cluster)
             .unwrap()
             .is_none());
     }
@@ -380,7 +418,8 @@ mod tests {
         ]);
         let cluster = cluster(vec![project("active-without-evidence", 3, None)]);
 
-        let card = match build_weekly_action_card(&long_term, &recent, &cluster).unwrap() {
+        let card = match build_weekly_action_card(&long_term, &recent, &cluster, &cluster).unwrap()
+        {
             Some(card) => card.join("\n"),
             None => panic!("expected fallback card for non-green breadth indicators"),
         };
@@ -405,7 +444,8 @@ mod tests {
         project.decision_titles = vec!["keep the release path explicit".to_string()];
         let cluster = cluster(vec![project]);
 
-        let card = match build_weekly_action_card(&long_term, &recent, &cluster).unwrap() {
+        let card = match build_weekly_action_card(&long_term, &recent, &cluster, &cluster).unwrap()
+        {
             Some(card) => card.join("\n"),
             None => panic!("expected card for decision-only project evidence"),
         };
@@ -423,7 +463,7 @@ mod tests {
             indicator("fragmentation", 40.0, Signal::Red),
         ]);
         let cluster = cluster(vec![project("other", 8, None)]);
-        let error = build_weekly_action_card(&score, &score, &cluster).unwrap_err();
+        let error = build_weekly_action_card(&score, &score, &cluster, &cluster).unwrap_err();
         assert!(error.to_string().contains("named active project"));
         assert!(error.to_string().contains("'other' bucket"));
     }
@@ -435,7 +475,7 @@ mod tests {
             indicator("fragmentation", 40.0, Signal::Red),
         ]);
         let cluster = cluster(vec![project("only-project", 8, None)]);
-        let card = build_weekly_action_card(&score, &score, &cluster)
+        let card = build_weekly_action_card(&score, &score, &cluster, &cluster)
             .unwrap()
             .unwrap()
             .join("\n");
@@ -455,12 +495,44 @@ mod tests {
             project("side", 1, None),
             project("other", 20, None),
         ]);
-        let card = build_weekly_action_card(&score, &score, &cluster)
+        let card = build_weekly_action_card(&score, &score, &cluster, &cluster)
             .unwrap()
             .unwrap()
             .join("\n");
         assert!(card.contains("Promote core"));
         assert!(card.contains("Stop side"));
         assert!(!card.contains("Promote other"));
+    }
+
+    #[test]
+    fn long_term_fragmentation_uses_long_term_candidates() {
+        let long_term = score_with_breadth(vec![
+            indicator("exploration", 20.0, Signal::Green),
+            indicator("fragmentation", 35.0, Signal::Red),
+        ]);
+        let recent = score_with_breadth(vec![
+            indicator("exploration", 25.0, Signal::Green),
+            indicator("fragmentation", 5.0, Signal::Green),
+        ]);
+        let long_term_cluster = cluster(vec![
+            project("healthy-core", 12, None),
+            project("healthy-secondary", 6, None),
+            project("old-one-off", 1, Some("unresolved historical experiment")),
+        ]);
+        let recent_cluster = cluster(vec![
+            project("healthy-core", 5, None),
+            project("healthy-secondary", 4, None),
+        ]);
+
+        let card =
+            build_weekly_action_card(&long_term, &recent, &long_term_cluster, &recent_cluster)
+                .unwrap()
+                .unwrap()
+                .join("\n");
+
+        assert!(card.contains("Decision cohort: rolling 90 days (event time)"));
+        assert!(card.contains("Promote healthy-core"));
+        assert!(card.contains("Stop old-one-off"));
+        assert!(!card.contains("Stop healthy-secondary"));
     }
 }

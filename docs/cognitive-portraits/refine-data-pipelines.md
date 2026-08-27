@@ -199,13 +199,13 @@ auto/remem: remem raw archive；local: filesystem scan
 | 命令入口 | `mirror profile` |
 | 代码位置 | `apps/mirror/src/profile.rs:269-317`（`handle_profile`），`build_profile_prompt`，`extract_profile_data` |
 | 触发方式 | 手动 |
-| 数据来源 | `find_all()` 全量 items → `cluster_observations` + `score::compute` |
-| 处理步骤 | 1) 全量加载；2) cluster + score；3) `extract_profile_data()` 算出 Top 10 项目 + 复杂度分桶 + decision:bugfix 比；4) `build_profile_prompt()` 带 facet budget 4000 字符预算；5) **单次** `llm_with_retry` 调用；6) 保存 |
+| 数据来源 | `find_observations_by_event_range(now-90d, now)` 滚动 90 天 event-time observations → `cluster_observations` + `score::compute`，与 score advice 的长期窗口共用 `LONG_TERM_WINDOW_DAYS` |
+| 处理步骤 | 1) 加载滚动 90 天 event-time cohort；2) cluster + score；3) `extract_profile_data()` 算出 Top 10 项目 + 复杂度分桶 + decision:bugfix 比；4) `build_profile_prompt()` 带 facet budget 4000 字符预算；5) **单次** `llm_with_retry` 调用；6) 保存同一 cohort identity 的画像与摘要 |
 | LLM 调用 | **是**；单次（带 5 次重试）；system prompt = "认知画像艺术家，写叙事，第二人称，结尾 2-3 个反思问题" |
 | 输出目标 | **stdout** + `~/.mirror/profile-summary.json`（带生成时间、窗口、schema/source revision 与 cohort identity 的短摘要，给 advice 流程做可验证 context 注入） + **refine.db** `documents` 表（source=`mirror-profile`，URL=`mirror-profile://<rfc3339>`） |
 | 输出 schema | `profile-summary.json` 是版本化 JSON envelope；14 天过期、legacy 文本、未来时间、未知 schema/revision、非 `sha256:<64hex>` identity、与预期 90 天 cohort 不同或字段缺失时不注入 advice prompt。DB 里存完整叙事 markdown。 |
 | 依赖 | 依赖链路 1；需要 LLM key |
-| 已知问题 | 未做时间窗口限制（`find_all`），数据量大时 prompt 会被 `FACET_BUDGET_CHARS=4000` 硬截断 |
+| 已知问题 | facet 内容仍受 `FACET_BUDGET_CHARS=4000` 预算限制 |
 
 ---
 

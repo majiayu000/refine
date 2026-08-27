@@ -40,7 +40,10 @@ The action card uses the same named-project denominator as fragmentation:
 fragmentation with no named candidate fails closed. With one named candidate,
 that project can be promoted but cannot also be stopped; with two or more, the
 highest-volume candidate is promoted and the lowest-volume candidate is
-stopped.
+stopped. Candidate evidence comes from the window that triggered
+consolidation: a non-green rolling-90-day fragmentation signal selects the
+rolling-90-day cluster, even when the recent window is healthy; otherwise a
+recent-only trigger selects the rolling-7-day cluster.
 
 Before any optional LLM call, `mirror score` writes the current deterministic
 policy to cache. Cache revision v5 binds policy, current score timestamp,
@@ -60,6 +63,10 @@ Profile context is stored as a versioned JSON envelope containing:
 - `source_revision`;
 - `cohort_identity`;
 - the summary text.
+
+`mirror profile` reads the same rolling-90-day event-time window used by score
+advice, and writes the resulting cluster identity into this envelope. It does
+not write an all-history identity that the advice loader can never match.
 
 Advice injects it only when the schema and source revision are supported, the
 generation timestamp is less than 14 days old, and `cohort_identity` is a
@@ -93,4 +100,6 @@ validation errors other than a missing file are returned clearly.
 - structured-LLM bypass, negation, and short-output tests;
 - cache revision, score timestamp, policy, and cohort binding tests;
 - action-card 0/1/2 named-project boundary tests;
+- long-term fragmentation with an old one-off and two healthy recent projects;
+- rolling-90-day profile writer-to-advice-loader round trip;
 - `cargo test -p mirror` and formatting checks.

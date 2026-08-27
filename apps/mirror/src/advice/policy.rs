@@ -2,6 +2,8 @@ use crate::lang::t;
 use crate::score::{Indicator, ScoreResult, Signal};
 use anyhow::Result;
 
+pub(crate) const LONG_TERM_WINDOW_DAYS: i64 = 90;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PortfolioMode {
     PromoteHoldStop,
