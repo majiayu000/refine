@@ -202,12 +202,22 @@ CREATE TABLE items (
     tags TEXT NOT NULL,       -- JSON 数组
     source TEXT,              -- JSON 对象
     created_at TEXT NOT NULL, -- ISO 8601
-    updated_at TEXT NOT NULL  -- ISO 8601
+    updated_at TEXT NOT NULL, -- ISO 8601
+    document_id TEXT,
+    excerpt TEXT,
+    FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE RESTRICT
 );
 
 CREATE INDEX idx_items_type ON items(item_type);
 CREATE INDEX idx_items_created ON items(created_at);
+CREATE INDEX idx_items_document ON items(document_id);
 ```
+
+`document_id` 允许为 `NULL`，用于保留无法证明来源关系的历史 Item。非空值必须指向现存
+Document。直接删除仍有关联 Items 的 Document 必须失败，避免把已知关系静默降级为
+`NULL`；需要删除整个聚合时，调用仓储的 `delete_documents_with_items`，由同一事务先删除
+Items（并清理 Conversation 的 `item_ids`）再删除 Documents。schema 升级只保留已有合法
+关系和已有 `NULL`，不会猜测或恢复历史关系。
 
 ---
 
