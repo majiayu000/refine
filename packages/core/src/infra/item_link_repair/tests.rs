@@ -2,6 +2,8 @@ use super::*;
 use rusqlite::params;
 use tempfile::TempDir;
 
+mod reviewer_regressions;
+
 fn ts(milliseconds: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(milliseconds).unwrap()
 }
@@ -233,7 +235,8 @@ fn backup_failure_and_update_failure_leave_current_database_unchanged() {
     let existing_backup = temp.path().join("existing.db");
     std::fs::write(&existing_backup, b"occupied").unwrap();
     let backup_error = apply_repair(&current, &evidence, &hash, &existing_backup).unwrap_err();
-    assert!(backup_error.to_string().contains("already exists"));
+    assert!(backup_error.to_string().contains("without clobbering"));
+    assert_eq!(std::fs::read(&existing_backup).unwrap(), b"occupied");
     assert_eq!(
         audit_detached_observations(&current)
             .unwrap()

@@ -288,8 +288,6 @@ fn display_width(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use refine_core::infra::SqliteStore;
-    use refine_core::knowledge::Item;
 
     #[test]
     fn test_padded_row_no_panic() {
@@ -336,11 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn dashboard_handler_rejects_detached_only_cohort_before_persist() {
-        let store = Arc::new(SqliteStore::in_memory().unwrap());
-        store
-            .save(&Item::new_observation("detached", "legacy evidence"))
-            .await
-            .unwrap();
+        let (_fixture, store) = crate::test_support::legacy_detached_store();
 
         let error = handle_dashboard(store, None, true)
             .await

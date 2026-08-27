@@ -6,7 +6,7 @@
 
 use crate::error::{InfraError, InfraResult};
 use chrono::{DateTime, Utc};
-use rusqlite::{backup::Backup, backup::StepResult, params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const RULE_VERSION: &str = "shadow-document-id-exact-v1";
+
+mod backup;
+mod schema_validation;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DetachedObservationAudit {
@@ -87,22 +90,36 @@ struct CurrentItem {
 
 pub fn audit_detached_observations(db_path: &Path) -> InfraResult<DetachedObservationAudit> {
     let conn = open_read_only(db_path)?;
-    validate_current_tables(&conn)?;
-    conn.query_row(
-        "SELECT COUNT(*), MAX(created_at), MAX(updated_at)
-         FROM items
-         WHERE item_type = 'observation' AND document_id IS NULL",
-        [],
-        |row| {
-            Ok(DetachedObservationAudit {
-                detached_observations: row.get(0)?,
-                newest_detached_event_or_created_at: row.get(1)?,
-                newest_detached_created_at: row.get(1)?,
-                newest_detached_updated_at: row.get(2)?,
-            })
-        },
-    )
-    .map_err(db_error)
+    schema_validation::validate_current_tables(&conn)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT created_at, updated_at FROM items
+             WHERE item_type = 'observation' AND document_id IS NULL",
+        )
+        .map_err(db_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(db_error)?;
+    let mut count = 0u64;
+    let mut newest_created: Option<DateTime<Utc>> = None;
+    let mut newest_updated: Option<DateTime<Utc>> = None;
+    for row in rows {
+        let (created_at, updated_at) = row.map_err(db_error)?;
+        let created_at = parse_timestamp(&created_at)?;
+        let updated_at = parse_timestamp(&updated_at)?;
+        count += 1;
+        newest_created = Some(newest_created.map_or(created_at, |seen| seen.max(created_at)));
+        newest_updated = Some(newest_updated.map_or(updated_at, |seen| seen.max(updated_at)));
+    }
+    let newest_created = newest_created.map(|timestamp| timestamp.to_rfc3339());
+    Ok(DetachedObservationAudit {
+        detached_observations: count,
+        newest_detached_event_or_created_at: newest_created.clone(),
+        newest_detached_created_at: newest_created,
+        newest_detached_updated_at: newest_updated.map(|timestamp| timestamp.to_rfc3339()),
+    })
 }
 
 pub fn plan_repair(
@@ -113,8 +130,8 @@ pub fn plan_repair(
     let evidence_sha256 = validate_evidence(evidence_path, expected_sha256)?;
     let current = open_read_only(db_path)?;
     let evidence = open_immutable(evidence_path)?;
-    validate_current_tables(&current)?;
-    validate_evidence_tables(&evidence)?;
+    schema_validation::validate_current_tables(&current)?;
+    schema_validation::validate_evidence_tables(&evidence)?;
     current.execute_batch("BEGIN").map_err(db_error)?;
     let plan = build_plan(&current, &evidence, evidence_sha256)?;
     current.execute_batch("COMMIT").map_err(db_error)?;
@@ -130,12 +147,15 @@ pub fn apply_repair(
 ) -> InfraResult<ApplyReport> {
     let evidence_sha256 = validate_evidence(evidence_path, expected_sha256)?;
     let evidence = open_immutable(evidence_path)?;
-    validate_evidence_tables(&evidence)?;
+    schema_validation::validate_evidence_tables(&evidence)?;
 
     let mut current = Connection::open(db_path).map_err(db_error)?;
     super::configure_sqlite_connection(&current)?;
-    validate_apply_schema(&current)?;
-    let plan = build_plan(&current, &evidence, evidence_sha256.clone())?;
+    let tx = current
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(db_error)?;
+    schema_validation::validate_apply_schema(&tx)?;
+    let plan = build_plan(&tx, &evidence, evidence_sha256.clone())?;
     validate_evidence(evidence_path, expected_sha256)?;
     if plan.candidates.is_empty() {
         return Ok(ApplyReport {
@@ -147,10 +167,16 @@ pub fn apply_repair(
         });
     }
 
-    create_consistent_backup(&current, backup_path)?;
-    let before_items = scalar_count(&current, "SELECT COUNT(*) FROM items")?;
+    let before_items = scalar_count(&tx, "SELECT COUNT(*) FROM items")?;
+    backup::create_no_clobber(db_path, backup_path)?;
+    let revalidated = build_plan(&tx, &evidence, evidence_sha256.clone())?;
+    validate_evidence(evidence_path, expected_sha256)?;
+    if revalidated != plan {
+        return Err(InfraError::Database(
+            "repair predicates changed after backup; transaction rolled back".into(),
+        ));
+    }
     let applied_at = Utc::now().to_rfc3339();
-    let tx = current.transaction().map_err(db_error)?;
     let mut changed_items = 0usize;
     let mut ledger_rows_added = 0usize;
 
@@ -247,7 +273,7 @@ fn build_plan_from_rows(
         .collect();
 
     let mut stats = RepairStats::default();
-    let mut preliminary = Vec::new();
+    let mut evidence_claims = Vec::new();
     for (evidence_document_id, mut items) in groups {
         items.sort_by(|left, right| left.id.cmp(&right.id));
         let exact_matches: Vec<(&EvidenceItem, &CurrentDocument)> = items
@@ -275,10 +301,29 @@ fn build_plan_from_rows(
             continue;
         }
         let (summary, target) = exact_matches[0];
-        let mut item_ids = Vec::with_capacity(items.len());
+        evidence_claims.push(RepairCandidate {
+            evidence_document_id,
+            target_document_id: target.id.clone(),
+            summary_title: summary.title.clone(),
+            item_ids: items.into_iter().map(|item| item.id).collect(),
+        });
+    }
+
+    let mut target_claims: HashMap<String, usize> = HashMap::new();
+    for candidate in &evidence_claims {
+        *target_claims
+            .entry(candidate.target_document_id.clone())
+            .or_default() += 1;
+    }
+    let mut candidates = Vec::new();
+    for candidate in evidence_claims {
+        if target_claims[&candidate.target_document_id] != 1 {
+            stats.target_conflicts += 1;
+            continue;
+        }
         let mut group_valid = true;
-        for item in &items {
-            match current_items.get(&item.id) {
+        for item_id in &candidate.item_ids {
+            match current_items.get(item_id) {
                 None => {
                     stats.missing_current_items += 1;
                     group_valid = false;
@@ -291,37 +336,15 @@ fn build_plan_from_rows(
                     stats.already_linked_items += 1;
                     group_valid = false;
                 }
-                Some(_) => item_ids.push(item.id.clone()),
+                Some(_) => {}
             }
         }
-        if group_valid && !item_ids.is_empty() {
-            preliminary.push(RepairCandidate {
-                evidence_document_id,
-                target_document_id: target.id.clone(),
-                summary_title: summary.title.clone(),
-                item_ids,
-            });
+        if group_valid && !candidate.item_ids.is_empty() {
+            candidates.push(candidate);
         } else {
             stats.unproven_groups += 1;
         }
     }
-
-    let mut target_claims: HashMap<String, usize> = HashMap::new();
-    for candidate in &preliminary {
-        *target_claims
-            .entry(candidate.target_document_id.clone())
-            .or_default() += 1;
-    }
-    let candidates: Vec<_> = preliminary
-        .into_iter()
-        .filter(|candidate| {
-            let conflict = target_claims[&candidate.target_document_id] != 1;
-            if conflict {
-                stats.target_conflicts += 1;
-            }
-            !conflict
-        })
-        .collect();
     stats.candidate_groups = candidates.len();
     stats.candidate_items = candidates
         .iter()
@@ -450,137 +473,6 @@ fn validate_evidence(path: &Path, expected_sha256: &str) -> InfraResult<String> 
         )));
     }
     Ok(actual)
-}
-
-fn validate_current_tables(conn: &Connection) -> InfraResult<()> {
-    require_columns(
-        conn,
-        "items",
-        &["id", "item_type", "created_at", "updated_at", "document_id"],
-    )?;
-    require_columns(conn, "documents", &["id", "title", "created_at"])
-}
-
-fn validate_evidence_tables(conn: &Connection) -> InfraResult<()> {
-    require_columns(
-        conn,
-        "items",
-        &["id", "item_type", "title", "created_at", "document_id"],
-    )?;
-    require_columns(conn, "documents", &["id"])
-}
-
-fn validate_apply_schema(conn: &Connection) -> InfraResult<()> {
-    validate_current_tables(conn)?;
-    require_columns(
-        conn,
-        "item_link_repair_ledger",
-        &[
-            "item_id",
-            "target_document_id",
-            "evidence_sha256",
-            "rule_version",
-            "applied_at",
-        ],
-    )?;
-    let restrict_fk: u64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_foreign_key_list('items')
-             WHERE \"from\" = 'document_id' AND \"table\" = 'documents'
-               AND UPPER(on_delete) IN ('RESTRICT', 'NO ACTION')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(db_error)?;
-    let trigger_count: u64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN
-             ('observations_require_document_insert',
-              'observations_require_document_update',
-              'item_link_repair_ledger_no_update',
-              'item_link_repair_ledger_no_delete')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(db_error)?;
-    if restrict_fk != 1 || trigger_count != 4 {
-        return Err(InfraError::Database(
-            "current DB is missing the fail-closed link schema; install/open the merged runtime before apply"
-                .into(),
-        ));
-    }
-    Ok(())
-}
-
-fn require_columns(conn: &Connection, table: &str, required: &[&str]) -> InfraResult<()> {
-    let sql = match table {
-        "items" => "PRAGMA table_info(items)",
-        "documents" => "PRAGMA table_info(documents)",
-        "item_link_repair_ledger" => "PRAGMA table_info(item_link_repair_ledger)",
-        _ => return Err(InfraError::Database(format!("unsupported table {table}"))),
-    };
-    let mut stmt = conn.prepare(sql).map_err(db_error)?;
-    let names: HashSet<String> = stmt
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(db_error)?
-        .collect::<Result<_, _>>()
-        .map_err(db_error)?;
-    let missing: Vec<_> = required
-        .iter()
-        .filter(|column| !names.contains(**column))
-        .copied()
-        .collect();
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(InfraError::Database(format!(
-            "{table} schema mismatch; missing columns: {}",
-            missing.join(", ")
-        )))
-    }
-}
-
-fn create_consistent_backup(source: &Connection, destination: &Path) -> InfraResult<()> {
-    if std::fs::symlink_metadata(destination).is_ok() {
-        return Err(InfraError::Database(format!(
-            "backup destination already exists: {}",
-            destination.display()
-        )));
-    }
-    let parent = destination.parent().ok_or_else(|| {
-        InfraError::Database(format!(
-            "backup path has no parent: {}",
-            destination.display()
-        ))
-    })?;
-    if !parent.is_dir() {
-        return Err(InfraError::Database(format!(
-            "backup parent does not exist: {}",
-            parent.display()
-        )));
-    }
-    let mut backup_conn = Connection::open(destination).map_err(db_error)?;
-    let result = (|| {
-        {
-            let backup = Backup::new(source, &mut backup_conn).map_err(db_error)?;
-            loop {
-                match backup.step(256).map_err(db_error)? {
-                    StepResult::Done => break,
-                    StepResult::More => continue,
-                    StepResult::Busy | StepResult::Locked => {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    _ => continue,
-                }
-            }
-        }
-        verify_sqlite(&backup_conn)
-    })();
-    if result.is_err() {
-        drop(backup_conn);
-        let _ = std::fs::remove_file(destination);
-    }
-    result
 }
 
 fn verify_sqlite(conn: &Connection) -> InfraResult<()> {

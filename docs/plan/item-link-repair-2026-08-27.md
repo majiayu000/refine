@@ -53,7 +53,16 @@ fuzzy fallback.
      --evidence-sha256 11c015feffa28e60c677f99f7442e38af297111229d8cb16c22efc3a4e44c140
    ```
 
-5. Choose a new, non-existent backup path on the same durable volume. Apply is
+5. Preflight free space before apply. The volume must have room for at least one
+   full current DB backup plus operational headroom. Record both commands in the
+   operation log and stop if the available space is smaller than the DB:
+
+   ```sh
+   du -h "/Users/lifcc/Library/Application Support/refine/refine.db"
+   df -h "/Users/lifcc/Library/Application Support/refine"
+   ```
+
+6. Choose a new, non-existent backup path on the same durable volume. Apply is
    a separate explicit command:
 
    ```sh
@@ -70,7 +79,7 @@ fuzzy fallback.
    transaction, preserves the total item count, and runs `quick_check` plus
    `foreign_key_check` before commit.
 
-6. Re-run the dry-run. It must report zero candidates. Re-run the audit and pin
+7. Re-run the dry-run. It must report zero candidates. Re-run the audit and pin
    its count/cutoff as the deployment guard. A later baseline breach exits
    non-zero:
 
@@ -81,8 +90,24 @@ fuzzy fallback.
      --cutoff <DEPLOYED_RFC3339_TIMESTAMP>
    ```
 
-7. Only after database verification should ingestion and cognitive-report jobs
+8. Only after database verification should ingestion and cognitive-report jobs
    resume.
+
+## Recovery
+
+If apply exits non-zero, keep ingestion and report jobs stopped. The link and
+ledger transaction rolls back automatically. Never copy the live DB file while
+WAL may be active and never delete the failed DB or the published backup.
+
+1. Confirm the published backup itself returns `ok` from `PRAGMA quick_check`
+   and zero rows from `PRAGMA foreign_key_check` using read-only SQLite access.
+2. Preserve the failed live DB, WAL, and SHM files as a forensic bundle.
+3. Restore the verified backup into a new path through the SQLite backup API;
+   do not use a raw `cp` as a restore mechanism.
+4. Verify item count, ledger count, `quick_check`, and `foreign_key_check` on the
+   restored path.
+5. Swap paths only in a separately reviewed maintenance action, then rerun the
+   audit and dry-run before restarting ingestion.
 
 Relinking establishes a proven Document relationship only. It does not promote
 `session_mode_unknown` to `session_mode_interactive`; analytics must continue to
