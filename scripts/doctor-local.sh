@@ -120,7 +120,23 @@ manifest_value() {
 plist_value() {
   local path="$1"
   local key="$2"
-  /usr/libexec/PlistBuddy -c "Print :${key}" "$path" 2>/dev/null || true
+  if [[ -x /usr/libexec/PlistBuddy ]]; then
+    /usr/libexec/PlistBuddy -c "Print :${key}" "$path" 2>/dev/null || true
+  elif have_cmd python3; then
+    python3 - "$path" "$key" <<'PY' 2>/dev/null || true
+import plistlib
+import sys
+
+try:
+    with open(sys.argv[1], "rb") as handle:
+        value = plistlib.load(handle)
+    for component in sys.argv[2].split(":"):
+        value = value[int(component)] if isinstance(value, list) else value[component]
+    print(value)
+except (IndexError, KeyError, OSError, ValueError):
+    pass
+PY
+  fi
 }
 
 check_cmd() {

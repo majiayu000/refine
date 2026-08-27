@@ -40,6 +40,55 @@ file_mode() {
   fi
 }
 
+fixture_plist_edit() {
+  local path="$1"
+  local operation="$2"
+  local key="$3"
+  local value="${4:-}"
+  python3 - "$path" "$operation" "$key" "$value" <<'PY'
+import plistlib
+import sys
+
+path, operation, key, replacement = sys.argv[1:]
+with open(path, "rb") as handle:
+    document = plistlib.load(handle)
+components = key.split(":")
+target = document
+for component in components[:-1]:
+    target = target[int(component)] if isinstance(target, list) else target[component]
+leaf = components[-1]
+if operation == "set":
+    if isinstance(target, list):
+        target[int(leaf)] = replacement
+    else:
+        target[leaf] = replacement
+elif operation == "delete":
+    if isinstance(target, list):
+        del target[int(leaf)]
+    else:
+        del target[leaf]
+else:
+    raise ValueError(f"unsupported fixture plist operation: {operation}")
+with open(path, "wb") as handle:
+    plistlib.dump(document, handle, sort_keys=False)
+PY
+}
+
+fixture_plist_value() {
+  local path="$1"
+  local key="$2"
+  python3 - "$path" "$key" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    value = plistlib.load(handle)
+for component in sys.argv[2].split(":"):
+    value = value[int(component)] if isinstance(value, list) else value[component]
+print(value)
+PY
+}
+
 fake_bin="${TEST_ROOT}/bin"
 test_home="${TEST_ROOT}/home"
 test_cargo_home="${test_home}/.cargo"
@@ -424,7 +473,7 @@ assert_contains "$healthy_doctor_output" 'PASS cognitive portrait WorkingDirecto
 assert_contains "$healthy_doctor_output" 'PASS cognitive portrait latest artifact:' \
   'Doctor did not validate the latest portrait artifact'
 
-/usr/libexec/PlistBuddy -c "Set :ProgramArguments:1 ${REPO_ROOT}/scripts/daily-refresh.sh" "$daily_plist"
+fixture_plist_edit "$daily_plist" set 'ProgramArguments:1' "${REPO_ROOT}/scripts/daily-refresh.sh"
 stale_plist_output="$(env -i \
   HOME="$test_home" CARGO_HOME="$test_cargo_home" \
   PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
@@ -434,7 +483,7 @@ assert_contains "$stale_plist_output" 'LaunchAgent binding mismatch: com.lifcc.r
 env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
   /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start >/dev/null
 
-/usr/libexec/PlistBuddy -c "Set :ProgramArguments:1 ${test_home}/.refine/run-refine-server.sh" "$server_plist"
+fixture_plist_edit "$server_plist" set 'ProgramArguments:1' "${test_home}/.refine/run-refine-server.sh"
 old_wrapper_output="$(env -i \
   HOME="$test_home" CARGO_HOME="$test_cargo_home" \
   PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
@@ -454,7 +503,7 @@ assert_contains "$orphan_ui_output" 'disabled LaunchAgent is still loaded: com.l
 assert_contains "$orphan_ui_output" 'disabled service still listens on TCP port 8987' \
   'Doctor missed an orphan UI listener'
 
-/usr/libexec/PlistBuddy -c 'Set :EnvironmentVariables:REFINE_ROOT /tmp/mismatched-portrait-root' "$portrait_plist"
+fixture_plist_edit "$portrait_plist" set 'EnvironmentVariables:REFINE_ROOT' '/tmp/mismatched-portrait-root'
 mismatched_root_output="$(env -i \
   HOME="$test_home" CARGO_HOME="$test_cargo_home" \
   PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
@@ -500,14 +549,14 @@ env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bi
   /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start --cognitive-portrait \
     --cognitive-portrait-root "$portrait_root" >/dev/null
 rm -f "${test_home}/.refine/install-manifest"
-/usr/libexec/PlistBuddy -c "Set :WorkingDirectory ${legacy_portrait_root}" "$portrait_plist"
-/usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:REFINE_ROOT ${legacy_portrait_root}" "$portrait_plist"
-/usr/libexec/PlistBuddy -c 'Delete :EnvironmentVariables:REFINE_PORTRAIT_DIR' "$portrait_plist"
+fixture_plist_edit "$portrait_plist" set WorkingDirectory "$legacy_portrait_root"
+fixture_plist_edit "$portrait_plist" set 'EnvironmentVariables:REFINE_ROOT' "$legacy_portrait_root"
+fixture_plist_edit "$portrait_plist" delete 'EnvironmentVariables:REFINE_PORTRAIT_DIR'
 env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
   /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start >/dev/null
 grep -Fxq "cognitive_portrait_root=${legacy_portrait_root}" "${test_home}/.refine/install-manifest" \
   || fail 'legacy upgrade did not preserve valid REFINE_ROOT'
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:REFINE_PORTRAIT_DIR' "$portrait_plist")" \
+[[ "$(fixture_plist_value "$portrait_plist" 'EnvironmentVariables:REFINE_PORTRAIT_DIR')" \
   == "${legacy_portrait_dir}" ]] || fail 'legacy upgrade did not add the explicit portrait output directory'
 
 leaf_name='daily-refresh.sh'

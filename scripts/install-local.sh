@@ -504,7 +504,23 @@ resolve_cognitive_portrait_setting() {
 plist_value() {
   local path="$1"
   local key="$2"
-  /usr/libexec/PlistBuddy -c "Print :${key}" "$path" 2>/dev/null || true
+  if [[ -x /usr/libexec/PlistBuddy ]]; then
+    /usr/libexec/PlistBuddy -c "Print :${key}" "$path" 2>/dev/null || true
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$path" "$key" <<'PY' 2>/dev/null || true
+import plistlib
+import sys
+
+try:
+    with open(sys.argv[1], "rb") as handle:
+        value = plistlib.load(handle)
+    for component in sys.argv[2].split(":"):
+        value = value[int(component)] if isinstance(value, list) else value[component]
+    print(value)
+except (IndexError, KeyError, OSError, ValueError):
+    pass
+PY
+  fi
 }
 
 validate_cognitive_portrait_root() {
@@ -541,6 +557,8 @@ resolve_cognitive_portrait_root() {
       cognitive_portrait_root="$(awk -F= '$1 == "cognitive_portrait_root" {sub(/^[^=]*=/, ""); print; exit}' "$install_manifest")"
     fi
     if [[ -z "$cognitive_portrait_root" && -f "$portrait_plist" ]]; then
+      plutil -lint "$portrait_plist" >/dev/null 2>&1 \
+        || die "legacy cognitive portrait plist is invalid and cannot be preserved: ${portrait_plist}"
       cognitive_portrait_root="$(plist_value "$portrait_plist" 'EnvironmentVariables:REFINE_ROOT')"
     fi
     if [[ -z "$cognitive_portrait_root" ]]; then
