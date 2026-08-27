@@ -69,6 +69,7 @@ pub async fn handle_weekly(
     let now = Utc::now();
     let week_ago = now - Duration::days(7);
     let two_weeks_ago = now - Duration::days(14);
+    let ninety_days_ago = now - Duration::days(crate::advice::LONG_TERM_WINDOW_DAYS);
 
     let this_week = item_repo
         .find_observations_by_event_range(week_ago, now)
@@ -76,6 +77,10 @@ pub async fn handle_weekly(
         .map_err(|e| anyhow::anyhow!("{}", e))?;
     let last_week = item_repo
         .find_observations_by_event_range(two_weeks_ago, week_ago)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let long_term_items = item_repo
+        .find_observations_by_event_range(ninety_days_ago, now)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -117,6 +122,13 @@ pub async fn handle_weekly(
         );
     }
     let this_score = score::compute(&this_cluster, &config.targets);
+    let long_term_cluster = cluster_observations(&long_term_items);
+    if long_term_cluster.data_quality.eligible_observations == 0 {
+        anyhow::bail!(
+            "No eligible linked interactive observations in the rolling-90-day portfolio window; refusing to generate portfolio advice"
+        );
+    }
+    let long_term_score = score::compute(&long_term_cluster, &config.targets);
 
     let last_cluster = if !last_week.is_empty() {
         Some(cluster_observations(&last_week))
@@ -131,7 +143,13 @@ pub async fn handle_weekly(
         .zip(last_cluster.as_ref())
         .map(|(score, cluster)| (score, &cluster.data_quality));
 
-    let report = build_weekly_report(&this_score, last_comparison, &this_cluster);
+    let report = build_weekly_report_with_portfolio(
+        &this_score,
+        last_comparison,
+        &this_cluster,
+        &long_term_score,
+        &long_term_cluster,
+    )?;
 
     println!("{}", report);
 
@@ -203,11 +221,13 @@ fn signal_delta(current: Signal, previous: Signal) -> &'static str {
     }
 }
 
-fn build_weekly_report(
+fn build_weekly_report_with_portfolio(
     this: &ScoreResult,
     last: Option<(&ScoreResult, &DataQualityStats)>,
-    cluster: &ClusterResult,
-) -> String {
+    recent_cluster: &ClusterResult,
+    long_term: &ScoreResult,
+    long_term_cluster: &ClusterResult,
+) -> Result<String> {
     let now = Utc::now();
     let week_num = now.iso_week().week();
     let year = now.iso_week().year();
@@ -224,7 +244,7 @@ fn build_weekly_report(
     ));
     lines.push(format!(
         "> Cohort: linked observations excluding unattended/subagent documents · Data quality: {}",
-        format_data_quality_stats(&cluster.data_quality)
+        format_data_quality_stats(&recent_cluster.data_quality)
     ));
     lines.push(format!(
         "> {}",
@@ -265,7 +285,7 @@ fn build_weekly_report(
         t!("Signal Delta vs Last Week", "vs 上周信号变化")
     ));
     match last {
-        _ if cluster.data_quality.is_degraded() => {
+        _ if recent_cluster.data_quality.is_degraded() => {
             lines.push(
                 t!(
                     "DEGRADED data quality: detached observations were excluded; week-over-week trend is suppressed.",
@@ -318,12 +338,45 @@ fn build_weekly_report(
         }
     }
 
-    if let Some(action_card) = action_card::build_weekly_action_card(this, cluster) {
+    if let Some(action_card) =
+        action_card::build_weekly_action_card(long_term, this, long_term_cluster, recent_cluster)?
+    {
         lines.push(String::new());
         lines.extend(action_card);
     }
 
-    lines.join("\n")
+    Ok(lines.join("\n"))
+}
+
+#[cfg(test)]
+fn build_weekly_report(
+    this: &ScoreResult,
+    last: Option<(&ScoreResult, &DataQualityStats)>,
+    cluster: &ClusterResult,
+) -> String {
+    let mut portfolio = this.clone();
+    if let Some(breadth) = portfolio
+        .layers
+        .iter_mut()
+        .find(|layer| layer.name == "breadth")
+    {
+        for name in ["exploration", "fragmentation"] {
+            if !breadth
+                .indicators
+                .iter()
+                .any(|indicator| indicator.name == name)
+            {
+                breadth.indicators.push(crate::score::Indicator {
+                    name: name.to_string(),
+                    actual: if name == "exploration" { 20.0 } else { 5.0 },
+                    target: String::new(),
+                    signal: Signal::Green,
+                });
+            }
+        }
+    }
+    build_weekly_report_with_portfolio(&portfolio, last, cluster, &portfolio, cluster)
+        .expect("weekly report fixture must include valid portfolio inputs")
 }
 
 #[cfg(test)]

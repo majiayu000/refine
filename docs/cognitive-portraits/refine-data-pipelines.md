@@ -16,7 +16,7 @@
 - 2 条由 launchd 调度的 shell 脚本（daily/weekly）
 - 1 条 in-repo skill（`cognitive-portrait`，在 `skills/` 目录，通过符号链接接入 Claude Code，读 refine.db）
 
-**核心结论**：除 `ingest-sessions` 外，所有链路都是对已经落库的 Observation 数据做聚合加工。`refine insights --prescription` 是 LLM 调用最重、耗时最长的链路（~11 次 LLM，10 并发）；`mirror score` 在原始职责"纯 SQL 聚合"之外，实际上也会调用 LLM 生成 advice（单次，带 72h 缓存）。
+**核心结论**：除 `ingest-sessions` 外，所有链路都是对已经落库的 Observation 数据做聚合加工。`refine insights --prescription` 是 LLM 调用最重、耗时最长的链路（~11 次 LLM，10 并发）；`mirror score` 在原始职责"纯 SQL 聚合"之外，会先为当前 score/cohort 生成确定性 advice，并可选调用一次 LLM 做结构化 policy 确认。
 
 ---
 
@@ -75,7 +75,7 @@ auto/remem: remem raw archive；local: filesystem scan
        ▼
   documents
   (mirror-profile)
-  + profile-summary.txt
+  + profile-summary.json
 
 ┌─────────────────────────────────────────────────────────────┐
 │ 链路 9: cognitive-portrait skill (外部)                     │
@@ -132,12 +132,12 @@ auto/remem: remem raw archive；local: filesystem scan
 | 代码位置 | `apps/mirror/src/cli.rs:22-30` → `apps/mirror/src/main.rs:45-48` → `apps/mirror/src/score.rs:66-186`（`handle_score`）；子模块 `score/{baseline,compute,display,indicators,persistence,streak,statusline,types}.rs`；LLM 部分在 `apps/mirror/src/advice.rs` |
 | 触发方式 | 手动；由 `scripts/daily-refresh.sh` 每天 08:00 调用 |
 | 数据来源 | `ItemRepository::find_since(cutoff)` (默认 90 天) 或 `find_all()`；再通过 `cluster_observations()` 聚合 |
-| 处理步骤 | 1) 按 `--all`/`--since`/默认 90 天窗口加载 items；2) 确认有 observation；3) `cluster_observations()`；4) `score::compute(&cluster, &config.targets)` 算 3 层信号灯 + 9 指标 + tension；5) `load_recent_scores(365)` 读历史 → `compute_personal_baseline()` → 若存在则 `apply_personal_baseline()`；6) `persist_score()` 写 jsonl；7) `print_score()` stdout；8) 读 `growth-tracker.json` 展示 pending_ingest 提示；9) **若有 LLM**，调用 `advice::generate_and_cache()` 单次生成 advice 并写缓存；10) `write_statusline()` |
-| LLM 调用 | **是（best-effort）**；调用链 `advice::generate_and_cache` → `llm_with_retry`；单次调用，有 5 次重试退避；失败只 `tracing::debug`，不让命令失败；advice 本身带 **72 小时缓存** (`advice.json`)；system prompt 为 "认知成长教练"，要求返回 `{"short": ..., "full": ...}` JSON |
+| 处理步骤 | 1) 按 `--all`/`--since`/默认 90 天窗口加载 items；2) 确认有 observation；3) `cluster_observations()`；4) `score::compute(&cluster, &config.targets)` 算 3 层信号灯 + 9 指标 + tension；5) `load_recent_scores(365)` 读历史；6) `persist_score()` 写 jsonl；7) `print_score()` stdout；8) 读 `growth-tracker.json` 展示 pending_ingest 提示；9) 按事件时间分别计算滚动 90 天与 7 天 score，先把当前 portfolio policy 的确定性建议写入缓存，再可选调用 LLM 确认结构化 policy；10) `write_statusline()`。portfolio 计算失败时旧 advice 缓存会失效。 |
+| LLM 调用 | **是（best-effort，可用 `--require-advice` 提升为必需）**；调用链 `advice::generate_and_cache` → `llm_with_retry`；单次调用，有 5 次重试退避。LLM 只返回 `policy` JSON，用户可见 short/full 均由服务端 deterministic renderer 产生，自由文本不会进入输出。`advice.json` v5 同时绑定当前 score timestamp、policy、90 天 cohort 和 7 天 cohort；LLM 关闭或失败时仍保留本次 score 的确定性建议。只有版本、新鲜度、严格 `sha256:<64hex>` identity 和预期 90 天 cohort 均可验证的 `profile-summary.json` 才会进入 prompt。 |
 | 输出目标 | **stdout**（ASCII 信号灯 + 指标） + `~/.mirror/scores.jsonl`（历史） + `<db_parent>/statusline.txt` + `~/.mirror/advice.json`（LLM 缓存） |
-| 输出 schema | `ScoreResult { layers: [LayerScore; 3], tension, timestamp }`，每 `LayerScore { name, signal(Red/Yellow/Green), indicators: [Indicator] }`；`CachedAdvice { advice, short, generated_at }` |
+| 输出 schema | `ScoreResult { layers: [LayerScore; 3], tension, timestamp }`，每 `LayerScore { name, signal(Red/Yellow/Green), indicators: [Indicator] }`；`CachedAdvice { advice, short, generated_at, cache_version, cache_key, score_timestamp, policy_key, long_cohort_identity, recent_cohort_identity }` |
 | 依赖 | 依赖链路 1 的 Observation；LLM 调用为可选软依赖 |
-| 已知问题 | 文档注释与实际行为不符：代码 `advice.rs:135` 注释说 "single attempt, best-effort" 但内部实际走了带 5 次重试的 `llm_with_retry`；`--period` 相关路径 `filter_since` 被标为 `#[allow(dead_code)]` |
+| 已知问题 | `--period` 相关路径 `filter_since` 被标为 `#[allow(dead_code)]` |
 
 ---
 
@@ -183,7 +183,7 @@ auto/remem: remem raw archive；local: filesystem scan
 | 代码位置 | `apps/mirror/src/motd.rs:233-328`（`handle_motd`），`weekly_reminder_from_path` 等 |
 | 触发方式 | shell rc 手动调用；不调 launchd |
 | 数据来源 | `~/.mirror/scores.jsonl`（通过 `load_recent_scores(2)`）+ `~/.mirror/advice.json`（LLM 缓存）+ `~/.mirror/last-weekly.md`（周一提醒）+ 内置 tips 列表（fallback） |
-| 处理步骤 | 1) 读最近 2 次 score；2) 计算信号灯 / trend 箭头；3) 找最弱 indicator 的 dimension；4) 优先用 `advice::load_cached()` 的建议（<72h 有效），否则用静态 tips；5) 检测 score 数据是否 >48h 过期；6) 追加 streak 信息；7) 如果今天是周一且 `last-weekly.md` 存在 → 追加一行周报提醒 |
+| 处理步骤 | 1) 读最近 2 次 score；2) 计算信号灯 / trend 箭头；3) 找最弱 indicator 的 dimension；4) 只读取 `advice::load_cached_for_score()` 返回的 v5 建议，即 cache 的 score timestamp 必须与当前 score 精确一致，否则用静态 tips；5) 检测 score 数据是否 >48h 过期；6) 追加 streak 信息；7) 如果今天是周一且 `last-weekly.md` 存在 → 追加一行周报提醒 |
 | LLM 调用 | **否**（纯读缓存；不触发任何网络请求） |
 | 输出目标 | **stdout**（单行 + 可选提醒行） |
 | 输出 schema | 形如 `🪞 深度🟢↑ 广度🟡 协作🔴 | <tip> [⚠️ Data is stale...]` |
@@ -199,13 +199,13 @@ auto/remem: remem raw archive；local: filesystem scan
 | 命令入口 | `mirror profile` |
 | 代码位置 | `apps/mirror/src/profile.rs:269-317`（`handle_profile`），`build_profile_prompt`，`extract_profile_data` |
 | 触发方式 | 手动 |
-| 数据来源 | `find_all()` 全量 items → `cluster_observations` + `score::compute` |
-| 处理步骤 | 1) 全量加载；2) cluster + score；3) `extract_profile_data()` 算出 Top 10 项目 + 复杂度分桶 + decision:bugfix 比；4) `build_profile_prompt()` 带 facet budget 4000 字符预算；5) **单次** `llm_with_retry` 调用；6) 保存 |
+| 数据来源 | `find_observations_by_event_range(now-90d, now)` 滚动 90 天 event-time observations → `cluster_observations` + `score::compute`，与 score advice 的长期窗口共用 `LONG_TERM_WINDOW_DAYS` |
+| 处理步骤 | 1) 加载滚动 90 天 event-time cohort；2) cluster + score；3) `extract_profile_data()` 算出 Top 10 项目 + 复杂度分桶 + decision:bugfix 比；4) `build_profile_prompt()` 带 facet budget 4000 字符预算；5) **单次** `llm_with_retry` 调用；6) 保存同一 cohort identity 的画像与摘要 |
 | LLM 调用 | **是**；单次（带 5 次重试）；system prompt = "认知画像艺术家，写叙事，第二人称，结尾 2-3 个反思问题" |
-| 输出目标 | **stdout** + `~/.mirror/profile-summary.txt`（短摘要，给 advice 流程做 profile context 注入） + **refine.db** `documents` 表（source=`mirror-profile`，URL=`mirror-profile://<rfc3339>`） |
-| 输出 schema | `profile-summary.txt` 是简短 key=value 清单；DB 里存完整叙事 markdown |
+| 输出目标 | **stdout** + `~/.mirror/profile-summary.json`（带生成时间、窗口、schema/source revision 与 cohort identity 的短摘要，给 advice 流程做可验证 context 注入） + **refine.db** `documents` 表（source=`mirror-profile`，URL=`mirror-profile://<rfc3339>`） |
+| 输出 schema | `profile-summary.json` 是版本化 JSON envelope；14 天过期、legacy 文本、未来时间、未知 schema/revision、非 `sha256:<64hex>` identity、与预期 90 天 cohort 不同或字段缺失时不注入 advice prompt。DB 里存完整叙事 markdown。 |
 | 依赖 | 依赖链路 1；需要 LLM key |
-| 已知问题 | 未做时间窗口限制（`find_all`），数据量大时 prompt 会被 `FACET_BUDGET_CHARS=4000` 硬截断 |
+| 已知问题 | facet 内容仍受 `FACET_BUDGET_CHARS=4000` 预算限制 |
 
 ---
 
@@ -262,7 +262,7 @@ auto/remem: remem raw archive；local: filesystem scan
 | 链路 1 `ingest-sessions` | **每会话 1~N 次**（N = chunk 数量） | 默认 1 | 批量时总量最大；可通过 env 配置 |
 | 链路 5 `weekly` | 1 次 | 1 | |
 | 链路 7 `profile` | 1 次 | 1 | |
-| 链路 3 `score` (advice) | 1 次（72h 缓存） | 1 | 命中缓存后 0 次 |
+| 链路 3 `score` (advice) | 最多 1 次（当前 score/cohort 缓存） | 1 | 先写确定性建议；相同 policy、score timestamp、90d/7d cohort 和 model 命中时为 0 次 |
 | 链路 4 `dashboard` / 链路 6 `motd` | **0 次** | — | 纯本地 |
 
 **每周日 09:00 的 launchd 任务（链路 8）= 链路 1 + 链路 2 的合计**，是 LLM 预算最集中的时间窗口。

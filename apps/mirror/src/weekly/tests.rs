@@ -303,6 +303,63 @@ fn test_build_weekly_report_includes_action_card_from_same_cluster() {
 }
 
 #[test]
+fn fragmented_other_only_cohort_keeps_weekly_report_without_action_card() {
+    let score = ScoreResult {
+        layers: [
+            LayerScore {
+                name: "depth".into(),
+                signal: Signal::Green,
+                indicators: Vec::new(),
+            },
+            LayerScore {
+                name: "breadth".into(),
+                signal: Signal::Red,
+                indicators: vec![
+                    Indicator {
+                        name: "exploration".into(),
+                        actual: 20.0,
+                        target: ">15%".into(),
+                        signal: Signal::Green,
+                    },
+                    Indicator {
+                        name: "deep_invest".into(),
+                        actual: 5.0,
+                        target: "15-30%".into(),
+                        signal: Signal::Red,
+                    },
+                    Indicator {
+                        name: "fragmentation".into(),
+                        actual: 40.0,
+                        target: "<20%".into(),
+                        signal: Signal::Red,
+                    },
+                ],
+            },
+            LayerScore {
+                name: "collaboration".into(),
+                signal: Signal::Green,
+                indicators: Vec::new(),
+            },
+        ],
+        tension: None,
+        timestamp: Utc::now(),
+    };
+    let mut other = cluster_with_project_evidence();
+    let mut project = other.projects.remove("codex-tool").unwrap();
+    project.project_name = "other".into();
+    other.projects.insert("other".into(), project);
+    other.global_stats.project_ranking = vec![("other".into(), 1)];
+
+    let report = build_weekly_report_with_portfolio(&score, None, &other, &score, &other)
+        .expect("synthetic-only cohort must not abort the weekly report");
+
+    assert!(report.contains("This Week Signals"));
+    assert!(report.contains("One-off Project Share=40.0"));
+    assert!(report.contains("Data quality:"));
+    assert!(!report.contains("Weekly Action Card"));
+}
+
+#[test]
 fn test_signal_delta_arrows() {
     assert_eq!(signal_delta(Signal::Green, Signal::Yellow), "↑");
     assert_eq!(signal_delta(Signal::Yellow, Signal::Green), "↓");
