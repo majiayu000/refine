@@ -49,7 +49,7 @@ An action card is emitted when exploration, mature-project share
 (`deep_invest`), or fragmentation is non-green in either window. A non-green
 `deep_invest` signal with green exploration and fragmentation selects the
 Deepen policy. Session-count fallback evidence names its actual candidate
-window: “past 90 days” for the long-term cohort and “this week” for the recent
+window: “past 90 days” for the long-term cohort and “past 7 days” for the recent
 cohort.
 
 Before any optional LLM call, `mirror score` writes the current deterministic

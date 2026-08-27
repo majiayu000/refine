@@ -273,11 +273,11 @@ fn project_evidence(project: &ProjectCluster, candidate_window: CandidateWindow)
         ),
         CandidateWindow::Rolling7Days => t!(
             format!(
-                "{} had {} sessions this week; use the 10% block to produce one concrete validation note.",
+                "{} had {} sessions over the past 7 days; use the 10% block to produce one concrete validation note.",
                 project.project_name, project.session_count
             ),
             format!(
-                "{} 本周有 {} 个 session；用 10% 时间块产出一条具体验证证据。",
+                "{} 过去 7 天有 {} 个 session；用 10% 时间块产出一条具体验证证据。",
                 project.project_name, project.session_count
             )
         ),
@@ -488,7 +488,7 @@ mod tests {
 
         assert!(card.contains("Weekly Action Card"));
         assert!(card.contains("active-without-evidence"));
-        assert!(card.contains("3 sessions this week"));
+        assert!(card.contains("3 sessions over the past 7 days"));
         assert!(card.contains("Bounded exploration"));
     }
 
