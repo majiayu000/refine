@@ -55,15 +55,16 @@ pub fn plan_routes(cluster: &ClusterResult) -> Vec<AnalysisRoute> {
 
     let quality = &cluster.data_quality;
     let trend_guard = if quality.is_degraded() {
-        "数据质量为 DEGRADED；脱链观测已排除。禁止输出跨期趋势、增减或改善/退化判断。"
+        "数据质量为 DEGRADED；脱链或非 Session 来源观测已排除。禁止输出跨期趋势、增减或改善/退化判断。"
     } else {
         "这是单一 cohort 聚合；没有显式时序证据时，不得推断趋势。"
     };
     let cohort_header = format!(
-        "## Cohort contract\neligible linked observations: {} | detached excluded: {} | mode excluded: {} | linked ratio: {:.1}%\n{}\n\n",
+        "## Cohort contract\neligible linked observations: {} | detached excluded: {} | mode excluded: {} | source excluded: {} | linked ratio: {:.1}%\n{}\n\n",
         quality.eligible_observations,
         quality.detached_observations,
         quality.mode_excluded_observations,
+        quality.source_excluded_observations,
         quality.linked_ratio() * 100.0,
         trend_guard,
     );
@@ -98,7 +99,7 @@ fn build_project_overview(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
             }
             ctx.push('\n');
         }
-        if ctx.len() > MAX_ROUTE_CONTEXT {
+        if ctx.chars().count() > MAX_ROUTE_CONTEXT {
             break;
         }
     }
@@ -140,7 +141,7 @@ fn build_decision_patterns(id: usize, cluster: &ClusterResult) -> AnalysisRoute 
             }
             ctx.push('\n');
         }
-        if ctx.len() > MAX_ROUTE_CONTEXT {
+        if ctx.chars().count() > MAX_ROUTE_CONTEXT {
             break;
         }
     }
@@ -185,7 +186,7 @@ fn build_bug_patterns(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
             }
             ctx.push('\n');
         }
-        if ctx.len() > MAX_ROUTE_CONTEXT {
+        if ctx.chars().count() > MAX_ROUTE_CONTEXT {
             break;
         }
     }
@@ -236,7 +237,7 @@ fn build_cognitive_evolution(id: usize, cluster: &ClusterResult) -> AnalysisRout
                 ctx.push_str(&format!("- [{}] {}\n", name, k));
             }
         }
-        if ctx.len() > MAX_ROUTE_CONTEXT {
+        if ctx.chars().count() > MAX_ROUTE_CONTEXT {
             break;
         }
     }
@@ -277,7 +278,7 @@ fn build_tech_radar(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
                 ctx.push_str(&format!("- [{}] {}\n", name, a));
             }
         }
-        if ctx.len() > MAX_ROUTE_CONTEXT {
+        if ctx.chars().count() > MAX_ROUTE_CONTEXT {
             break;
         }
     }
@@ -320,7 +321,7 @@ fn build_ai_collaboration(id: usize, cluster: &ClusterResult) -> AnalysisRoute {
                 ctx.push_str(&format!("- [{}] {}\n", name, f));
             }
         }
-        if ctx.len() > MAX_ROUTE_CONTEXT {
+        if ctx.chars().count() > MAX_ROUTE_CONTEXT {
             break;
         }
     }
@@ -452,7 +453,7 @@ fn build_knowledge_network(id: usize, cluster: &ClusterResult) -> AnalysisRoute 
             }
             ctx.push('\n');
         }
-        if ctx.len() > MAX_ROUTE_CONTEXT {
+        if ctx.chars().count() > MAX_ROUTE_CONTEXT {
             break;
         }
     }
@@ -489,7 +490,7 @@ fn build_friction_deep_dive(id: usize, cluster: &ClusterResult) -> AnalysisRoute
             }
             ctx.push('\n');
         }
-        if ctx.len() > MAX_ROUTE_CONTEXT {
+        if ctx.chars().count() > MAX_ROUTE_CONTEXT {
             break;
         }
     }
@@ -514,17 +515,34 @@ fn build_friction_deep_dive(id: usize, cluster: &ClusterResult) -> AnalysisRoute
 }
 
 fn truncate(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
+    let original_chars = text.chars().count();
+    if original_chars <= max_chars {
         return text.to_string();
     }
     let mut result = String::new();
+    let mut used_chars = 0usize;
     for line in text.lines() {
-        if result.len() + line.len() + 1 > max_chars {
-            result.push_str(&format!("\n... (截断，原始 {} 字符)", text.len()));
+        let line_chars = line.chars().count();
+        if used_chars + line_chars + 1 > max_chars {
+            result.push_str(&format!("\n... (截断，原始 {} 字符)", original_chars));
             break;
         }
         result.push_str(line);
         result.push('\n');
+        used_chars += line_chars + 1;
     }
     result
+}
+
+#[cfg(test)]
+mod unicode_budget_tests {
+    use super::truncate;
+
+    #[test]
+    fn truncate_counts_unicode_characters_not_utf8_bytes() {
+        let text = "中文一行\n中文二行\n中文三行";
+        let truncated = truncate(text, 12);
+        assert!(truncated.contains("中文一行"));
+        assert!(truncated.contains("中文二行"));
+    }
 }

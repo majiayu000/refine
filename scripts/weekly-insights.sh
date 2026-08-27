@@ -56,15 +56,16 @@ else
   FAILED_STEPS+=("ingest-sessions")
 fi
 
-# Step 2: 生成处方报告
-log "Step 2: insights --prescription"
+# Step 2: 生成当前 7 天与前一等长 7 天的 delta 处方报告。
+# 全历史输出只能由人工显式执行 `refine insights --all`。
+log "Step 2: insights --period 7 --prescription"
 insights_rc=0
-"$REFINE_BIN" insights --prescription 2>&1 || insights_rc=$?
+"$REFINE_BIN" insights --period 7 --prescription 2>&1 || insights_rc=$?
 if [[ "$insights_rc" -eq 0 ]]; then
-  log "Step 2: insights --prescription completed successfully"
+  log "Step 2: insights --period 7 --prescription completed successfully"
 else
-  log "ERROR: Step 2 insights --prescription failed with exit code ${insights_rc}"
-  FAILED_STEPS+=("insights --prescription")
+  log "ERROR: Step 2 insights --period 7 --prescription failed with exit code ${insights_rc}"
+  FAILED_STEPS+=("insights --period 7 --prescription")
 fi
 
 # Step 3: 发送与真实状态一致的 macOS 通知

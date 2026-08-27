@@ -114,6 +114,7 @@ fn cluster_with_project_evidence() -> ClusterResult {
             linked_observations: 1,
             detached_observations: 0,
             mode_excluded_observations: 0,
+            source_excluded_observations: 0,
             eligible_observations: 1,
             cohort_identity: "sha256:test-weekly".into(),
         },
@@ -186,6 +187,7 @@ fn test_build_weekly_report_with_prior_data_shows_delta() {
         linked_observations: 1,
         detached_observations: 0,
         mode_excluded_observations: 0,
+        source_excluded_observations: 0,
         eligible_observations: 1,
         cohort_identity: "sha256:last-week".into(),
     };
@@ -237,6 +239,7 @@ fn degraded_quality_suppresses_week_over_week_trend() {
         linked_observations: 2,
         detached_observations: 1,
         mode_excluded_observations: 0,
+        source_excluded_observations: 0,
         eligible_observations: 2,
         cohort_identity: "sha256:degraded".into(),
     };

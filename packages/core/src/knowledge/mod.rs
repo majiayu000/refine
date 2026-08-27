@@ -15,5 +15,5 @@ mod types;
 pub use doc_repository::DocumentRepository;
 pub use document::{Document, RestoreDocumentParams};
 pub use item::{Item, RestoreParams};
-pub use repository::ItemRepository;
+pub use repository::{ItemRepository, ObservationDocumentMeta, ObservationWindowSnapshot};
 pub use types::{DocumentId, ItemId, ItemType, Source, Tag};

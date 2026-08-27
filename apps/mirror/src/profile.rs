@@ -495,6 +495,7 @@ mod tests {
                 linked_observations: 450,
                 detached_observations: 0,
                 mode_excluded_observations: 0,
+                source_excluded_observations: 0,
                 eligible_observations: 450,
                 cohort_identity: format!("sha256:{}", "a".repeat(64)),
             },

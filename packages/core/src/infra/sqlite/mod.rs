@@ -8,7 +8,8 @@ use crate::conversation::{
 };
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{
-    Document, DocumentId, DocumentRepository, Item, ItemId, ItemRepository, ItemType, Tag,
+    Document, DocumentId, DocumentRepository, Item, ItemId, ItemRepository, ItemType,
+    ObservationWindowSnapshot, Tag,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -17,9 +18,11 @@ use tokio::sync::oneshot;
 
 mod conversation_ops;
 mod doc_ops;
+mod insights_snapshot;
 mod ops;
 mod rows;
 mod worker;
+mod worker_support;
 
 use worker::{start_worker, OpenMode, SqliteCommand, WorkerHandle};
 
@@ -169,6 +172,19 @@ impl ItemRepository for SqliteStore {
     ) -> InfraResult<Vec<Item>> {
         self.request(|resp| SqliteCommand::FindObservationsByEventRange { start, end, resp })
             .await
+    }
+
+    async fn load_observation_window_snapshot(
+        &self,
+        cutoff: DateTime<Utc>,
+        period_days: Option<usize>,
+    ) -> InfraResult<ObservationWindowSnapshot> {
+        self.request(|resp| SqliteCommand::LoadObservationWindowSnapshot {
+            cutoff,
+            period_days,
+            resp,
+        })
+        .await
     }
 
     async fn find_by_document_id(&self, doc_id: &DocumentId) -> InfraResult<Vec<Item>> {
