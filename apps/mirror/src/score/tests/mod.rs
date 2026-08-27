@@ -1,7 +1,7 @@
 use super::*;
 use chrono::{DateTime, TimeZone, Utc};
 
-use refine_core::session::{ClusterResult, GlobalStats, ProjectCluster};
+use refine_core::session::{ClusterResult, DataQualityStats, GlobalStats, ProjectCluster};
 use std::collections::HashMap;
 
 mod baseline;
@@ -62,6 +62,7 @@ pub(super) fn make_cluster(
             tool_frequency: HashMap::new(),
             project_ranking: Vec::new(),
         },
+        data_quality: DataQualityStats::default(),
         untagged_count: 0,
     }
 }
@@ -111,6 +112,7 @@ pub(super) fn make_cluster_with_data(
             tool_frequency: HashMap::new(),
             project_ranking: Vec::new(),
         },
+        data_quality: DataQualityStats::default(),
         untagged_count: 0,
     }
 }

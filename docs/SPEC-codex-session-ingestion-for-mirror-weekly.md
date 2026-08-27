@@ -36,7 +36,7 @@ ingested.
 
 | Command | Default window | Override | Time source |
 | --- | --- | --- | --- |
-| `mirror score` | Rolling 90 days | `--since YYYY-MM-DD`, `--all` | `Document.captured_at`, falling back to `Item.created_at` for unlinked legacy observations |
+| `mirror score` | Rolling 90 days | `--since YYYY-MM-DD`, `--all` | Repository query may find legacy rows by `Item.created_at`; clustering excludes them unless they remain linked to a Session Document |
 | `mirror dashboard` | Rolling 90 days | `--since YYYY-MM-DD`, `--all` | Same event-time query |
 | `mirror weekly` | Rolling 7 days vs prior 7 days | None | Same event-time query |
 
@@ -75,6 +75,20 @@ metadata-only local backfill reconciles these tags onto existing observations
 without another LLM call. Its cursor is independent from normal ingestion and
 stays before parse failures, missing documents, or failed writes so the work is
 retried.
+
+All Mirror consumers then apply one strict clustering cohort: only linked
+observations from documents not proven unattended/subagent are eligible.
+Detached legacy observations remain stored as evidence but are excluded from
+every score numerator, denominator, project ranking, profile facet, and weekly
+action-card input. Linked `session_mode_unknown` observations remain eligible.
+
+`ClusterResult.data_quality` records input, linked, detached, mode-excluded and
+eligible observation counts plus linked ratio and exact eligible-cohort identity.
+Weekly and profile output display this metadata. When detached observations are
+present, output is marked `DEGRADED`; Mirror Weekly suppresses week-over-week
+trend arrows rather than presenting an incomplete comparison confidently. A
+window with zero eligible observations fails closed before emitting scores or a
+profile.
 
 The experiment drops three noisy live indicators:
 
