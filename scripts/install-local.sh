@@ -423,7 +423,7 @@ disable_plist() {
 
   launchctl bootout "$domain" "$path" >/dev/null 2>&1 || true
   launchctl bootout "${domain}/${label}" >/dev/null 2>&1 || true
-  if [[ -f "$path" ]]; then
+  if [[ -e "$path" || -L "$path" ]]; then
     rm -f "$path"
     log "removed $path"
   else
@@ -484,6 +484,12 @@ source_commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || printf 'unkno
 [[ "$source_commit" != "unknown" ]] || die "install source is not a Git checkout"
 [[ -z "$(git -C "$repo_root" status --porcelain 2>/dev/null || true)" ]] \
   || die "install source must be clean; commit or stash changes first"
+[[ ! -L "${HOME}/.refine/install-manifest" ]] \
+  || die "install manifest is a symlink and was rejected: ${HOME}/.refine/install-manifest"
+if [[ "$cognitive_portrait_enabled" != "0" \
+  && -L "${HOME}/Library/LaunchAgents/com.lifcc.refine-cognitive-portrait.plist" ]]; then
+  die "enabled cognitive portrait plist is a symlink and was rejected: ${HOME}/Library/LaunchAgents/com.lifcc.refine-cognitive-portrait.plist"
+fi
 
 if [[ "$launchd_enabled" == "1" && "$(uname -s)" == "Darwin" ]]; then
   guard_legacy_project_env_upgrade

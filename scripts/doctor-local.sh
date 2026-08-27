@@ -158,8 +158,8 @@ check_launch_agent() {
     return
   fi
 
-  if [[ ! -f "$plist" ]]; then
-    fail "missing LaunchAgent: $plist"
+  if [[ -L "$plist" || ! -f "$plist" ]]; then
+    fail "LaunchAgent plist must be a regular non-symlink file: $plist"
     return
   fi
 
@@ -174,7 +174,7 @@ check_launch_agent() {
     if [[ "$actual" == "$expected" ]]; then
       pass "LaunchAgent binding matches: ${label} ProgramArguments[${index}]"
     else
-      fail "LaunchAgent binding mismatch: ${label} ProgramArguments[${index}] expected=${expected} actual=${actual:-missing}"
+      fail "LaunchAgent binding mismatch: ${label} ProgramArguments[${index}]"
     fi
     index=$((index + 1))
   done
@@ -187,6 +187,28 @@ check_launch_agent() {
 
   local state
   state="$(launchctl print "gui/$(id -u)/${label}" 2>&1 || true)"
+  if [[ $# -gt 0 ]]; then
+    local live_args=()
+    while IFS= read -r actual; do
+      live_args[${#live_args[@]}]="$actual"
+    done < <(awk '
+      /^[[:space:]]*arguments = \{/ {in_arguments=1; next}
+      in_arguments && /^[[:space:]]*\}/ {exit}
+      in_arguments {sub(/^[[:space:]]*/, ""); print}
+    ' <<<"$state")
+    index=0
+    for expected in "$@"; do
+      if [[ "${live_args[$index]:-}" == "$expected" ]]; then
+        pass "LaunchAgent live binding matches: ${label} ProgramArguments[${index}]"
+      else
+        fail "LaunchAgent live binding mismatch: ${label} ProgramArguments[${index}]"
+      fi
+      index=$((index + 1))
+    done
+    if [[ "${#live_args[@]}" -ne "$index" ]]; then
+      fail "LaunchAgent live ProgramArguments count mismatch: ${label}"
+    fi
+  fi
   if grep -q 'state = running' <<<"$state"; then
     pass "LaunchAgent running: $label"
   elif grep -q 'state = not running' <<<"$state"; then
@@ -297,8 +319,8 @@ check_http() {
 
 check_install_manifest() {
   local manifest="${HOME}/.refine/install-manifest"
-  if [[ ! -f "$manifest" ]]; then
-    fail "missing install manifest: $manifest"
+  if [[ -L "$manifest" || ! -f "$manifest" ]]; then
+    fail "install manifest must be a regular non-symlink file: $manifest"
     return
   fi
 

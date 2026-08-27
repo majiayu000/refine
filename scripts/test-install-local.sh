@@ -128,6 +128,24 @@ if [[ "${1:-}" == 'print' ]]; then
     || [[ "$label" == 'com.lifcc.refine-cognitive-portrait' && "${FAKE_ORPHAN_PORTRAIT:-0}" == '1' ]] \
     || [[ -f "${HOME}/Library/LaunchAgents/${label}.plist" ]]; then
     printf 'state = not running\n'
+    if [[ -f "${HOME}/Library/LaunchAgents/${label}.plist" ]]; then
+      printf 'arguments = {\n'
+      if [[ "${FAKE_STALE_LIVE_LABEL:-}" == "$label" ]]; then
+        printf '\t/bin/bash\n'
+        printf '\t%s\n' "${FAKE_STALE_LIVE_VALUE:-}"
+      else
+        python3 - "${HOME}/Library/LaunchAgents/${label}.plist" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    document = plistlib.load(handle)
+for argument in document.get("ProgramArguments", []):
+    print(f"\t{argument}")
+PY
+      fi
+      printf '}\n'
+    fi
     exit 0
   fi
   exit 3
@@ -473,6 +491,31 @@ assert_contains "$healthy_doctor_output" 'PASS cognitive portrait WorkingDirecto
 assert_contains "$healthy_doctor_output" 'PASS cognitive portrait latest artifact:' \
   'Doctor did not validate the latest portrait artifact'
 
+daily_plist_target="${TEST_ROOT}/daily-plist-target"
+mv "$daily_plist" "$daily_plist_target"
+ln -s "$daily_plist_target" "$daily_plist"
+symlink_plist_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$symlink_plist_output" 'LaunchAgent plist must be a regular non-symlink file' \
+  'Doctor accepted an enabled LaunchAgent plist symlink'
+rm -f "$daily_plist"
+mv "$daily_plist_target" "$daily_plist"
+
+manifest="${test_home}/.refine/install-manifest"
+manifest_target="${TEST_ROOT}/install-manifest-target"
+mv "$manifest" "$manifest_target"
+ln -s "$manifest_target" "$manifest"
+symlink_manifest_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$symlink_manifest_output" 'install manifest must be a regular non-symlink file' \
+  'Doctor accepted an enabled install manifest symlink'
+rm -f "$manifest"
+mv "$manifest_target" "$manifest"
+
 fixture_plist_edit "$daily_plist" set 'ProgramArguments:1' "${REPO_ROOT}/scripts/daily-refresh.sh"
 stale_plist_output="$(env -i \
   HOME="$test_home" CARGO_HOME="$test_cargo_home" \
@@ -480,8 +523,28 @@ stale_plist_output="$(env -i \
   /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
 assert_contains "$stale_plist_output" 'LaunchAgent binding mismatch: com.lifcc.refine-daily-ingest' \
   'Doctor accepted a checkout-bound unattended job'
+secret_argument_sentinel='review-secret-argument-sentinel'
+fixture_plist_edit "$daily_plist" set 'ProgramArguments:1' "$secret_argument_sentinel"
+secret_argument_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$secret_argument_output" 'LaunchAgent binding mismatch: com.lifcc.refine-daily-ingest' \
+  'Doctor accepted a secret-valued plist argument'
+assert_not_contains "$secret_argument_output" "$secret_argument_sentinel" \
+  'Doctor leaked the mismatched plist argument value'
 env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
   /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start >/dev/null
+
+stale_live_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  FAKE_STALE_LIVE_LABEL='com.lifcc.refine-daily-ingest' \
+  FAKE_STALE_LIVE_VALUE="${REPO_ROOT}/scripts/daily-refresh.sh" \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$stale_live_output" \
+  'LaunchAgent live binding mismatch: com.lifcc.refine-daily-ingest ProgramArguments[1]' \
+  'Doctor accepted stale launchd arguments after a no-start plist rewrite'
 
 fixture_plist_edit "$server_plist" set 'ProgramArguments:1' "${test_home}/.refine/run-refine-server.sh"
 old_wrapper_output="$(env -i \
@@ -522,6 +585,16 @@ orphan_portrait_output="$(env -i \
   /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
 assert_contains "$orphan_portrait_output" 'disabled LaunchAgent is still loaded: com.lifcc.refine-cognitive-portrait' \
   'Doctor missed an orphan disabled portrait label'
+
+ln -s "${TEST_ROOT}/missing-ui-plist" "${launch_agents}/com.lifcc.refine-ui-dev.plist"
+ln -s "${TEST_ROOT}/missing-portrait-plist" "$portrait_plist"
+env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
+  /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start --no-cognitive-portrait >/dev/null
+[[ ! -e "${launch_agents}/com.lifcc.refine-ui-dev.plist" \
+  && ! -L "${launch_agents}/com.lifcc.refine-ui-dev.plist" ]] \
+  || fail 'installer left a dangling disabled UI plist symlink'
+[[ ! -e "$portrait_plist" && ! -L "$portrait_plist" ]] \
+  || fail 'installer left a dangling disabled portrait plist symlink'
 
 invalid_root_home="${TEST_ROOT}/invalid-root-home"
 invalid_root_cargo="${invalid_root_home}/.cargo"
