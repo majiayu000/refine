@@ -81,14 +81,17 @@ pub struct GlobalStats {
 ///
 /// The analytics cohort is deliberately strict: an observation is eligible
 /// only when it is linked to a source document and that document is not tagged
-/// as an unattended or subagent session. The three terminal buckets therefore
-/// satisfy `input = detached + mode_excluded + eligible`.
+/// as an unattended or subagent session. Source-aware callers additionally
+/// reject observations linked to non-session document sources. The terminal
+/// buckets satisfy `input = detached + mode_excluded + source_excluded + eligible`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataQualityStats {
     pub input_observations: usize,
     pub linked_observations: usize,
     pub detached_observations: usize,
     pub mode_excluded_observations: usize,
+    #[serde(default)]
+    pub source_excluded_observations: usize,
     pub eligible_observations: usize,
     /// Stable identity of the exact eligible item set, used by checkpoints.
     pub cohort_identity: String,
@@ -104,7 +107,7 @@ impl DataQualityStats {
     }
 
     pub fn is_degraded(&self) -> bool {
-        self.detached_observations > 0
+        self.detached_observations > 0 || self.source_excluded_observations > 0
     }
 
     pub fn status_label(&self) -> &'static str {
@@ -208,6 +211,7 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
         linked_observations,
         detached_observations,
         mode_excluded_observations,
+        source_excluded_observations: 0,
         eligible_observations: eligible_observation_count,
         cohort_identity: format!("sha256:{:x}", cohort_hasher.finalize()),
     };

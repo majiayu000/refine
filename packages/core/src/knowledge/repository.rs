@@ -7,6 +7,24 @@ use crate::knowledge::{DocumentId, Item, ItemId, ItemType, Tag};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
+/// Minimal document metadata captured together with an insights observation
+/// window, without loading transcript bodies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservationDocumentMeta {
+    pub id: DocumentId,
+    pub source: String,
+    pub captured_at: DateTime<Utc>,
+}
+
+/// Current/previous event-time windows and their source metadata, read under
+/// one database snapshot.
+#[derive(Debug, Clone)]
+pub struct ObservationWindowSnapshot {
+    pub current: Vec<Item>,
+    pub previous: Vec<Item>,
+    pub documents: Vec<ObservationDocumentMeta>,
+}
+
 /// Item 仓储接口
 #[async_trait]
 pub trait ItemRepository: Send + Sync {
@@ -60,6 +78,14 @@ pub trait ItemRepository: Send + Sync {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> InfraResult<Vec<Item>>;
+
+    /// Load both equal event-time windows and all linked source metadata from
+    /// one read snapshot. `None` selects all history strictly before `cutoff`.
+    async fn load_observation_window_snapshot(
+        &self,
+        cutoff: DateTime<Utc>,
+        period_days: Option<usize>,
+    ) -> InfraResult<ObservationWindowSnapshot>;
 
     /// 全文搜索（分页）
     async fn search_text(&self, query: &str, offset: usize, limit: usize)

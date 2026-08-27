@@ -1,13 +1,16 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use refine_core::knowledge::{DocumentRepository, Item};
-use refine_core::session::{eligible_observations, ClusterResult};
+use refine_core::knowledge::{Item, ObservationDocumentMeta};
+use refine_core::session::{
+    eligible_observations, is_supported_session_document_source, AnalysisRoute, ClusterResult,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::io::Read;
 
 pub(crate) const MANIFEST_VERSION: u32 = 1;
-pub(crate) const COHORT_CONTRACT_IDENTITY: &str = "linked-interactive-v1";
+pub(crate) const COHORT_CONTRACT_IDENTITY: &str = "source-aware-linked-interactive-v2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct EventTimeWindow {
@@ -30,12 +33,14 @@ pub(crate) struct WindowManifest {
     pub linked_observations: usize,
     pub detached_observations: usize,
     pub mode_excluded_observations: usize,
+    pub source_excluded_observations: usize,
     pub eligible_observations: usize,
     pub linked_ratio: String,
     pub status: String,
     pub cohort_contract_identity: String,
     pub cohort_identity: String,
     pub source_counts: Vec<SourceStats>,
+    pub unsupported_source_counts: Vec<SourceStats>,
     pub platform_unknown_observations: usize,
     pub platform_unknown_sessions: usize,
 }
@@ -49,6 +54,7 @@ pub(crate) struct InsightsManifest {
     pub previous_window: Option<WindowManifest>,
     pub model_identity: String,
     pub prompt_identity: String,
+    pub route_identity: String,
     pub binary_identity: String,
     pub source_revision: String,
 }
@@ -60,49 +66,68 @@ struct SourceAccumulator {
     freshest_event_time: Option<DateTime<Utc>>,
 }
 
-pub(crate) async fn build_window_manifest(
+pub(crate) fn build_window_manifest(
     window: EventTimeWindow,
-    observations: &[Item],
+    cohort_observations: &[Item],
+    all_observations: &[Item],
     cluster: &ClusterResult,
-    doc_store: &dyn DocumentRepository,
+    documents: &[ObservationDocumentMeta],
 ) -> Result<WindowManifest> {
-    let eligible = eligible_observations(observations);
+    let document_map: BTreeMap<&str, &ObservationDocumentMeta> = documents
+        .iter()
+        .map(|document| (document.id.as_str(), document))
+        .collect();
+    let eligible = eligible_observations(cohort_observations);
     let mut sources: BTreeMap<String, SourceAccumulator> = BTreeMap::new();
-    let mut eligible_documents = BTreeMap::new();
     for item in eligible {
         let document_id = item
             .document_id()
             .context("eligible observation unexpectedly lacks document_id")?;
-        let entry = eligible_documents
-            .entry(document_id.as_str().to_string())
-            .or_insert((document_id.clone(), 0usize));
-        entry.1 += 1;
-    }
-
-    for (_, (document_id, observation_count)) in eligible_documents {
-        let document = doc_store
-            .find_by_id(&document_id)
-            .await
-            .context("load source document for insights manifest")?
-            .with_context(|| {
-                format!(
-                    "eligible cohort references missing document {}",
-                    document_id
-                )
-            })?;
-        let source = report_source(document.source()).to_string();
+        let document = document_map.get(document_id.as_str()).with_context(|| {
+            format!(
+                "eligible cohort references missing document {}",
+                document_id
+            )
+        })?;
+        let source = report_source(&document.source).to_string();
         let accumulator = sources.entry(source).or_default();
-        accumulator.observation_count += observation_count;
+        accumulator.observation_count += 1;
         accumulator
             .document_ids
             .insert(document_id.as_str().to_string());
         accumulator.freshest_event_time = Some(
             accumulator
                 .freshest_event_time
-                .map_or(document.captured_at(), |current| {
-                    current.max(document.captured_at())
+                .map_or(document.captured_at, |current| {
+                    current.max(document.captured_at)
                 }),
         );
+    }
+
+    let mut unsupported_sources: BTreeMap<String, SourceAccumulator> = BTreeMap::new();
+    for item in all_observations {
+        let Some(document_id) = item.document_id() else {
+            continue;
+        };
+        let (source, captured_at) = document_map
+            .get(document_id.as_str())
+            .map(|document| (document.source.as_str(), Some(document.captured_at)))
+            .unwrap_or(("missing_document_metadata", None));
+        if is_supported_session_document_source(source) {
+            continue;
+        }
+        let accumulator = unsupported_sources.entry(source.to_string()).or_default();
+        accumulator.observation_count += 1;
+        accumulator
+            .document_ids
+            .insert(document_id.as_str().to_string());
+        if let Some(captured_at) = captured_at {
+            accumulator.freshest_event_time = Some(
+                accumulator
+                    .freshest_event_time
+                    .map_or(captured_at, |current| current.max(captured_at)),
+            );
+        }
     }
 
     let source_counts: Vec<SourceStats> = sources
@@ -114,6 +139,7 @@ pub(crate) async fn build_window_manifest(
             freshest_event_time: accumulator.freshest_event_time,
         })
         .collect();
+    let unsupported_source_counts = source_stats(unsupported_sources);
     let platform_unknown_observations = source_counts
         .iter()
         .filter(|stats| stats.source == "platform_unknown")
@@ -132,15 +158,29 @@ pub(crate) async fn build_window_manifest(
         linked_observations: quality.linked_observations,
         detached_observations: quality.detached_observations,
         mode_excluded_observations: quality.mode_excluded_observations,
+        source_excluded_observations: quality.source_excluded_observations,
         eligible_observations: quality.eligible_observations,
         linked_ratio: format!("{:.6}", quality.linked_ratio()),
         status: quality.status_label().to_string(),
         cohort_contract_identity: COHORT_CONTRACT_IDENTITY.to_string(),
         cohort_identity: quality.cohort_identity.clone(),
         source_counts,
+        unsupported_source_counts,
         platform_unknown_observations,
         platform_unknown_sessions,
     })
+}
+
+fn source_stats(sources: BTreeMap<String, SourceAccumulator>) -> Vec<SourceStats> {
+    sources
+        .into_iter()
+        .map(|(source, accumulator)| SourceStats {
+            source,
+            observation_count: accumulator.observation_count,
+            session_count: accumulator.document_ids.len(),
+            freshest_event_time: accumulator.freshest_event_time,
+        })
+        .collect()
 }
 
 fn report_source(document_source: &str) -> &str {
@@ -161,6 +201,7 @@ pub(crate) fn build_manifest(
     previous_window: Option<WindowManifest>,
     model_identity: String,
     prompt_identity: &str,
+    route_identity: String,
 ) -> InsightsManifest {
     InsightsManifest {
         manifest_version: MANIFEST_VERSION,
@@ -170,9 +211,41 @@ pub(crate) fn build_manifest(
         previous_window,
         model_identity,
         prompt_identity: prompt_identity.to_string(),
-        binary_identity: format!("refine-cli/{}", env!("CARGO_PKG_VERSION")),
+        route_identity,
+        binary_identity: binary_identity(),
         source_revision: source_revision(),
     }
+}
+
+pub(crate) fn route_plan_identity(routes: &[AnalysisRoute]) -> String {
+    let mut hasher = Sha256::new();
+    for route in routes {
+        hasher.update(route.id.to_le_bytes());
+        hasher.update(route.title.as_bytes());
+        hasher.update([0]);
+        hasher.update(route.prompt.as_bytes());
+        hasher.update([0]);
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn binary_identity() -> String {
+    let Some(path) = std::env::current_exe().ok() else {
+        return "unknown".to_string();
+    };
+    let Some(mut file) = std::fs::File::open(path).ok() else {
+        return "unknown".to_string();
+    };
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&buffer[..read]),
+            Err(_) => return "unknown".to_string(),
+        }
+    }
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 pub(crate) fn source_revision() -> String {
@@ -213,11 +286,13 @@ pub(crate) fn build_delta_summary(
     };
     if current.status != "OK" || previous.status != "OK" {
         return format!(
-            "新增/消失/反转: 已抑制；两个窗口中至少一个为 DEGRADED，禁止跨期趋势。\n证据缺口: current={} previous={}；current detached={} previous detached={}；platform unknown sessions current={} previous={}",
+            "新增/消失/反转: 已抑制；两个窗口中至少一个为 DEGRADED，禁止跨期趋势。\n证据缺口: current={} previous={}；current detached={} previous detached={}；current source-excluded={} previous source-excluded={}；platform unknown sessions current={} previous={}",
             current.status,
             previous.status,
             current.detached_observations,
             previous.detached_observations,
+            current.source_excluded_observations,
+            previous.source_excluded_observations,
             current.platform_unknown_sessions,
             previous.platform_unknown_sessions,
         );
@@ -269,7 +344,10 @@ fn list_or_none(values: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use refine_core::session::{ClusterResult, DataQualityStats, GlobalStats};
+    use refine_core::knowledge::DocumentId;
+    use refine_core::session::{
+        cluster_session_observations, ClusterResult, DataQualityStats, GlobalStats,
+    };
     use std::collections::HashMap;
 
     fn cluster(projects: &[(&str, usize)], degraded: bool) -> ClusterResult {
@@ -307,12 +385,14 @@ mod tests {
             linked_observations: 1,
             detached_observations: usize::from(status == "DEGRADED"),
             mode_excluded_observations: 0,
+            source_excluded_observations: 0,
             eligible_observations: 1,
             linked_ratio: "1.000000".into(),
             status: status.into(),
             cohort_contract_identity: COHORT_CONTRACT_IDENTITY.into(),
             cohort_identity: "sha256:test".into(),
             source_counts: Vec::new(),
+            unsupported_source_counts: Vec::new(),
             platform_unknown_observations: 0,
             platform_unknown_sessions: 0,
         }
@@ -331,6 +411,69 @@ mod tests {
         assert!(delta.contains("新增项目: new"));
         assert!(delta.contains("消失项目: old"));
         assert!(delta.find("新增项目").unwrap() < delta.find("可比总量").unwrap());
+    }
+
+    #[test]
+    fn previous_only_window_reports_disappeared_projects() {
+        let current_cluster = cluster(&[], false);
+        let previous_cluster = cluster(&[("inactive", 2)], false);
+        let delta = build_delta_summary(
+            &current_cluster,
+            &window("OK"),
+            Some(&previous_cluster),
+            Some(&window("OK")),
+        );
+        assert!(delta.contains("消失项目: inactive"));
+        assert!(delta.contains("sessions 2→0"));
+    }
+
+    #[test]
+    fn unsupported_document_sources_are_excluded_and_visible() {
+        let now = Utc::now();
+        let mut codex = Item::new_observation("codex", "codex evidence");
+        codex.set_document_id(DocumentId::from("codex-doc"));
+        let mut grok = Item::new_observation("grok", "legacy knowledge evidence");
+        grok.set_document_id(DocumentId::from("grok-doc"));
+        let observations = vec![codex, grok];
+        let sources = HashMap::from([
+            ("codex-doc".into(), "codex-session".into()),
+            ("grok-doc".into(), "grok-knowledge".into()),
+        ]);
+        let cohort = cluster_session_observations(&observations, &sources);
+        let documents = vec![
+            ObservationDocumentMeta {
+                id: DocumentId::from("codex-doc"),
+                source: "codex-session".into(),
+                captured_at: now,
+            },
+            ObservationDocumentMeta {
+                id: DocumentId::from("grok-doc"),
+                source: "grok-knowledge".into(),
+                captured_at: now,
+            },
+        ];
+
+        let manifest = build_window_manifest(
+            EventTimeWindow {
+                start: Some(now),
+                end: Some(now),
+            },
+            &cohort.cohort_items,
+            &observations,
+            &cohort.cluster,
+            &documents,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.eligible_observations, 1);
+        assert_eq!(manifest.source_excluded_observations, 1);
+        assert_eq!(manifest.status, "DEGRADED");
+        assert_eq!(manifest.source_counts[0].source, "codex");
+        assert_eq!(
+            manifest.unsupported_source_counts[0].source,
+            "grok-knowledge"
+        );
+        assert_eq!(manifest.unsupported_source_counts[0].observation_count, 1);
     }
 
     #[test]
@@ -366,6 +509,7 @@ mod tests {
             previous_window: Some(window("OK")),
             model_identity: "provider:model:endpoint-sha256:test".into(),
             prompt_identity: "prompt-v1".into(),
+            route_identity: "sha256:route".into(),
             binary_identity: "refine-cli/test".into(),
             source_revision: "unknown".into(),
         };
@@ -378,6 +522,7 @@ mod tests {
             "source_counts",
             "model_identity",
             "prompt_identity",
+            "route_identity",
             "binary_identity",
             "source_revision",
         ] {

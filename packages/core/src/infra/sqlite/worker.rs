@@ -1,8 +1,11 @@
 use super::rows::{configure_connection, configure_read_only_connection};
-use super::{conversation_ops, doc_ops, ops};
+use super::worker_support::{send_init_result, send_response};
+use super::{conversation_ops, doc_ops, insights_snapshot, ops};
 use crate::conversation::{ConversationRecord, EventRecord, ExtractionJobRecord};
 use crate::error::{InfraError, InfraResult};
-use crate::knowledge::{Document, Item, ItemType, RestoreDocumentParams};
+use crate::knowledge::{
+    Document, Item, ItemType, ObservationWindowSnapshot, RestoreDocumentParams,
+};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use std::path::PathBuf;
@@ -81,6 +84,11 @@ pub(super) enum SqliteCommand {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
         resp: oneshot::Sender<InfraResult<Vec<Item>>>,
+    },
+    LoadObservationWindowSnapshot {
+        cutoff: DateTime<Utc>,
+        period_days: Option<usize>,
+        resp: oneshot::Sender<InfraResult<ObservationWindowSnapshot>>,
     },
     // Document 操作
     DocFindByUrl {
@@ -311,29 +319,6 @@ fn run_worker(
     }
 }
 
-fn send_init_result(
-    init_tx: &mpsc::SyncSender<InfraResult<()>>,
-    result: InfraResult<()>,
-    context: &'static str,
-) {
-    if let Err(err) = &result {
-        tracing::error!(context = context, error = %err, "sqlite worker init failed");
-    }
-    if init_tx.send(result).is_err() {
-        tracing::warn!(context = context, "sqlite worker init receiver dropped");
-    }
-}
-
-fn send_response<T>(
-    command: &'static str,
-    resp: oneshot::Sender<InfraResult<T>>,
-    result: InfraResult<T>,
-) {
-    if resp.send(result).is_err() {
-        tracing::warn!(command = command, "sqlite response receiver dropped");
-    }
-}
-
 fn handle_command(conn: &Connection, command: SqliteCommand) {
     match command {
         SqliteCommand::FindById { id, resp } => {
@@ -409,6 +394,17 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
                 "FindObservationsByEventRange",
                 resp,
                 ops::find_observations_by_event_range(conn, start, end),
+            );
+        }
+        SqliteCommand::LoadObservationWindowSnapshot {
+            cutoff,
+            period_days,
+            resp,
+        } => {
+            send_response(
+                "LoadObservationWindowSnapshot",
+                resp,
+                insights_snapshot::load(conn, cutoff, period_days),
             );
         }
         SqliteCommand::DocFindByUrl { url, resp } => {

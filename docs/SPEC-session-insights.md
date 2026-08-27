@@ -176,22 +176,26 @@ parser；`local` 路径使用以下 JSONL 规则。`--legacy-local-scan` 只是
 eligible cohort。Observation 必须同时满足：
 
 1. `document_id` 指向一个现存 Session Document；
-2. 同一 Document 的 Observation 中没有
+2. Document source 精确属于 `claude-code-session`、`codex-session`、
+   `remem-raw-session` 三者之一；
+3. 同一 Document 的 Observation 中没有
    `session_mode_unattended` 或 `session_mode_subagent` 标签。
 
 `session_mode_interactive` 和已关联的 `session_mode_unknown` 保留。脱链
 Observation 不删除、不猜测归属，但不得进入 session、decision、bugfix、project、
 cognitive、collaboration 的任何分子、分母、排名或 prompt 证据。
 
-`ClusterResult.data_quality` 暴露 input、linked、detached、mode-excluded、eligible
-计数、linked ratio 和 eligible item set 的稳定 identity。三类终态满足
-`input = detached + mode-excluded + eligible`，且
-`linked = mode-excluded + eligible`。
+`ClusterResult.data_quality` 暴露 input、linked、detached、mode-excluded、
+source-excluded、eligible 计数、linked ratio 和 eligible item set 的稳定 identity。
+终态满足 `input = detached + mode-excluded + source-excluded + eligible`，且
+`linked = mode-excluded + source-excluded + eligible`。
 
 CLI stdout 和保存的 `session-insights-v2` 文档必须写明窗口、cohort 和上述质量
-统计。存在 detached Observation 时状态为 `DEGRADED`，可以对严格 eligible
+统计。存在 detached 或 source-excluded Observation 时状态为 `DEGRADED`，可以对严格 eligible
 cohort 做当前窗口描述，但禁止输出跨期增减、改善或退化结论。eligible 为 0 时
-直接失败，不生成空口径报告。Insights checkpoint signature 包含完整数据质量统计
+如果前一窗口也为空则以明确 `NO_DATA` 失败；如果前一窗口非空则必须保存只含
+manifest、inactivity/removals 和 evidence-gap 的 deterministic 报告，不得把成功退出
+误报成生成了 LLM 报告。Insights checkpoint signature 包含完整数据质量统计
 和 cohort identity；关联质量或 eligible item set 变化后不得复用旧路由结果。
 
 #### 窗口、Delta 与可复现 Manifest
@@ -204,18 +208,24 @@ snapshot 的差异写成趋势。
 保存的报告第一段是 `refine-insights-manifest-v1` JSON，至少记录：
 
 - 唯一 cutoff 与 current/previous 的 event-time start/end；
-- 两个窗口各自的 input、linked、detached、mode-excluded、eligible、linked
+- 两个窗口各自的 input、linked、detached、mode-excluded、source-excluded、eligible、linked
   ratio、status、cohort contract identity 和 exact cohort identity；
 - eligible cohort 按来源的 observation/session 数与 freshest event time，以及
-  platform-unknown 数；
-- LLM model identity、prompt identity/version、binary identity、source revision。
+  platform-unknown 数；不受支持的 source 另列 observation/session 数与 freshness；
+- LLM model identity、prompt identity/version、route plan identity、binary content identity、
+  source revision。
+
+current、previous 与其全部 source metadata 必须由同一个 SQLite read transaction
+一次读取。窗口查询以同一 cutoff 为上界，`--all` 也严格排除 cutoff 之后并发写入的
+Observation；source metadata 使用 bulk query，不允许逐 Observation N+1 查询。
 
 运行时无法证明的 revision 或 event-time 边界写为 `unknown`/`null`，禁止从目录名、
 模型名或其他弱信号猜测。checkpoint 同时绑定窗口、cutoff、current/previous cohort、
-完整 manifest identity、model、prompt 和 source revision；其中任一变化都不得续跑旧结果。
+完整 manifest identity、model、prompt、route plan、binary content 和 source revision；
+其中任一变化都不得续跑旧结果。source revision 为 `unknown` 时禁止复用 cutoff 或路由结果。
 
 报告必须先陈述新增、消失、反转与证据缺口，再陈述稳定基线。比较只允许使用相同
-`linked-interactive-v1` cohort contract。任一窗口为 `DEGRADED` 时，所有跨期数字和
+`source-aware-linked-interactive-v2` cohort contract。任一窗口为 `DEGRADED` 时，所有跨期数字和
 趋势结论 fail closed；可以保留各窗口的静态事实与证据缺口。
 
 最终合并上下文按 Unicode scalar 字符统一计量。每条 route 获得相同预算，起始 route
@@ -223,8 +233,10 @@ snapshot 的差异写成趋势。
 
 #### Source expansion contract
 
-当前可识别 Session 来源只有本地 `claude-code-session` 与 `codex-session`。Codex 是
-一等来源，并未缺席。`remem-raw-session` 只证明 archive provider，不证明上游平台；
+当前 session cohort 只允许精确的 `claude-code-session`、`codex-session` 和
+`remem-raw-session`。Codex 是一等来源，并未缺席；其他 source 即使关联了
+Observation 也必须 fail closed，并在 manifest 的 unsupported source 统计中可见。
+`remem-raw-session` 只证明 archive provider，不证明上游平台；
 在 remem 保存并透传稳定 upstream platform identity 前，报告必须把它计为
 `platform_unknown`，不得重标为 Claude 或 Codex。
 

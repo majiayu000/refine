@@ -3,24 +3,46 @@
 use crate::insights_checkpoint::{DatasetSignature, InsightsCheckpoint, CHECKPOINT_VERSION};
 use crate::insights_manifest::{
     build_delta_summary, build_manifest, build_window_manifest, manifest_identity, render_manifest,
-    rotation_seed, source_revision, EventTimeWindow, InsightsManifest,
+    rotation_seed, route_plan_identity, source_revision, EventTimeWindow, InsightsManifest,
 };
 use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
 use refine_core::infra::{llm_with_retry_policy, LlmClient, LlmRetryPolicy};
 use refine_core::knowledge::{Document, DocumentRepository, ItemRepository};
 use refine_core::session::{
-    build_final_prompt_with_delta, cluster_observations, format_data_quality_stats,
+    build_final_prompt_with_delta, cluster_session_observations, format_data_quality_stats,
     merge_route_results_with_budget, plan_routes, DataQualityStats, RouteResult,
     INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 const DEFAULT_LLM_CONCURRENCY: usize = 4;
 const FINAL_REPORT_REQUEST_TIMEOUT_MILLIS: u64 = 300_000;
-const INSIGHTS_PROMPT_IDENTITY: &str = "insights-v2:route-v2:delta-final-v3";
+const INSIGHTS_PROMPT_IDENTITY: &str = "insights-v2:route-v2:delta-final-v4";
 const FINAL_ROUTE_CONTEXT_CHARS: usize = 24_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowDisposition {
+    NoData,
+    PersistDeterministic,
+    Analyze,
+}
+
+fn window_disposition(
+    current_observations: usize,
+    previous_observations: usize,
+    current_eligible: usize,
+) -> WindowDisposition {
+    if current_observations == 0 && previous_observations == 0 {
+        WindowDisposition::NoData
+    } else if current_eligible == 0 {
+        WindowDisposition::PersistDeterministic
+    } else {
+        WindowDisposition::Analyze
+    }
+}
 
 fn insights_window_label(period: Option<usize>) -> String {
     match period {
@@ -71,6 +93,29 @@ fn final_report_retry_policy() -> LlmRetryPolicy {
     }
 }
 
+async fn persist_report(
+    persisted_report: &str,
+    all_snapshot: bool,
+    doc_store: &dyn DocumentRepository,
+) -> Result<()> {
+    let mut doc = Document::new("session-insights-v2", persisted_report);
+    let kind = if all_snapshot { "Snapshot" } else { "Delta" };
+    doc.set_title(&format!(
+        "Session Insights v2 {} {}",
+        kind,
+        doc.created_at().format("%Y-%m-%d %H:%M")
+    ));
+    doc.set_url(&format!(
+        "insights-v2://{}/{}",
+        kind.to_lowercase(),
+        doc.created_at().to_rfc3339()
+    ));
+    doc_store.save(&doc).await.context("保存报告失败")?;
+    InsightsCheckpoint::clear()?;
+    println!("\n报告已保存 (ID: {})", doc.id());
+    Ok(())
+}
+
 #[allow(dead_code)]
 pub struct InsightsOptions {
     pub period: Option<usize>,
@@ -90,15 +135,12 @@ pub async fn handle_insights(
     if options.period.is_none() != options.all_snapshot {
         anyhow::bail!("内部参数错误：全历史报告必须由显式 --all 选择");
     }
-    let client = match &llm_client {
-        Some(c) => c.clone(),
-        None => {
-            println!("insights 需要 LLM。请配置 API Key。");
-            return Ok(());
-        }
-    };
-
-    let llm_identity = client.cache_identity();
+    // Loading and classifying the windows is deterministic. Preserve that path
+    // when no LLM is configured so inactivity/removal reports can still land.
+    let llm_identity = llm_client
+        .as_ref()
+        .map(|client| client.cache_identity())
+        .unwrap_or_else(|| "unknown".to_string());
     let source_revision = source_revision();
     let cutoff = InsightsCheckpoint::reusable_cutoff(
         options.period,
@@ -108,63 +150,73 @@ pub async fn handle_insights(
         &source_revision,
     )?
     .unwrap_or_else(Utc::now);
-    let (observations, previous_observations, current_window, previous_window, report_mode) =
-        match options.period {
-            Some(days) => {
-                let days = i64::try_from(days).context("--period 超出支持范围")?;
-                let current_start = cutoff - Duration::days(days);
-                let previous_start = current_start - Duration::days(days);
-                let current = item_store
-                    .find_observations_by_event_range(current_start, cutoff)
-                    .await
-                    .context("加载当前 Observation 窗口失败")?;
-                let previous = item_store
-                    .find_observations_by_event_range(previous_start, current_start)
-                    .await
-                    .context("加载前一 Observation 窗口失败")?;
-                (
-                    current,
-                    Some(previous),
-                    EventTimeWindow {
-                        start: Some(current_start),
-                        end: Some(cutoff),
-                    },
-                    Some(EventTimeWindow {
-                        start: Some(previous_start),
-                        end: Some(current_start),
-                    }),
-                    format!("rolling-{days}d-delta"),
-                )
-            }
-            None => (
-                item_store
-                    .find_by_type(refine_core::knowledge::ItemType::Observation)
-                    .await
-                    .context("加载全历史 Observation snapshot 失败")?,
-                None,
+    let snapshot = item_store
+        .load_observation_window_snapshot(cutoff, options.period)
+        .await
+        .context("在同一 SQLite snapshot 中加载 insights 窗口与来源元数据失败")?;
+    let (current_window, previous_window, report_mode) = match options.period {
+        Some(days) => {
+            let days = i64::try_from(days).context("--period 超出支持范围")?;
+            let current_start = cutoff - Duration::days(days);
+            let previous_start = current_start - Duration::days(days);
+            (
                 EventTimeWindow {
-                    start: None,
+                    start: Some(current_start),
                     end: Some(cutoff),
                 },
-                None,
-                "all-history-snapshot".to_string(),
-            ),
-        };
+                Some(EventTimeWindow {
+                    start: Some(previous_start),
+                    end: Some(current_start),
+                }),
+                format!("rolling-{days}d-delta"),
+            )
+        }
+        None => (
+            EventTimeWindow {
+                start: None,
+                end: Some(cutoff),
+            },
+            None,
+            "all-history-snapshot".to_string(),
+        ),
+    };
 
-    if observations.is_empty() {
-        println!("暂无观测数据。请先运行 `refine ingest-sessions` 导入会话。");
-        return Ok(());
-    }
-
-    println!("加载 {} 条观测数据...", observations.len());
+    println!(
+        "加载 current={} / previous={} 条观测数据...",
+        snapshot.current.len(),
+        snapshot.previous.len()
+    );
 
     // Step 1: 本地聚类（纯 Rust，无 LLM）
-    let cluster_result = cluster_observations(&observations);
-    let previous_cluster = previous_observations
-        .as_ref()
-        .map(|items| cluster_observations(items));
+    let document_sources: HashMap<String, String> = snapshot
+        .documents
+        .iter()
+        .map(|document| (document.id.as_str().to_string(), document.source.clone()))
+        .collect();
+    let current_cohort = cluster_session_observations(&snapshot.current, &document_sources);
+    let previous_cohort = options
+        .period
+        .map(|_| cluster_session_observations(&snapshot.previous, &document_sources));
+    let cluster_result = &current_cohort.cluster;
+    let previous_cluster = previous_cohort.as_ref().map(|cohort| &cohort.cluster);
     let stats = &cluster_result.global_stats;
     let quality = &cluster_result.data_quality;
+    let disposition = window_disposition(
+        snapshot.current.len(),
+        snapshot.previous.len(),
+        quality.eligible_observations,
+    );
+    if disposition == WindowDisposition::NoData {
+        anyhow::bail!(
+            "NO_DATA: 当前窗口与前一等长窗口均无 Observation；未生成 Session Insights 报告"
+        );
+    }
+    let routes = if disposition == WindowDisposition::Analyze {
+        plan_routes(cluster_result)
+    } else {
+        Vec::new()
+    };
+    let route_identity = route_plan_identity(&routes);
 
     println!(
         "Cohort: {}\nWindow: {}\n",
@@ -174,19 +226,19 @@ pub async fn handle_insights(
 
     let current_manifest = build_window_manifest(
         current_window,
-        &observations,
-        &cluster_result,
-        doc_store.as_ref(),
-    )
-    .await?;
-    let previous_manifest = match (
-        previous_window,
-        previous_observations.as_ref(),
-        previous_cluster.as_ref(),
-    ) {
-        (Some(window), Some(items), Some(cluster)) => {
-            Some(build_window_manifest(window, items, cluster, doc_store.as_ref()).await?)
-        }
+        &current_cohort.cohort_items,
+        &snapshot.current,
+        cluster_result,
+        &snapshot.documents,
+    )?;
+    let previous_manifest = match (previous_window, previous_cohort.as_ref()) {
+        (Some(window), Some(cohort)) => Some(build_window_manifest(
+            window,
+            &cohort.cohort_items,
+            &snapshot.previous,
+            &cohort.cluster,
+            &snapshot.documents,
+        )?),
         _ => None,
     };
     let manifest = build_manifest(
@@ -196,22 +248,30 @@ pub async fn handle_insights(
         previous_manifest,
         llm_identity.clone(),
         INSIGHTS_PROMPT_IDENTITY,
+        route_identity,
     );
     let manifest_identity = manifest_identity(&manifest)?;
     let delta_summary = build_delta_summary(
-        &cluster_result,
+        cluster_result,
         &manifest.current_window,
-        previous_cluster.as_ref(),
+        previous_cluster,
         manifest.previous_window.as_ref(),
     );
-    if quality.eligible_observations == 0 {
-        anyhow::bail!(
-            "没有可用于分析的已关联交互观测（输入 {}，脱链 {}，模式排除 {}）；拒绝生成空或错口径报告",
-            quality.input_observations,
-            quality.detached_observations,
-            quality.mode_excluded_observations,
-        );
+    if disposition == WindowDisposition::PersistDeterministic {
+        let deterministic = "# Session Insights Report\n\n## 稳定基线\n\n当前窗口没有可用于 LLM 路由分析的 eligible sessions；本报告仅保存可复现 manifest 与跨窗 inactivity/evidence-gap 事实。";
+        let persisted = report_with_metadata(
+            deterministic,
+            options.period,
+            quality,
+            &manifest,
+            &delta_summary,
+        )?;
+        println!("{}", persisted);
+        return persist_report(&persisted, options.all_snapshot, doc_store.as_ref()).await;
     }
+
+    let client = llm_client
+        .context("LLM_UNAVAILABLE: 当前窗口有 eligible sessions，但未配置 LLM；未生成报告")?;
 
     println!(
         "聚类完成: {} 个项目, {} sessions, {} decisions, {} bugs\n",
@@ -221,14 +281,15 @@ pub async fn handle_insights(
         stats.total_bugfixes,
     );
 
-    let latest_updated_at = observations
+    let latest_updated_at = snapshot
+        .current
         .iter()
         .map(|item| item.updated_at())
         .max()
         .context("Observation 集合缺少更新时间")?;
     let signature = DatasetSignature {
         checkpoint_version: CHECKPOINT_VERSION,
-        observation_count: observations.len(),
+        observation_count: snapshot.current.len(),
         latest_updated_at,
         with_prescription: options.with_prescription,
         period_days: options.period,
@@ -243,12 +304,13 @@ pub async fn handle_insights(
             .map(|window| window.cohort_identity.clone()),
         manifest_identity,
         source_revision: manifest.source_revision.clone(),
+        binary_identity: manifest.binary_identity.clone(),
+        route_identity: manifest.route_identity.clone(),
         data_quality: quality.clone(),
     };
     let mut checkpoint = InsightsCheckpoint::load_matching(signature)?;
 
-    // Step 2: 规划 LLM 分析路由
-    let routes = plan_routes(&cluster_result);
+    // Step 2: 执行已纳入 manifest identity 的 LLM 分析路由
     let route_count = routes.len();
     let cached_count = routes
         .iter()
@@ -382,39 +444,12 @@ pub async fn handle_insights(
         report_with_metadata(&report, options.period, quality, &manifest, &delta_summary)?;
     println!("{}", persisted_report);
 
-    // Step 5: 保存
-    let mut doc = Document::new("session-insights-v2", &persisted_report);
-    let title = format!(
-        "Session Insights v2 {} {}",
-        if options.all_snapshot {
-            "Snapshot"
-        } else {
-            "Delta"
-        },
-        doc.created_at().format("%Y-%m-%d %H:%M")
-    );
-    doc.set_title(&title);
-    doc.set_url(&format!(
-        "insights-v2://{}/{}",
-        if options.all_snapshot {
-            "snapshot"
-        } else {
-            "delta"
-        },
-        doc.created_at().to_rfc3339()
-    ));
-    doc_store.save(&doc).await.context("保存报告失败")?;
-
-    InsightsCheckpoint::clear()?;
-
-    println!("\n报告已保存 (ID: {})", doc.id());
-
-    Ok(())
+    persist_report(&persisted_report, options.all_snapshot, doc_store.as_ref()).await
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_llm_concurrency;
+    use super::{parse_llm_concurrency, window_disposition, WindowDisposition};
 
     #[test]
     fn insights_concurrency_requires_a_positive_integer() {
@@ -437,5 +472,15 @@ mod tests {
             policy.request_timeout_millis,
             FINAL_REPORT_REQUEST_TIMEOUT_MILLIS
         );
+    }
+
+    #[test]
+    fn previous_only_window_persists_deterministic_inactivity() {
+        assert_eq!(
+            window_disposition(0, 12, 0),
+            WindowDisposition::PersistDeterministic
+        );
+        assert_eq!(window_disposition(0, 0, 0), WindowDisposition::NoData);
+        assert_eq!(window_disposition(4, 12, 4), WindowDisposition::Analyze);
     }
 }

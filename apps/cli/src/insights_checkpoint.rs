@@ -8,7 +8,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_ENV: &str = "REFINE_INSIGHTS_CHECKPOINT_PATH";
-pub(crate) const CHECKPOINT_VERSION: u32 = 4;
+pub(crate) const CHECKPOINT_VERSION: u32 = 5;
 const RESUME_MAX_AGE_HOURS: i64 = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +35,10 @@ pub(crate) struct DatasetSignature {
     pub manifest_identity: String,
     #[serde(default)]
     pub source_revision: String,
+    #[serde(default)]
+    pub binary_identity: String,
+    #[serde(default)]
+    pub route_identity: String,
     #[serde(default)]
     pub data_quality: DataQualityStats,
 }
@@ -76,6 +80,9 @@ impl InsightsCheckpoint {
         prompt_identity: &str,
         source_revision: &str,
     ) -> Result<Option<DateTime<Utc>>> {
+        if source_revision == "unknown" {
+            return Ok(None);
+        }
         let content = match std::fs::read_to_string(path) {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -250,6 +257,8 @@ mod tests {
             previous_cohort_identity: None,
             manifest_identity: "sha256:manifest-a".into(),
             source_revision: "revision-a".into(),
+            binary_identity: "sha256:binary-a".into(),
+            route_identity: "sha256:route-a".into(),
             data_quality: DataQualityStats::default(),
         };
         let mut checkpoint = InsightsCheckpoint::empty(signature);
@@ -285,6 +294,8 @@ mod tests {
             previous_cohort_identity: None,
             manifest_identity: "sha256:manifest-a".into(),
             source_revision: "revision-a".into(),
+            binary_identity: "sha256:binary-a".into(),
+            route_identity: "sha256:route-a".into(),
             data_quality: DataQualityStats::default(),
         };
         let mut checkpoint = InsightsCheckpoint::empty(signature.clone());
@@ -318,6 +329,7 @@ mod tests {
                 linked_observations: 2,
                 detached_observations: 1,
                 mode_excluded_observations: 0,
+                source_excluded_observations: 0,
                 eligible_observations: 2,
                 cohort_identity: "sha256:changed".into(),
             },
@@ -353,6 +365,8 @@ mod tests {
             previous_cohort_identity: None,
             manifest_identity: "manifest".into(),
             source_revision: "revision".into(),
+            binary_identity: "sha256:binary".into(),
+            route_identity: "sha256:route".into(),
             data_quality: DataQualityStats::default(),
         };
         atomic_write_json(&path, &InsightsCheckpoint::empty(signature)).unwrap();
@@ -378,6 +392,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mismatched, None);
+
+        let unknown_revision = InsightsCheckpoint::reusable_cutoff_from(
+            &path,
+            Some(7),
+            true,
+            "model",
+            "prompt",
+            "unknown",
+        )
+        .unwrap();
+        assert_eq!(unknown_revision, None);
     }
 
     #[cfg(unix)]
@@ -400,6 +425,8 @@ mod tests {
             previous_cohort_identity: None,
             manifest_identity: "sha256:manifest".into(),
             source_revision: "revision".into(),
+            binary_identity: "sha256:binary".into(),
+            route_identity: "sha256:route".into(),
             data_quality: DataQualityStats::default(),
         };
         atomic_write_json(&path, &InsightsCheckpoint::empty(signature)).unwrap();
