@@ -40,6 +40,55 @@ file_mode() {
   fi
 }
 
+fixture_plist_edit() {
+  local path="$1"
+  local operation="$2"
+  local key="$3"
+  local value="${4:-}"
+  python3 - "$path" "$operation" "$key" "$value" <<'PY'
+import plistlib
+import sys
+
+path, operation, key, replacement = sys.argv[1:]
+with open(path, "rb") as handle:
+    document = plistlib.load(handle)
+components = key.split(":")
+target = document
+for component in components[:-1]:
+    target = target[int(component)] if isinstance(target, list) else target[component]
+leaf = components[-1]
+if operation == "set":
+    if isinstance(target, list):
+        target[int(leaf)] = replacement
+    else:
+        target[leaf] = replacement
+elif operation == "delete":
+    if isinstance(target, list):
+        del target[int(leaf)]
+    else:
+        del target[leaf]
+else:
+    raise ValueError(f"unsupported fixture plist operation: {operation}")
+with open(path, "wb") as handle:
+    plistlib.dump(document, handle, sort_keys=False)
+PY
+}
+
+fixture_plist_value() {
+  local path="$1"
+  local key="$2"
+  python3 - "$path" "$key" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    value = plistlib.load(handle)
+for component in sys.argv[2].split(":"):
+    value = value[int(component)] if isinstance(value, list) else value[component]
+print(value)
+PY
+}
+
 fake_bin="${TEST_ROOT}/bin"
 test_home="${TEST_ROOT}/home"
 test_cargo_home="${test_home}/.cargo"
@@ -72,6 +121,35 @@ printf 'Darwin\n'
 EOF
 cat > "${fake_bin}/launchctl" <<'EOF'
 #!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == 'print' ]]; then
+  label="${2##*/}"
+  if [[ "$label" == 'com.lifcc.refine-ui-dev' && "${FAKE_ORPHAN_UI:-0}" == '1' ]] \
+    || [[ "$label" == 'com.lifcc.refine-cognitive-portrait' && "${FAKE_ORPHAN_PORTRAIT:-0}" == '1' ]] \
+    || [[ -f "${HOME}/Library/LaunchAgents/${label}.plist" ]]; then
+    printf 'state = not running\n'
+    if [[ -f "${HOME}/Library/LaunchAgents/${label}.plist" ]]; then
+      printf 'arguments = {\n'
+      if [[ "${FAKE_STALE_LIVE_LABEL:-}" == "$label" ]]; then
+        printf '\t/bin/bash\n'
+        printf '\t%s\n' "${FAKE_STALE_LIVE_VALUE:-}"
+      else
+        python3 - "${HOME}/Library/LaunchAgents/${label}.plist" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    document = plistlib.load(handle)
+for argument in document.get("ProgramArguments", []):
+    print(f"\t{argument}")
+PY
+      fi
+      printf '}\n'
+    fi
+    exit 0
+  fi
+  exit 3
+fi
 exit 0
 EOF
 cat > "${fake_bin}/plutil" <<'EOF'
@@ -160,9 +238,22 @@ if [[ -n "${FAKE_TOKEN_OWNER:-}" && "$last_arg" == "${FAKE_TOKEN_PATH:-}" && \
 fi
 exec /usr/bin/stat "$@"
 EOF
+cat > "${fake_bin}/lsof" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${FAKE_UI_LISTENING:-0}" == '1' ]]; then
+  printf 'bun 1 user 1u IPv4 TCP 127.0.0.1:8987 (LISTEN)\n'
+fi
+EOF
 chmod 700 "${fake_bin}/cargo" "${fake_bin}/uname" \
   "${fake_bin}/launchctl" "${fake_bin}/plutil" "${fake_bin}/codex" "${fake_bin}/curl" \
-  "${fake_bin}/stat"
+  "${fake_bin}/stat" "${fake_bin}/lsof"
+
+portrait_root="${TEST_ROOT}/portrait workspace"
+portrait_dir="${portrait_root}/docs/cognitive-portraits"
+mkdir -p "${portrait_root}/skills/cognitive-portrait" "$portrait_dir"
+printf '%s\n' '# Cognitive portrait fixture' > "${portrait_root}/skills/cognitive-portrait/SKILL.md"
+printf '%s\n' '# Portrait archive' > "${portrait_dir}/INDEX.md"
+printf '%s\n' '# Fixture portrait' > "${portrait_dir}/cognitive-portrait-2026-08-24-v3.md"
 
 custom_llm_env="${TEST_ROOT}/custom-llm.env"
 printf '%s\n' "export BASE_API_KEY='custom-path-secret'" > "$custom_llm_env"
@@ -175,7 +266,8 @@ install_output="$(env -i \
   BASE_URL='https://process-only.example.invalid' \
   REFINE_LLM_ENV_FILE="$custom_llm_env" \
   /bin/bash "${SCRIPT_DIR}/install-local.sh" \
-    --no-ui-dev --no-start --cognitive-portrait 2>&1)" \
+    --no-ui-dev --no-start --cognitive-portrait \
+    --cognitive-portrait-root "$portrait_root" 2>&1)" \
   || fail 'installer failed with transient credential inputs'
 assert_contains "$install_output" 'WARNING: LLM credentials are not configured for LaunchAgents' \
   'transient credentials suppressed the LaunchAgent warning'
@@ -249,8 +341,17 @@ grep -Fq "${test_home}/.refine/scripts/cognitive-portrait.sh" "$portrait_plist" 
   || fail 'cognitive portrait LaunchAgent does not use the installed script'
 grep -Fq '<key>REFINE_ROOT</key>' "$portrait_plist" \
   || fail 'cognitive portrait LaunchAgent lost its repository workspace'
-grep -Fq "$REPO_ROOT" "$portrait_plist" \
+grep -Fq "$portrait_root" "$portrait_plist" \
   || fail 'cognitive portrait LaunchAgent lost its repository output root'
+grep -Fq '<key>REFINE_PORTRAIT_DIR</key>' "$portrait_plist" \
+  || fail 'cognitive portrait LaunchAgent does not declare its output directory'
+grep -Fxq "cognitive_portrait_root=${portrait_root}" "${test_home}/.refine/install-manifest" \
+  || fail 'install manifest did not separate the portrait root from install source'
+grep -Fxq "source_root=${REPO_ROOT}" "${test_home}/.refine/install-manifest" \
+  || fail 'install manifest lost its source checkout'
+
+mkdir -p "${test_home}/Library/Logs"
+printf '%s\n' 'portrait fixture log' > "${test_home}/Library/Logs/refine-portrait.log"
 
 for plist in "$server_plist" "$daily_plist" "$weekly_plist" "$portrait_plist"; do
   if grep -Fq "${REPO_ROOT}/scripts/" "$plist"; then
@@ -372,6 +473,164 @@ env -i \
   PATH="${fake_bin}:/usr/bin:/bin" \
   /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start >/dev/null
 [[ ! -e "$token_file" && ! -L "$token_file" ]] || fail 'dev-anon reinstall did not remove the token file'
+grep -Fxq "cognitive_portrait_root=${portrait_root}" "${test_home}/.refine/install-manifest" \
+  || fail 'repeated install switched the configured portrait root'
+
+healthy_doctor_output="$(env -i \
+  HOME="$test_home" \
+  CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" \
+  EXPECT_ANON=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$healthy_doctor_output" 'PASS disabled LaunchAgent label unloaded: com.lifcc.refine-ui-dev' \
+  'Doctor did not prove the disabled UI label is unloaded'
+assert_contains "$healthy_doctor_output" 'PASS disabled service port is not listening: 8987' \
+  'Doctor did not prove the disabled UI port is closed'
+assert_contains "$healthy_doctor_output" 'PASS cognitive portrait WorkingDirectory matches manifest' \
+  'Doctor did not validate the portrait workspace contract'
+assert_contains "$healthy_doctor_output" 'PASS cognitive portrait latest artifact:' \
+  'Doctor did not validate the latest portrait artifact'
+
+daily_plist_target="${TEST_ROOT}/daily-plist-target"
+mv "$daily_plist" "$daily_plist_target"
+ln -s "$daily_plist_target" "$daily_plist"
+symlink_plist_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$symlink_plist_output" 'LaunchAgent plist must be a regular non-symlink file' \
+  'Doctor accepted an enabled LaunchAgent plist symlink'
+rm -f "$daily_plist"
+mv "$daily_plist_target" "$daily_plist"
+
+manifest="${test_home}/.refine/install-manifest"
+manifest_target="${TEST_ROOT}/install-manifest-target"
+mv "$manifest" "$manifest_target"
+ln -s "$manifest_target" "$manifest"
+symlink_manifest_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$symlink_manifest_output" 'install manifest must be a regular non-symlink file' \
+  'Doctor accepted an enabled install manifest symlink'
+rm -f "$manifest"
+mv "$manifest_target" "$manifest"
+
+fixture_plist_edit "$daily_plist" set 'ProgramArguments:1' "${REPO_ROOT}/scripts/daily-refresh.sh"
+stale_plist_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$stale_plist_output" 'LaunchAgent binding mismatch: com.lifcc.refine-daily-ingest' \
+  'Doctor accepted a checkout-bound unattended job'
+secret_argument_sentinel='review-secret-argument-sentinel'
+fixture_plist_edit "$daily_plist" set 'ProgramArguments:1' "$secret_argument_sentinel"
+secret_argument_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$secret_argument_output" 'LaunchAgent binding mismatch: com.lifcc.refine-daily-ingest' \
+  'Doctor accepted a secret-valued plist argument'
+assert_not_contains "$secret_argument_output" "$secret_argument_sentinel" \
+  'Doctor leaked the mismatched plist argument value'
+env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
+  /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start >/dev/null
+
+stale_live_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  FAKE_STALE_LIVE_LABEL='com.lifcc.refine-daily-ingest' \
+  FAKE_STALE_LIVE_VALUE="${REPO_ROOT}/scripts/daily-refresh.sh" \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$stale_live_output" \
+  'LaunchAgent live binding mismatch: com.lifcc.refine-daily-ingest ProgramArguments[1]' \
+  'Doctor accepted stale launchd arguments after a no-start plist rewrite'
+
+fixture_plist_edit "$server_plist" set 'ProgramArguments:1' "${test_home}/.refine/run-refine-server.sh"
+old_wrapper_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$old_wrapper_output" 'LaunchAgent binding mismatch: com.lifcc.refine-server' \
+  'Doctor accepted the retired server wrapper path'
+env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
+  /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start >/dev/null
+
+orphan_ui_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  FAKE_ORPHAN_UI=1 FAKE_UI_LISTENING=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$orphan_ui_output" 'disabled LaunchAgent is still loaded: com.lifcc.refine-ui-dev' \
+  'Doctor missed an orphan UI label'
+assert_contains "$orphan_ui_output" 'disabled service still listens on TCP port 8987' \
+  'Doctor missed an orphan UI listener'
+
+fixture_plist_edit "$portrait_plist" set 'EnvironmentVariables:REFINE_ROOT' '/tmp/mismatched-portrait-root'
+mismatched_root_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$mismatched_root_output" 'cognitive portrait REFINE_ROOT mismatches manifest' \
+  'Doctor accepted a mismatched portrait plist root'
+env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
+  /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start >/dev/null
+
+env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
+  /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start --no-cognitive-portrait >/dev/null
+orphan_portrait_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  FAKE_ORPHAN_PORTRAIT=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$orphan_portrait_output" 'disabled LaunchAgent is still loaded: com.lifcc.refine-cognitive-portrait' \
+  'Doctor missed an orphan disabled portrait label'
+
+ln -s "${TEST_ROOT}/missing-ui-plist" "${launch_agents}/com.lifcc.refine-ui-dev.plist"
+ln -s "${TEST_ROOT}/missing-portrait-plist" "$portrait_plist"
+env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
+  /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start --no-cognitive-portrait >/dev/null
+[[ ! -e "${launch_agents}/com.lifcc.refine-ui-dev.plist" \
+  && ! -L "${launch_agents}/com.lifcc.refine-ui-dev.plist" ]] \
+  || fail 'installer left a dangling disabled UI plist symlink'
+[[ ! -e "$portrait_plist" && ! -L "$portrait_plist" ]] \
+  || fail 'installer left a dangling disabled portrait plist symlink'
+
+invalid_root_home="${TEST_ROOT}/invalid-root-home"
+invalid_root_cargo="${invalid_root_home}/.cargo"
+mkdir -p "$invalid_root_home" "${invalid_root_cargo}/bin"
+ln -s "$portrait_root" "${TEST_ROOT}/portrait-root-link"
+invalid_root_output=''
+if invalid_root_output="$(env -i \
+  HOME="$invalid_root_home" CARGO_HOME="$invalid_root_cargo" PATH="${fake_bin}:/usr/bin:/bin" \
+  /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start --cognitive-portrait \
+    --cognitive-portrait-root "${TEST_ROOT}/portrait-root-link" 2>&1)"; then
+  fail 'installer accepted a symlinked portrait root'
+fi
+assert_contains "$invalid_root_output" 'existing non-symlink directory' \
+  'invalid portrait root error was not actionable'
+[[ ! -e "${invalid_root_cargo}/bin/refine" ]] \
+  || fail 'portrait root validation happened after binary installation'
+
+legacy_portrait_root="${TEST_ROOT}/legacy portrait workspace"
+legacy_portrait_dir="${legacy_portrait_root}/docs/cognitive-portraits"
+mkdir -p "${legacy_portrait_root}/skills/cognitive-portrait" "$legacy_portrait_dir"
+printf '%s\n' '# Legacy skill' > "${legacy_portrait_root}/skills/cognitive-portrait/SKILL.md"
+printf '%s\n' '# Legacy index' > "${legacy_portrait_dir}/INDEX.md"
+printf '%s\n' '# Legacy artifact' > "${legacy_portrait_dir}/cognitive-portrait-2026-08-10-v3.md"
+env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
+  /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start --cognitive-portrait \
+    --cognitive-portrait-root "$portrait_root" >/dev/null
+rm -f "${test_home}/.refine/install-manifest"
+fixture_plist_edit "$portrait_plist" set WorkingDirectory "$legacy_portrait_root"
+fixture_plist_edit "$portrait_plist" set 'EnvironmentVariables:REFINE_ROOT' "$legacy_portrait_root"
+fixture_plist_edit "$portrait_plist" delete 'EnvironmentVariables:REFINE_PORTRAIT_DIR'
+env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
+  /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start >/dev/null
+grep -Fxq "cognitive_portrait_root=${legacy_portrait_root}" "${test_home}/.refine/install-manifest" \
+  || fail 'legacy upgrade did not preserve valid REFINE_ROOT'
+[[ "$(fixture_plist_value "$portrait_plist" 'EnvironmentVariables:REFINE_PORTRAIT_DIR')" \
+  == "${legacy_portrait_dir}" ]] || fail 'legacy upgrade did not add the explicit portrait output directory'
 
 leaf_name='daily-refresh.sh'
 leaf_installed="${test_home}/.refine/scripts/${leaf_name}"
