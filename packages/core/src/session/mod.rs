@@ -12,6 +12,7 @@ mod filter;
 mod parser;
 mod prescription;
 mod project_identity;
+mod project_identity_value;
 mod report;
 mod source_cohort;
 mod types;
@@ -25,8 +26,9 @@ pub use clustering::{
 };
 pub use discovery::{discover_sessions, discover_sessions_in, DiscoveredSession};
 pub use facets::{
-    build_facet_prompt, facets_to_items, facets_to_items_with_mode, parse_facet_response,
-    FacetResponse, FACET_SYSTEM_PROMPT,
+    build_facet_prompt, facets_to_items, facets_to_items_with_mode,
+    facets_to_items_with_mode_and_identity, parse_facet_response, FacetResponse,
+    FACET_SYSTEM_PROMPT,
 };
 pub use filter::{filter_sessions, passes_filter, FilterConfig};
 pub use parser::{parse_session_content, parse_session_file};

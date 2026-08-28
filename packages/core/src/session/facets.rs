@@ -150,9 +150,23 @@ pub fn facets_to_items_with_mode(
     project: Option<&str>,
     mode: SessionMode,
 ) -> Vec<Item> {
+    facets_to_items_with_mode_and_identity(facets, document_id, project, project, mode)
+}
+
+/// Convert facets while retaining the exact pre-normalization project identity.
+///
+/// `project` remains the backward-compatible display/tag value. The optional
+/// identity carries raw cwd evidence through case-normalizing `Tag` storage.
+pub fn facets_to_items_with_mode_and_identity(
+    facets: &FacetResponse,
+    document_id: &DocumentId,
+    project: Option<&str>,
+    project_identity: Option<&str>,
+    mode: SessionMode,
+) -> Vec<Item> {
     let mut items = Vec::new();
-    let project_source =
-        project.map(|project| Source::new(SESSION_PROJECT_SOURCE_PLATFORM).with_url(project));
+    let project_source = project_identity
+        .map(|identity| Source::new(SESSION_PROJECT_SOURCE_PLATFORM).with_url(identity));
 
     // 宏观标注作为一个综合 observation
     let mut summary_item = Item::new_observation(&facets.session_summary, &facets.session_summary);

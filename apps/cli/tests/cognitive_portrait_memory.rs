@@ -8,7 +8,7 @@ mod insights_manifest;
 use chrono::{Duration, TimeZone, Utc};
 use refine_core::knowledge::{
     DocumentId, Item, ItemId, ItemType, ObservationDocumentMeta, ObservationWindowSnapshot,
-    RestoreParams, Tag,
+    RestoreParams, Source, Tag,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -73,19 +73,27 @@ fn long_observation(
 fn bounded_projection_does_not_clone_long_unique_cohort_text() {
     const OBSERVATIONS: usize = 5_000;
     const LONG_LINE_BYTES: usize = 16 * 1024;
+    const LONG_PROJECT_BYTES: usize = 16 * 1024;
     const MAX_PROJECTION_ALLOCATIONS: usize = 64 * 1024 * 1024;
 
     let cutoff = Utc.with_ymd_and_hms(2026, 8, 28, 0, 0, 0).unwrap();
     let event_time = cutoff - Duration::days(1);
     let padding = "x".repeat(LONG_LINE_BYTES);
+    let project_prefix = "/bounded/";
+    let long_project = format!(
+        "{project_prefix}{}",
+        "p".repeat(LONG_PROJECT_BYTES - project_prefix.len())
+    );
     let current: Vec<Item> = (0..OBSERVATIONS)
         .map(|index| {
-            long_observation(
+            let mut item = long_observation(
                 format!("long-{index:05}"),
                 "current-doc",
                 format!("知识:\n- unique-{index:05}-{padding}"),
                 event_time,
-            )
+            );
+            item.set_source(Source::new("session-project").with_url(&long_project));
+            item
         })
         .collect();
     let snapshot = ObservationWindowSnapshot {
@@ -123,6 +131,11 @@ fn bounded_projection_does_not_clone_long_unique_cohort_text() {
         OBSERVATIONS
     );
     assert!(bundle.current.evidence_selection.selected_observations <= 2_048);
+    assert!(bundle
+        .current
+        .evidence
+        .iter()
+        .all(|record| record.project.len() <= 256));
     assert!(
         allocated <= MAX_PROJECTION_ALLOCATIONS,
         "projection allocated {allocated} bytes after snapshot construction; limit is {MAX_PROJECTION_ALLOCATIONS}"

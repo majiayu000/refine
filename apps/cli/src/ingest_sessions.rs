@@ -89,6 +89,15 @@ fn project_for_ingest(
         .map(ToOwned::to_owned)
 }
 
+fn project_identity_for_ingest(
+    selected_project: Option<&str>,
+    session_project_identity: Option<&str>,
+) -> Option<String> {
+    session_project_identity
+        .or(selected_project)
+        .map(ToOwned::to_owned)
+}
+
 fn session_captured_at(
     session_started_at: Option<DateTime<Utc>>,
     file_modified_at: SystemTime,
@@ -334,6 +343,7 @@ async fn handle_remem_ingest_sessions_with_summaries(
             total,
             url,
             source: remem_session.session.source,
+            project_identity: Some(remem_session.project.clone()),
             project: Some(remem_session.project),
             mode: SessionMode::Unknown,
             captured_at,
@@ -460,6 +470,10 @@ async fn handle_legacy_ingest_sessions(
         }
 
         let project = project_for_ingest(ds.project.as_deref(), session.meta.project.as_deref());
+        let project_identity = project_identity_for_ingest(
+            project.as_deref(),
+            session.meta.project_identity.as_deref(),
+        );
         let mode = session.meta.mode;
         let has_embedded_timestamp = session.meta.started_at.is_some();
         let captured_at = session_captured_at(session.meta.started_at, ds.modified_at);
@@ -594,6 +608,7 @@ async fn handle_legacy_ingest_sessions(
             url,
             source: effective_source,
             project,
+            project_identity,
             mode,
             captured_at,
             has_embedded_timestamp,

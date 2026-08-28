@@ -434,6 +434,7 @@ pub(super) fn is_session_id(segment: &str) -> bool {
         .is_some_and(|rest| rest.len() >= 16 && rest.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
+#[cfg(test)]
 pub fn normalize_project_name(raw: &str) -> Option<String> {
     let segments: Vec<&str> = raw.split('-').filter(|s| !s.is_empty()).collect();
     let first_project_segment = segments

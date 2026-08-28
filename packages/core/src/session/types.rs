@@ -79,7 +79,12 @@ pub struct SessionMessage {
 /// 会话元数据
 #[derive(Debug, Clone, Default)]
 pub struct SessionMeta {
+    /// Backward-compatible display name used by existing ingest tags and UI.
     pub project: Option<String>,
+    /// Exact project identity before basename/tag normalization. Codex and
+    /// Claude cwd paths retain case and punctuation here for collision-aware
+    /// snapshot resolution.
+    pub project_identity: Option<String>,
     pub model: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub mode: SessionMode,

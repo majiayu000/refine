@@ -1,8 +1,12 @@
 use super::clustering::{
     eligible_observations, is_generic_project_path_segment, is_project_meta_tag, is_session_id,
-    normalize_project_name,
 };
 use super::facets::SESSION_PROJECT_SOURCE_PLATFORM;
+#[cfg(test)]
+use super::project_identity_value::normalized_path_display;
+use super::project_identity_value::{
+    bounded_hyphen_join, encoded_path_key, encoded_path_value, raw_path_key, raw_path_value,
+};
 use crate::knowledge::Item;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -130,7 +134,9 @@ impl ProjectIdentityResolver {
                         .alias_keys
                         .iter()
                         .any(|alias| bare_aliases.contains(alias));
-                let canonical = if has_collision || inferred_alias_contested {
+                let identity_is_bounded = candidate.qualified_identity.contains("~bytes=");
+                let canonical = if has_collision || inferred_alias_contested || identity_is_bounded
+                {
                     candidate.qualified_identity.clone()
                 } else {
                     candidate
@@ -204,19 +210,23 @@ impl ProjectIdentityResolver {
         let mut ambiguous_aliases = Vec::new();
 
         for raw in inputs.into_iter().filter(|tag| !is_project_meta_tag(tag)) {
-            if let Some(path) = path_candidate(raw) {
-                match self.path_resolutions.get(&path.key) {
+            if let Some(key) = path_candidate_key(raw) {
+                match self.path_resolutions.get(&key) {
                     Some(ProjectResolution::Canonical(canonical)) => {
                         canonical_paths.push(canonical.clone());
                     }
                     Some(ProjectResolution::AmbiguousAlias(alias)) => {
                         ambiguous_aliases.push(alias.clone());
                     }
-                    None => canonical_paths.push(path.qualified_identity),
+                    None => {
+                        if let Some(path) = path_candidate(raw) {
+                            canonical_paths.push(path.qualified_identity);
+                        }
+                    }
                 }
                 continue;
             }
-            let Some(alias) = normalize_project_name(raw) else {
+            let Some(alias) = normalize_project_name_bounded(raw) else {
                 continue;
             };
             match self.aliases.get(&alias) {
@@ -259,6 +269,11 @@ fn record_candidate(
     candidates: &mut BTreeMap<String, PathCandidate>,
     bare_aliases: &mut BTreeSet<String>,
 ) {
+    if let Some(key) = path_candidate_key(raw) {
+        if candidates.contains_key(&key) {
+            return;
+        }
+    }
     if let Some(candidate) = path_candidate(raw) {
         candidates
             .entry(candidate.key.clone())
@@ -266,91 +281,58 @@ fn record_candidate(
                 existing.alias_keys.extend(candidate.alias_keys.clone());
             })
             .or_insert(candidate);
-    } else if let Some(alias) = normalize_project_name(raw) {
+    } else if let Some(alias) = normalize_project_name_bounded(raw) {
         bare_aliases.insert(alias);
+    }
+}
+
+fn path_candidate_key(raw: &str) -> Option<String> {
+    if is_encoded_path(raw) {
+        encoded_path_key(raw, is_session_id)
+    } else if looks_like_path(raw) {
+        raw_path_key(raw, is_session_id)
+    } else {
+        None
     }
 }
 
 fn path_candidate(raw: &str) -> Option<PathCandidate> {
     let mut alias_keys = BTreeSet::new();
     if is_encoded_path(raw) {
-        let encoded_key = normalized_encoded_path(raw)?;
-        let display_alias = normalize_encoded_path_alias(&encoded_key);
+        let value = encoded_path_value(raw, is_session_id)?;
+        let display_alias = normalize_encoded_path_alias(raw);
         if let Some(alias) = &display_alias {
             alias_keys.insert(alias.clone());
         }
         return Some(PathCandidate {
-            key: format!("encoded:{encoded_key}"),
-            qualified_identity: format!("encoded:{encoded_key}"),
-            encoded_key,
+            key: value.key,
+            qualified_identity: value.qualified,
+            encoded_key: value.encoded_fingerprint,
             display_alias,
             display_is_explicit: false,
             alias_keys,
         });
     }
 
-    let full_path = normalized_full_path(raw)?;
-    let display_alias = path_leaf(raw).and_then(normalize_project_name);
+    if !looks_like_path(raw) {
+        return None;
+    }
+    let value = raw_path_value(raw, is_session_id)?;
+    let display_alias = path_leaf(raw).and_then(normalize_project_name_bounded);
     if let Some(alias) = &display_alias {
         alias_keys.insert(alias.clone());
     }
-    if let Some(encoded_alias) = normalize_encoded_path_alias(&legacy_encoded_path(raw)) {
+    if let Some(encoded_alias) = normalize_encoded_path_alias(raw) {
         alias_keys.insert(encoded_alias);
     }
     Some(PathCandidate {
-        key: format!("raw:{full_path}"),
-        qualified_identity: path_qualified_identity(&full_path),
-        encoded_key: legacy_encoded_path(&full_path),
+        key: value.key,
+        qualified_identity: value.qualified,
+        encoded_key: value.encoded_fingerprint,
         display_alias,
         display_is_explicit: true,
         alias_keys,
     })
-}
-
-fn legacy_encoded_path(raw: &str) -> String {
-    let mut encoded: String = raw
-        .trim()
-        .trim_end_matches(['/', '\\'])
-        .chars()
-        .map(|character| match character {
-            '/' | '\\' | '.' | ':' => '-',
-            other => other,
-        })
-        .collect();
-    if !encoded.starts_with('-') {
-        encoded.insert(0, '-');
-    }
-    encoded
-}
-
-fn normalized_encoded_path(raw: &str) -> Option<String> {
-    let mut encoded = raw.trim().to_string();
-    if let Some(index) = encoded.rfind("-agent_") {
-        if is_session_id(&encoded[index + 1..]) {
-            encoded.truncate(index);
-        }
-    }
-    (!encoded.is_empty()).then_some(encoded)
-}
-
-/// Normalize only lossless path syntax. Claude's encoded cwd is deliberately
-/// not treated as full-path evidence because dots, hyphens, colons, and path
-/// separators have already been collapsed in that representation.
-fn normalized_full_path(raw: &str) -> Option<String> {
-    if !looks_like_path(raw) || is_encoded_path(raw) {
-        return None;
-    }
-    let mut full_path = raw.trim().trim_end_matches(['/', '\\']).replace('\\', "/");
-    if let Some(index) = full_path.rfind("-agent_") {
-        if is_session_id(&full_path[index + 1..]) {
-            full_path.truncate(index);
-        }
-    }
-    if full_path.is_empty() {
-        None
-    } else {
-        Some(full_path)
-    }
 }
 
 fn looks_like_path(raw: &str) -> bool {
@@ -372,29 +354,43 @@ fn path_leaf(raw: &str) -> Option<&str> {
 }
 
 fn normalize_encoded_path_alias(raw: &str) -> Option<String> {
-    let segments: Vec<&str> = raw
-        .split('-')
-        .filter(|segment| !segment.is_empty())
-        .collect();
-    let last_generic = segments
-        .iter()
+    let segment_count = legacy_segments(raw).count();
+    let last_generic = legacy_segments(raw)
         .enumerate()
-        .rfind(|(index, segment)| *index + 1 < segments.len() && is_legacy_generic_segment(segment))
-        .map(|(index, _)| index);
-    let leaf = last_generic
-        .and_then(|index| segments.get(index + 1..))
-        .filter(|segments| !segments.is_empty())
-        .map(|segments| segments.join("-"))
-        .unwrap_or_else(|| segments.join("-"));
-    normalize_project_name(&leaf)
+        .filter(|(index, _)| *index + 1 < segment_count)
+        .filter(|(_, segment)| is_legacy_generic_segment(segment))
+        .map(|(index, _)| index)
+        .last();
+    let start = last_generic.map_or(0, |index| index + 1);
+    normalize_project_segments_bounded(legacy_segments(raw).skip(start))
+}
+
+fn legacy_segments(raw: &str) -> impl DoubleEndedIterator<Item = &str> {
+    raw.split(['-', '/', '\\', '.', ':'])
+        .filter(|segment| !segment.is_empty())
+}
+
+fn normalize_project_name_bounded(raw: &str) -> Option<String> {
+    normalize_project_segments_bounded(raw.split('-').filter(|segment| !segment.is_empty()))
+}
+
+fn normalize_project_segments_bounded<'a>(
+    segments: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    let mut found_project = false;
+    bounded_hyphen_join(segments.into_iter().filter(|segment| {
+        if !found_project {
+            if is_generic_project_path_segment(segment) {
+                return false;
+            }
+            found_project = true;
+        }
+        !is_session_id(segment)
+    }))
 }
 
 fn is_legacy_generic_segment(segment: &str) -> bool {
     is_generic_project_path_segment(segment) || matches!(segment, "infra" | "gateway")
-}
-
-fn path_qualified_identity(full_path: &str) -> String {
-    format!("path:{full_path}")
 }
 
 #[cfg(test)]
@@ -443,11 +439,12 @@ mod tests {
             Some(BTreeSet::from(["om".into()]))
         );
         assert_eq!(
-            normalized_full_path(r"C:\any\home\work\mutil-om"),
+            normalized_path_display(r"C:\any\home\work\mutil-om", is_session_id),
             Some("C:/any/home/work/mutil-om".into())
         );
         assert_eq!(
-            path_candidate("-c--any-home-work-mutil-om").map(|candidate| candidate.key),
+            path_candidate("-c--any-home-work-mutil-om")
+                .map(|candidate| candidate.qualified_identity),
             Some("encoded:-c--any-home-work-mutil-om".into())
         );
         assert_eq!(

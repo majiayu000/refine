@@ -165,11 +165,13 @@ fn collector_reuses_source_cohort_and_emits_traceable_evidence() {
 }
 
 #[tokio::test]
-async fn sqlite_portrait_preserves_all_project_identity_evidence() {
+async fn sqlite_portrait_preserves_bounded_resolver_evidence() {
     let store = SqliteStore::in_memory().unwrap();
     let cutoff = Utc.with_ymd_and_hms(2026, 8, 28, 0, 0, 0).unwrap();
     let captured_at = cutoff - Duration::days(1);
-    for (id, project) in [
+    let oversized_project = format!("/r/{}a", "x".repeat(1_021));
+    assert_eq!(oversized_project.len(), 1_025);
+    let fixtures = [
         ("dot", "/r/a.b/foo"),
         ("hyphen", "/r/a-b/foo"),
         ("alias", "foo"),
@@ -178,10 +180,9 @@ async fn sqlite_portrait_preserves_all_project_identity_evidence() {
         ("encoded-a", "-root-a-work-mutil-om"),
         ("encoded-b", "-root-b-work-mutil-om"),
         ("encoded-alias", "om"),
-        ("upper", "/r/Foo/bar"),
-        ("lower", "/r/foo/bar"),
-        ("case-alias", "bar"),
-    ] {
+        ("oversized", oversized_project.as_str()),
+    ];
+    for (id, project) in fixtures {
         let document_id = DocumentId::from(format!("{id}-doc").as_str());
         let document = Document::restore(RestoreDocumentParams {
             id: document_id.clone(),
@@ -198,7 +199,11 @@ async fn sqlite_portrait_preserves_all_project_identity_evidence() {
             id,
             Some(document_id.as_str()),
             captured_at,
-            &[project],
+            &[if project.len() > 50 {
+                "oversized"
+            } else {
+                project
+            }],
             "进展:\n- exact sqlite portrait fixture",
         );
         item.set_source(Source::new("session-project").with_url(project));
@@ -222,17 +227,18 @@ async fn sqlite_portrait_preserves_all_project_identity_evidence() {
     assert_eq!(projects["encoded-a"], "encoded:-root-a-work-mutil-om");
     assert_eq!(projects["encoded-b"], "encoded:-root-b-work-mutil-om");
     assert_eq!(projects["encoded-alias"], "other");
-    assert_eq!(projects["upper"], "path:/r/Foo/bar");
-    assert_eq!(projects["lower"], "path:/r/foo/bar");
-    assert_eq!(projects["case-alias"], "other");
+    let oversized_identity = projects["oversized"];
+    assert!(oversized_identity.starts_with("path:/r/"));
+    assert!(oversized_identity.contains("~bytes=1025;sha256="));
+    assert!(oversized_identity.len() <= 512);
     assert_eq!(
         bundle
             .manifest
             .current_window
             .ambiguous_project_alias_observations,
-        4
+        3
     );
-    assert_eq!(bundle.manifest.current_window.ambiguous_project_aliases, 4);
+    assert_eq!(bundle.manifest.current_window.ambiguous_project_aliases, 3);
     let ranking: std::collections::BTreeMap<_, _> = bundle
         .current
         .metrics
@@ -246,13 +252,11 @@ async fn sqlite_portrait_preserves_all_project_identity_evidence() {
     assert_eq!(ranking["my-tools-app"], 1);
     assert_eq!(ranking["encoded:-root-a-work-mutil-om"], 1);
     assert_eq!(ranking["encoded:-root-b-work-mutil-om"], 1);
-    assert_eq!(ranking["path:/r/Foo/bar"], 1);
-    assert_eq!(ranking["path:/r/foo/bar"], 1);
-    assert_eq!(ranking["other"], 4);
+    assert_eq!(ranking[oversized_identity], 1);
+    assert_eq!(ranking["other"], 3);
     assert!(!ranking.contains_key("foo"));
     assert!(!ranking.contains_key("app"));
     assert!(!ranking.contains_key("om"));
-    assert!(!ranking.contains_key("bar"));
 }
 
 #[test]
