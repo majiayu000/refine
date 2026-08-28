@@ -503,9 +503,12 @@ mod tests {
 
         assert_eq!(
             portrait[0].item_projects,
-            vec!["path:root-a-work-mutil-om", "other"]
+            vec!["path:/root/a/work/mutil-om", "other"]
         );
-        assert_eq!(portrait[1].item_projects, vec!["path:root-b-work-mutil-om"]);
+        assert_eq!(
+            portrait[1].item_projects,
+            vec!["path:/root/b/work/mutil-om"]
+        );
         assert_eq!(
             portrait[0]
                 .data_quality

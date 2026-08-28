@@ -7,14 +7,15 @@ mod insights_manifest;
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use cognitive_portrait_data::{
-    build_bundle_from_snapshot, read_bundle, validate_files, validate_portrait, write_bundle,
-    CognitivePortraitBundle, MAX_PORTRAIT_BUNDLE_BYTES, MAX_PORTRAIT_CANDIDATE_BYTES,
+    build_bundle_from_snapshot, collect_bundle, read_bundle, validate_files, validate_portrait,
+    write_bundle, CognitivePortraitBundle, MAX_PORTRAIT_BUNDLE_BYTES, MAX_PORTRAIT_CANDIDATE_BYTES,
     MAX_PREVIOUS_PORTRAIT_BYTES, MAX_WINDOW_DIMENSIONS_BYTES, PORTRAIT_BUNDLE_SCHEMA_VERSION,
     PORTRAIT_COLLECTOR_VERSION,
 };
+use refine_core::infra::SqliteStore;
 use refine_core::knowledge::{
-    DocumentId, Item, ItemId, ItemType, ObservationDocumentMeta, ObservationWindowSnapshot,
-    RestoreParams, Tag,
+    Document, DocumentId, DocumentRepository, Item, ItemId, ItemType, ObservationDocumentMeta,
+    ObservationWindowSnapshot, RestoreDocumentParams, RestoreParams, Tag,
 };
 
 fn observation(
@@ -161,6 +162,78 @@ fn collector_reuses_source_cohort_and_emits_traceable_evidence() {
     assert!(claim_ids.contains(&"fact.current.manifest.unsupported_sources.coverage"));
     assert!(claim_ids.contains(&"fact.current.evidence.000000"));
     assert!(claim_ids.contains(&"trend.total_sessions"));
+}
+
+#[tokio::test]
+async fn sqlite_portrait_keeps_dot_and_hyphen_paths_distinct() {
+    let store = SqliteStore::in_memory().unwrap();
+    let cutoff = Utc.with_ymd_and_hms(2026, 8, 28, 0, 0, 0).unwrap();
+    let captured_at = cutoff - Duration::days(1);
+    for (id, project) in [
+        ("dot", "/r/a.b/foo"),
+        ("hyphen", "/r/a-b/foo"),
+        ("alias", "foo"),
+        ("tool-path", "/users/me/work/my-tools-app"),
+        ("independent-app", "app"),
+    ] {
+        let document_id = DocumentId::from(format!("{id}-doc").as_str());
+        let document = Document::restore(RestoreDocumentParams {
+            id: document_id.clone(),
+            title: Some(id.into()),
+            raw_content: format!("raw {id}"),
+            source: "codex-session".into(),
+            url: format!("sqlite-fixture://{id}"),
+            source_version: None,
+            captured_at,
+            created_at: captured_at,
+            updated_at: captured_at,
+        });
+        let item = observation(
+            id,
+            Some(document_id.as_str()),
+            captured_at,
+            &[project],
+            "进展:\n- exact sqlite portrait fixture",
+        );
+        DocumentRepository::save_with_replaced_items(&store, &document, &[item])
+            .await
+            .unwrap();
+    }
+
+    let bundle = collect_bundle(&store, cutoff, 90).await.unwrap();
+    let projects: std::collections::BTreeMap<_, _> = bundle
+        .current
+        .evidence
+        .iter()
+        .map(|evidence| (evidence.item_id.as_str(), evidence.project.as_str()))
+        .collect();
+    assert_eq!(projects["dot"], "path:/r/a.b/foo");
+    assert_eq!(projects["hyphen"], "path:/r/a-b/foo");
+    assert_eq!(projects["alias"], "other");
+    assert_eq!(projects["tool-path"], "my-tools-app");
+    assert_eq!(projects["independent-app"], "other");
+    assert_eq!(
+        bundle
+            .manifest
+            .current_window
+            .ambiguous_project_alias_observations,
+        2
+    );
+    assert_eq!(bundle.manifest.current_window.ambiguous_project_aliases, 2);
+    let ranking: std::collections::BTreeMap<_, _> = bundle
+        .current
+        .metrics
+        .project_ranking
+        .entries
+        .iter()
+        .map(|entry| (entry.value.as_str(), entry.count))
+        .collect();
+    assert_eq!(ranking["path:/r/a.b/foo"], 1);
+    assert_eq!(ranking["path:/r/a-b/foo"], 1);
+    assert_eq!(ranking["my-tools-app"], 1);
+    assert_eq!(ranking["other"], 2);
+    assert!(!ranking.contains_key("foo"));
+    assert!(!ranking.contains_key("app"));
 }
 
 #[test]

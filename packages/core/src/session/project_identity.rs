@@ -19,7 +19,8 @@ pub(super) enum ProjectResolution {
 
 #[derive(Debug, Clone)]
 struct PathCandidate {
-    key: String,
+    full_path: Option<String>,
+    display_alias: Option<String>,
     alias_keys: BTreeSet<String>,
 }
 
@@ -46,6 +47,7 @@ impl ProjectIdentityResolver {
 
     pub(super) fn from_eligible_items<'a>(items: impl IntoIterator<Item = &'a Item>) -> Self {
         let mut paths = BTreeMap::new();
+        let mut bare_aliases = BTreeSet::new();
         for item in items {
             for tag in item.tags() {
                 let raw = tag.as_str();
@@ -53,60 +55,70 @@ impl ProjectIdentityResolver {
                     continue;
                 }
                 if let Some(candidate) = path_candidate(raw) {
+                    let Some(full_path) = candidate.full_path.clone() else {
+                        continue;
+                    };
                     paths
-                        .entry(candidate.key.clone())
+                        .entry(full_path)
                         .and_modify(|existing: &mut PathCandidate| {
                             existing.alias_keys.extend(candidate.alias_keys.clone());
                         })
                         .or_insert(candidate);
+                } else if let Some(alias) = normalize_project_name(raw) {
+                    bare_aliases.insert(alias);
                 }
             }
         }
 
         let mut alias_paths: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for path in paths.values() {
+        for (full_path, path) in &paths {
             for alias in &path.alias_keys {
                 alias_paths
                     .entry(alias.clone())
                     .or_default()
-                    .insert(path.key.clone());
+                    .insert(full_path.clone());
             }
         }
 
         let canonical_paths: HashMap<String, String> = paths
-            .values()
-            .map(|path| {
+            .iter()
+            .map(|(full_path, path)| {
                 let has_collision = path.alias_keys.iter().any(|alias| {
                     alias_paths
                         .get(alias)
                         .is_some_and(|path_keys| path_keys.len() > 1)
                 });
                 let canonical = if has_collision {
-                    path_qualified_identity(&path.key)
+                    path_qualified_identity(full_path)
                 } else {
-                    path.alias_keys
-                        .iter()
-                        .min_by(|left, right| left.len().cmp(&right.len()).then(left.cmp(right)))
-                        .cloned()
-                        .unwrap_or_else(|| path_qualified_identity(&path.key))
+                    path.display_alias
+                        .clone()
+                        .unwrap_or_else(|| path_qualified_identity(full_path))
                 };
-                (path.key.clone(), canonical)
+                (full_path.clone(), canonical)
             })
             .collect();
 
         let aliases = alias_paths
             .into_iter()
             .map(|(alias, path_keys)| {
-                let resolution = if path_keys.len() == 1 {
-                    path_keys
-                        .iter()
-                        .next()
-                        .and_then(|path_key| canonical_paths.get(path_key))
-                        .cloned()
-                        .map(AliasResolution::Canonical)
-                        .unwrap_or(AliasResolution::Ambiguous)
-                } else {
+                let resolution = if path_keys.len() != 1 {
                     AliasResolution::Ambiguous
+                } else {
+                    let path_key = path_keys.iter().next();
+                    let is_explicit_display_alias = path_key
+                        .and_then(|path_key| paths.get(path_key))
+                        .and_then(|path| path.display_alias.as_deref())
+                        == Some(alias.as_str());
+                    if bare_aliases.contains(&alias) && !is_explicit_display_alias {
+                        AliasResolution::Ambiguous
+                    } else {
+                        path_key
+                            .and_then(|path_key| canonical_paths.get(path_key))
+                            .cloned()
+                            .map(AliasResolution::Canonical)
+                            .unwrap_or(AliasResolution::Ambiguous)
+                    }
                 };
                 (alias, resolution)
             })
@@ -125,8 +137,23 @@ impl ProjectIdentityResolver {
 
         for raw in tags.iter().copied().filter(|tag| !is_project_meta_tag(tag)) {
             if let Some(path) = path_candidate(raw) {
-                if let Some(canonical) = self.canonical_paths.get(&path.key) {
-                    canonical_paths.push(canonical.clone());
+                if let Some(full_path) = path.full_path {
+                    canonical_paths.push(
+                        self.canonical_paths
+                            .get(&full_path)
+                            .cloned()
+                            .unwrap_or_else(|| path_qualified_identity(&full_path)),
+                    );
+                } else {
+                    for alias in path.alias_keys {
+                        match self.aliases.get(&alias) {
+                            Some(AliasResolution::Canonical(canonical)) => {
+                                canonical_aliases.push(canonical.clone());
+                            }
+                            Some(AliasResolution::Ambiguous) => ambiguous_aliases.push(alias),
+                            None => canonical_aliases.push(alias),
+                        }
+                    }
                 }
                 continue;
             }
@@ -161,41 +188,62 @@ impl ProjectIdentityResolver {
 }
 
 fn path_candidate(raw: &str) -> Option<PathCandidate> {
-    let key = normalized_full_path(raw)?;
     let mut alias_keys = BTreeSet::new();
     if is_encoded_path(raw) {
-        alias_keys.insert(normalize_encoded_path_alias(raw)?);
-    } else {
-        alias_keys.insert(path_leaf(raw).and_then(normalize_project_name)?);
-        if let Some(encoded_alias) = normalize_encoded_path_alias(&key) {
-            alias_keys.insert(encoded_alias);
+        if let Some(alias) = normalize_encoded_path_alias(raw) {
+            alias_keys.insert(alias);
         }
+        return Some(PathCandidate {
+            full_path: None,
+            display_alias: None,
+            alias_keys,
+        });
     }
-    Some(PathCandidate { key, alias_keys })
+
+    let full_path = normalized_full_path(raw)?;
+    let display_alias = path_leaf(raw).and_then(normalize_project_name);
+    if let Some(alias) = &display_alias {
+        alias_keys.insert(alias.clone());
+    }
+    if let Some(encoded_alias) = normalize_encoded_path_alias(&legacy_encoded_path(raw)) {
+        alias_keys.insert(encoded_alias);
+    }
+    Some(PathCandidate {
+        full_path: Some(full_path),
+        display_alias,
+        alias_keys,
+    })
 }
 
-fn normalized_full_path(raw: &str) -> Option<String> {
-    if !looks_like_path(raw) {
-        return None;
-    }
-    let mut key = raw
-        .trim()
+fn legacy_encoded_path(raw: &str) -> String {
+    raw.trim()
         .trim_end_matches(['/', '\\'])
         .chars()
         .map(|character| match character {
             '/' | '\\' | '.' | ':' => '-',
             other => other.to_ascii_lowercase(),
         })
-        .collect::<String>();
-    if !key.starts_with('-') {
-        key.insert(0, '-');
+        .collect()
+}
+
+/// Normalize only lossless path syntax. Claude's encoded cwd is deliberately
+/// not treated as full-path evidence because dots, hyphens, colons, and path
+/// separators have already been collapsed in that representation.
+fn normalized_full_path(raw: &str) -> Option<String> {
+    if !looks_like_path(raw) || is_encoded_path(raw) {
+        return None;
     }
-    if let Some(index) = key.rfind("-agent_") {
-        if is_session_id(&key[index + 1..]) {
-            key.truncate(index);
+    let mut full_path = raw.trim().trim_end_matches(['/', '\\']).replace('\\', "/");
+    if let Some(index) = full_path.rfind("-agent_") {
+        if is_session_id(&full_path[index + 1..]) {
+            full_path.truncate(index);
         }
     }
-    Some(key)
+    if full_path.is_empty() {
+        None
+    } else {
+        Some(full_path)
+    }
 }
 
 fn looks_like_path(raw: &str) -> bool {
@@ -238,8 +286,8 @@ fn is_legacy_generic_segment(segment: &str) -> bool {
     is_generic_project_path_segment(segment) || matches!(segment, "infra" | "gateway")
 }
 
-fn path_qualified_identity(encoded_path: &str) -> String {
-    format!("path:{}", encoded_path.trim_start_matches('-'))
+fn path_qualified_identity(full_path: &str) -> String {
+    format!("path:{full_path}")
 }
 
 #[cfg(test)]
@@ -283,7 +331,11 @@ mod tests {
         );
         assert_eq!(
             normalized_full_path(r"C:\any\home\work\mutil-om"),
-            normalized_full_path("-c--any-home-work-mutil-om")
+            Some("C:/any/home/work/mutil-om".into())
+        );
+        assert_eq!(
+            path_candidate("-c--any-home-work-mutil-om").and_then(|candidate| candidate.full_path),
+            None
         );
         assert_eq!(
             path_candidate("-users-lifcc-desktop-code-work-infra-her")
@@ -322,8 +374,14 @@ mod tests {
         let resolver = ProjectIdentityResolver::from_observation_windows(&[&items]);
         let cluster = cluster_observations_with_resolver(&items, &resolver);
 
-        assert_eq!(cluster.item_projects["path-a"], "path:root-a-work-mutil-om");
-        assert_eq!(cluster.item_projects["path-b"], "path:root-b-work-mutil-om");
+        assert_eq!(
+            cluster.item_projects["path-a"],
+            "path:/root/a/work/mutil-om"
+        );
+        assert_eq!(
+            cluster.item_projects["path-b"],
+            "path:/root/b/work/mutil-om"
+        );
         assert_eq!(cluster.item_projects["alias"], "other");
         assert_eq!(cluster.data_quality.ambiguous_project_alias_observations, 1);
         assert_eq!(cluster.data_quality.ambiguous_project_aliases, 1);
@@ -341,7 +399,7 @@ mod tests {
         let resolver = ProjectIdentityResolver::from_observation_windows(&[&items]);
         let cluster = cluster_observations_with_resolver(&items, &resolver);
 
-        assert_eq!(cluster.item_projects["path"], "path:root-a-work-mutil-om");
+        assert_eq!(cluster.item_projects["path"], "path:/root/a/work/mutil-om");
         assert_eq!(cluster.item_projects["alias"], "other");
         assert_eq!(cluster.data_quality.ambiguous_project_alias_observations, 1);
     }
@@ -359,13 +417,63 @@ mod tests {
 
         assert_eq!(
             current_cluster.item_projects["current-path"],
-            "path:root-a-work-mutil-om"
+            "path:/root/a/work/mutil-om"
         );
         assert_eq!(current_cluster.item_projects["current-alias"], "other");
         assert_eq!(
             previous_cluster.item_projects["previous-path"],
-            "path:root-b-work-mutil-om"
+            "path:/root/b/work/mutil-om"
         );
+    }
+
+    #[test]
+    fn punctuation_and_path_separators_remain_distinct_full_path_evidence() {
+        let items = vec![
+            observation("dot", "/r/a.b/foo"),
+            observation("hyphen", "/r/a-b/foo"),
+            observation("alias", "foo"),
+        ];
+        let resolver = ProjectIdentityResolver::from_observation_windows(&[&items]);
+        let cluster = cluster_observations_with_resolver(&items, &resolver);
+
+        assert_eq!(cluster.item_projects["dot"], "path:/r/a.b/foo");
+        assert_eq!(cluster.item_projects["hyphen"], "path:/r/a-b/foo");
+        assert_eq!(cluster.item_projects["alias"], "other");
+        assert_eq!(cluster.data_quality.ambiguous_project_alias_observations, 1);
+        assert_eq!(cluster.data_quality.ambiguous_project_aliases, 1);
+    }
+
+    #[test]
+    fn legacy_inferred_alias_resolves_to_the_explicit_leaf_when_uncontested() {
+        let items = vec![
+            observation("path", "/users/me/work/my-tools-app"),
+            observation("encoded", "-users-me-work-my-tools-app"),
+        ];
+        let resolver = ProjectIdentityResolver::from_observation_windows(&[&items]);
+        let cluster = cluster_observations_with_resolver(&items, &resolver);
+
+        assert_eq!(cluster.item_projects["path"], "my-tools-app");
+        assert_eq!(cluster.item_projects["encoded"], "my-tools-app");
+        assert_eq!(cluster.data_quality.ambiguous_project_aliases, 0);
+    }
+
+    #[test]
+    fn independent_bare_project_makes_inferred_alias_fail_closed() {
+        let items = vec![
+            observation("path", "/users/me/work/my-tools-app"),
+            observation("encoded", "-users-me-work-my-tools-app"),
+            observation("leaf", "my-tools-app"),
+            observation("bare", "app"),
+        ];
+        let resolver = ProjectIdentityResolver::from_observation_windows(&[&items]);
+        let cluster = cluster_observations_with_resolver(&items, &resolver);
+
+        assert_eq!(cluster.item_projects["path"], "my-tools-app");
+        assert_eq!(cluster.item_projects["leaf"], "my-tools-app");
+        assert_eq!(cluster.item_projects["encoded"], "other");
+        assert_eq!(cluster.item_projects["bare"], "other");
+        assert_eq!(cluster.data_quality.ambiguous_project_alias_observations, 2);
+        assert_eq!(cluster.data_quality.ambiguous_project_aliases, 1);
     }
 
     #[test]
