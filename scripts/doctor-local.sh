@@ -403,6 +403,29 @@ check_cognitive_portrait() {
     fail "cognitive portrait agent executable invalid: ${agent:-missing}"
   fi
 
+  local dependency key expected_path expected_hash actual_hash required_path
+  for dependency in collector validator; do
+    key="cognitive_portrait_${dependency}"
+    expected_path="$(manifest_value "$key" "$manifest")"
+    expected_hash="$(manifest_value "${key}_sha256" "$manifest")"
+    actual_hash="$(file_sha256 "$expected_path" 2>/dev/null || true)"
+    if [[ "$dependency" == "collector" ]]; then
+      required_path="${HOME}/.refine/scripts/collect-cognitive-portrait.sh"
+    else
+      required_path="${HOME}/.refine/scripts/validate-cognitive-portrait.sh"
+    fi
+    if [[ "$expected_path" == "$required_path" && ! -L "$expected_path" && -f "$expected_path" && -x "$expected_path" ]]; then
+      pass "cognitive portrait ${dependency} path binding matches manifest"
+    else
+      fail "cognitive portrait ${dependency} path binding missing or invalid"
+    fi
+    if [[ -n "$expected_hash" && "$expected_hash" == "$actual_hash" ]]; then
+      pass "cognitive portrait ${dependency} hash matches manifest"
+    else
+      fail "cognitive portrait ${dependency} hash mismatch"
+    fi
+  done
+
   check_launch_agent com.lifcc.refine-cognitive-portrait \
     /bin/bash "${HOME}/.refine/scripts/cognitive-portrait.sh"
   if [[ -f "$plist" ]]; then
@@ -531,12 +554,14 @@ check_unattended_llm_env() {
 check_runtime_scripts() {
   local name source installed source_hash installed_hash owner_uid mode directory
   local runtime_scripts=(
+    collect-cognitive-portrait.sh
     cognitive-portrait.sh
     daily-refresh.sh
     load-llm-env.sh
     quota-time.sh
     run-refine-server.sh
     runtime-job-lock.sh
+    validate-cognitive-portrait.sh
     weekly-insights.sh
   )
 

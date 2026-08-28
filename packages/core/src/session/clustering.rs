@@ -123,6 +123,8 @@ impl DataQualityStats {
 #[derive(Debug)]
 pub struct ClusterResult {
     pub projects: HashMap<String, ProjectCluster>,
+    /// Exact eligible observation id to project assignment used by this cluster.
+    pub item_projects: HashMap<String, String>,
     pub global_stats: GlobalStats,
     pub data_quality: DataQualityStats,
     pub untagged_count: usize,
@@ -229,6 +231,7 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
     }
 
     let mut projects: HashMap<String, ProjectCluster> = HashMap::new();
+    let mut item_projects: HashMap<String, String> = HashMap::new();
     let mut untagged_count = 0usize;
     let mut global_cognitive: HashMap<String, usize> = HashMap::new();
     let mut global_collab: HashMap<String, usize> = HashMap::new();
@@ -252,6 +255,7 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
                 "other".to_string()
             }
         };
+        item_projects.insert(item.id().as_str().to_string(), project_name.clone());
 
         let cluster = projects
             .entry(project_name.clone())
@@ -354,10 +358,11 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
         .iter()
         .map(|(name, c)| (name.clone(), c.session_count))
         .collect();
-    project_ranking.sort_by_key(|b| std::cmp::Reverse(b.1));
+    project_ranking.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
 
     ClusterResult {
         projects,
+        item_projects,
         global_stats: GlobalStats {
             total_sessions: all_doc_ids.len(),
             total_decisions,
@@ -594,6 +599,21 @@ mod tests {
         assert_eq!(cluster.global_stats.total_sessions, 2);
         assert_eq!(cluster.projects["project-a"].session_count, 1);
         assert_eq!(cluster.projects["project-b"].session_count, 2);
+    }
+
+    #[test]
+    fn cluster_records_direct_item_projects_and_name_stable_ranking_ties() {
+        let cluster = cluster_observations(&[
+            observation("zeta-item", "zeta-doc", &["zeta"]),
+            observation("alpha-item", "alpha-doc", &["alpha"]),
+        ]);
+
+        assert_eq!(cluster.item_projects["zeta-item"], "zeta");
+        assert_eq!(cluster.item_projects["alpha-item"], "alpha");
+        assert_eq!(
+            cluster.global_stats.project_ranking,
+            vec![("alpha".into(), 1), ("zeta".into(), 1)]
+        );
     }
 
     #[test]

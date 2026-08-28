@@ -1,224 +1,143 @@
 # Authoritative spec: docs/cognitive-portraits/SPEC.md
 
-# Cognitive Portrait v3 — Dispatcher
+# Cognitive Portrait v4 — evidence-bundle dispatcher
 
 Trigger keywords: 认知画像 / cognitive portrait / 认知分析 / 分析我的成长
 
----
+This skill turns one deterministic, versioned Refine bundle into four parallel
+analysis layers. It never invents SQL, never queries `refine.db` directly, and
+never treats output length as evidence quality.
 
-## Overview
+## Stage 0 — preflight
 
-This is the **Dispatcher** skill. It orchestrates v3 multi-agent parallel architecture:
+Require all of the following or stop with a specific error:
 
-1. **Stage 1** — SQL data collection: run 8 queries against `refine.db`, write results to `/tmp/cp_data_*.txt`
-2. **Stage 2** — Dispatch 4 Task agents in parallel, each writing one layer with explicit file ownership (W-14)
-3. **Stage 3** — Load temp files, run acceptance checks, merge, write final report
+- `REFINE_COGNITIVE_PORTRAIT_BUNDLE` points to a readable JSON bundle.
+- The bundle has `schema_version=1` and
+  `collector_version=cognitive-portrait-collector-v1`.
+- `claim_catalog.schema_version` is the supported catalog version. The catalog
+  is the closed set of evidence, numeric, and trend facts for this run.
+- `REFINE_COGNITIVE_PORTRAIT_OUTPUT` names the only final candidate file this
+  invocation may write; its parent is the unique writable staging directory.
+- All four prompt templates exist at the trusted skill path.
+- `comparison.status` is read before any cross-period claim is planned.
 
----
+`REFINE_COGNITIVE_PORTRAIT_PREVIOUS` is an optional read-only prior portrait
+used only for novelty/repetition checks. The 2026-03-21 portrait is an optional
+long-term anchor; do not pad every layer with it.
 
-## Stage 1: Data Collection
+## Stage 1 — deterministic collection only
 
-Determine the report version number N (count existing `docs/cognitive-portraits/cognitive-portrait-*-v3.md` files + 1, minimum 1).
-
-Run the following 8 SQL queries against `refine.db` using `sqlite3`. Write each result to the corresponding `/tmp/cp_data_N.txt` file, where N matches the query number.
-
-```bash
-# Set DB path
-DB=$(ls ~/.local/share/refine/refine.db ~/.refine/refine.db 2>/dev/null | head -1)
-[ -z "$DB" ] && { echo "ERROR: refine.db not found"; exit 1; }
-
-# Query 1: Recent observations overview (last 90 days)
-sqlite3 "$DB" "
-SELECT i.cognitive_level, i.collaboration_mode, i.tool,
-       substr(i.created_at,1,10) as date, i.title
-FROM items i
-WHERE i.item_type='observation'
-  AND i.created_at >= date('now','-90 days')
-ORDER BY i.created_at DESC
-LIMIT 200
-" > /tmp/cp_data_1.txt
-
-# Query 2: Decision patterns
-sqlite3 "$DB" "
-SELECT i.title, i.content, substr(i.created_at,1,10) as date
-FROM items i
-WHERE i.item_type='observation'
-  AND i.decision IS NOT NULL AND i.decision != ''
-  AND i.created_at >= date('now','-90 days')
-ORDER BY i.created_at DESC
-LIMIT 100
-" > /tmp/cp_data_2.txt
-
-# Query 3: Bug fix patterns
-sqlite3 "$DB" "
-SELECT i.title, i.content, substr(i.created_at,1,10) as date
-FROM items i
-WHERE i.item_type='observation'
-  AND i.bugfix IS NOT NULL AND i.bugfix != ''
-  AND i.created_at >= date('now','-90 days')
-ORDER BY i.created_at DESC
-LIMIT 100
-" > /tmp/cp_data_3.txt
-
-# Query 4: Knowledge and patterns acquired
-sqlite3 "$DB" "
-SELECT i.title, i.knowledge, i.pattern, i.architecture,
-       substr(i.created_at,1,10) as date
-FROM items i
-WHERE i.item_type='observation'
-  AND (i.knowledge IS NOT NULL OR i.pattern IS NOT NULL)
-  AND i.created_at >= date('now','-90 days')
-ORDER BY i.created_at DESC
-LIMIT 100
-" > /tmp/cp_data_4.txt
-
-# Query 5: Friction and collaboration mode
-sqlite3 "$DB" "
-SELECT i.collaboration_mode, i.friction, i.tool,
-       substr(i.created_at,1,10) as date, i.title
-FROM items i
-WHERE i.item_type='observation'
-  AND i.created_at >= date('now','-90 days')
-ORDER BY i.created_at DESC
-LIMIT 150
-" > /tmp/cp_data_5.txt
-
-# Query 6: Project distribution
-sqlite3 "$DB" "
-SELECT d.url, count(*) as obs_count,
-       min(substr(i.created_at,1,10)) as first_seen,
-       max(substr(i.created_at,1,10)) as last_seen
-FROM items i
-JOIN documents d ON i.document_id = d.id
-WHERE i.item_type='observation'
-  AND i.created_at >= date('now','-90 days')
-GROUP BY d.url
-ORDER BY obs_count DESC
-LIMIT 50
-" > /tmp/cp_data_6.txt
-
-# Query 7: Cognitive level distribution over time
-sqlite3 "$DB" "
-SELECT substr(i.created_at,1,7) as month,
-       i.cognitive_level,
-       count(*) as cnt
-FROM items i
-WHERE i.item_type='observation'
-  AND i.created_at >= date('now','-180 days')
-GROUP BY month, i.cognitive_level
-ORDER BY month, i.cognitive_level
-" > /tmp/cp_data_7.txt
-
-# Query 8: Recent session insights documents
-sqlite3 "$DB" "
-SELECT d.title, d.raw_content, substr(d.created_at,1,10) as date
-FROM documents d
-WHERE d.source IN ('session-insights-v2','mirror-weekly','mirror-profile')
-  AND d.created_at >= date('now','-30 days')
-ORDER BY d.created_at DESC
-LIMIT 5
-" > /tmp/cp_data_8.txt
-```
-
-Also run `mirror score` and capture output to `/tmp/cp_mirror_score.txt`.
-
-Verify all 8 data files are non-empty. If any are empty, log a warning but continue.
-
----
-
-## Stage 2: Dispatch 4 Parallel Sub-agents
-
-Use the Task tool to dispatch 4 sub-agents in parallel. Each agent receives:
-- The path to its prompt template (in this repo under `skills/cognitive-portrait/prompts/`)
-- Its explicit file ownership declaration
-- The paths to all 8 data files (read-only)
-- The version number N
-
-**File ownership declarations (W-14 — no agent may write another agent's file):**
-
-```
-Agent L1 owns: /tmp/cp_v{N}_l1.md ONLY — do not create or modify any other file
-Agent L2 owns: /tmp/cp_v{N}_l2.md ONLY — do not create or modify any other file
-Agent L3 owns: /tmp/cp_v{N}_l3.md ONLY — do not create or modify any other file
-Agent L4 owns: /tmp/cp_v{N}_l4.md ONLY — do not create or modify any other file
-```
-
-Load each prompt template from `skills/cognitive-portrait/prompts/l{N}_*.md` and pass it verbatim to the corresponding sub-agent, appending the data file paths and the file ownership declaration.
-
----
-
-## Stage 3: Merge and Write Final Report
-
-After all 4 sub-agents complete:
-
-### 3.1 Acceptance Checks
+The scheduled wrapper collects the bundle before invoking this skill. For an
+interactive run without that wrapper, run exactly:
 
 ```bash
-for layer in 1 2 3 4; do
-  file="/tmp/cp_v${N}_l${layer}.md"
-  lines=$(wc -l < "$file" 2>/dev/null || echo 0)
-  if [ "$layer" -le 3 ] && [ "$lines" -lt 250 ]; then
-    echo "WARNING: L${layer} has ${lines} lines (minimum 250)"
-  fi
-  if [ "$layer" -eq 4 ] && [ "$lines" -lt 280 ]; then
-    echo "WARNING: L4 has ${lines} lines (minimum 280)"
-  fi
-done
+bundle=$(mktemp "${TMPDIR:-/tmp}/refine-portrait-bundle.XXXXXX")
+scripts/collect-cognitive-portrait.sh --period 90 --output "$bundle"
+export REFINE_COGNITIVE_PORTRAIT_BUNDLE="$bundle"
 ```
 
-If any layer fails the line count check, log the warning but continue with the merge (do not abort).
+Do not run ad-hoc `sqlite3`, do not use `items.created_at` as recent session
+time, and do not relabel `platform_unknown` as Claude or Codex. The collector
+already uses one SQLite read snapshot, event time, the Session Insights source
+allowlist, and the strict eligible cohort for current rolling 90 days and the
+previous 90 days.
 
-### 3.2 Style Unification Pass
+`DEGRADED` is a host-level stop condition. The wrapper must not launch the
+agent, create a candidate, publish a report, or update `INDEX.md` when the
+collector reports `DEGRADED`; the collector output remains a diagnostic bundle,
+while the scheduled archive stays unchanged.
+If collection reports `NO_CORE_DATA` or `SCHEMA_INVALID`, stop with a specific
+error as well.
 
-Before merging, scan all 4 layer files and ensure:
-- All confidence labels use format: `[推断，置信度：高/中/低]`
-- All fact labels use: `[事实]`
-- All suggestion labels use: `[建议]`
-- Tables use consistent `|---|` separator style
+## Stage 2 — four parallel layers
 
-### 3.3 Build Header
+Dispatch four independent agents in parallel. Each receives:
 
-```markdown
----
-date: {YYYY-MM-DD}
-version: v3
-sessions_analyzed: {count from data file 1}
-total_lines: {will fill after merge}
----
+- the same read-only bundle path;
+- the optional previous portrait path;
+- exactly one prompt under `skills/cognitive-portrait/prompts/`;
+- exactly one owned layer file beside `REFINE_COGNITIVE_PORTRAIT_OUTPUT`, named
+  `layer-l{1..4}.md`.
 
-# 认知画像 v3 — {YYYY-MM-DD}
+No layer may write another layer, the final report, `INDEX.md`, the bundle, or
+the database.
 
-> 生成架构：Dispatcher + 4 并行 Sub-agent（L1/L2/L3/L4）
-> 数据范围：最近 90 天观测 + 180 天认知等级时序
-> 版本对比基准：2026-03-21 v0（978 行）
+### Closed claim catalog
 
-## 总体判断
+The collector is the sole authority for numeric facts and trends. For every
+numeric or trend statement, the model must copy the corresponding
+`claim_catalog.claims[].rendered_line` byte-for-byte, including its
+`[claim:<claim_id>]` marker. The model must not compose, paraphrase, round,
+translate, or recalculate a catalog line. Its label, unit, window, pointers,
+and values are already fixed by the catalog.
 
-[Dispatcher 根据 mirror score 和数据文件写 2-3 段总体判断，包含三分离标签]
-```
+Unknown claim IDs, duplicate claim IDs, or a line that differs from its
+catalog `rendered_line` fail closed. A claim ID cannot be used as multiple
+facts. A canonical catalog line inside fenced/indented code, a block quote, or
+HTML is not visible evidence and does not count. CommonMark paragraph text is
+the rendered surface; soft-wrapped paragraphs are one paragraph.
 
-### 3.4 Concatenate and Write
+Raw HTML, Markdown images, and `javascript:`, `data:`, `file:`, protocol-relative,
+or other non-HTTP/non-relative link targets are forbidden in the candidate.
+The candidate is capped at 1 MiB; a single Markdown line is capped at 64 KiB
+and the rendered report at 4096 blocks. The trusted bundle is capped at 64 MiB
+and the previous portrait at 4 MiB.
 
-Concatenate: header + L1 content + L2 content + L3 content + L4 content
+A layer may cite interpretations and recommendations with these machine-readable
+forms:
 
-Write to: `docs/cognitive-portraits/cognitive-portrait-{date}-v3.md`
+- `[evidence:obs:<item-id>]` for an observation in the bundle;
+- `[bundle:/json/pointer]` for a non-numeric aggregate or manifest field;
 
-### 3.5 Update INDEX.md
+Every `[事实]` line, including a non-numeric evidence fact, must be an exact,
+unique catalog `rendered_line`. The collector emits opaque evidence-record
+claims for this purpose, so the model never invents a factual label. Free-prose
+facts, numbers, and self-written trend lines fail closed. `[推断]` prose must
+carry a valid evidence ID or bundle pointer. If `comparison.comparable=false`, no trend, direction,
+increase/decrease, or current-versus-previous claim is allowed. Do not cite
+knowledge-only Grok/Gemini sources as sessions.
 
-Append a row to `docs/cognitive-portraits/INDEX.md`:
+Every `[建议]` must carry allowlisted evidence, a meaningful owner, a due date
+no later than 90 days after the bundle cutoff, and one typed verification
+condition. Valid examples are `[verify:metric|/comparison/status|eq|"OK"]`,
+`[verify:artifact|portrait-review|present]`, and
+`[verify:check|weekly-reflection|pass]`. Metric targets are typed JSON values;
+artifact/check states are fixed enums. Free-form verification text is invalid.
 
-```
-| [{date}](./cognitive-portrait-{date}-v3.md) | v3 | {sessions_count} | {total_lines} | {L1_lines} | {L2_lines} | {L3_lines} | {L4_lines} | {generation_mode} | {pass/fail} |
-```
+## Stage 3 — merge only; wrapper validates and archives
 
----
+1. Confirm all four layer files exist and keep their L1-L4 boundaries.
+2. Merge them only into `REFINE_COGNITIVE_PORTRAIT_OUTPUT` with a
+   header that records bundle schema, collector version, cutoff, window, cohort
+   status, source revision, and binary identity.
+3. Do not use line count, table count, or prose volume as a pass condition.
+4. Return zero only after the candidate is completely written. Do not run the
+   validator, publish evidence, write a final archive name, or touch `INDEX.md`.
 
-## Preflight Checks
+The scheduled wrapper owns the trusted bundle, validator, fixed report name,
+kernel-backed lock, archive, and index. It hash-checks trusted inputs after the
+agent exits, validates the staged candidate, rejects collisions/symlinks/hard
+links, and publishes the report, evidence, and index transactionally. No agent
+or layer may overwrite a prior artifact.
 
-Before Stage 1, verify:
-1. `refine.db` exists and is readable
-2. `mirror` binary is available (`which mirror`)
-3. `docs/cognitive-portraits/` directory exists
-4. If `~/.claude/skills/cognitive-portrait` is a symlink pointing to this repo's `skills/cognitive-portrait/` — log the path for traceability
+The validator requires complete factual traceability, zero unsupported numeric
+claims, complete inference evidence traceability, canonical catalog usage,
+trends absent when the cohort is not
+comparable, at least 60% paragraph novelty when a previous portrait exists, and
+verifiable actions with owner, deadline, and verification condition.
 
-If preflight fails, report the specific failure and stop.
+## Output contract
+
+The final portrait contains exactly these main sections:
+
+- `## L1：认知演进`
+- `## L2：战略定位`
+- `## L3：工作方式健康度`
+- `## L4：成长处方`
+
+Historical v0-v3 files remain immutable. New evidence artifacts are archived by
+the wrapper as:
+
+- `docs/cognitive-portraits/evidence/cognitive-portrait-{date}-v4.bundle.json`
+- `docs/cognitive-portraits/evidence/cognitive-portrait-{date}-v4.quality.json`

@@ -467,6 +467,7 @@ mod tests {
 
         ClusterResult {
             projects,
+            item_projects: HashMap::new(),
             global_stats: GlobalStats {
                 total_sessions: 70,
                 total_decisions: 100,

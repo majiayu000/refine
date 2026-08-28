@@ -1,76 +1,39 @@
-# L1 Sub-agent: 认知演进分析
+# L1 Agent — 认知演进
 
-## File Ownership (W-14)
+You own only `layer-l1.md` beside `REFINE_COGNITIVE_PORTRAIT_OUTPUT`. Read only the JSON bundle at
+`REFINE_COGNITIVE_PORTRAIT_BUNDLE` and the optional previous portrait. Do not
+query SQLite, write the final portrait, or edit `INDEX.md`.
 
-**You own ONLY: `/tmp/cp_v{N}_l1.md`**
-Do NOT create, read, or modify any other file except the 8 read-only data files listed below.
+Write `## L1：认知演进` with these subsections:
 
-## Data Sources (read-only)
+- `### 1.1 当前认知结构`
+- `### 1.2 决策与知识形成`
+- `### 1.3 当前与前一等长窗口`
+- `### 1.4 证据缺口和认知瓶颈`
 
-- `/tmp/cp_data_1.txt` — Recent observations overview (last 90 days)
-- `/tmp/cp_data_2.txt` — Decision patterns
-- `/tmp/cp_data_3.txt` — Bug fix patterns
-- `/tmp/cp_data_4.txt` — Knowledge and patterns acquired
-- `/tmp/cp_data_5.txt` — Friction and collaboration mode
-- `/tmp/cp_data_6.txt` — Project distribution
-- `/tmp/cp_data_7.txt` — Cognitive level distribution over time
-- `/tmp/cp_data_8.txt` — Recent session insights documents
+Use the bundle's observations and claim catalog. For every numeric fact or
+trend, copy the exact `claim_catalog.claims[].rendered_line` that matches the
+claim ID; never write, recalculate, round, or paraphrase a number or trend. The
+2026-03-21 portrait may appear once as an explicitly optional long-term anchor,
+never as required padding. A `DEGRADED` bundle is not analyzable: stop without
+writing a layer. If `comparison.comparable=false`, no trend, arrow,
+increase/decrease, or directional claim is allowed.
 
-## Mandatory Constraints
+Every `[事实]`, including a non-numeric evidence fact, must be copied from the
+catalog byte-for-byte. Write interpretations as `[推断，置信度：高/中/低]` and
+end them with a valid `[evidence:obs:<id>]` or `[bundle:/json/pointer]`. Numeric
+facts, evidence facts, and trends must be copied catalog lines only, including
+`[claim:<claim_id>]`; unknown or duplicate IDs and edits to `rendered_line`
+fail closed. A catalog line in code, a quote, or HTML is invisible. Every
+`[建议]` must also include `[owner:...] [due:YYYY-MM-DD]` and one typed check,
+such as `[verify:metric|/comparison/status|eq|"OK"]`,
+`[verify:artifact|portrait-review|present]`, or
+`[verify:check|weekly-reflection|pass]`. Prefer
+specific new conclusions over text repeated from the prior portrait. There is
+no line-count target.
 
-1. **三分离强制**: Every claim must carry one of these labels:
-   - `[事实]` — directly traceable to a data file line
-   - `[推断，置信度：高/中/低]` — logical inference from facts
-   - `[建议]` — action recommendation with prerequisite assumption stated
-2. **精确数值**: All numbers in `N/M(百分比%)` format where applicable
-3. **矩阵化优先**: Use tables over bullet lists when 3+ items can be compared
-4. **行数硬下限**: This file MUST be ≥ 250 lines when complete
-5. **与 03-21 对比**: Include at least one comparison table referencing 2026-03-21 baseline data
-6. **范围隔离**: Write ONLY L1 content (认知演进). Do NOT write L2 (战略定位), L3 (工作方式), or L4 (成长处方) content.
-
-## Output Path
-
-Write your complete analysis to: `/tmp/cp_v{N}_l1.md`
-
-## Section Outline
-
-Your output must follow this exact structure (H2 + H3 hierarchy):
-
-```
-## L1：认知演进
-
-### 1.1 认知等级时序分析
-
-[Time series table: month × cognitive_level × count from data_7.txt]
-[Trend analysis with [事实] labels]
-[Inference about trajectory with confidence]
-
-### 1.2 决策质量演进
-
-[Analysis of decision patterns from data_2.txt]
-[Comparison: current vs 2026-03-21 baseline]
-[Table: decision category × frequency × quality signal]
-
-### 1.3 知识积累与模式识别
-
-[Analysis from data_4.txt: knowledge types, pattern density]
-[Table: knowledge domain × sessions × depth signal]
-[Inferences about learning velocity]
-
-### 1.4 认知瓶颈识别
-
-[What is NOT progressing? What cognitive levels are stagnant?]
-[Table: bottleneck × evidence × confidence × impact]
-[Suggestions with prerequisite assumptions]
-```
-
-## Style Reference
-
-Minimum density targets:
-- Section 1.1: ≥ 60 lines (time series data + analysis)
-- Section 1.2: ≥ 60 lines (decision analysis + comparison table)
-- Section 1.3: ≥ 60 lines (knowledge analysis + tables)
-- Section 1.4: ≥ 70 lines (bottleneck analysis + suggestions)
-
-Every paragraph must end with a labeled claim or labeled table row.
-Do not use vague phrases like "this seems to indicate" — use explicit confidence labels instead.
+Each catalog line must be copied byte-for-byte, with its catalog-defined label,
+unit, window, pointers, and values unchanged. Comparable trends use the
+catalog's canonical trend line and `[趋势]`; deadlines must be within 90 days
+after cutoff and verification must be a machine-checkable typed metric,
+artifact, or check condition.

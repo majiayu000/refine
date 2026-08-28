@@ -183,7 +183,7 @@ fn source_stats(sources: BTreeMap<String, SourceAccumulator>) -> Vec<SourceStats
         .collect()
 }
 
-fn report_source(document_source: &str) -> &str {
+pub(crate) fn report_source(document_source: &str) -> &str {
     match document_source {
         "claude-code-session" => "claude",
         "codex-session" => "codex",
@@ -353,6 +353,7 @@ mod tests {
     fn cluster(projects: &[(&str, usize)], degraded: bool) -> ClusterResult {
         ClusterResult {
             projects: HashMap::new(),
+            item_projects: HashMap::new(),
             global_stats: GlobalStats {
                 total_sessions: projects.iter().map(|(_, count)| count).sum(),
                 total_decisions: 3,

@@ -143,12 +143,14 @@ write_file() {
 install_runtime_scripts() {
   local name
   local runtime_scripts=(
+    collect-cognitive-portrait.sh
     cognitive-portrait.sh
     daily-refresh.sh
     load-llm-env.sh
     quota-time.sh
     run-refine-server.sh
     runtime-job-lock.sh
+    validate-cognitive-portrait.sh
     weekly-insights.sh
   )
 
@@ -595,6 +597,16 @@ write_install_manifest() {
     || die "installation changed tracked source files; refusing a clean-source manifest"
   mkdir -p "${HOME}/.refine"
   local install_manifest="${HOME}/.refine/install-manifest"
+  local portrait_collector="" portrait_collector_sha256=""
+  local portrait_validator="" portrait_validator_sha256=""
+  if [[ -f "${installed_scripts}/collect-cognitive-portrait.sh" ]]; then
+    portrait_collector="${installed_scripts}/collect-cognitive-portrait.sh"
+    portrait_collector_sha256="$(file_sha256 "$portrait_collector")"
+  fi
+  if [[ -f "${installed_scripts}/validate-cognitive-portrait.sh" ]]; then
+    portrait_validator="${installed_scripts}/validate-cognitive-portrait.sh"
+    portrait_validator_sha256="$(file_sha256 "$portrait_validator")"
+  fi
   write_file "$install_manifest" <<EOF
 source_root=${repo_root}
 source_commit=${source_commit}
@@ -610,6 +622,10 @@ cognitive_portrait_enabled=${cognitive_portrait_enabled}
 cognitive_portrait_root=${cognitive_portrait_root}
 cognitive_portrait_dir=${cognitive_portrait_root:+${cognitive_portrait_root}/docs/cognitive-portraits}
 cognitive_portrait_agent=${portrait_agent_bin:-}
+cognitive_portrait_collector=${portrait_collector}
+cognitive_portrait_collector_sha256=${portrait_collector_sha256}
+cognitive_portrait_validator=${portrait_validator}
+cognitive_portrait_validator_sha256=${portrait_validator_sha256}
 EOF
 }
 
