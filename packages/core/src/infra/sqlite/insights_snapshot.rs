@@ -114,36 +114,43 @@ fn load_document_metadata(
     if document_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let placeholders = std::iter::repeat_n("?", document_ids.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT id, source, captured_at FROM documents WHERE id IN ({placeholders}) ORDER BY id"
-    );
-    let mut statement = conn
-        .prepare(&sql)
-        .map_err(|error| InfraError::Database(error.to_string()))?;
-    let rows = statement
-        .query_map(params_from_iter(document_ids.iter()), |row| {
-            let id: String = row.get(0)?;
-            let source: String = row.get(1)?;
-            let captured_at: String = row.get(2)?;
-            Ok((id, source, captured_at))
-        })
-        .map_err(|error| InfraError::Database(error.to_string()))?;
-    rows.map(|row| {
-        let (id, source, captured_at) =
-            row.map_err(|error| InfraError::Database(error.to_string()))?;
-        let captured_at = DateTime::parse_from_rfc3339(&captured_at)
-            .map(|value| value.with_timezone(&Utc))
-            .map_err(|error| InfraError::Serialization(error.to_string()))?;
-        Ok(ObservationDocumentMeta {
-            id: DocumentId::from(id.as_str()),
-            source,
-            captured_at,
-        })
-    })
-    .collect()
+    // Keep the entire lookup on the caller's read transaction while bounding
+    // each statement well below SQLite's host-parameter limit.
+    const DOCUMENT_ID_CHUNK: usize = 500;
+    let document_ids: Vec<String> = document_ids.into_iter().collect();
+    let mut documents = Vec::with_capacity(document_ids.len());
+    for chunk in document_ids.chunks(DOCUMENT_ID_CHUNK) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id, source, captured_at FROM documents WHERE id IN ({placeholders}) ORDER BY id"
+        );
+        let mut statement = conn
+            .prepare(&sql)
+            .map_err(|error| InfraError::Database(error.to_string()))?;
+        let rows = statement
+            .query_map(params_from_iter(chunk.iter()), |row| {
+                let id: String = row.get(0)?;
+                let source: String = row.get(1)?;
+                let captured_at: String = row.get(2)?;
+                Ok((id, source, captured_at))
+            })
+            .map_err(|error| InfraError::Database(error.to_string()))?;
+        for row in rows {
+            let (id, source, captured_at) =
+                row.map_err(|error| InfraError::Database(error.to_string()))?;
+            let captured_at = DateTime::parse_from_rfc3339(&captured_at)
+                .map(|value| value.with_timezone(&Utc))
+                .map_err(|error| InfraError::Serialization(error.to_string()))?;
+            documents.push(ObservationDocumentMeta {
+                id: DocumentId::from(id.as_str()),
+                source,
+                captured_at,
+            });
+        }
+    }
+    Ok(documents)
 }
 
 fn to_row_error(error: InfraError) -> rusqlite::Error {
@@ -201,5 +208,40 @@ mod tests {
             .iter()
             .all(|item| item.id().as_str() != "future"));
         assert!(all.previous.is_empty());
+    }
+
+    #[test]
+    fn snapshot_chunks_large_distinct_document_metadata_lookup() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::super::ops::init_schema(&conn).unwrap();
+        let cutoff = Utc.with_ymd_and_hms(2026, 8, 27, 0, 0, 0).unwrap();
+        let event_time = cutoff - Duration::days(1);
+        let transaction = conn.transaction().unwrap();
+        {
+            let mut document = transaction
+                .prepare("INSERT INTO documents (id,title,raw_content,source,url,captured_at,created_at,updated_at) VALUES (?1,?1,'raw',?2,?1,?3,?3,?3)")
+                .unwrap();
+            let mut item = transaction
+                .prepare("INSERT INTO items (id,item_type,title,summary,content,tags,source,document_id,excerpt,created_at,updated_at) VALUES (?1,'observation',?1,'','','[]',NULL,?1,NULL,?2,?2)")
+                .unwrap();
+            for index in 0..35_000usize {
+                let id = format!("doc-{index:05}");
+                document
+                    .execute(params![
+                        id,
+                        format!("unsupported-{index:05}"),
+                        event_time.to_rfc3339()
+                    ])
+                    .unwrap();
+                item.execute(params![id, event_time.to_rfc3339()]).unwrap();
+            }
+        }
+        transaction.commit().unwrap();
+
+        let snapshot = load(&conn, cutoff, Some(7)).unwrap();
+        assert_eq!(snapshot.current.len(), 35_000);
+        assert_eq!(snapshot.documents.len(), 35_000);
+        assert_eq!(snapshot.documents.first().unwrap().id.as_str(), "doc-00000");
+        assert_eq!(snapshot.documents.last().unwrap().id.as_str(), "doc-34999");
     }
 }

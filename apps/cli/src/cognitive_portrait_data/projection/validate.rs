@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{self, Write};
 
 use super::super::bundle::{
     CognitivePortraitBundle, CountBreakdown, DimensionProjection, FieldFingerprint,
@@ -99,8 +100,12 @@ pub(crate) fn validate_window_projection(data: &PortraitWindowData, window: &str
     for (name, dimension) in dimensions(&data.dimensions) {
         validate_dimension(dimension, &evidence_ids, &evidence_times, window, name)?;
     }
-    let expected_selection_digest =
-        selection_digest(&data.evidence, &data.dimensions, &selection.strata)?;
+    let expected_selection_digest = selection_digest(
+        &data.evidence,
+        &data.dimensions,
+        &selection.strata,
+        selection.evidence_byte_budget,
+    )?;
     if selection.selection_digest != expected_selection_digest {
         bail!("SCHEMA_INVALID: {window} selection digest mismatch");
     }
@@ -161,11 +166,9 @@ fn validate_dimension(
     window: &str,
     name: &str,
 ) -> Result<()> {
-    if dimension.total_values != dimension.selected_values + dimension.omitted_values
+    if dimension.total_occurrences != dimension.selected_occurrences + dimension.omitted_occurrences
         || dimension.selected_values != dimension.entries.len()
         || dimension.selected_values > MAX_DIMENSION_ENTRIES
-        || dimension.total_evidence_refs
-            != dimension.selected_evidence_refs + dimension.omitted_evidence_refs
         || !valid_digest(&dimension.full_digest)
     {
         bail!("SCHEMA_INVALID: {window} {name} dimension invariant failed");
@@ -200,7 +203,14 @@ fn validate_dimension(
             bail!("SCHEMA_INVALID: {window} {name} evidence ordering is unstable");
         }
     }
-    if selected_refs != dimension.selected_evidence_refs {
+    let selected_occurrences: usize = dimension
+        .entries
+        .iter()
+        .map(|entry| entry.support_count)
+        .sum();
+    if selected_refs != dimension.selected_evidence_refs
+        || selected_occurrences != dimension.selected_occurrences
+    {
         bail!("SCHEMA_INVALID: {window} {name} reference totals disagree");
     }
     if !dimension.entries.windows(2).all(|pair| {
@@ -210,7 +220,7 @@ fn validate_dimension(
                     > evidence_times[&pair[1].evidence_ids[0]]
                     || (evidence_times[&pair[0].evidence_ids[0]]
                         == evidence_times[&pair[1].evidence_ids[0]]
-                        && pair[0].value <= pair[1].value)))
+                        && pair[0].value_digest <= pair[1].value_digest)))
     }) {
         bail!("SCHEMA_INVALID: {window} {name} dimension ordering is unstable");
     }
@@ -278,9 +288,8 @@ pub(crate) fn enforce_bundle_budgets(bundle: &CognitivePortraitBundle) -> Result
         &bundle.claim_catalog,
         MAX_CLAIM_CATALOG_BYTES,
     )?;
-    let bytes = serde_json::to_vec_pretty(bundle)
+    let bytes = serialized_bytes(bundle, true)
         .context("serialize cognitive portrait bundle for internal budget")?
-        .len()
         + 1;
     if bytes > MAX_PROJECTED_BUNDLE_BYTES {
         bail!(
@@ -296,13 +305,41 @@ fn enforce_component_budget<T: Serialize>(
     value: &T,
     limit: usize,
 ) -> Result<()> {
-    let bytes = serde_json::to_vec(value)
-        .with_context(|| format!("serialize {window} {component} for budget"))?
-        .len();
+    let bytes = serialized_bytes(value, false)
+        .with_context(|| format!("serialize {window} {component} for budget"))?;
     if bytes > limit {
         bail!(
             "INTERNAL_BUDGET_VIOLATION: {window} {component} uses {bytes} bytes; limit is {limit}"
         );
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct CountingWriter {
+    bytes: usize,
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(buffer.len())
+            .ok_or_else(|| io::Error::other("serialized byte count overflow"))?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_bytes<T: Serialize>(value: &T, pretty: bool) -> Result<usize> {
+    let mut writer = CountingWriter::default();
+    if pretty {
+        serde_json::to_writer_pretty(&mut writer, value)?;
+    } else {
+        serde_json::to_writer(&mut writer, value)?;
+    }
+    Ok(writer.bytes)
 }

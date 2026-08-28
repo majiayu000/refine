@@ -6,36 +6,71 @@ use super::super::bundle::{FieldFingerprint, MAX_PROJECTION_TEXT_BYTES};
 
 const DIGEST_PREFIX: &str = "sha256:";
 
-pub(super) struct StableDigest(Sha256);
+pub(crate) struct StableDigest(Sha256);
 
 impl StableDigest {
-    pub(super) fn new(domain: &str) -> Self {
+    pub(crate) fn new(domain: &str) -> Self {
         let mut hasher = Sha256::new();
         update_length_prefixed(&mut hasher, domain.as_bytes());
         Self(hasher)
     }
 
-    pub(super) fn bytes(&mut self, value: &[u8]) {
+    pub(crate) fn bytes(&mut self, value: &[u8]) {
         update_length_prefixed(&mut self.0, value);
     }
 
-    pub(super) fn text(&mut self, value: &str) {
+    pub(crate) fn text(&mut self, value: &str) {
         self.bytes(value.as_bytes());
     }
 
-    pub(super) fn usize(&mut self, value: usize) {
+    pub(crate) fn usize(&mut self, value: usize) {
         // Fixed-width encoding keeps digests identical on 32-bit and 64-bit hosts.
         self.bytes(&(value as u64).to_le_bytes());
     }
 
-    pub(super) fn finish(self) -> String {
+    pub(crate) fn finish(self) -> String {
         format!("{DIGEST_PREFIX}{:x}", self.0.finalize())
+    }
+
+    pub(crate) fn finish_bytes(self) -> [u8; 32] {
+        self.0.finalize().into()
     }
 }
 
 fn update_length_prefixed(hasher: &mut Sha256, value: &[u8]) {
-    hasher.update(value.len().to_le_bytes());
+    hasher.update((value.len() as u64).to_le_bytes());
     hasher.update(value);
+}
+
+#[derive(Default)]
+pub(crate) struct MultisetDigest {
+    count: u64,
+    xor: [u8; 32],
+    sums: [u64; 4],
+}
+
+impl MultisetDigest {
+    pub(crate) fn add(&mut self, value: [u8; 32]) {
+        self.count = self.count.wrapping_add(1);
+        for (target, byte) in self.xor.iter_mut().zip(value) {
+            *target ^= byte;
+        }
+        for (index, chunk) in value.chunks_exact(8).enumerate() {
+            self.sums[index] = self.sums[index].wrapping_add(u64::from_le_bytes(
+                chunk.try_into().expect("8-byte digest lane"),
+            ));
+        }
+    }
+
+    pub(crate) fn finish(self, domain: &str) -> String {
+        let mut digest = StableDigest::new(domain);
+        digest.bytes(&self.count.to_le_bytes());
+        digest.bytes(&self.xor);
+        for sum in self.sums {
+            digest.bytes(&sum.to_le_bytes());
+        }
+        digest.finish()
+    }
 }
 
 pub(super) fn fingerprint(bytes: &[u8]) -> FieldFingerprint {
@@ -51,11 +86,11 @@ pub(super) fn sha256_json<T: Serialize>(value: &T) -> Result<String> {
     ))
 }
 
-pub(super) fn sha256_bytes(bytes: &[u8]) -> String {
+pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
     format!("{DIGEST_PREFIX}{:x}", Sha256::digest(bytes))
 }
 
-pub(super) fn truncate_projection_text(value: &str) -> String {
+pub(crate) fn truncate_projection_text(value: &str) -> String {
     if value.len() <= MAX_PROJECTION_TEXT_BYTES {
         return value.to_string();
     }
@@ -92,5 +127,24 @@ mod tests {
         assert!(valid_digest(&valid));
         assert!(!valid_digest(&valid.to_uppercase()));
         assert!(!valid_digest("sha256:abc"));
+    }
+
+    #[test]
+    fn stable_digest_uses_fixed_width_lengths_and_multiset_is_order_independent() {
+        let mut first = StableDigest::new("row");
+        first.text("a");
+        let mut second = StableDigest::new("row");
+        second.text("b");
+        let mut forward = MultisetDigest::default();
+        forward.add(first.finish_bytes());
+        forward.add(second.finish_bytes());
+        let mut reverse = MultisetDigest::default();
+        let mut second = StableDigest::new("row");
+        second.text("b");
+        reverse.add(second.finish_bytes());
+        let mut first = StableDigest::new("row");
+        first.text("a");
+        reverse.add(first.finish_bytes());
+        assert_eq!(forward.finish("set"), reverse.finish("set"));
     }
 }

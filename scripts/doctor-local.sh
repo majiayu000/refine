@@ -27,6 +27,9 @@ failures=0
 warnings=0
 ui_dev_enabled=1
 runtime_scripts_valid=1
+cognitive_portrait_contract_version=2
+cognitive_portrait_bundle_schema=2
+cognitive_portrait_catalog_schema=2
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -90,6 +93,28 @@ file_sha256() {
     sha256sum "$path" | awk '{print $1}'
   else
     return 1
+  fi
+}
+
+portrait_skill_tree_sha256() {
+  local root="$1" path relative hash
+  local paths=()
+  [[ -z "$(find "$root" -type l -print -quit)" ]] || return 1
+  while IFS= read -r path; do
+    paths+=("$path")
+  done < <(find "$root" -type f -print | LC_ALL=C sort)
+  [[ ${#paths[@]} -gt 0 ]] || return 1
+  {
+    for path in "${paths[@]}"; do
+      relative="${path#${root}/}"
+      [[ "$relative" != "$path" && "$relative" != *$'\n'* ]] || return 1
+      hash="$(file_sha256 "$path")" || return 1
+      printf '%s\t%s\n' "$relative" "$hash"
+    done
+  } | if have_cmd shasum; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    sha256sum | awk '{print $1}'
   fi
 }
 
@@ -391,6 +416,23 @@ check_cognitive_portrait() {
     pass "cognitive portrait root valid: ${root}"
   else
     fail "cognitive portrait root invalid: ${root:-missing}"
+  fi
+  local expected_skill_hash actual_skill_hash source_skill_hash
+  expected_skill_hash="$(manifest_value cognitive_portrait_skill_tree_sha256 "$manifest")"
+  actual_skill_hash="$(portrait_skill_tree_sha256 "${root}/skills/cognitive-portrait" 2>/dev/null || true)"
+  source_skill_hash="$(portrait_skill_tree_sha256 "${repo_root}/skills/cognitive-portrait" 2>/dev/null || true)"
+  if [[ "$(manifest_value cognitive_portrait_contract_version "$manifest")" == "$cognitive_portrait_contract_version" \
+    && "$(manifest_value cognitive_portrait_bundle_schema "$manifest")" == "$cognitive_portrait_bundle_schema" \
+    && "$(manifest_value cognitive_portrait_catalog_schema "$manifest")" == "$cognitive_portrait_catalog_schema" ]]; then
+    pass "cognitive portrait v2 schema contract matches manifest"
+  else
+    fail "cognitive portrait schema contract is missing or mismatched"
+  fi
+  if [[ -n "$expected_skill_hash" && "$actual_skill_hash" == "$expected_skill_hash" \
+    && "$source_skill_hash" == "$expected_skill_hash" ]]; then
+    pass "cognitive portrait skill tree hash matches v2 contract"
+  else
+    fail "cognitive portrait skill tree hash mismatch"
   fi
   if [[ "$portrait_dir" == "${root}/docs/cognitive-portraits" && -d "$portrait_dir" ]]; then
     pass "cognitive portrait output directory valid: ${portrait_dir}"

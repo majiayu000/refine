@@ -251,7 +251,7 @@ chmod 700 "${fake_bin}/cargo" "${fake_bin}/uname" \
 portrait_root="${TEST_ROOT}/portrait workspace"
 portrait_dir="${portrait_root}/docs/cognitive-portraits"
 mkdir -p "${portrait_root}/skills/cognitive-portrait" "$portrait_dir"
-printf '%s\n' '# Cognitive portrait fixture' > "${portrait_root}/skills/cognitive-portrait/SKILL.md"
+cp -R "${REPO_ROOT}/skills/cognitive-portrait/." "${portrait_root}/skills/cognitive-portrait/"
 printf '%s\n' '# Portrait archive' > "${portrait_dir}/INDEX.md"
 printf '%s\n' '# Fixture portrait' > "${portrait_dir}/cognitive-portrait-2026-08-24-v3.md"
 
@@ -355,6 +355,14 @@ grep -Fxq "cognitive_portrait_collector=${test_home}/.refine/scripts/collect-cog
   || fail 'install manifest lost the cognitive portrait collector binding'
 grep -Fxq "cognitive_portrait_validator=${test_home}/.refine/scripts/validate-cognitive-portrait.sh" "${test_home}/.refine/install-manifest" \
   || fail 'install manifest lost the cognitive portrait validator binding'
+grep -Fxq 'cognitive_portrait_contract_version=2' "${test_home}/.refine/install-manifest" \
+  || fail 'install manifest lost the cognitive portrait contract version'
+grep -Fxq 'cognitive_portrait_bundle_schema=2' "${test_home}/.refine/install-manifest" \
+  || fail 'install manifest lost the cognitive portrait bundle schema'
+grep -Fxq 'cognitive_portrait_catalog_schema=2' "${test_home}/.refine/install-manifest" \
+  || fail 'install manifest lost the cognitive portrait catalog schema'
+grep -Eq '^cognitive_portrait_skill_tree_sha256=[0-9a-f]{64}$' "${test_home}/.refine/install-manifest" \
+  || fail 'install manifest lost the cognitive portrait skill tree hash'
 
 mkdir -p "${test_home}/Library/Logs"
 printf '%s\n' 'portrait fixture log' > "${test_home}/Library/Logs/refine-portrait.log"
@@ -504,6 +512,20 @@ assert_contains "$healthy_doctor_output" 'PASS cognitive portrait validator path
   'Doctor did not validate the portrait validator path binding'
 assert_contains "$healthy_doctor_output" 'PASS cognitive portrait validator hash matches manifest' \
   'Doctor did not validate the portrait validator hash'
+assert_contains "$healthy_doctor_output" 'PASS cognitive portrait v2 schema contract matches manifest' \
+  'Doctor did not validate the portrait schema contract'
+assert_contains "$healthy_doctor_output" 'PASS cognitive portrait skill tree hash matches v2 contract' \
+  'Doctor did not validate the portrait skill tree hash'
+
+printf '\nlegacy mutation\n' >> "${portrait_root}/skills/cognitive-portrait/SKILL.md"
+stale_skill_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$stale_skill_output" 'cognitive portrait skill tree hash mismatch' \
+  'Doctor accepted a modified or legacy cognitive portrait skill tree'
+cp "${REPO_ROOT}/skills/cognitive-portrait/SKILL.md" \
+  "${portrait_root}/skills/cognitive-portrait/SKILL.md"
 
 installed_collector="${test_home}/.refine/scripts/collect-cognitive-portrait.sh"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 99' > "$installed_collector"
@@ -655,6 +677,18 @@ rm -f "${test_home}/.refine/install-manifest"
 fixture_plist_edit "$portrait_plist" set WorkingDirectory "$legacy_portrait_root"
 fixture_plist_edit "$portrait_plist" set 'EnvironmentVariables:REFINE_ROOT' "$legacy_portrait_root"
 fixture_plist_edit "$portrait_plist" delete 'EnvironmentVariables:REFINE_PORTRAIT_DIR'
+legacy_upgrade_output=''
+if legacy_upgrade_output="$(env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
+  /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start 2>&1)"; then
+  fail 'legacy v1 skill root was silently mixed with the v2 runtime'
+fi
+assert_contains "$legacy_upgrade_output" 'skill contract is legacy or mismatched' \
+  'legacy v1 skill root failure was not actionable'
+mv "${legacy_portrait_root}/skills/cognitive-portrait" \
+  "${legacy_portrait_root}/skills/cognitive-portrait-v1"
+mkdir -p "${legacy_portrait_root}/skills/cognitive-portrait"
+cp -R "${REPO_ROOT}/skills/cognitive-portrait/." \
+  "${legacy_portrait_root}/skills/cognitive-portrait/"
 env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
   /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start >/dev/null
 grep -Fxq "cognitive_portrait_root=${legacy_portrait_root}" "${test_home}/.refine/install-manifest" \

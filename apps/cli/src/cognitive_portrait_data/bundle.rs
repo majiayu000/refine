@@ -1,5 +1,6 @@
 use crate::insights_manifest::{
-    build_manifest, build_window_manifest, EventTimeWindow, InsightsManifest, WindowManifest,
+    build_manifest, build_window_manifest, validate_window_manifest, EventTimeWindow,
+    InsightsManifest, WindowManifest,
 };
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -143,12 +144,11 @@ pub(crate) struct PortraitDimensions {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DimensionProjection {
-    pub total_values: usize,
+    pub total_occurrences: usize,
+    pub selected_occurrences: usize,
+    pub omitted_occurrences: usize,
     pub selected_values: usize,
-    pub omitted_values: usize,
-    pub total_evidence_refs: usize,
     pub selected_evidence_refs: usize,
-    pub omitted_evidence_refs: usize,
     pub full_digest: String,
     pub entries: Vec<DimensionEvidence>,
 }
@@ -426,15 +426,16 @@ fn collector_identity() -> String {
 
 pub(crate) fn write_bundle(path: &Path, bundle: &CognitivePortraitBundle) -> Result<()> {
     enforce_bundle_budgets(bundle)?;
-    let mut json = serde_json::to_string_pretty(bundle).context("serialize portrait bundle")?;
-    json.push('\n');
+    let mut json = Vec::with_capacity(1024 * 1024);
+    serde_json::to_writer_pretty(&mut json, bundle).context("serialize portrait bundle")?;
+    json.push(b'\n');
     if json.len() > MAX_PORTRAIT_BUNDLE_BYTES {
         bail!(
             "DATA_QUALITY_DEGRADED: cognitive portrait bundle exceeds the {} byte limit",
             MAX_PORTRAIT_BUNDLE_BYTES
         );
     }
-    fs::write(path, json)
+    fs::write(path, &json)
         .with_context(|| format!("write cognitive portrait bundle {}", path.display()))
 }
 
@@ -475,6 +476,8 @@ pub(crate) fn read_bundle(path: &Path) -> Result<CognitivePortraitBundle> {
     {
         bail!("SCHEMA_INVALID: comparison contract disagrees with window manifests");
     }
+    validate_window_manifest(&bundle.manifest.current_window, "current")?;
+    validate_window_manifest(previous_manifest, "previous")?;
     let expected_catalog = build_claim_catalog(
         &bundle.current,
         &bundle.previous,

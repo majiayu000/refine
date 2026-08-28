@@ -160,7 +160,7 @@ fn unsupported_knowledge_source_is_disclosed_and_suppresses_trends() {
     assert_eq!(bundle.current.metrics.total_sessions, 1);
     assert_eq!(bundle.current.evidence.len(), 1);
     assert_eq!(
-        bundle.manifest.current_window.unsupported_source_counts[0].source,
+        bundle.manifest.current_window.unsupported_sources.entries[0].source,
         "grok-knowledge"
     );
     assert!(!bundle.comparison.comparable);
@@ -255,6 +255,11 @@ fn bounded_projection_invariants_fail_closed() {
     tampered["current"]["evidence_selection"]["full_payload_digest"] =
         serde_json::json!("sha256:not-a-digest");
     assert_invalid(tampered, "evidence selection invariant");
+
+    let mut tampered = serde_json::to_value(fixture(true)).unwrap();
+    tampered["manifest"]["current_window"]["unsupported_sources"]["selected_observations"] =
+        serde_json::json!(999);
+    assert_invalid(tampered, "unsupported source breakdown invariant");
 }
 
 #[test]

@@ -72,20 +72,25 @@ Within each sorted stratum, observations rank by event time descending and
 evidence ID ascending. Selection round-robins across sorted strata up to 2048
 anchors per window. It is therefore neither SQL first-N nor recency-only.
 
-Each qualitative dimension discloses total/selected/omitted unique values,
-total/selected/omitted evidence references, and a digest of all full-cohort
-values and references. At most 128 entries per dimension and four retained
-evidence IDs per entry are emitted. Entries rank by full support descending,
-latest retained event descending, then full value ascending. Display values and
-anchor display text are UTF-8 safely bounded to 512 bytes while their original
-byte length and SHA-256 remain available.
+Each qualitative dimension discloses exact total/selected/omitted occurrences,
+the retained value and evidence-reference counts, and an order-independent
+digest of all full-cohort occurrences and references. At most 128 deterministic
+min-hash values per dimension and four retained evidence IDs per value are
+emitted. Display values and anchor display text are UTF-8 safely bounded to 512
+bytes while their original byte length and SHA-256 remain available.
+
+Unsupported sources use the same bounded disclosure: exact observation and
+session totals, freshest event time, selected and omitted observation counts,
+an order-independent full digest, and at most 128 min-hash source entries.
+Their raw high-cardinality names are never expanded without a bound.
 
 Project ranking and tool frequency retain exact full-entry counts, full digests,
 and reproducible retained-selection digests but emit at most 128 ranked entries.
 Fixed scalar totals, cognitive levels, and collaboration modes remain exact.
 
-The builder measures evidence, dimensions, and claim-catalog components before
-final serialization. Any implementation invariant exceeding its component
+The builder counts evidence, dimensions, claim-catalog, and final JSON bytes
+through streaming writers before allocating the bounded final buffer. Any
+implementation invariant exceeding its component
 budget is `INTERNAL_BUDGET_VIOLATION`; it is never handled by silently dropping
 additional data at write time. The final pretty JSON must be at most 16 MiB.
 The independent 64 MiB reader/wrapper safety limit remains unchanged.

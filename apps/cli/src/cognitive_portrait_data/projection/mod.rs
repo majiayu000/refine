@@ -1,61 +1,28 @@
-mod hashing;
+mod dimensions;
+pub(crate) mod hashing;
+mod selection;
 mod validate;
 
 use crate::insights_manifest::report_source;
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use refine_core::knowledge::{Item, ObservationDocumentMeta};
 use refine_core::session::{eligible_observations, ClusterResult};
 use std::collections::{BTreeMap, BTreeSet};
 
+use self::dimensions::DimensionAccumulators;
 use self::hashing::{
-    fingerprint, sha256_bytes, sha256_json, truncate_projection_text, StableDigest,
+    fingerprint, sha256_bytes, sha256_json, truncate_projection_text, MultisetDigest, StableDigest,
+};
+use self::selection::{
+    allocate_quotas, build_strata, next_evidence_json_bytes, BoundedSelection, StratumKey,
 };
 use super::bundle::{
-    CountBreakdown, CountEntry, DimensionEvidence, DimensionProjection, EvidenceFieldFingerprints,
-    EvidenceRecord, EvidenceSelection, PortraitDimensions, PortraitMetrics, PortraitWindowData,
-    SelectionStratum, MAX_BREAKDOWN_ENTRIES, MAX_DIMENSION_ENTRIES, MAX_DIMENSION_EVIDENCE_IDS,
-    MAX_SELECTED_EVIDENCE_PER_WINDOW, MAX_TOP_PROJECT_STRATA, MAX_WINDOW_EVIDENCE_BYTES,
-    PORTRAIT_PROJECTION_POLICY,
+    CountBreakdown, CountEntry, EvidenceFieldFingerprints, EvidenceRecord, EvidenceSelection,
+    PortraitDimensions, PortraitMetrics, PortraitWindowData, MAX_BREAKDOWN_ENTRIES,
+    MAX_TOP_PROJECT_STRATA, MAX_WINDOW_EVIDENCE_BYTES, PORTRAIT_PROJECTION_POLICY,
 };
 
 pub(super) use validate::{enforce_bundle_budgets, validate_window_projection};
-
-#[derive(Debug)]
-struct Candidate {
-    record: EvidenceRecord,
-    primary_category: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct StratumKey {
-    source: String,
-    category: String,
-    project_bucket: String,
-}
-
-#[derive(Default)]
-struct DimensionAccumulator {
-    projects: EvidenceValues,
-    decisions: EvidenceValues,
-    bugfixes: EvidenceValues,
-    knowledge: EvidenceValues,
-    patterns: EvidenceValues,
-    architectures: EvidenceValues,
-    frictions: EvidenceValues,
-}
-
-#[derive(Default)]
-struct EvidenceValues(BTreeMap<String, BTreeSet<String>>);
-
-impl EvidenceValues {
-    fn add(&mut self, value: &str, evidence_id: &str) {
-        self.0
-            .entry(value.to_string())
-            .or_default()
-            .insert(evidence_id.to_string());
-    }
-}
 
 pub(super) fn build_window_data(
     cohort_items: &[Item],
@@ -67,111 +34,104 @@ pub(super) fn build_window_data(
         .map(|document| (document.id.as_str(), document))
         .collect();
     let eligible = eligible_observations(cohort_items);
-    let top_projects: BTreeSet<String> = sorted_project_counts(cluster)
-        .into_iter()
+    let top_projects: BTreeSet<String> = cluster
+        .global_stats
+        .project_ranking
+        .iter()
         .take(MAX_TOP_PROJECT_STRATA)
-        .map(|(project, _)| project)
+        .map(|(project, _)| project.clone())
         .collect();
-    let mut dimensions = DimensionAccumulator::default();
-    let mut candidates = Vec::with_capacity(eligible.len());
 
-    for item in eligible {
-        let document_id = item
-            .document_id()
-            .context("eligible portrait observation unexpectedly lacks document_id")?;
-        let document = documents.get(document_id.as_str()).with_context(|| {
-            format!(
-                "eligible portrait observation references missing document metadata {}",
-                document_id
-            )
-        })?;
-        let project = cluster
-            .item_projects
-            .get(item.id().as_str())
-            .with_context(|| {
-                format!(
-                    "eligible portrait observation is missing its direct project assignment {}",
-                    item.id()
-                )
-            })?
-            .clone();
-        let evidence_id = format!("obs:{}", item.id());
-        let tags: Vec<String> = item
-            .tags()
-            .iter()
-            .map(|tag| tag.as_str().to_string())
-            .collect();
-        let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
-        let mut categories = BTreeSet::new();
-        let mut preferred_display: Option<String> = None;
+    // Pass 1 stores only bounded stratum counters and a commutative digest.
+    let mut stratum_counts = BTreeMap::new();
+    let mut payload_digest = MultisetDigest::default();
+    for item in &eligible {
+        let (document, project) = item_context(item, cluster, &documents)?;
+        let key = stratum_key(item, document, project, &top_projects);
+        *stratum_counts.entry(key).or_default() += 1;
+        payload_digest.add(payload_row_digest(item, document, project));
+    }
+    let full_payload_digest = payload_digest.finish("cognitive-portrait-full-payload-v2");
 
-        dimensions.projects.add(&project, &evidence_id);
-        if tag_refs.contains(&"decision") {
-            categories.insert("decision".to_string());
-            dimensions.decisions.add(item.title(), &evidence_id);
-            preferred_display = Some(item.title().to_string());
-        } else if tag_refs.contains(&"bugfix") {
-            categories.insert("bugfix".to_string());
-            dimensions.bugfixes.add(item.title(), &evidence_id);
-            preferred_display = Some(item.title().to_string());
-        } else {
-            categories.insert("summary".to_string());
-        }
-
-        add_sections(
-            item,
-            &evidence_id,
-            &mut categories,
-            &mut preferred_display,
-            &mut dimensions,
+    // Pass 2 retains at most 2,048 indices across deterministic strata.
+    let mut selector = BoundedSelection::new(allocate_quotas(&stratum_counts));
+    for (index, item) in eligible.iter().enumerate() {
+        let (document, project) = item_context(item, cluster, &documents)?;
+        selector.consider(
+            stratum_key(item, document, project, &top_projects),
+            index,
+            document.captured_at,
+            item.id().as_str(),
         );
-        let source = report_source(&document.source).to_string();
-        let categories: Vec<String> = categories.into_iter().collect();
-        let primary_category = primary_category(&categories).to_string();
-        let display_source = preferred_display.unwrap_or_else(|| item.title().to_string());
-        let tags_json = serde_json::to_vec(&tags).context("serialize portrait tags")?;
-        candidates.push(Candidate {
-            primary_category,
-            record: EvidenceRecord {
-                evidence_id,
-                item_id: item.id().as_str().to_string(),
-                document_id: document_id.as_str().to_string(),
-                event_time: document.captured_at,
-                source,
-                project,
-                categories,
-                display_text: truncate_projection_text(&display_source),
-                display_text_original_bytes: display_source.len(),
-                display_text_digest: sha256_bytes(display_source.as_bytes()),
-                original_fields: EvidenceFieldFingerprints {
-                    title: fingerprint(item.title().as_bytes()),
-                    summary: fingerprint(item.summary().as_bytes()),
-                    content: fingerprint(item.content().as_bytes()),
-                    excerpt: item.excerpt().map(|value| fingerprint(value.as_bytes())),
-                    tags: fingerprint(&tags_json),
-                },
-            },
-        });
     }
 
-    candidates.sort_by(|left, right| {
-        left.record
-            .event_time
-            .cmp(&right.record.event_time)
-            .then_with(|| left.record.item_id.cmp(&right.record.item_id))
+    // Build only retained records. Round-robin packing uses exact compact JSON
+    // bytes, including escaping and separators, before accepting each record.
+    let ranked = selector.into_ranked();
+    let mut offsets = vec![0usize; ranked.len()];
+    let mut evidence = Vec::new();
+    let mut selected_counts = BTreeMap::new();
+    let mut selected_indices = BTreeSet::new();
+    let mut evidence_json_bytes = 2usize;
+    loop {
+        let mut progressed = false;
+        for (group_index, (key, indices)) in ranked.iter().enumerate() {
+            let offset = &mut offsets[group_index];
+            let Some(index) = indices.get(*offset).copied() else {
+                continue;
+            };
+            *offset += 1;
+            progressed = true;
+            let item = eligible[index];
+            let (document, project) = item_context(item, cluster, &documents)?;
+            let record = build_evidence_record(item, document, project)?;
+            let record_bytes = serde_json::to_vec(&record)
+                .context("serialize portrait evidence record for byte budget")?
+                .len();
+            if let Some(next_bytes) = next_evidence_json_bytes(
+                evidence_json_bytes,
+                evidence.len(),
+                record_bytes,
+                MAX_WINDOW_EVIDENCE_BYTES,
+            ) {
+                evidence_json_bytes = next_bytes;
+                evidence.push(record);
+                selected_indices.insert(index);
+                *selected_counts.entry(key.clone()).or_default() += 1;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    evidence.sort_by(|left, right| {
+        left.event_time
+            .cmp(&right.event_time)
+            .then_with(|| left.item_id.cmp(&right.item_id))
     });
-    let full_payload_digest = full_payload_digest(&candidates)?;
-    let (evidence, strata) = select_evidence(candidates, &top_projects);
-    let selected_ids: BTreeSet<String> = evidence
-        .iter()
-        .map(|record| record.evidence_id.clone())
-        .collect();
-    let event_times: BTreeMap<String, DateTime<Utc>> = evidence
-        .iter()
-        .map(|record| (record.evidence_id.clone(), record.event_time))
-        .collect();
-    let dimensions = finish_dimensions(dimensions, &selected_ids, &event_times)?;
-    let selection_digest = selection_digest(&evidence, &dimensions, &strata)?;
+    debug_assert_eq!(serde_json::to_vec(&evidence)?.len(), evidence_json_bytes);
+    let strata = build_strata(stratum_counts, &selected_counts);
+
+    // Passes 3 and 4 keep only 128 min-hash keys per dimension, then recount
+    // exact occurrence support and provenance against the full cohort.
+    let mut dimension_accumulators = DimensionAccumulators::default();
+    for index in &selected_indices {
+        let item = eligible[*index];
+        let (_, project) = item_context(item, cluster, &documents)?;
+        dimension_accumulators.sample_item(item, project);
+    }
+    for (index, item) in eligible.iter().enumerate() {
+        let (document, project) = item_context(item, cluster, &documents)?;
+        dimension_accumulators.observe_item(
+            item,
+            project,
+            document.captured_at,
+            selected_indices.contains(&index),
+        );
+    }
+    let dimensions = dimension_accumulators.finish();
+    let selection_digest =
+        selection_digest(&evidence, &dimensions, &strata, MAX_WINDOW_EVIDENCE_BYTES)?;
     let eligible_observations = cluster.data_quality.eligible_observations;
     let selected_observations = evidence.len();
     let omitted_observations = eligible_observations
@@ -185,15 +145,19 @@ pub(super) fn build_window_data(
             total_bugfixes: stats.total_bugfixes,
             total_summaries: stats.total_summaries,
             untagged_observations: cluster.untagged_count,
-            project_ranking: build_count_breakdown(sorted_project_counts(cluster))?,
+            project_ranking: build_count_breakdown(
+                stats
+                    .project_ranking
+                    .iter()
+                    .map(|(value, count)| (value.as_str(), *count)),
+            )?,
             cognitive_levels: stats.cognitive_levels.clone().into_iter().collect(),
             collaboration_modes: stats.collaboration_modes.clone().into_iter().collect(),
             tool_frequency: build_count_breakdown(
                 stats
                     .tool_frequency
                     .iter()
-                    .map(|(value, count)| (value.clone(), *count))
-                    .collect(),
+                    .map(|(value, count)| (value.as_str(), *count)),
             )?,
         },
         evidence_selection: EvidenceSelection {
@@ -213,235 +177,190 @@ pub(super) fn build_window_data(
     Ok(data)
 }
 
-fn add_sections(
+fn item_context<'a>(
     item: &Item,
-    evidence_id: &str,
-    categories: &mut BTreeSet<String>,
-    preferred_display: &mut Option<String>,
-    dimensions: &mut DimensionAccumulator,
-) {
-    for (category, section, target) in [
-        ("knowledge", "知识", &mut dimensions.knowledge),
-        ("pattern", "模式", &mut dimensions.patterns),
-        ("architecture", "架构", &mut dimensions.architectures),
-        ("friction", "阻力", &mut dimensions.frictions),
-    ] {
-        for value in extract_section_items(item.content(), section) {
-            categories.insert(category.to_string());
-            if preferred_display.is_none() {
-                *preferred_display = Some(value.clone());
-            }
-            target.add(&value, evidence_id);
-        }
+    cluster: &'a ClusterResult,
+    documents: &BTreeMap<&str, &'a ObservationDocumentMeta>,
+) -> Result<(&'a ObservationDocumentMeta, &'a str)> {
+    let document_id = item
+        .document_id()
+        .context("eligible portrait observation unexpectedly lacks document_id")?;
+    let document = documents
+        .get(document_id.as_str())
+        .copied()
+        .with_context(|| {
+            format!(
+                "eligible portrait observation references missing document metadata {document_id}"
+            )
+        })?;
+    let project = cluster
+        .item_projects
+        .get(item.id().as_str())
+        .with_context(|| {
+            format!(
+                "eligible portrait observation is missing its direct project assignment {}",
+                item.id()
+            )
+        })?;
+    Ok((document, project))
+}
+
+fn stratum_key(
+    item: &Item,
+    document: &ObservationDocumentMeta,
+    project: &str,
+    top_projects: &BTreeSet<String>,
+) -> StratumKey {
+    StratumKey {
+        source: report_source(&document.source).to_string(),
+        category: primary_category_for_item(item).to_string(),
+        project_bucket: if top_projects.contains(project) {
+            project.to_string()
+        } else {
+            "__other__".to_string()
+        },
     }
 }
 
-fn sorted_project_counts(cluster: &ClusterResult) -> Vec<(String, usize)> {
-    let mut entries = cluster.global_stats.project_ranking.clone();
-    entries.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    entries
+fn primary_category_for_item(item: &Item) -> &'static str {
+    if item.tags().iter().any(|tag| tag.as_str() == "decision") {
+        "decision"
+    } else if item.tags().iter().any(|tag| tag.as_str() == "bugfix") {
+        "bugfix"
+    } else if has_section_item(item.content(), "知识") {
+        "knowledge"
+    } else if has_section_item(item.content(), "模式") {
+        "pattern"
+    } else if has_section_item(item.content(), "架构") {
+        "architecture"
+    } else if has_section_item(item.content(), "阻力") {
+        "friction"
+    } else {
+        "summary"
+    }
 }
 
-fn build_count_breakdown(mut entries: Vec<(String, usize)>) -> Result<CountBreakdown> {
-    entries.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    let full_digest = count_breakdown_digest(&entries);
-    let total_entries = entries.len();
-    let selected: Vec<CountEntry> = entries
+fn build_evidence_record(
+    item: &Item,
+    document: &ObservationDocumentMeta,
+    project: &str,
+) -> Result<EvidenceRecord> {
+    let tags: Vec<String> = item
+        .tags()
+        .iter()
+        .map(|tag| tag.as_str().to_string())
+        .collect();
+    let mut categories = BTreeSet::new();
+    if tags.iter().any(|tag| tag == "decision") {
+        categories.insert("decision".to_string());
+    } else if tags.iter().any(|tag| tag == "bugfix") {
+        categories.insert("bugfix".to_string());
+    } else {
+        categories.insert("summary".to_string());
+    }
+    let mut display = None;
+    for (category, section) in [
+        ("knowledge", "知识"),
+        ("pattern", "模式"),
+        ("architecture", "架构"),
+        ("friction", "阻力"),
+    ] {
+        for_each_section_item(item.content(), section, |value| {
+            categories.insert(category.to_string());
+            if display.is_none() {
+                display = Some(value);
+            }
+        });
+    }
+    let display = if categories.contains("decision") || categories.contains("bugfix") {
+        item.title()
+    } else {
+        display.unwrap_or(item.title())
+    };
+    let mut tags_digest = StableDigest::new("cognitive-portrait-tags-v2");
+    tags_digest.usize(tags.len());
+    for tag in &tags {
+        tags_digest.text(tag);
+    }
+    Ok(EvidenceRecord {
+        evidence_id: format!("obs:{}", item.id()),
+        item_id: item.id().as_str().to_string(),
+        document_id: item
+            .document_id()
+            .expect("eligible item has document id")
+            .as_str()
+            .to_string(),
+        event_time: document.captured_at,
+        source: report_source(&document.source).to_string(),
+        project: project.to_string(),
+        categories: categories.into_iter().collect(),
+        display_text: truncate_projection_text(display),
+        display_text_original_bytes: display.len(),
+        display_text_digest: sha256_bytes(display.as_bytes()),
+        original_fields: EvidenceFieldFingerprints {
+            title: fingerprint(item.title().as_bytes()),
+            summary: fingerprint(item.summary().as_bytes()),
+            content: fingerprint(item.content().as_bytes()),
+            excerpt: item.excerpt().map(|value| fingerprint(value.as_bytes())),
+            tags: super::bundle::FieldFingerprint {
+                bytes: tags.iter().map(String::len).sum(),
+                digest: tags_digest.finish(),
+            },
+        },
+    })
+}
+
+fn payload_row_digest(item: &Item, document: &ObservationDocumentMeta, project: &str) -> [u8; 32] {
+    let mut row = StableDigest::new("cognitive-portrait-payload-row-v2");
+    row.text(item.id().as_str());
+    row.text(item.document_id().map_or("", |id| id.as_str()));
+    row.text(&document.captured_at.to_rfc3339());
+    row.text(report_source(&document.source));
+    row.text(project);
+    row.text(primary_category_for_item(item));
+    row.text(item.title());
+    row.text(item.summary());
+    row.text(item.content());
+    row.text(item.excerpt().unwrap_or(""));
+    row.usize(item.tags().len());
+    for tag in item.tags() {
+        row.text(tag.as_str());
+    }
+    row.finish_bytes()
+}
+
+fn build_count_breakdown<'a>(
+    entries: impl Iterator<Item = (&'a str, usize)>,
+) -> Result<CountBreakdown> {
+    let mut full = MultisetDigest::default();
+    let mut total_entries = 0usize;
+    let mut selected = Vec::with_capacity(MAX_BREAKDOWN_ENTRIES);
+    for (value, count) in entries {
+        total_entries += 1;
+        let mut row = StableDigest::new("cognitive-portrait-count-row-v2");
+        row.text(value);
+        row.usize(count);
+        full.add(row.finish_bytes());
+        selected.push((value, count));
+        selected.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+        selected.truncate(MAX_BREAKDOWN_ENTRIES);
+    }
+    let selected: Vec<CountEntry> = selected
         .into_iter()
-        .take(MAX_BREAKDOWN_ENTRIES)
         .map(|(value, count)| CountEntry {
-            value: truncate_projection_text(&value),
+            value: truncate_projection_text(value),
             original_bytes: value.len(),
             value_digest: sha256_bytes(value.as_bytes()),
             count,
         })
         .collect();
-    let selected_entries = selected.len();
-    let selection_digest = sha256_json(&selected)?;
     Ok(CountBreakdown {
         total_entries,
-        selected_entries,
-        omitted_entries: total_entries - selected_entries,
-        full_digest,
-        selection_digest,
+        selected_entries: selected.len(),
+        omitted_entries: total_entries - selected.len(),
+        full_digest: full.finish("cognitive-portrait-count-breakdown-v2"),
+        selection_digest: sha256_json(&selected)?,
         entries: selected,
-    })
-}
-
-fn select_evidence(
-    candidates: Vec<Candidate>,
-    top_projects: &BTreeSet<String>,
-) -> (Vec<EvidenceRecord>, Vec<SelectionStratum>) {
-    let mut groups: BTreeMap<StratumKey, Vec<usize>> = BTreeMap::new();
-    for (index, candidate) in candidates.iter().enumerate() {
-        let project_bucket = if top_projects.contains(&candidate.record.project) {
-            candidate.record.project.clone()
-        } else {
-            "__other__".to_string()
-        };
-        groups
-            .entry(StratumKey {
-                source: candidate.record.source.clone(),
-                category: candidate.primary_category.clone(),
-                project_bucket,
-            })
-            .or_default()
-            .push(index);
-    }
-    for indices in groups.values_mut() {
-        indices.sort_by(|left, right| {
-            candidates[*right]
-                .record
-                .event_time
-                .cmp(&candidates[*left].record.event_time)
-                .then_with(|| {
-                    candidates[*left]
-                        .record
-                        .evidence_id
-                        .cmp(&candidates[*right].record.evidence_id)
-                })
-        });
-    }
-
-    let limit = candidates.len().min(MAX_SELECTED_EVIDENCE_PER_WINDOW);
-    let mut offsets: BTreeMap<StratumKey, usize> =
-        groups.keys().cloned().map(|key| (key, 0)).collect();
-    let mut selected_indices = Vec::with_capacity(limit);
-    while selected_indices.len() < limit {
-        let mut progressed = false;
-        for (key, indices) in &groups {
-            if selected_indices.len() == limit {
-                break;
-            }
-            let offset = offsets.get_mut(key).expect("stratum offset exists");
-            if let Some(index) = indices.get(*offset) {
-                selected_indices.push(*index);
-                *offset += 1;
-                progressed = true;
-            }
-        }
-        if !progressed {
-            break;
-        }
-    }
-    selected_indices.sort_by(|left, right| {
-        candidates[*left]
-            .record
-            .event_time
-            .cmp(&candidates[*right].record.event_time)
-            .then_with(|| {
-                candidates[*left]
-                    .record
-                    .item_id
-                    .cmp(&candidates[*right].record.item_id)
-            })
-    });
-    let selected_set: BTreeSet<usize> = selected_indices.iter().copied().collect();
-    let evidence = selected_indices
-        .into_iter()
-        .map(|index| candidates[index].record.clone())
-        .collect();
-    let strata = groups
-        .into_iter()
-        .map(|(key, indices)| {
-            let selected_observations = indices
-                .iter()
-                .filter(|index| selected_set.contains(index))
-                .count();
-            SelectionStratum {
-                source: key.source,
-                category: key.category,
-                project_bucket: key.project_bucket,
-                eligible_observations: indices.len(),
-                selected_observations,
-                omitted_observations: indices.len() - selected_observations,
-            }
-        })
-        .collect();
-    (evidence, strata)
-}
-
-fn finish_dimensions(
-    dimensions: DimensionAccumulator,
-    selected_ids: &BTreeSet<String>,
-    event_times: &BTreeMap<String, DateTime<Utc>>,
-) -> Result<PortraitDimensions> {
-    Ok(PortraitDimensions {
-        projects: finish_dimension(dimensions.projects, selected_ids, event_times)?,
-        decisions: finish_dimension(dimensions.decisions, selected_ids, event_times)?,
-        bugfixes: finish_dimension(dimensions.bugfixes, selected_ids, event_times)?,
-        knowledge: finish_dimension(dimensions.knowledge, selected_ids, event_times)?,
-        patterns: finish_dimension(dimensions.patterns, selected_ids, event_times)?,
-        architectures: finish_dimension(dimensions.architectures, selected_ids, event_times)?,
-        frictions: finish_dimension(dimensions.frictions, selected_ids, event_times)?,
-    })
-}
-
-fn finish_dimension(
-    values: EvidenceValues,
-    selected_ids: &BTreeSet<String>,
-    event_times: &BTreeMap<String, DateTime<Utc>>,
-) -> Result<DimensionProjection> {
-    let full_digest = dimension_digest(&values.0);
-    let total_values = values.0.len();
-    let total_evidence_refs: usize = values.0.values().map(BTreeSet::len).sum();
-    let mut candidates = Vec::new();
-    for (value, evidence_ids) in values.0 {
-        let mut retained: Vec<String> = evidence_ids
-            .iter()
-            .filter(|id| selected_ids.contains(*id))
-            .cloned()
-            .collect();
-        if retained.is_empty() {
-            continue;
-        }
-        retained.sort_by(|left, right| {
-            event_times
-                .get(right)
-                .cmp(&event_times.get(left))
-                .then_with(|| left.cmp(right))
-        });
-        let latest = *event_times
-            .get(&retained[0])
-            .expect("retained evidence event exists");
-        candidates.push((value, evidence_ids.len(), latest, retained));
-    }
-    candidates.sort_by(|left, right| {
-        right
-            .1
-            .cmp(&left.1)
-            .then_with(|| right.2.cmp(&left.2))
-            .then_with(|| left.0.cmp(&right.0))
-    });
-    let entries: Vec<DimensionEvidence> = candidates
-        .into_iter()
-        .take(MAX_DIMENSION_ENTRIES)
-        .map(|(value, support_count, _, evidence_ids)| {
-            let evidence_ids: Vec<String> = evidence_ids
-                .into_iter()
-                .take(MAX_DIMENSION_EVIDENCE_IDS)
-                .collect();
-            DimensionEvidence {
-                value: truncate_projection_text(&value),
-                original_bytes: value.len(),
-                value_digest: sha256_bytes(value.as_bytes()),
-                support_count,
-                omitted_evidence_count: support_count - evidence_ids.len(),
-                evidence_ids,
-            }
-        })
-        .collect();
-    let selected_values = entries.len();
-    let selected_evidence_refs = entries.iter().map(|entry| entry.evidence_ids.len()).sum();
-    Ok(DimensionProjection {
-        total_values,
-        selected_values,
-        omitted_values: total_values - selected_values,
-        total_evidence_refs,
-        selected_evidence_refs,
-        omitted_evidence_refs: total_evidence_refs - selected_evidence_refs,
-        full_digest,
-        entries,
     })
 }
 
@@ -462,86 +381,54 @@ pub(super) fn primary_category(categories: &[String]) -> &str {
     "summary"
 }
 
-fn extract_section_items(content: &str, section: &str) -> Vec<String> {
+pub(super) fn for_each_section_item<'a>(
+    content: &'a str,
+    section: &str,
+    mut visit: impl FnMut(&'a str),
+) {
     let mut in_section = false;
-    let mut values = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.ends_with(':') && !trimmed.starts_with('-') {
             in_section = trimmed.trim_end_matches(':') == section;
-            continue;
-        }
-        if in_section && trimmed.starts_with("- ") {
-            values.push(trimmed.trim_start_matches("- ").to_string());
+        } else if in_section && trimmed.starts_with("- ") {
+            visit(trimmed.trim_start_matches("- "));
         } else if in_section && !trimmed.is_empty() {
             in_section = false;
         }
     }
-    values
 }
 
-fn full_payload_digest(candidates: &[Candidate]) -> Result<String> {
-    let mut digest = StableDigest::new("cognitive-portrait-full-payload-v2");
-    digest.usize(candidates.len());
-    for candidate in candidates {
-        let record = &candidate.record;
-        digest.text(&record.evidence_id);
-        digest.text(&record.item_id);
-        digest.text(&record.document_id);
-        digest.text(&record.event_time.to_rfc3339());
-        digest.text(&record.source);
-        digest.text(&record.project);
-        digest.usize(record.categories.len());
-        for category in &record.categories {
-            digest.text(category);
-        }
-        digest_fingerprint(&mut digest, &record.original_fields.title);
-        digest_fingerprint(&mut digest, &record.original_fields.summary);
-        digest_fingerprint(&mut digest, &record.original_fields.content);
-        match &record.original_fields.excerpt {
-            Some(value) => {
-                digest.text("some");
-                digest_fingerprint(&mut digest, value);
-            }
-            None => digest.text("none"),
-        }
-        digest_fingerprint(&mut digest, &record.original_fields.tags);
-    }
-    Ok(digest.finish())
-}
-
-fn count_breakdown_digest(entries: &[(String, usize)]) -> String {
-    let mut digest = StableDigest::new("cognitive-portrait-count-breakdown-v2");
-    digest.usize(entries.len());
-    for (value, count) in entries {
-        digest.text(value);
-        digest.usize(*count);
-    }
-    digest.finish()
-}
-
-fn dimension_digest(values: &BTreeMap<String, BTreeSet<String>>) -> String {
-    let mut digest = StableDigest::new("cognitive-portrait-dimension-v2");
-    digest.usize(values.len());
-    for (value, evidence_ids) in values {
-        digest.text(value);
-        digest.usize(evidence_ids.len());
-        for evidence_id in evidence_ids {
-            digest.text(evidence_id);
-        }
-    }
-    digest.finish()
-}
-
-fn digest_fingerprint(digest: &mut StableDigest, value: &super::bundle::FieldFingerprint) {
-    digest.usize(value.bytes);
-    digest.text(&value.digest);
+fn has_section_item(content: &str, section: &str) -> bool {
+    let mut found = false;
+    for_each_section_item(content, section, |_| found = true);
+    found
 }
 
 pub(super) fn selection_digest(
     evidence: &[EvidenceRecord],
     dimensions: &PortraitDimensions,
-    strata: &[SelectionStratum],
+    strata: &[super::bundle::SelectionStratum],
+    evidence_byte_budget: usize,
 ) -> Result<String> {
-    sha256_json(&(PORTRAIT_PROJECTION_POLICY, evidence, dimensions, strata))
+    sha256_json(&(
+        PORTRAIT_PROJECTION_POLICY,
+        evidence_byte_budget as u64,
+        evidence,
+        dimensions,
+        strata,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_digest_commits_to_declared_evidence_budget() {
+        let dimensions = PortraitDimensions::default();
+        let first = selection_digest(&[], &dimensions, &[], 1024).unwrap();
+        let second = selection_digest(&[], &dimensions, &[], 2048).unwrap();
+        assert_ne!(first, second);
+    }
 }
