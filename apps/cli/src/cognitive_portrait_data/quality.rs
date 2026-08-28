@@ -471,8 +471,7 @@ fn contains_numeric_token(line: &str) -> bool {
         index += 1;
     }
     rendered.chars().any(|character| {
-        character.is_ascii_digit()
-            || ('０'..='９').contains(&character)
+        character.is_numeric()
             || "零〇一二三四五六七八九十百千万亿两壹贰叁肆伍陆柒捌玖拾佰仟".contains(character)
     }) || rendered.contains("百分之")
 }

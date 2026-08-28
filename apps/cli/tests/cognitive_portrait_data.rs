@@ -494,6 +494,24 @@ fn inline_code_is_visible_to_claim_and_novelty_gates() {
     assert!(!report.passed);
     assert!(report.unsupported_numeric_claims > 0);
 
+    for unsupported_body in [
+        format!(
+            "[推断，置信度：高] 当前完成 `٩٩٩` 个任务。[evidence:obs:current]\n\n{}",
+            valid_action()
+        ),
+        format!(
+            "[推断，置信度：高] 当前完成 ⑨⑨⑨ 个任务。[evidence:obs:current]\n\n{}",
+            valid_action()
+        ),
+        "[建议] 执行 `۹۹۹` 次检查。[evidence:obs:current] [owner:lifcc] [due:2026-09-01] [verify:metric|/comparison/status|eq|\"OK\"]".to_string(),
+        "[建议] 执行 ९९९ 次检查。[evidence:obs:current] [owner:lifcc] [due:2026-09-01] [verify:metric|/comparison/status|eq|\"OK\"]".to_string(),
+    ] {
+        let candidate = portrait(&format!("{fact}\n\n{unsupported_body}"));
+        let report = validate_portrait(&bundle, &candidate, None);
+        assert!(!report.passed, "Unicode numeric claim unexpectedly passed");
+        assert!(report.unsupported_numeric_claims > 0);
+    }
+
     let previous = portrait(&format!(
         "{fact}\n\n{}\n\n这是一段足够长的重复分析，可见编号 999 不会因为 Markdown 行内代码格式变化而变成新洞察。",
         valid_action()
