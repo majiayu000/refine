@@ -274,7 +274,16 @@ pub(crate) fn build_bundle_from_snapshot(
     );
     let current = build_window_data(&current_cohort, &snapshot.documents)?;
     let previous = build_window_data(&previous_cohort, &snapshot.documents)?;
-    let claim_catalog = build_claim_catalog(&current, &previous, comparison.comparable)?;
+    let claim_catalog = build_claim_catalog(
+        &current,
+        &previous,
+        &manifest.current_window,
+        manifest
+            .previous_window
+            .as_ref()
+            .context("previous window manifest is required")?,
+        comparison.comparable,
+    )?;
     let bundle = CognitivePortraitBundle {
         schema_version: PORTRAIT_BUNDLE_SCHEMA_VERSION,
         collector_version: PORTRAIT_COLLECTOR_VERSION.to_string(),
@@ -293,6 +302,8 @@ pub(crate) fn build_bundle_from_snapshot(
 fn build_claim_catalog(
     current: &PortraitWindowData,
     previous: &PortraitWindowData,
+    current_manifest: &WindowManifest,
+    previous_manifest: &WindowManifest,
     comparable: bool,
 ) -> Result<PortraitClaimCatalog> {
     let metrics = [
@@ -348,10 +359,11 @@ fn build_claim_catalog(
             });
         }
     }
-    for (window, window_label, data) in [
-        ("current", "当前窗口", current),
-        ("previous", "上一窗口", previous),
+    for (window, window_label, data, window_manifest) in [
+        ("current", "当前窗口", current, current_manifest),
+        ("previous", "上一窗口", previous, previous_manifest),
     ] {
+        add_source_manifest_claims(&mut claims, window, window_label, window_manifest)?;
         add_projection_claims(&mut claims, window, window_label, data)?;
         for (index, _) in data.evidence.iter().enumerate() {
             let claim_id = format!("fact.{window}.evidence.{index:06}");
@@ -376,6 +388,98 @@ fn build_claim_catalog(
         schema_version: PORTRAIT_CLAIM_CATALOG_VERSION,
         claims,
     })
+}
+
+fn add_source_manifest_claims(
+    claims: &mut Vec<PortraitClaim>,
+    window: &str,
+    window_label: &str,
+    manifest: &WindowManifest,
+) -> Result<()> {
+    let manifest_window = format!("{window}_window");
+    for (source, source_label) in [
+        ("claude", "Claude"),
+        ("codex", "Codex"),
+        ("platform_unknown", "platform-unknown"),
+    ] {
+        let stats = manifest
+            .source_counts
+            .iter()
+            .enumerate()
+            .find(|(_, stats)| stats.source == source);
+        let (observations, sessions, freshness, pointers) = if let Some((index, stats)) = stats {
+            let prefix = format!("/manifest/{manifest_window}/source_counts/{index}");
+            (
+                stats.observation_count,
+                stats.session_count,
+                format_freshness(stats.freshest_event_time),
+                vec![
+                    format!("{prefix}/observation_count"),
+                    format!("{prefix}/session_count"),
+                    format!("{prefix}/freshest_event_time"),
+                ],
+            )
+        } else {
+            (
+                0,
+                0,
+                "unavailable".to_string(),
+                vec![format!("/manifest/{manifest_window}/source_counts")],
+            )
+        };
+        let claim_id = format!("fact.{window}.manifest.source.{source}.coverage");
+        claims.push(PortraitClaim {
+            claim_id: claim_id.clone(),
+            kind: "fact".to_string(),
+            metric: format!("manifest.source.{source}.coverage"),
+            label: format!("{source_label} 来源覆盖与新鲜度"),
+            unit: "observation,session,timestamp".to_string(),
+            windows: vec![window.to_string()],
+            pointers,
+            values: vec![
+                u64::try_from(observations).context("source observation count exceeds u64")?,
+                u64::try_from(sessions).context("source session count exceeds u64")?,
+            ],
+            rendered_line: format!(
+                "[事实][claim:{claim_id}] {window_label}{source_label} 来源：observations={observations} observation; sessions={sessions} session; freshest_event_time={freshness}。"
+            ),
+        });
+    }
+
+    let unsupported = &manifest.unsupported_sources;
+    let claim_id = format!("fact.{window}.manifest.unsupported_sources.coverage");
+    claims.push(PortraitClaim {
+        claim_id: claim_id.clone(),
+        kind: "fact".to_string(),
+        metric: "manifest.unsupported_sources.coverage".to_string(),
+        label: "unsupported 来源覆盖与新鲜度".to_string(),
+        unit: "observation,session,timestamp".to_string(),
+        windows: vec![window.to_string()],
+        pointers: vec![
+            format!("/manifest/{manifest_window}/unsupported_sources/total_observations"),
+            format!("/manifest/{manifest_window}/unsupported_sources/total_sessions"),
+            format!("/manifest/{manifest_window}/unsupported_sources/freshest_event_time"),
+        ],
+        values: vec![
+            u64::try_from(unsupported.total_observations)
+                .context("unsupported source observation count exceeds u64")?,
+            u64::try_from(unsupported.total_sessions)
+                .context("unsupported source session count exceeds u64")?,
+        ],
+        rendered_line: format!(
+            "[事实][claim:{claim_id}] {window_label}unsupported 来源：observations={} observation; sessions={} session; freshest_event_time={}。",
+            unsupported.total_observations,
+            unsupported.total_sessions,
+            format_freshness(unsupported.freshest_event_time),
+        ),
+    });
+    Ok(())
+}
+
+fn format_freshness(freshness: Option<DateTime<Utc>>) -> String {
+    freshness
+        .map(|value| value.to_rfc3339())
+        .unwrap_or_else(|| "unavailable".to_string())
 }
 
 fn add_projection_claims(
@@ -650,6 +754,8 @@ pub(crate) fn read_bundle(path: &Path) -> Result<CognitivePortraitBundle> {
     let expected_catalog = build_claim_catalog(
         &bundle.current,
         &bundle.previous,
+        &bundle.manifest.current_window,
+        previous_manifest,
         bundle.comparison.comparable,
     )?;
     if bundle.claim_catalog != expected_catalog {

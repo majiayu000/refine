@@ -1,10 +1,12 @@
 use chrono::{DateTime, Utc};
 use refine_core::knowledge::Item;
+use serde::Serialize;
 use std::collections::BTreeMap;
+use std::io::{self, Write};
 
 use super::super::bundle::{
     DimensionEvidence, DimensionProjection, PortraitDimensions, MAX_DIMENSION_ENTRIES,
-    MAX_DIMENSION_EVIDENCE_IDS,
+    MAX_DIMENSION_EVIDENCE_IDS, MAX_WINDOW_DIMENSIONS_BYTES,
 };
 use super::hashing::{sha256_bytes, truncate_projection_text, MultisetDigest, StableDigest};
 
@@ -165,16 +167,19 @@ impl DimensionAccumulators {
         });
     }
 
-    pub(super) fn finish(self) -> PortraitDimensions {
-        PortraitDimensions {
-            projects: self.projects.finish(),
-            decisions: self.decisions.finish(),
-            bugfixes: self.bugfixes.finish(),
-            knowledge: self.knowledge.finish(),
-            patterns: self.patterns.finish(),
-            architectures: self.architectures.finish(),
-            frictions: self.frictions.finish(),
-        }
+    pub(super) fn finish(self) -> anyhow::Result<PortraitDimensions> {
+        pack_dimensions_by_json_bytes(
+            PortraitDimensions {
+                projects: self.projects.finish(),
+                decisions: self.decisions.finish(),
+                bugfixes: self.bugfixes.finish(),
+                knowledge: self.knowledge.finish(),
+                patterns: self.patterns.finish(),
+                architectures: self.architectures.finish(),
+                frictions: self.frictions.finish(),
+            },
+            MAX_WINDOW_DIMENSIONS_BYTES,
+        )
     }
 
     fn get_mut(&mut self, kind: Kind) -> &mut Accumulator {
@@ -188,6 +193,126 @@ impl DimensionAccumulators {
             Kind::Frictions => &mut self.frictions,
         }
     }
+}
+
+fn pack_dimensions_by_json_bytes(
+    dimensions: PortraitDimensions,
+    byte_budget: usize,
+) -> anyhow::Result<PortraitDimensions> {
+    let source = [
+        dimensions.projects,
+        dimensions.decisions,
+        dimensions.bugfixes,
+        dimensions.knowledge,
+        dimensions.patterns,
+        dimensions.architectures,
+        dimensions.frictions,
+    ];
+    let mut packed = source.each_ref().map(empty_projection);
+    let mut offsets = [0usize; 7];
+    loop {
+        let mut progressed = false;
+        for index in 0..source.len() {
+            let Some(candidate) = source[index].entries.get(offsets[index]).cloned() else {
+                continue;
+            };
+            offsets[index] += 1;
+            progressed = true;
+            packed[index].entries.push(candidate);
+            refresh_projection_totals(&mut packed[index]);
+            if dimensions_json_bytes(&packed)? > byte_budget {
+                packed[index].entries.pop();
+                refresh_projection_totals(&mut packed[index]);
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    let [projects, decisions, bugfixes, knowledge, patterns, architectures, frictions] = packed;
+    let result = PortraitDimensions {
+        projects,
+        decisions,
+        bugfixes,
+        knowledge,
+        patterns,
+        architectures,
+        frictions,
+    };
+    debug_assert!(serde_json::to_vec(&result)?.len() <= byte_budget);
+    Ok(result)
+}
+
+fn empty_projection(source: &DimensionProjection) -> DimensionProjection {
+    DimensionProjection {
+        total_occurrences: source.total_occurrences,
+        selected_occurrences: 0,
+        omitted_occurrences: source.total_occurrences,
+        selected_values: 0,
+        selected_evidence_refs: 0,
+        full_digest: source.full_digest.clone(),
+        entries: Vec::new(),
+    }
+}
+
+fn refresh_projection_totals(projection: &mut DimensionProjection) {
+    projection.selected_occurrences = projection
+        .entries
+        .iter()
+        .map(|entry| entry.support_count)
+        .sum();
+    projection.omitted_occurrences = projection.total_occurrences - projection.selected_occurrences;
+    projection.selected_values = projection.entries.len();
+    projection.selected_evidence_refs = projection
+        .entries
+        .iter()
+        .map(|entry| entry.evidence_ids.len())
+        .sum();
+}
+
+#[derive(Serialize)]
+struct PortraitDimensionsRef<'a> {
+    projects: &'a DimensionProjection,
+    decisions: &'a DimensionProjection,
+    bugfixes: &'a DimensionProjection,
+    knowledge: &'a DimensionProjection,
+    patterns: &'a DimensionProjection,
+    architectures: &'a DimensionProjection,
+    frictions: &'a DimensionProjection,
+}
+
+#[derive(Default)]
+struct CountingWriter(usize);
+
+impl Write for CountingWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .ok_or_else(|| io::Error::other("dimension JSON byte count overflow"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn dimensions_json_bytes(dimensions: &[DimensionProjection; 7]) -> anyhow::Result<usize> {
+    let mut writer = CountingWriter::default();
+    serde_json::to_writer(
+        &mut writer,
+        &PortraitDimensionsRef {
+            projects: &dimensions[0],
+            decisions: &dimensions[1],
+            bugfixes: &dimensions[2],
+            knowledge: &dimensions[3],
+            patterns: &dimensions[4],
+            architectures: &dimensions[5],
+            frictions: &dimensions[6],
+        },
+    )?;
+    Ok(writer.0)
 }
 
 fn for_each_value(item: &Item, project: &str, mut visit: impl FnMut(Kind, &str)) {

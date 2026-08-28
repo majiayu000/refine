@@ -51,7 +51,7 @@ fn read_utf8_bounded(path: &Path, maximum: usize, label: &str) -> Result<String>
 #[allow(unused_imports)]
 pub(crate) use bundle::{
     build_bundle_from_snapshot, collect_bundle, read_bundle, write_bundle, CognitivePortraitBundle,
-    PORTRAIT_BUNDLE_SCHEMA_VERSION, PORTRAIT_COLLECTOR_VERSION,
+    MAX_WINDOW_DIMENSIONS_BYTES, PORTRAIT_BUNDLE_SCHEMA_VERSION, PORTRAIT_COLLECTOR_VERSION,
 };
 #[allow(unused_imports)]
 pub(crate) use quality::{validate_portrait, PortraitQualityReport, PORTRAIT_QUALITY_GATE_VERSION};

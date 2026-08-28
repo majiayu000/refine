@@ -132,7 +132,7 @@ pub(super) fn build_window_data(
             selected_indices.contains(&index),
         );
     }
-    let dimensions = dimension_accumulators.finish();
+    let dimensions = dimension_accumulators.finish()?;
     let selection_digest =
         selection_digest(&evidence, &dimensions, &strata, MAX_WINDOW_EVIDENCE_BYTES)?;
     let eligible_observations = cohort.data_quality.eligible_observations;

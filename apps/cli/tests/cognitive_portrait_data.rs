@@ -9,7 +9,8 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use cognitive_portrait_data::{
     build_bundle_from_snapshot, read_bundle, validate_files, validate_portrait, write_bundle,
     CognitivePortraitBundle, MAX_PORTRAIT_BUNDLE_BYTES, MAX_PORTRAIT_CANDIDATE_BYTES,
-    MAX_PREVIOUS_PORTRAIT_BYTES, PORTRAIT_BUNDLE_SCHEMA_VERSION, PORTRAIT_COLLECTOR_VERSION,
+    MAX_PREVIOUS_PORTRAIT_BYTES, MAX_WINDOW_DIMENSIONS_BYTES, PORTRAIT_BUNDLE_SCHEMA_VERSION,
+    PORTRAIT_COLLECTOR_VERSION,
 };
 use refine_core::knowledge::{
     DocumentId, Item, ItemId, ItemType, ObservationDocumentMeta, ObservationWindowSnapshot,
@@ -154,6 +155,10 @@ fn collector_reuses_source_cohort_and_emits_traceable_evidence() {
     assert!(claim_ids.contains(&"fact.current.dimensions.knowledge.omitted_occurrences"));
     assert!(claim_ids.contains(&"fact.current.metrics.project_ranking.omitted_occurrences"));
     assert!(claim_ids.contains(&"fact.current.metrics.tool_frequency.selected_entries"));
+    assert!(claim_ids.contains(&"fact.current.manifest.source.claude.coverage"));
+    assert!(claim_ids.contains(&"fact.current.manifest.source.codex.coverage"));
+    assert!(claim_ids.contains(&"fact.current.manifest.source.platform_unknown.coverage"));
+    assert!(claim_ids.contains(&"fact.current.manifest.unsupported_sources.coverage"));
     assert!(claim_ids.contains(&"fact.current.evidence.000000"));
     assert!(claim_ids.contains(&"trend.total_sessions"));
 }
@@ -171,6 +176,33 @@ fn required_projection_disclosures_are_canonical_catalog_claims() {
     ));
     let report = validate_portrait(&bundle, &candidate, None);
     assert!(report.passed, "{:?}", report.errors);
+    assert_eq!(report.unsupported_numeric_claims, 0);
+}
+
+#[test]
+fn required_source_counts_and_freshness_are_canonical_catalog_claims() {
+    let bundle = fixture(false);
+    assert!(
+        claim_line(&bundle, "fact.current.manifest.source.codex.coverage")
+            .contains("freshest_event_time=2026-08-27T00:00:00+00:00")
+    );
+    assert!(
+        claim_line(&bundle, "fact.current.manifest.source.claude.coverage").contains(
+            "observations=0 observation; sessions=0 session; freshest_event_time=unavailable"
+        )
+    );
+    let body = [
+        "fact.current.manifest.source.claude.coverage",
+        "fact.current.manifest.source.codex.coverage",
+        "fact.current.manifest.source.platform_unknown.coverage",
+        "fact.current.manifest.unsupported_sources.coverage",
+    ]
+    .map(|claim_id| claim_line(&bundle, claim_id))
+    .join("\n\n");
+    let candidate = portrait(&format!("{body}\n\n{}", valid_action()));
+    let report = validate_portrait(&bundle, &candidate, None);
+    assert!(report.passed, "{:?}", report.errors);
+    assert_eq!(report.factual_claims, 4);
     assert_eq!(report.unsupported_numeric_claims, 0);
 }
 
@@ -302,6 +334,77 @@ fn full_payload_digest_distinguishes_omitted_null_and_empty_excerpt() {
         null_excerpt.current.evidence_selection.full_payload_digest,
         empty_excerpt.current.evidence_selection.full_payload_digest
     );
+}
+
+#[test]
+fn dimension_projection_packs_final_escaped_json_bytes() {
+    let cutoff = Utc.with_ymd_and_hms(2026, 8, 28, 0, 0, 0).unwrap();
+    let event_time = cutoff - Duration::days(1);
+    let escaped = "\u{1}".repeat(500);
+    let current: Vec<Item> = (0..256)
+        .map(|index| {
+            let category = if index < 128 { "decision" } else { "bugfix" };
+            observation_with_title(
+                &format!("escaped-dimension-{index:03}"),
+                &format!("{escaped}-title-{index:03}"),
+                Some("escaped-dimension-current"),
+                event_time,
+                &["refine", category],
+                &format!(
+                    "知识:\n- {escaped}-knowledge-{index:03}\n模式:\n- {escaped}-pattern-{index:03}\n架构:\n- {escaped}-architecture-{index:03}\n阻力:\n- {escaped}-friction-{index:03}"
+                ),
+            )
+        })
+        .collect();
+    let snapshot = || ObservationWindowSnapshot {
+        current: current.clone(),
+        previous: vec![observation(
+            "escaped-dimension-previous",
+            Some("escaped-dimension-previous-doc"),
+            cutoff - Duration::days(91),
+            &["refine"],
+            "知识:\n- previous",
+        )],
+        documents: vec![
+            ObservationDocumentMeta {
+                id: DocumentId::from("escaped-dimension-current"),
+                source: "codex-session".to_string(),
+                captured_at: event_time,
+            },
+            ObservationDocumentMeta {
+                id: DocumentId::from("escaped-dimension-previous-doc"),
+                source: "claude-code-session".to_string(),
+                captured_at: cutoff - Duration::days(91),
+            },
+        ],
+    };
+    let first = build_bundle_from_snapshot(snapshot(), cutoff, 90).unwrap();
+    let second = build_bundle_from_snapshot(snapshot(), cutoff, 90).unwrap();
+    let bytes = serde_json::to_vec(&first.current.dimensions).unwrap().len();
+    assert!(
+        bytes <= MAX_WINDOW_DIMENSIONS_BYTES,
+        "dimensions use {bytes} bytes"
+    );
+    assert!(
+        first.current.dimensions.knowledge.selected_values < 128
+            || first.current.dimensions.patterns.selected_values < 128
+            || first.current.dimensions.architectures.selected_values < 128
+            || first.current.dimensions.frictions.selected_values < 128
+    );
+    for dimension in [
+        &first.current.dimensions.knowledge,
+        &first.current.dimensions.patterns,
+        &first.current.dimensions.architectures,
+        &first.current.dimensions.frictions,
+    ] {
+        assert_eq!(dimension.total_occurrences, 256);
+        assert_eq!(
+            dimension.selected_occurrences + dimension.omitted_occurrences,
+            dimension.total_occurrences
+        );
+        assert!(dimension.full_digest.starts_with("sha256:"));
+    }
+    assert_eq!(first.current.dimensions, second.current.dimensions);
 }
 
 #[test]
