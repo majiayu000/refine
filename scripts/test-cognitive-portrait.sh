@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TEST_ROOT=$(mktemp -d)
+TEST_ROOT=$(cd "$TEST_ROOT" && pwd -P)
 REPORT_DATE=$(date '+%Y-%m-%d')
 REPORT_BASE="cognitive-portrait-${REPORT_DATE}-v4"
 trap 'rm -rf "$TEST_ROOT"' EXIT
@@ -21,6 +22,14 @@ prepare_case() {
 #!/usr/bin/env bash
 set -euo pipefail
 [[ -z "${FAKE_AGENT_LOG:-}" ]] || printf 'started\n' >> "$FAKE_AGENT_LOG"
+if [[ "${FAKE_ASSERT_ISOLATION:-0}" == "1" ]]; then
+  for secret in ANTHROPIC_API_KEY ANTHROPIC_BASE_URL GOOGLE_API_KEY GEMINI_API_KEY XAI_API_KEY GROK_API_KEY BASE_API_KEY BASE_URL OPENAI_BASE_URL OPENAI_API_BASE; do
+    [[ -z "${!secret:-}" ]] || exit 88
+  done
+  for required in --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check; do
+    [[ " $* " == *" ${required} "* ]] || exit 89
+  done
+fi
 case "${FAKE_AGENT_MODE:-normal}" in
   normal) printf '# candidate\n' > "$REFINE_COGNITIVE_PORTRAIT_OUTPUT" ;;
   exit) printf '# incomplete\n' > "$REFINE_COGNITIVE_PORTRAIT_OUTPUT"; exit 7 ;;
@@ -99,6 +108,7 @@ run_case() {
     REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" \
     REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
     FAKE_AGENT_MODE="$mode" FAKE_VALIDATOR_EXIT="$validator_exit" \
+    FAKE_ASSERT_ISOLATION=1 ANTHROPIC_API_KEY=ambient-secret BASE_URL=https://ambient.invalid \
     FAKE_INDEX_TARGET="$root/portraits/INDEX.md" \
     FAKE_HISTORY_TARGET="$root/portraits/cognitive-portrait-2026-01-01-v3.md" \
     FAKE_PORTRAIT_TARGET="$root/portraits" \
@@ -147,6 +157,39 @@ if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/pr
 fi
 [[ ! -e "$root/portraits/${REPORT_BASE}.md" ]] || fail '.failed preflight left report'
 
+prepare_case trusted-script-links
+root="$TEST_ROOT/trusted-script-links"
+mv "$root/bin/fake-collector" "$root/bin/collector-real"
+ln -s "$root/bin/collector-real" "$root/bin/fake-collector"
+if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
+  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state" \
+  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector" \
+  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+  FAKE_AGENT_MODE=normal bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
+  fail 'symlink collector accepted'
+fi
+rm "$root/bin/fake-collector"
+ln "$root/bin/collector-real" "$root/bin/fake-collector"
+if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
+  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state" \
+  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector" \
+  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+  FAKE_AGENT_MODE=normal bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
+  fail 'hard-linked collector accepted'
+fi
+
+prepare_case state-parent-symlink
+root="$TEST_ROOT/state-parent-symlink"
+mkdir "$root/real-state"
+ln -s "$root/real-state" "$root/linked-state"
+if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
+  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/linked-state/runs" \
+  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector" \
+  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+  FAKE_AGENT_MODE=normal bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
+  fail 'symlink run-state parent accepted'
+fi
+
 run_case bundle-tamper tamper-bundle
 grep -q '"metric":1' "$TEST_ROOT/bundle-tamper/portraits/evidence/${REPORT_BASE}.bundle.json" \
   || fail 'agent bundle copy replaced trusted archived bundle'
@@ -185,6 +228,28 @@ fi
 
 run_case validator-tamper tamper-validator && fail 'validator tamper accepted'
 [[ ! -e "$TEST_ROOT/validator-tamper/validator.called" ]] || fail 'modified validator executed'
+
+prepare_case crash-recovery
+root="$TEST_ROOT/crash-recovery"
+crash_env=(HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project"
+  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state"
+  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector"
+  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0
+  FAKE_INDEX_TARGET="$root/portraits/INDEX.md" FAKE_HISTORY_TARGET="$root/portraits/cognitive-portrait-2026-01-01-v3.md")
+if env -i "${crash_env[@]}" FAKE_AGENT_MODE=normal REFINE_PORTRAIT_FAILPOINT=after-bundle \
+  bash "$SCRIPT_DIR/cognitive-portrait.sh" >/dev/null 2>&1; then
+  fail 'SIGKILL publication failpoint succeeded'
+fi
+[[ -f "$root/portraits/.portrait-publish.journal" ]] || fail 'crash journal was not durable'
+if env -i "${crash_env[@]}" FAKE_AGENT_MODE=exit bash "$SCRIPT_DIR/cognitive-portrait.sh" >/dev/null 2>&1; then
+  fail 'recovery probe unexpectedly succeeded'
+fi
+[[ ! -e "$root/portraits/.portrait-publish.journal" \
+  && ! -e "$root/portraits/.portrait-publish.index-backup" ]] || fail 'recovery state remained'
+[[ ! -e "$root/portraits/${REPORT_BASE}.md" \
+  && ! -e "$root/portraits/evidence/${REPORT_BASE}.bundle.json" \
+  && ! -e "$root/portraits/evidence/${REPORT_BASE}.quality.json" ]] || fail 'crash recovery left partial artifacts'
+[[ "$(cat "$root/portraits/INDEX.md")" == '# Index' ]] || fail 'crash recovery did not restore index'
 
 for path_kind in report evidence; do
   prepare_case "${path_kind}-symlink"

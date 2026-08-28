@@ -102,10 +102,14 @@ structure and novelty checks, so metadata-only edits do not count as insight.
 A failed gate returns non-zero. One kernel-backed lock owns a run. The scheduled
 wrapper gives the untrusted agent a unique writable staging directory and an
 untrusted bundle copy; the trusted bundle, validator, skill, archive, history,
-and index remain outside that writable root and are hash checked. The agent
+and index remain outside that writable root and are hash checked. Codex runs
+ephemerally with user config/rules ignored, a minimal environment, and no
+Mirror write grant. The agent
 writes only `candidate.md`. The host validates and atomically publishes the
-fixed v4 report name, evidence, and index row; failed candidates never enter the
-archive or throttle scan. Existing names, symlinks, and hard links fail closed.
+fixed v4 report name, evidence, and index row. A durable journal and INDEX
+backup recover host crashes before throttle evaluation. Failed candidates never
+enter the archive or throttle scan. Existing names, symlinks, and hard links
+fail closed. Trusted run state lives under owner-only `~/.refine/`, not Mirror.
 
 ```text
 cognitive-portrait-YYYY-MM-DD-v4.md

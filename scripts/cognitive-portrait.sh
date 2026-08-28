@@ -31,13 +31,15 @@ fi
 PROJECT_DIR="${REFINE_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 PORTRAIT_DIR="${REFINE_PORTRAIT_DIR:-${PROJECT_DIR}/docs/cognitive-portraits}"
 INDEX_FILE="${PORTRAIT_DIR}/INDEX.md"
+PUBLICATION_JOURNAL="${PORTRAIT_DIR}/.portrait-publish.journal"
+PUBLICATION_INDEX_BACKUP="${PORTRAIT_DIR}/.portrait-publish.index-backup"
 AGENT_BIN="${REFINE_PORTRAIT_AGENT:-codex}"
 AGENT_SANDBOX="${REFINE_PORTRAIT_SANDBOX:-workspace-write}"
 MIN_INTERVAL_DAYS="${REFINE_PORTRAIT_MIN_INTERVAL_DAYS:-13}"
 COLLECTOR_SCRIPT="${REFINE_PORTRAIT_COLLECTOR:-${SCRIPT_DIR}/collect-cognitive-portrait.sh}"
 VALIDATOR_SCRIPT="${REFINE_PORTRAIT_VALIDATOR:-${SCRIPT_DIR}/validate-cognitive-portrait.sh}"
 SKILL_FILE="${REFINE_PORTRAIT_SKILL:-${PROJECT_DIR}/skills/cognitive-portrait/SKILL.md}"
-STATE_ROOT="${REFINE_PORTRAIT_STATE_ROOT:-${HOME}/.mirror/cognitive-portrait-runs}"
+STATE_ROOT="${REFINE_PORTRAIT_STATE_ROOT:-${HOME}/.refine/cognitive-portrait-runs}"
 STAGING_ROOT="${REFINE_PORTRAIT_STAGING_ROOT:-${TMPDIR:-/tmp}}"
 LOG_PREFIX="[refine-portrait]"
 
@@ -61,17 +63,34 @@ sha256_file() {
 }
 
 file_identity() {
-  stat -f '%d:%i:%l' "$1" 2>/dev/null || stat -c '%d:%i:%h' "$1" 2>/dev/null
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    stat -f '%d:%i:%l' "$1"
+  else
+    stat -c '%d:%i:%h' "$1"
+  fi
+}
+
+file_owner() {
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    stat -f '%u' "$1"
+  else
+    stat -c '%u' "$1"
+  fi
 }
 
 directory_identity() {
   [[ -d "$1" && ! -L "$1" ]] || return 1
-  stat -f '%d:%i' "$1" 2>/dev/null || stat -c '%d:%i' "$1" 2>/dev/null
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    stat -f '%d:%i' "$1"
+  else
+    stat -c '%d:%i' "$1"
+  fi
 }
 
 require_private_regular() {
   [[ -f "$1" && ! -L "$1" ]] || return 1
-  [[ "$(file_identity "$1" | awk -F: '{print $3}')" == "1" ]]
+  [[ "$(file_identity "$1" | awk -F: '{print $3}')" == "1" \
+    && "$(file_owner "$1")" == "$(id -u)" ]]
 }
 
 atomic_copy() {
@@ -91,6 +110,34 @@ atomic_copy() {
   mv -- "$temporary" "$destination"
 }
 
+atomic_replace() {
+  local source="$1" destination="$2" parent temporary
+  parent=$(dirname "$destination")
+  [[ "$parent" == "$PORTRAIT_DIR" && -d "$parent" && ! -L "$parent" ]] || return 1
+  temporary=$(mktemp "${parent}/.portrait-replace.XXXXXX") || return 1
+  cp -p -- "$source" "$temporary" || { rm -f -- "$temporary"; return 1; }
+  chmod 600 "$temporary" 2>/dev/null || true
+  rm -f -- "$destination" || { rm -f -- "$temporary"; return 1; }
+  mv -f -- "$temporary" "$destination"
+}
+
+recover_incomplete_publication() {
+  local base report bundle quality
+  [[ -e "$PUBLICATION_JOURNAL" || -L "$PUBLICATION_JOURNAL" ]] || return 0
+  require_private_regular "$PUBLICATION_JOURNAL" \
+    && require_private_regular "$PUBLICATION_INDEX_BACKUP" || return 1
+  IFS= read -r base < "$PUBLICATION_JOURNAL"
+  [[ "$base" =~ ^cognitive-portrait-[0-9]{4}-[0-9]{2}-[0-9]{2}-v4$ ]] || return 1
+  report="${PORTRAIT_DIR}/${base}.md"
+  bundle="${PORTRAIT_DIR}/evidence/${base}.bundle.json"
+  quality="${PORTRAIT_DIR}/evidence/${base}.quality.json"
+  rm -f -- "$report" "$bundle" "$quality"
+  atomic_replace "$PUBLICATION_INDEX_BACKUP" "$INDEX_FILE" || return 1
+  rm -f -- "$PUBLICATION_JOURNAL" "$PUBLICATION_INDEX_BACKUP"
+  sync
+  log "recovered incomplete publication: ${base}"
+}
+
 tree_fingerprint() {
   local root="$1"
   find "$root" -type f -print | LC_ALL=C sort | while IFS= read -r file; do
@@ -108,7 +155,10 @@ if [[ ! -f "$INDEX_FILE" || -L "$INDEX_FILE" ]] || ! require_private_regular "$I
   log "ERROR: INDEX.md must be a regular single-link file"
   exit 1
 fi
-if [[ ! -x "$COLLECTOR_SCRIPT" || ! -x "$VALIDATOR_SCRIPT" || ! -f "$SKILL_FILE" ]]; then
+if [[ ! -x "$COLLECTOR_SCRIPT" || ! -x "$VALIDATOR_SCRIPT" || ! -f "$SKILL_FILE" ]] \
+  || ! require_private_regular "$COLLECTOR_SCRIPT" \
+  || ! require_private_regular "$VALIDATOR_SCRIPT" \
+  || ! require_private_regular "$SKILL_FILE"; then
   log "ERROR: trusted collector, validator, or skill is unavailable"
   exit 1
 fi
@@ -122,8 +172,24 @@ if ! command -v "$AGENT_BIN" >/dev/null 2>&1; then
   notify "agent 未找到" "Refine Cognitive Portrait 失败"
   exit 1
 fi
+if [[ "$(basename "$AGENT_BIN")" == "codex" ]]; then
+  agent_help=$("$AGENT_BIN" exec --help 2>&1) || {
+    log "ERROR: cannot inspect Codex automation flags"
+    exit 1
+  }
+  for required_flag in --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check; do
+    grep -q -- "$required_flag" <<<"$agent_help" || {
+      log "ERROR: Codex lacks required isolation flag ${required_flag}"
+      exit 1
+    }
+  done
+fi
 if find "$PORTRAIT_DIR" \( -type l -o -type f -links +1 \) -print -quit | grep -q .; then
   log "ERROR: archive contains a symlink or hard-linked file"
+  exit 1
+fi
+if ! recover_incomplete_publication; then
+  log "ERROR: incomplete publication journal is unsafe or unrecoverable"
   exit 1
 fi
 if [[ -e "${PORTRAIT_DIR}/.failed" && ! -d "${PORTRAIT_DIR}/.failed" ]] \
@@ -150,8 +216,8 @@ if [[ -n "$latest" ]]; then
   fi
 fi
 
-if [[ -L "$STATE_ROOT" ]]; then
-  log "ERROR: refusing symlink run-state root"
+if [[ "$STATE_ROOT" != /* ]]; then
+  log "ERROR: run-state root must be absolute"
   exit 1
 fi
 if [[ ! -d "$STAGING_ROOT" ]]; then
@@ -159,8 +225,28 @@ if [[ ! -d "$STAGING_ROOT" ]]; then
   exit 1
 fi
 STAGING_ROOT=$(cd "$STAGING_ROOT" && pwd -P)
+state_parent=$(dirname "$STATE_ROOT")
+if [[ -L "$state_parent" ]]; then
+  log "ERROR: refusing symlink run-state parent"
+  exit 1
+fi
+mkdir -p "$state_parent"
+state_parent_physical=$(cd "$state_parent" && pwd -P)
+if [[ "$state_parent_physical" != "$state_parent" || "$(file_owner "$state_parent")" != "$(id -u)" ]]; then
+  log "ERROR: run-state parent must be canonical and owned by the current user"
+  exit 1
+fi
+chmod 700 "$state_parent" 2>/dev/null || true
+if [[ -L "$STATE_ROOT" ]]; then
+  log "ERROR: refusing symlink run-state root"
+  exit 1
+fi
 mkdir -p "$STATE_ROOT"
 chmod 700 "$STATE_ROOT" 2>/dev/null || true
+if [[ "$(file_owner "$STATE_ROOT")" != "$(id -u)" ]]; then
+  log "ERROR: run-state root is not owned by the current user"
+  exit 1
+fi
 trusted_dir=$(mktemp -d "${STATE_ROOT}/trusted.XXXXXX")
 staging_dir=$(mktemp -d "${STAGING_ROOT%/}/refine-portrait-agent.XXXXXX")
 chmod 700 "$trusted_dir" "$staging_dir"
@@ -239,6 +325,11 @@ trap 'forward_agent_signal INT 130' INT
 trap 'forward_agent_signal TERM 143' TERM
 
 cutoff=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+if ! require_private_regular "$COLLECTOR_SCRIPT" \
+  || [[ "$(sha256_file "$COLLECTOR_SCRIPT")" != "$collector_hash" ]]; then
+  log "ERROR: trusted collector identity changed before execution"
+  exit 1
+fi
 if ! "$COLLECTOR_SCRIPT" --period 90 --cutoff "$cutoff" --output "$bundle_file"; then
   log "ERROR: deterministic collector failed"
   exit 1
@@ -256,13 +347,25 @@ export REFINE_COGNITIVE_PORTRAIT_BUNDLE="$agent_bundle"
 export REFINE_COGNITIVE_PORTRAIT_PREVIOUS="${agent_previous:-}"
 export REFINE_COGNITIVE_PORTRAIT_OUTPUT="$agent_candidate"
 prompt="Read ${SKILL_FILE} and generate one cognitive portrait from the supplied bundle. Write only ${agent_candidate}; do not edit the repository, archive, evidence, input bundle, validator, or history."
+agent_env=(
+  "HOME=${HOME}"
+  "PATH=${PATH}"
+  "REFINE_COGNITIVE_PORTRAIT_BUNDLE=${agent_bundle}"
+  "REFINE_COGNITIVE_PORTRAIT_PREVIOUS=${agent_previous:-}"
+  "REFINE_COGNITIVE_PORTRAIT_OUTPUT=${agent_candidate}"
+)
+for allowed_env in TMPDIR CODEX_HOME OPENAI_API_KEY OPENAI_ORG_ID OPENAI_PROJECT SSL_CERT_FILE SSL_CERT_DIR \
+  FAKE_AGENT_MODE FAKE_AGENT_LOG FAKE_ASSERT_ISOLATION FAKE_INDEX_TARGET FAKE_HISTORY_TARGET \
+  FAKE_PORTRAIT_TARGET FAKE_VALIDATOR_TARGET FAKE_VALIDATOR_MARKER FAKE_VICTIM \
+  FAKE_DESCENDANT_MARKER; do
+  [[ -z "${!allowed_env:-}" ]] || agent_env+=("${allowed_env}=${!allowed_env}")
+done
 log "running untrusted agent in isolated staging directory"
 rc=0
 (cd "$staging_dir" && exec /usr/bin/perl -MPOSIX=setsid -e 'setsid() or die "setsid failed: $!"; exec @ARGV or die "exec failed: $!"' -- \
-  env -u REFINE_ROOT -u REFINE_PORTRAIT_DIR -u REFINE_PORTRAIT_COLLECTOR \
-    -u REFINE_PORTRAIT_VALIDATOR -u REFINE_PORTRAIT_SKILL -u REFINE_PORTRAIT_STATE_ROOT \
-    -u REFINE_PORTRAIT_STAGING_ROOT \
-    "$AGENT_BIN" exec --ephemeral --sandbox "$AGENT_SANDBOX" "$prompt") 2>&1 &
+  env -i "${agent_env[@]}" \
+    "$AGENT_BIN" exec --ephemeral --ignore-user-config --ignore-rules \
+      --skip-git-repo-check --sandbox "$AGENT_SANDBOX" "$prompt") 2>&1 &
 agent_pid=$!
 wait "$agent_pid" || rc=$?
 agent_pid=""
@@ -306,6 +409,11 @@ fi
 
 validator_args=(--bundle "$bundle_file" --portrait "$candidate_trusted" --output "$quality_file")
 [[ -n "$latest" ]] && validator_args+=(--previous "$latest")
+if ! require_private_regular "$VALIDATOR_SCRIPT" \
+  || [[ "$(sha256_file "$VALIDATOR_SCRIPT")" != "$validator_hash" ]]; then
+  log "ERROR: trusted validator identity changed before execution"
+  exit 1
+fi
 if ! "$VALIDATOR_SCRIPT" "${validator_args[@]}"; then
   log "ERROR: candidate failed evidence quality gates"
   exit 1
@@ -330,12 +438,30 @@ for destination in "$report_destination" "$bundle_destination" "$quality_destina
   fi
 done
 
+if [[ -e "$PUBLICATION_JOURNAL" || -L "$PUBLICATION_JOURNAL" \
+  || -e "$PUBLICATION_INDEX_BACKUP" || -L "$PUBLICATION_INDEX_BACKUP" ]]; then
+  log "ERROR: refusing to overwrite publication recovery state"
+  exit 1
+fi
+atomic_copy "$INDEX_FILE" "$PUBLICATION_INDEX_BACKUP"
+journal_stage=$(mktemp "${PORTRAIT_DIR}/.portrait-journal.XXXXXX")
+printf '%s\n' "${new_base%.md}" > "$journal_stage"
+chmod 600 "$journal_stage" 2>/dev/null || true
+mv -- "$journal_stage" "$PUBLICATION_JOURNAL"
+sync
+
 atomic_copy "$bundle_file" "$bundle_destination"
 published_bundle="$bundle_destination"
+sync
+if [[ "${REFINE_PORTRAIT_FAILPOINT:-}" == "after-bundle" ]]; then
+  kill -KILL "$$"
+fi
 atomic_copy "$quality_file" "$quality_destination"
 published_quality="$quality_destination"
+sync
 atomic_copy "$candidate_trusted" "$report_destination"
 published_report="$report_destination"
+sync
 index_stage="${trusted_dir}/INDEX.next.md"
 index_row="| [${report_date}](./${new_base}) | v4 | bundle | evidence | ✅ | ✅ | ✅ | ✅ | deterministic collector + gated agent | ✅ |"
 awk -v row="$index_row" '
@@ -349,6 +475,9 @@ awk -v row="$index_row" '
   END { if (!inserted) print row }
 ' "$INDEX_FILE" > "$index_stage"
 restore_archive_file "$index_stage" "$INDEX_FILE"
+sync
+rm -f -- "$PUBLICATION_JOURNAL" "$PUBLICATION_INDEX_BACKUP"
+sync
 run_committed=1
 trap - EXIT HUP INT TERM
 chmod 700 "$staging_dir" 2>/dev/null || true

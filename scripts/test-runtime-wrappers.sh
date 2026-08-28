@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/refine-runtime-wrapper-test.XXXXXX")
+TEST_ROOT=$(cd "$TEST_ROOT" && pwd -P)
 trap 'rm -rf "$TEST_ROOT"' EXIT HUP INT TERM
 
 fail() {
@@ -92,6 +93,29 @@ run_refine_runtime_job_locked true || fail 'runtime job lock treated a stale fil
 if run_refine_runtime_job_locked bash -c 'exit 17'; then
   fail 'runtime job lock discarded the child exit status'
 fi
+
+printf 'victim-safe\n' > "${TEST_ROOT}/lock-victim"
+rm -f "$lock_file"
+ln -s "${TEST_ROOT}/lock-victim" "$lock_file"
+if run_refine_runtime_job_locked true >/dev/null 2>&1; then
+  fail 'runtime lock accepted a symlink file'
+fi
+[[ "$(cat "${TEST_ROOT}/lock-victim")" == 'victim-safe' ]] \
+  || fail 'runtime lock followed a symlink victim'
+rm -f "$lock_file"
+printf 'lock\n' > "${TEST_ROOT}/lock-hardlink-source"
+ln "${TEST_ROOT}/lock-hardlink-source" "$lock_file"
+if run_refine_runtime_job_locked true >/dev/null 2>&1; then
+  fail 'runtime lock accepted a hard-linked file'
+fi
+rm -f "$lock_file" "${TEST_ROOT}/lock-hardlink-source"
+mkdir "${TEST_ROOT}/real-lock-parent"
+ln -s "${TEST_ROOT}/real-lock-parent" "${TEST_ROOT}/linked-lock-parent"
+REFINE_RUNTIME_JOB_LOCK_FILE="${TEST_ROOT}/linked-lock-parent/runtime.lock"
+if run_refine_runtime_job_locked true >/dev/null 2>&1; then
+  fail 'runtime lock accepted a symlink parent'
+fi
+REFINE_RUNTIME_JOB_LOCK_FILE="$lock_file"
 
 # Exercise every installed backend. Two simultaneous contenders must remain
 # strictly serialized even when a stale lock file already exists on disk.

@@ -52,8 +52,10 @@
   `~/Library/LaunchAgents/com.lifcc.refine-cognitive-portrait.plist`。每周日 10:00
   触发 `scripts/cognitive-portrait.sh`，脚本按最新产物日期做 13 天节流 ⇒ 实际双周一份；
   agent 缺失或未产出新画像时 error 日志 + 通知失败 + 非零退出。
-  已于 2026-07-23 `launchctl load` 生效。agent 以 `--sandbox workspace-write` 运行（最小权限，
-  可用 `REFINE_PORTRAIT_SANDBOX` 覆盖）；plist 使用安装时发现的 agent 绝对路径及其
+  已于 2026-07-23 `launchctl load` 生效。agent 以 `--sandbox workspace-write` 运行，但
+  writable workspace 仅为每次运行的随机 staging 目录；归档、INDEX、trusted bundle 和
+  validator 均由 host wrapper 独占。Codex 运行同时忽略用户配置/规则并使用 ephemeral
+  session。plist 使用安装时发现的 agent 绝对路径及其
   runtime PATH。升级 agent runtime 后重新运行安装命令即可刷新。
 - **Phase 3.1（当前）**: v4 固定 cutoff 证据 bundle + evidence quality gate，见 [SPEC.md](./SPEC.md)
 - **Phase 4（长期）**: 处方追踪 + 指标自校准 + 自我演进
