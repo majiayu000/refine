@@ -134,7 +134,7 @@ impl ProjectIdentityResolver {
                         .alias_keys
                         .iter()
                         .any(|alias| bare_aliases.contains(alias));
-                let identity_is_bounded = candidate.qualified_identity.contains("~bytes=");
+                let identity_is_bounded = candidate.qualified_identity.contains("~%bytes=");
                 let canonical = if has_collision || inferred_alias_contested || identity_is_bounded
                 {
                     candidate.qualified_identity.clone()
