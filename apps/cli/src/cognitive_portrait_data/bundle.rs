@@ -352,6 +352,7 @@ fn build_claim_catalog(
         ("current", "当前窗口", current),
         ("previous", "上一窗口", previous),
     ] {
+        add_projection_claims(&mut claims, window, window_label, data)?;
         for (index, _) in data.evidence.iter().enumerate() {
             let claim_id = format!("fact.{window}.evidence.{index:06}");
             let pointer = format!("/{window}/evidence/{index}");
@@ -375,6 +376,172 @@ fn build_claim_catalog(
         schema_version: PORTRAIT_CLAIM_CATALOG_VERSION,
         claims,
     })
+}
+
+fn add_projection_claims(
+    claims: &mut Vec<PortraitClaim>,
+    window: &str,
+    window_label: &str,
+    data: &PortraitWindowData,
+) -> Result<()> {
+    for (metric, label, unit, pointer, value) in [
+        (
+            "evidence_selection.eligible_observations",
+            "可用观察总量",
+            "observation",
+            format!("/{window}/evidence_selection/eligible_observations"),
+            data.evidence_selection.eligible_observations,
+        ),
+        (
+            "evidence_selection.selected_observations",
+            "保留证据观察量",
+            "observation",
+            format!("/{window}/evidence_selection/selected_observations"),
+            data.evidence_selection.selected_observations,
+        ),
+        (
+            "evidence_selection.omitted_observations",
+            "省略证据观察量",
+            "observation",
+            format!("/{window}/evidence_selection/omitted_observations"),
+            data.evidence_selection.omitted_observations,
+        ),
+    ] {
+        push_projection_claim(
+            claims,
+            window,
+            window_label,
+            metric,
+            label,
+            unit,
+            pointer,
+            value,
+        )?;
+    }
+    for (name, label, dimension) in [
+        ("projects", "项目维度", &data.dimensions.projects),
+        ("decisions", "决策维度", &data.dimensions.decisions),
+        ("bugfixes", "修复维度", &data.dimensions.bugfixes),
+        ("knowledge", "知识维度", &data.dimensions.knowledge),
+        ("patterns", "模式维度", &data.dimensions.patterns),
+        ("architectures", "架构维度", &data.dimensions.architectures),
+        ("frictions", "阻力维度", &data.dimensions.frictions),
+    ] {
+        for (field, field_label, unit, value) in [
+            (
+                "total_occurrences",
+                "完整 occurrence 总量",
+                "occurrence",
+                dimension.total_occurrences,
+            ),
+            (
+                "selected_occurrences",
+                "保留 occurrence 总量",
+                "occurrence",
+                dimension.selected_occurrences,
+            ),
+            (
+                "omitted_occurrences",
+                "省略 occurrence 总量",
+                "occurrence",
+                dimension.omitted_occurrences,
+            ),
+            (
+                "selected_values",
+                "保留值总量",
+                "value",
+                dimension.selected_values,
+            ),
+            (
+                "selected_evidence_refs",
+                "保留证据引用总量",
+                "reference",
+                dimension.selected_evidence_refs,
+            ),
+        ] {
+            let metric = format!("dimensions.{name}.{field}");
+            push_projection_claim(
+                claims,
+                window,
+                window_label,
+                &metric,
+                &format!("{label}{field_label}"),
+                unit,
+                format!("/{window}/dimensions/{name}/{field}"),
+                value,
+            )?;
+        }
+    }
+    for (name, label, breakdown) in [
+        ("project_ranking", "项目排名", &data.metrics.project_ranking),
+        ("tool_frequency", "工具频率", &data.metrics.tool_frequency),
+    ] {
+        for (field, field_label, unit, value) in [
+            (
+                "total_occurrences",
+                "完整 occurrence 总量",
+                "occurrence",
+                breakdown.total_occurrences,
+            ),
+            (
+                "selected_occurrences",
+                "保留 occurrence 总量",
+                "occurrence",
+                breakdown.selected_occurrences,
+            ),
+            (
+                "omitted_occurrences",
+                "省略 occurrence 总量",
+                "occurrence",
+                breakdown.omitted_occurrences,
+            ),
+            (
+                "selected_entries",
+                "保留条目总量",
+                "entry",
+                breakdown.selected_entries,
+            ),
+        ] {
+            let metric = format!("metrics.{name}.{field}");
+            push_projection_claim(
+                claims,
+                window,
+                window_label,
+                &metric,
+                &format!("{label}{field_label}"),
+                unit,
+                format!("/{window}/metrics/{name}/{field}"),
+                value,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_projection_claim(
+    claims: &mut Vec<PortraitClaim>,
+    window: &str,
+    window_label: &str,
+    metric: &str,
+    label: &str,
+    unit: &str,
+    pointer: String,
+    value: usize,
+) -> Result<()> {
+    let claim_id = format!("fact.{window}.{metric}");
+    claims.push(PortraitClaim {
+        claim_id: claim_id.clone(),
+        kind: "fact".to_string(),
+        metric: metric.to_string(),
+        label: label.to_string(),
+        unit: unit.to_string(),
+        windows: vec![window.to_string()],
+        pointers: vec![pointer],
+        values: vec![u64::try_from(value).context("portrait projection count exceeds u64")?],
+        rendered_line: format!("[事实][claim:{claim_id}] {window_label}{label}：{value} {unit}。"),
+    });
+    Ok(())
 }
 
 fn metric_value(metrics: &PortraitMetrics, metric: &str) -> Result<usize> {
@@ -478,6 +645,8 @@ pub(crate) fn read_bundle(path: &Path) -> Result<CognitivePortraitBundle> {
     }
     validate_window_manifest(&bundle.manifest.current_window, "current")?;
     validate_window_manifest(previous_manifest, "previous")?;
+    validate_window_projection(&bundle.current, "current")?;
+    validate_window_projection(&bundle.previous, "previous")?;
     let expected_catalog = build_claim_catalog(
         &bundle.current,
         &bundle.previous,
@@ -488,8 +657,6 @@ pub(crate) fn read_bundle(path: &Path) -> Result<CognitivePortraitBundle> {
             "SCHEMA_INVALID: claim catalog disagrees with trusted metrics or canonical rendering"
         );
     }
-    validate_window_projection(&bundle.current, "current")?;
-    validate_window_projection(&bundle.previous, "previous")?;
     enforce_bundle_budgets(&bundle)?;
     Ok(bundle)
 }

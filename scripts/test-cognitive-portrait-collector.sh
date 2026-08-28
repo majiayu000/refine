@@ -54,6 +54,10 @@ jq -e '.manifest.manifest_version == 2' "$bundle" >/dev/null \
   || fail 'insights manifest version was not bumped with the bounded source schema'
 jq -e '.claim_catalog.schema_version == 2
   and ([.claim_catalog.claims[].claim_id] == ([.claim_catalog.claims[].claim_id] | sort | unique))
+  and ([.claim_catalog.claims[].claim_id] | index("fact.current.evidence_selection.omitted_observations") != null)
+  and ([.claim_catalog.claims[].claim_id] | index("fact.current.dimensions.knowledge.omitted_occurrences") != null)
+  and ([.claim_catalog.claims[].claim_id] | index("fact.current.metrics.project_ranking.omitted_occurrences") != null)
+  and ([.claim_catalog.claims[].claim_id] | index("fact.current.metrics.tool_frequency.selected_entries") != null)
   and ([.claim_catalog.claims[].kind] | index("trend") == null)' "$bundle" >/dev/null \
   || fail 'DEGRADED bundle claim catalog is not stable or trend-free'
 jq -e '.current.evidence | map(.item_id) | sort == ["codex-item", "remem-item"]' "$bundle" >/dev/null \

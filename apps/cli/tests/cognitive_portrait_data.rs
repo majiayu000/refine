@@ -150,8 +150,28 @@ fn collector_reuses_source_cohort_and_emits_traceable_evidence() {
         .collect();
     assert!(claim_ids.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(claim_ids.contains(&"fact.current.total_sessions"));
+    assert!(claim_ids.contains(&"fact.current.evidence_selection.omitted_observations"));
+    assert!(claim_ids.contains(&"fact.current.dimensions.knowledge.omitted_occurrences"));
+    assert!(claim_ids.contains(&"fact.current.metrics.project_ranking.omitted_occurrences"));
+    assert!(claim_ids.contains(&"fact.current.metrics.tool_frequency.selected_entries"));
     assert!(claim_ids.contains(&"fact.current.evidence.000000"));
     assert!(claim_ids.contains(&"trend.total_sessions"));
+}
+
+#[test]
+fn required_projection_disclosures_are_canonical_catalog_claims() {
+    let bundle = fixture(false);
+    let candidate = portrait(&format!(
+        "{}\n\n{}",
+        claim_line(
+            &bundle,
+            "fact.current.evidence_selection.omitted_observations"
+        ),
+        valid_action()
+    ));
+    let report = validate_portrait(&bundle, &candidate, None);
+    assert!(report.passed, "{:?}", report.errors);
+    assert_eq!(report.unsupported_numeric_claims, 0);
 }
 
 #[test]
