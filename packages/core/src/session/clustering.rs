@@ -249,7 +249,7 @@ pub fn cluster_observations_with_resolver(
     let mut doc_project_map: HashMap<String, String> = HashMap::new();
     for (item, tags) in &obs_with_tags {
         if let Some(doc_id) = item.document_id() {
-            if let Some(ProjectResolution::Canonical(name)) = resolver.resolve_tags(tags) {
+            if let Some(ProjectResolution::Canonical(name)) = resolver.resolve_item(item, tags) {
                 doc_project_map
                     .entry(doc_id.as_str().to_string())
                     .and_modify(|existing| {
@@ -276,7 +276,7 @@ pub fn cluster_observations_with_resolver(
 
     for (item, tags) in &obs_with_tags {
         // Try own tags first, then inherit from session's summary item
-        let own_resolution = resolver.resolve_tags(tags);
+        let own_resolution = resolver.resolve_item(item, tags);
         if let Some(ProjectResolution::AmbiguousAlias(alias)) = &own_resolution {
             data_quality.ambiguous_project_alias_observations += 1;
             ambiguous_aliases.insert(alias.clone());

@@ -261,7 +261,7 @@ fn build_portrait_cohort<'a>(
     for item in &eligible_items {
         let tags: Vec<&str> = item.tags().iter().map(|tag| tag.as_str()).collect();
         if let (Some(document_id), Some(ProjectResolution::Canonical(project))) =
-            (item.document_id(), resolver.resolve_tags(&tags))
+            (item.document_id(), resolver.resolve_item(item, &tags))
         {
             document_projects
                 .entry(document_id.as_str())
@@ -285,7 +285,7 @@ fn build_portrait_cohort<'a>(
     let mut ambiguous_aliases = HashSet::new();
     for item in &eligible_items {
         let tags: Vec<&str> = item.tags().iter().map(|tag| tag.as_str()).collect();
-        let own_resolution = resolver.resolve_tags(&tags);
+        let own_resolution = resolver.resolve_item(item, &tags);
         if let Some(ProjectResolution::AmbiguousAlias(alias)) = &own_resolution {
             data_quality.ambiguous_project_alias_observations += 1;
             ambiguous_aliases.insert(alias.clone());
