@@ -416,16 +416,18 @@ fn soft_wrapping_visible_prose_does_not_create_false_novelty() {
 fn catalog_claims_in_quotes_code_or_html_do_not_count() {
     let bundle = fixture(false);
     let claim = claim_line(&bundle, "fact.current.total_sessions");
-    for hidden in [
-        format!("> {claim}"),
-        format!("`{claim}`"),
-        format!("<!-- {claim} -->"),
-    ] {
+    for hidden in [format!("> {claim}"), format!("<!-- {claim} -->")] {
         let candidate = portrait(&format!("{hidden}\n\n{}", valid_action()));
         let report = validate_portrait(&bundle, &candidate, None);
         assert!(!report.passed, "hidden claim unexpectedly passed: {hidden}");
         assert_eq!(report.factual_claims, 0);
     }
+
+    let inline_code = portrait(&format!("`{claim}`\n\n{}", valid_action()));
+    let report = validate_portrait(&bundle, &inline_code, None);
+    assert!(!report.passed);
+    assert_eq!(report.factual_claims, 1);
+    assert_eq!(report.unsupported_numeric_claims, 1);
 
     let html = portrait(&format!("<span>{claim}</span>\n\n{}", valid_action()));
     let report = validate_portrait(&bundle, &html, None);
@@ -462,6 +464,44 @@ fn inferences_require_valid_allowlisted_evidence() {
     let report = validate_portrait(&bundle, &valid, None);
     assert!(report.passed, "{:?}", report.errors);
     assert_eq!(report.inference_traceability_rate, 1.0);
+}
+
+#[test]
+fn inline_code_is_visible_to_claim_and_novelty_gates() {
+    let bundle = fixture(false);
+    let fact = claim_line(&bundle, "fact.current.total_sessions");
+    let inference = portrait(&format!(
+        "{fact}\n\n[推断，置信度：高] session 数为 `999`。[evidence:obs:current]\n\n{}",
+        valid_action()
+    ));
+    let report = validate_portrait(&bundle, &inference, None);
+    assert!(!report.passed);
+    assert_eq!(report.inference_traceability_rate, 1.0);
+    assert!(report.unsupported_numeric_claims > 0);
+
+    let inline_fact = portrait(&format!(
+        "[事实] 当前窗口有 `999` 个 session。[evidence:obs:current]\n\n{}",
+        valid_action()
+    ));
+    let report = validate_portrait(&bundle, &inline_fact, None);
+    assert!(!report.passed);
+    assert!(report.unsupported_numeric_claims > 0);
+
+    let inline_action = portrait(&format!(
+        "{fact}\n\n[建议] 执行 `999` 次检查。[evidence:obs:current] [owner:lifcc] [due:2026-09-01] [verify:metric|/comparison/status|eq|\"OK\"]"
+    ));
+    let report = validate_portrait(&bundle, &inline_action, None);
+    assert!(!report.passed);
+    assert!(report.unsupported_numeric_claims > 0);
+
+    let previous = portrait(&format!(
+        "{fact}\n\n{}\n\n这是一段足够长的重复分析，可见编号 999 不会因为 Markdown 行内代码格式变化而变成新洞察。",
+        valid_action()
+    ));
+    let candidate = previous.replace("可见编号 999", "可见编号 `999`");
+    let report = validate_portrait(&bundle, &candidate, Some(&previous));
+    assert!(!report.passed);
+    assert_eq!(report.novelty_rate, Some(0.0));
 }
 
 #[test]

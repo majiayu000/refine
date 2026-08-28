@@ -89,7 +89,11 @@ pub(super) fn scan_markdown(markdown: &str) -> MarkdownScan {
             Event::Html(_) | Event::InlineHtml(_) => {
                 violations.push("raw HTML is forbidden in portrait archives".to_string());
             }
-            Event::Code(_) => {}
+            Event::Code(text) if code_depth == 0 && quote_depth == 0 && image_depth == 0 => {
+                if let Some(block) = current.as_mut() {
+                    block.text.push_str(&text);
+                }
+            }
             _ => {}
         }
         if blocks.len() > MAX_MARKDOWN_BLOCKS {

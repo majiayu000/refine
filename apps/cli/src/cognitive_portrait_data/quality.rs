@@ -113,6 +113,7 @@ pub(crate) fn validate_portrait(
         let has_numeric = contains_numeric_token(line);
         let is_factual = line.contains("[事实]");
         let is_inference = line.contains("[推断");
+        let is_action = line.contains("[建议]");
         let unique_claim = claim_id.is_some_and(|id| used_claims.insert(id.to_string()));
 
         if is_factual {
@@ -123,7 +124,7 @@ pub(crate) fn validate_portrait(
         }
 
         let catalog_is_numeric = catalog_claim.is_some_and(|claim| !claim.values.is_empty());
-        if catalog_is_numeric || ((is_factual || is_inference) && has_numeric) {
+        if catalog_is_numeric || ((is_factual || is_inference || is_action) && has_numeric) {
             numeric_claims += 1;
             if !is_catalog_line || !unique_claim {
                 unsupported_numeric_claims += 1;
@@ -149,7 +150,7 @@ pub(crate) fn validate_portrait(
                 errors.push("inference is missing valid allowlisted evidence".to_string());
             }
         }
-        if line.contains("[建议]") {
+        if is_action {
             action_claims += 1;
             let references = evidence_bundle_references(line);
             if references_are_valid(&references, &evidence_ids, &bundle_json)
