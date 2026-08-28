@@ -10,8 +10,42 @@ mod quality;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use refine_core::knowledge::ItemRepository;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::Path;
+
+pub(crate) const MAX_PORTRAIT_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_PORTRAIT_CANDIDATE_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_PREVIOUS_PORTRAIT_BYTES: usize = 4 * 1024 * 1024;
+
+fn read_utf8_bounded(path: &Path, maximum: usize, label: &str) -> Result<String> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect {label} {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!("{label} must be a regular file: {}", path.display());
+    }
+    if metadata.len() > maximum as u64 {
+        bail!(
+            "{label} exceeds the {} byte limit: {}",
+            maximum,
+            path.display()
+        );
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    File::open(path)
+        .with_context(|| format!("open {label} {}", path.display()))?
+        .take((maximum + 1) as u64)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {label} {}", path.display()))?;
+    if bytes.len() > maximum {
+        bail!(
+            "{label} exceeds the {} byte limit while reading: {}",
+            maximum,
+            path.display()
+        );
+    }
+    String::from_utf8(bytes).with_context(|| format!("{label} is not UTF-8: {}", path.display()))
+}
 
 #[allow(unused_imports)]
 pub(crate) use bundle::{
@@ -58,13 +92,13 @@ pub(crate) fn validate_files(
     output: &Path,
 ) -> Result<()> {
     let bundle = read_bundle(bundle_path)?;
-    let portrait = fs::read_to_string(portrait_path)
-        .with_context(|| format!("read portrait candidate {}", portrait_path.display()))?;
+    let portrait = read_utf8_bounded(
+        portrait_path,
+        MAX_PORTRAIT_CANDIDATE_BYTES,
+        "portrait candidate",
+    )?;
     let previous = previous_path
-        .map(|path| {
-            fs::read_to_string(path)
-                .with_context(|| format!("read previous portrait {}", path.display()))
-        })
+        .map(|path| read_utf8_bounded(path, MAX_PREVIOUS_PORTRAIT_BYTES, "previous portrait"))
         .transpose()?;
     let report = validate_portrait(&bundle, &portrait, previous.as_deref());
     quality::write_quality_report(output, &report)?;

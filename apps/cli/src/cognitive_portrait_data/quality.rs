@@ -1,4 +1,5 @@
 use super::bundle::{CognitivePortraitBundle, PortraitClaim, PORTRAIT_CLAIM_CATALOG_VERSION};
+use super::{MAX_PORTRAIT_CANDIDATE_BYTES, MAX_PREVIOUS_PORTRAIT_BYTES};
 use anyhow::{Context, Result};
 use chrono::{Duration, NaiveDate};
 use serde::{Deserialize, Serialize};
@@ -9,7 +10,7 @@ use std::path::Path;
 
 mod markdown;
 mod novelty;
-use markdown::{visible_blocks, VisibleBlock, VisibleBlockKind};
+use markdown::{scan_markdown, VisibleBlock, VisibleBlockKind};
 use novelty::novelty_rate;
 
 pub(crate) const PORTRAIT_QUALITY_GATE_VERSION: &str = "cognitive-portrait-quality-v1";
@@ -25,6 +26,9 @@ pub(crate) struct PortraitQualityReport {
     pub numeric_claims: usize,
     pub unsupported_numeric_claims: usize,
     pub unsupported_number_rate: f64,
+    pub inference_claims: usize,
+    pub traceable_inference_claims: usize,
+    pub inference_traceability_rate: f64,
     pub comparable_cohort_rate: f64,
     pub comparison_claims_suppressed: bool,
     pub action_claims: usize,
@@ -48,7 +52,15 @@ pub(crate) fn validate_portrait(
     candidate: &str,
     previous_portrait: Option<&str>,
 ) -> PortraitQualityReport {
-    let blocks = visible_blocks(candidate);
+    if candidate.len() > MAX_PORTRAIT_CANDIDATE_BYTES {
+        return failed_quality_report(format!(
+            "portrait candidate exceeds the {MAX_PORTRAIT_CANDIDATE_BYTES} byte limit"
+        ));
+    }
+    let previous_oversized =
+        previous_portrait.is_some_and(|previous| previous.len() > MAX_PREVIOUS_PORTRAIT_BYTES);
+    let scan = scan_markdown(candidate);
+    let blocks = scan.blocks;
     let bundle_json = serde_json::to_value(bundle).expect("portrait bundle must serialize");
     let evidence_ids: HashSet<&str> = bundle
         .current
@@ -68,9 +80,17 @@ pub(crate) fn validate_portrait(
     let mut traceable_factual_claims = 0usize;
     let mut numeric_claims = 0usize;
     let mut unsupported_numeric_claims = 0usize;
+    let mut inference_claims = 0usize;
+    let mut traceable_inference_claims = 0usize;
     let mut action_claims = 0usize;
     let mut verifiable_actions = 0usize;
-    let mut errors = validate_structure(&blocks);
+    let mut errors = scan.violations;
+    errors.extend(validate_structure(&blocks));
+    if previous_oversized {
+        errors.push(format!(
+            "previous portrait exceeds the {MAX_PREVIOUS_PORTRAIT_BYTES} byte limit"
+        ));
+    }
 
     if bundle.claim_catalog.schema_version != PORTRAIT_CLAIM_CATALOG_VERSION
         || catalog.len() != bundle.claim_catalog.claims.len()
@@ -118,11 +138,22 @@ pub(crate) fn validate_portrait(
         {
             errors.push("trend line is not a canonical trend catalog claim".to_string());
         }
+        if is_inference {
+            inference_claims += 1;
+            let references = evidence_bundle_references(line);
+            if references_are_valid(&references, &evidence_ids, &bundle_json)
+                && references_are_allowlisted(&references)
+            {
+                traceable_inference_claims += 1;
+            } else {
+                errors.push("inference is missing valid allowlisted evidence".to_string());
+            }
+        }
         if line.contains("[建议]") {
             action_claims += 1;
             let references = evidence_bundle_references(line);
             if references_are_valid(&references, &evidence_ids, &bundle_json)
-                && action_references_allowed(&references)
+                && references_are_allowlisted(&references)
                 && action_is_verifiable(line, bundle.cutoff.date_naive(), &bundle_json)
             {
                 verifiable_actions += 1;
@@ -135,6 +166,7 @@ pub(crate) fn validate_portrait(
         .any(|error| error.starts_with("required section"));
     let factual_traceability_rate = ratio(traceable_factual_claims, factual_claims);
     let unsupported_number_rate = ratio(unsupported_numeric_claims, numeric_claims);
+    let inference_traceability_rate = ratio(traceable_inference_claims, inference_claims);
     let action_verifiability_rate = ratio(verifiable_actions, action_claims);
     if factual_claims == 0 {
         errors.push("no [事实] claims found".to_string());
@@ -148,6 +180,11 @@ pub(crate) fn validate_portrait(
             "unsupported number rate {unsupported_number_rate:.3} is above 0.000"
         ));
     }
+    if inference_claims > 0 && inference_traceability_rate < 1.0 {
+        errors.push(format!(
+            "inference traceability rate {inference_traceability_rate:.3} is below 1.000"
+        ));
+    }
     if action_claims == 0 {
         errors.push("no [建议] claims found".to_string());
     } else if action_verifiability_rate < 1.0 {
@@ -156,6 +193,7 @@ pub(crate) fn validate_portrait(
         ));
     }
     let (novelty_rate, repetition_rate) = previous_portrait
+        .filter(|_| !previous_oversized)
         .map(|previous| {
             let novelty = novelty_rate(candidate, previous);
             (Some(novelty), Some(1.0 - novelty))
@@ -177,6 +215,9 @@ pub(crate) fn validate_portrait(
         numeric_claims,
         unsupported_numeric_claims,
         unsupported_number_rate,
+        inference_claims,
+        traceable_inference_claims,
+        inference_traceability_rate,
         comparable_cohort_rate: f64::from(bundle.comparison.comparable),
         comparison_claims_suppressed: bundle.comparison.comparable && errors.is_empty(),
         action_claims,
@@ -186,6 +227,31 @@ pub(crate) fn validate_portrait(
         repetition_rate,
         structure_complete,
         errors,
+    }
+}
+
+fn failed_quality_report(error: String) -> PortraitQualityReport {
+    PortraitQualityReport {
+        gate_version: PORTRAIT_QUALITY_GATE_VERSION.to_string(),
+        passed: false,
+        factual_claims: 0,
+        traceable_factual_claims: 0,
+        factual_traceability_rate: 0.0,
+        numeric_claims: 0,
+        unsupported_numeric_claims: 0,
+        unsupported_number_rate: 0.0,
+        inference_claims: 0,
+        traceable_inference_claims: 0,
+        inference_traceability_rate: 0.0,
+        comparable_cohort_rate: 0.0,
+        comparison_claims_suppressed: false,
+        action_claims: 0,
+        verifiable_actions: 0,
+        action_verifiability_rate: 0.0,
+        novelty_rate: None,
+        repetition_rate: None,
+        structure_complete: false,
+        errors: vec![error],
     }
 }
 
@@ -282,17 +348,18 @@ fn references_are_valid(
         })
 }
 
-fn action_references_allowed(references: &[EvidenceReference]) -> bool {
-    references.iter().any(|reference| match reference {
-        EvidenceReference::Evidence(_) => true,
-        EvidenceReference::Bundle(pointer) => {
-            pointer.starts_with("/current/")
-                || pointer.starts_with("/previous/")
-                || pointer.starts_with("/comparison/")
-                || pointer.starts_with("/manifest/current_window/")
-                || pointer.starts_with("/manifest/previous_window/")
-        }
-    })
+fn references_are_allowlisted(references: &[EvidenceReference]) -> bool {
+    !references.is_empty()
+        && references.iter().all(|reference| match reference {
+            EvidenceReference::Evidence(_) => true,
+            EvidenceReference::Bundle(pointer) => {
+                pointer.starts_with("/current/")
+                    || pointer.starts_with("/previous/")
+                    || pointer.starts_with("/comparison/")
+                    || pointer.starts_with("/manifest/current_window/")
+                    || pointer.starts_with("/manifest/previous_window/")
+            }
+        })
 }
 
 fn field_value<'a>(line: &'a str, field: &str) -> Option<&'a str> {
@@ -383,21 +450,43 @@ fn valid_verification_name(name: &str) -> bool {
 }
 
 fn contains_numeric_token(line: &str) -> bool {
+    let characters: Vec<char> = line.chars().collect();
     let mut rendered = String::with_capacity(line.len());
-    let mut machine_depth = 0usize;
-    for character in line.chars() {
-        match character {
-            '[' => machine_depth += 1,
-            ']' if machine_depth > 0 => machine_depth -= 1,
-            _ if machine_depth == 0 => rendered.push(character),
-            _ => {}
+    let mut index = 0usize;
+    while index < characters.len() {
+        if characters[index] == '[' {
+            if let Some(end) = characters[index + 1..]
+                .iter()
+                .position(|character| *character == ']')
+            {
+                let metadata: String = characters[index + 1..index + end + 1].iter().collect();
+                if is_machine_field(&metadata) {
+                    index += end + 2;
+                    continue;
+                }
+            }
         }
+        rendered.push(characters[index]);
+        index += 1;
     }
     rendered.chars().any(|character| {
         character.is_ascii_digit()
             || ('０'..='９').contains(&character)
             || "零〇一二三四五六七八九十百千万亿两壹贰叁肆伍陆柒捌玖拾佰仟".contains(character)
     }) || rendered.contains("百分之")
+}
+
+fn is_machine_field(value: &str) -> bool {
+    value == "事实"
+        || value == "建议"
+        || value == "趋势"
+        || value.starts_with("推断")
+        || value.starts_with("claim:")
+        || value.starts_with("evidence:")
+        || value.starts_with("bundle:")
+        || value.starts_with("owner:")
+        || value.starts_with("due:")
+        || value.starts_with("verify:")
 }
 
 fn ratio(numerator: usize, denominator: usize) -> f64 {

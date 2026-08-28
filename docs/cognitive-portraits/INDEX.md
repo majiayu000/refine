@@ -57,7 +57,7 @@
   validator 均由 host wrapper 独占。Codex 运行同时忽略用户配置/规则并使用 ephemeral
   session。plist 使用安装时发现的 agent 绝对路径及其
   runtime PATH。升级 agent runtime 后重新运行安装命令即可刷新。
-- **Phase 3.1（当前）**: v4 固定 cutoff 证据 bundle、closed claim catalog + evidence quality gate，见 [SPEC.md](./SPEC.md)。catalog version、stable ordering 和 canonical rendered lines 是数值/趋势事实的唯一来源；DEGRADED 不启动 agent、不发布报告、不更新本索引。
+- **Phase 3.1（当前）**: v4 固定 cutoff 证据 bundle、closed claim catalog + evidence quality gate，见 [SPEC.md](./SPEC.md)。catalog version、stable ordering 和 canonical rendered lines 是事实的唯一来源；推断必须绑定证据，active Markdown 与超限输入 fail closed；DEGRADED 不启动 agent、不发布报告、不更新本索引。
 - **Phase 4（长期）**: 处方追踪 + 指标自校准 + 自我演进
 
 ## 命名约定

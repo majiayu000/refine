@@ -82,6 +82,11 @@ Catalog lines inside fenced or indented code, block quotes, or HTML are not
 visible claims. The validator parses the rendered CommonMark surface, so a
 soft-wrapped paragraph is one paragraph.
 
+Every `[推断]` requires at least one existing, allowlisted observation ID or
+bundle pointer. Raw HTML and Markdown images are rejected. Link destinations
+must be `http`, `https`, or a safe relative path; active schemes such as
+`javascript`, `data`, and `file` fail closed.
+
 Numeric tokens in free factual prose (including scientific notation, percent,
 thousands separators, full-width digits, and Chinese numerals) fail closed.
 Metadata/version pointers are not catalog claims. Every action carries:
@@ -110,6 +115,7 @@ number.
 The gate replaces all raw line-count requirements. A candidate passes only when:
 
 - factual traceability is 100%;
+- inference evidence traceability is 100% whenever inferences are present;
 - unsupported-number rate is 0%;
 - trends are absent when the cohort is not comparable;
 - every numeric/trend line is an exact line from the closed claim catalog;
@@ -123,6 +129,10 @@ valid bounded ISO dates. Fenced/indented code, block quotes, frontmatter, HTML
 comments, link destinations, HTML metadata, and machine fields are excluded
 from rendered structure and novelty checks, so metadata-only edits do not
 count as insight. Soft-wrapped paragraphs are reconstructed before validation.
+Candidates are capped at 1 MiB, individual Markdown lines at 64 KiB, and the
+rendered report at 4096 blocks. Bundles are capped at 64 MiB and previous
+portraits at 4 MiB. Both the host wrapper and Rust reader enforce the byte caps
+before hashing, copying, or parsing.
 
 A failed gate returns non-zero. One kernel-backed lock owns a run. The scheduled
 wrapper gives the untrusted agent a unique writable staging directory and an

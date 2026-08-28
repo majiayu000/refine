@@ -1,5 +1,8 @@
 use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
 
+pub(super) const MAX_MARKDOWN_BLOCKS: usize = 4096;
+pub(super) const MAX_MARKDOWN_LINE_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum VisibleBlockKind {
     Heading(u8),
@@ -11,10 +14,23 @@ pub(super) struct VisibleBlock {
     pub(super) kind: VisibleBlockKind,
     pub(super) text: String,
     pub(super) raw: String,
-    contains_html: bool,
 }
 
-pub(super) fn visible_blocks(markdown: &str) -> Vec<VisibleBlock> {
+pub(super) struct MarkdownScan {
+    pub(super) blocks: Vec<VisibleBlock>,
+    pub(super) violations: Vec<String>,
+}
+
+pub(super) fn scan_markdown(markdown: &str) -> MarkdownScan {
+    let mut violations = Vec::new();
+    if markdown
+        .split(['\n', '\r'])
+        .any(|line| line.len() > MAX_MARKDOWN_LINE_BYTES)
+    {
+        violations.push(format!(
+            "Markdown line exceeds the {MAX_MARKDOWN_LINE_BYTES} byte limit"
+        ));
+    }
     let markdown = strip_frontmatter(markdown);
     let parser = Parser::new(markdown);
     let mut blocks = Vec::new();
@@ -29,14 +45,21 @@ pub(super) fn visible_blocks(markdown: &str) -> Vec<VisibleBlock> {
             Event::End(TagEnd::CodeBlock) => code_depth = code_depth.saturating_sub(1),
             Event::Start(Tag::BlockQuote(_)) => quote_depth += 1,
             Event::End(TagEnd::BlockQuote(_)) => quote_depth = quote_depth.saturating_sub(1),
-            Event::Start(Tag::Image { .. }) => image_depth += 1,
+            Event::Start(Tag::Image { .. }) => {
+                violations.push("Markdown images are forbidden in portrait archives".to_string());
+                image_depth += 1;
+            }
             Event::End(TagEnd::Image) => image_depth = image_depth.saturating_sub(1),
+            Event::Start(Tag::Link { dest_url, .. }) if !safe_link_destination(&dest_url) => {
+                violations.push(format!(
+                    "unsafe Markdown link destination is forbidden: {dest_url}"
+                ));
+            }
             Event::Start(Tag::Heading { level, .. }) if code_depth == 0 && quote_depth == 0 => {
                 current = Some(VisibleBlock {
                     kind: VisibleBlockKind::Heading(heading_level(level)),
                     text: String::new(),
                     raw: markdown[range].to_string(),
-                    contains_html: false,
                 });
             }
             Event::Start(Tag::Paragraph) if code_depth == 0 && quote_depth == 0 => {
@@ -44,7 +67,6 @@ pub(super) fn visible_blocks(markdown: &str) -> Vec<VisibleBlock> {
                     kind: VisibleBlockKind::Paragraph,
                     text: String::new(),
                     raw: markdown[range].to_string(),
-                    contains_html: false,
                 });
             }
             Event::End(TagEnd::Heading(_)) | Event::End(TagEnd::Paragraph)
@@ -65,26 +87,62 @@ pub(super) fn visible_blocks(markdown: &str) -> Vec<VisibleBlock> {
                 }
             }
             Event::Html(_) | Event::InlineHtml(_) => {
-                if let Some(block) = current.as_mut() {
-                    block.contains_html = true;
-                }
+                violations.push("raw HTML is forbidden in portrait archives".to_string());
             }
             Event::Code(_) => {}
             _ => {}
         }
+        if blocks.len() > MAX_MARKDOWN_BLOCKS {
+            blocks.truncate(MAX_MARKDOWN_BLOCKS);
+            violations.push(format!(
+                "Markdown exceeds the {MAX_MARKDOWN_BLOCKS} rendered block limit"
+            ));
+            break;
+        }
     }
     finish_block(&mut current, &mut blocks);
-    blocks
+    if blocks.len() > MAX_MARKDOWN_BLOCKS {
+        blocks.truncate(MAX_MARKDOWN_BLOCKS);
+        violations.push(format!(
+            "Markdown exceeds the {MAX_MARKDOWN_BLOCKS} rendered block limit"
+        ));
+    }
+    violations.sort();
+    violations.dedup();
+    MarkdownScan { blocks, violations }
+}
+
+pub(super) fn visible_blocks(markdown: &str) -> Vec<VisibleBlock> {
+    scan_markdown(markdown).blocks
 }
 
 fn finish_block(current: &mut Option<VisibleBlock>, blocks: &mut Vec<VisibleBlock>) {
     if let Some(mut block) = current.take() {
         block.text = block.text.split_whitespace().collect::<Vec<_>>().join(" ");
         block.raw = block.raw.trim_end_matches(['\r', '\n']).to_string();
-        if !block.text.is_empty() && !block.contains_html {
+        if !block.text.is_empty() {
             blocks.push(block);
         }
     }
+}
+
+fn safe_link_destination(destination: &str) -> bool {
+    let destination = destination.trim();
+    if destination.chars().any(char::is_control)
+        || destination.starts_with('/')
+        || destination.contains('\\')
+    {
+        return false;
+    }
+    let lowercase = destination.to_ascii_lowercase();
+    if lowercase.starts_with("http://") || lowercase.starts_with("https://") {
+        return true;
+    }
+    if destination.contains(':') {
+        return false;
+    }
+    let relative_path = destination.split(['?', '#']).next().unwrap_or_default();
+    !relative_path.split('/').any(|component| component == "..")
 }
 
 fn heading_level(level: HeadingLevel) -> u8 {
@@ -111,7 +169,7 @@ fn strip_frontmatter(markdown: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{visible_blocks, VisibleBlockKind};
+    use super::{scan_markdown, visible_blocks, VisibleBlockKind};
 
     #[test]
     fn commonmark_parser_ignores_non_rendered_and_quoted_claims() {
@@ -123,5 +181,22 @@ mod tests {
         assert_eq!(blocks[1].kind, VisibleBlockKind::Paragraph);
         assert_eq!(blocks[1].text, "soft wrapped");
         assert_eq!(blocks[1].raw, "soft\nwrapped");
+    }
+
+    #[test]
+    fn active_content_and_unsafe_links_are_reported() {
+        let scan = scan_markdown(
+            "text <span>visible</span>\n\n![track](https://example.com/x)\n\n[x](javascript:alert(1))\n\n[y](../outside)",
+        );
+        assert_eq!(scan.blocks[0].text, "text visible");
+        assert!(scan
+            .violations
+            .iter()
+            .any(|error| error.contains("raw HTML")));
+        assert!(scan.violations.iter().any(|error| error.contains("images")));
+        assert!(scan
+            .violations
+            .iter()
+            .any(|error| error.contains("unsafe Markdown link")));
     }
 }

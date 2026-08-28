@@ -14,6 +14,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
 
+use super::{read_utf8_bounded, MAX_PORTRAIT_BUNDLE_BYTES};
+
 pub(crate) const PORTRAIT_BUNDLE_SCHEMA_VERSION: u32 = 1;
 pub(crate) const PORTRAIT_COLLECTOR_VERSION: &str = "cognitive-portrait-collector-v1";
 pub(crate) const PORTRAIT_CLAIM_CATALOG_VERSION: u32 = 1;
@@ -516,13 +518,18 @@ impl EvidenceValues {
 pub(crate) fn write_bundle(path: &Path, bundle: &CognitivePortraitBundle) -> Result<()> {
     let mut json = serde_json::to_string_pretty(bundle).context("serialize portrait bundle")?;
     json.push('\n');
+    if json.len() > MAX_PORTRAIT_BUNDLE_BYTES {
+        bail!(
+            "DATA_QUALITY_DEGRADED: cognitive portrait bundle exceeds the {} byte limit",
+            MAX_PORTRAIT_BUNDLE_BYTES
+        );
+    }
     fs::write(path, json)
         .with_context(|| format!("write cognitive portrait bundle {}", path.display()))
 }
 
 pub(crate) fn read_bundle(path: &Path) -> Result<CognitivePortraitBundle> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("read cognitive portrait bundle {}", path.display()))?;
+    let raw = read_utf8_bounded(path, MAX_PORTRAIT_BUNDLE_BYTES, "cognitive portrait bundle")?;
     let bundle: CognitivePortraitBundle = serde_json::from_str(&raw)
         .with_context(|| format!("SCHEMA_INVALID: parse portrait bundle {}", path.display()))?;
     if bundle.schema_version != PORTRAIT_BUNDLE_SCHEMA_VERSION {

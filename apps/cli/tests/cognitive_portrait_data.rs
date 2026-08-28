@@ -7,7 +7,8 @@ mod insights_manifest;
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use cognitive_portrait_data::{
-    read_bundle, validate_portrait, write_bundle, CognitivePortraitBundle,
+    read_bundle, validate_files, validate_portrait, write_bundle, CognitivePortraitBundle,
+    MAX_PORTRAIT_BUNDLE_BYTES, MAX_PORTRAIT_CANDIDATE_BYTES, MAX_PREVIOUS_PORTRAIT_BYTES,
     PORTRAIT_BUNDLE_SCHEMA_VERSION, PORTRAIT_COLLECTOR_VERSION,
 };
 use refine_core::knowledge::{
@@ -290,6 +291,7 @@ fn numeric_claim_must_equal_its_referenced_scalar() {
         "[事实] 当前窗口有 1,000 个 session。[bundle:/schema_version]",
         "[事实] 当前窗口有 １ 个 session。[bundle:/schema_version]",
         "[事实] 当前窗口有一百个 session。[bundle:/schema_version]",
+        "[事实] 当前窗口有 [999] 个 session。[bundle:/schema_version]",
         "[事实] 当前窗口 session 总量见指标。[claim:unknown]",
         "[事实] 当前窗口 session 总量见指标。[claim:fact.current.total_sessions]",
     ] {
@@ -418,7 +420,6 @@ fn catalog_claims_in_quotes_code_or_html_do_not_count() {
         format!("> {claim}"),
         format!("`{claim}`"),
         format!("<!-- {claim} -->"),
-        format!("<span>{claim}</span>"),
     ] {
         let candidate = portrait(&format!("{hidden}\n\n{}", valid_action()));
         let report = validate_portrait(&bundle, &candidate, None);
@@ -426,11 +427,144 @@ fn catalog_claims_in_quotes_code_or_html_do_not_count() {
         assert_eq!(report.factual_claims, 0);
     }
 
+    let html = portrait(&format!("<span>{claim}</span>\n\n{}", valid_action()));
+    let report = validate_portrait(&bundle, &html, None);
+    assert!(!report.passed);
+    assert!(report.errors.iter().any(|error| error.contains("raw HTML")));
+
     let reformatted = portrait(&format!("**{claim}**\n\n{}", valid_action()));
     let report = validate_portrait(&bundle, &reformatted, None);
     assert!(!report.passed);
     assert_eq!(report.factual_claims, 1);
     assert_eq!(report.unsupported_numeric_claims, 1);
+}
+
+#[test]
+fn inferences_require_valid_allowlisted_evidence() {
+    let bundle = fixture(false);
+    let fact = claim_line(&bundle, "fact.current.total_sessions");
+    for inference in [
+        "[推断，置信度：高] 当前工作明显更成熟。",
+        "[推断，置信度：高] 当前工作明显更成熟。[evidence:obs:does-not-exist]",
+        "[推断，置信度：高] 当前工作明显更成熟。[bundle:/schema_version]",
+        "[推断，置信度：高] 当前工作明显更成熟。[evidence:obs:current] [bundle:/schema_version]",
+    ] {
+        let candidate = portrait(&format!("{fact}\n\n{inference}\n\n{}", valid_action()));
+        let report = validate_portrait(&bundle, &candidate, None);
+        assert!(!report.passed, "inference unexpectedly passed: {inference}");
+        assert_eq!(report.inference_traceability_rate, 0.0);
+    }
+
+    let valid = portrait(&format!(
+        "{fact}\n\n[推断，置信度：高] 当前工作形成可复核证据。[evidence:obs:current]\n\n{}",
+        valid_action()
+    ));
+    let report = validate_portrait(&bundle, &valid, None);
+    assert!(report.passed, "{:?}", report.errors);
+    assert_eq!(report.inference_traceability_rate, 1.0);
+}
+
+#[test]
+fn active_markdown_payloads_fail_closed_but_safe_links_pass() {
+    let bundle = fixture(false);
+    let fact = claim_line(&bundle, "fact.current.total_sessions");
+    for payload in [
+        "<script>alert('x')</script>",
+        "![tracking](https://example.com/pixel.png)",
+        "[payload](javascript:alert(1))",
+        "[payload](data:text/html,boom)",
+        "[payload](file:///etc/passwd)",
+        "[payload](/absolute/path)",
+        "[payload](../outside)",
+    ] {
+        let candidate = portrait(&format!("{fact}\n\n{}\n\n{payload}", valid_action()));
+        let report = validate_portrait(&bundle, &candidate, None);
+        assert!(!report.passed, "payload unexpectedly passed: {payload}");
+        assert!(report.errors.iter().any(|error| {
+            error.contains("raw HTML")
+                || error.contains("images")
+                || error.contains("unsafe Markdown link")
+        }));
+    }
+
+    let safe = portrait(&format!(
+        "{fact}\n\n{}\n\n[说明](https://example.com/report) 与 [本地规范](./SPEC.md)。",
+        valid_action()
+    ));
+    let report = validate_portrait(&bundle, &safe, None);
+    assert!(report.passed, "{:?}", report.errors);
+}
+
+#[test]
+fn candidate_line_block_and_file_sizes_are_bounded() {
+    let bundle = fixture(false);
+    let fact = claim_line(&bundle, "fact.current.total_sessions");
+    let long_line = "x".repeat(64 * 1024 + 1);
+    let candidate = portrait(&format!("{fact}\n\n{}\n\n{long_line}", valid_action()));
+    let report = validate_portrait(&bundle, &candidate, None);
+    assert!(!report.passed);
+    assert!(report
+        .errors
+        .iter()
+        .any(|error| error.contains("line exceeds")));
+
+    let many_blocks = (0..4100)
+        .map(|index| format!("block-{index}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let candidate = portrait(&format!("{fact}\n\n{}\n\n{many_blocks}", valid_action()));
+    let report = validate_portrait(&bundle, &candidate, None);
+    assert!(!report.passed);
+    assert!(report
+        .errors
+        .iter()
+        .any(|error| error.contains("block limit")));
+
+    let directory = tempfile::tempdir().unwrap();
+    let bundle_path = directory.path().join("bundle.json");
+    let candidate_path = directory.path().join("candidate.md");
+    let previous_path = directory.path().join("previous.md");
+    let quality_path = directory.path().join("quality.json");
+    write_bundle(&bundle_path, &bundle).unwrap();
+    std::fs::File::create(&candidate_path)
+        .unwrap()
+        .set_len((MAX_PORTRAIT_CANDIDATE_BYTES + 1) as u64)
+        .unwrap();
+    assert!(
+        validate_files(&bundle_path, &candidate_path, None, &quality_path)
+            .unwrap_err()
+            .to_string()
+            .contains("byte limit")
+    );
+
+    std::fs::write(
+        &candidate_path,
+        portrait(&format!("{fact}\n\n{}", valid_action())),
+    )
+    .unwrap();
+    std::fs::File::create(&previous_path)
+        .unwrap()
+        .set_len((MAX_PREVIOUS_PORTRAIT_BYTES + 1) as u64)
+        .unwrap();
+    assert!(validate_files(
+        &bundle_path,
+        &candidate_path,
+        Some(&previous_path),
+        &quality_path
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("byte limit"));
+
+    let oversized_bundle = directory.path().join("oversized-bundle.json");
+    std::fs::File::create(&oversized_bundle)
+        .unwrap()
+        .set_len((MAX_PORTRAIT_BUNDLE_BYTES + 1) as u64)
+        .unwrap();
+    assert!(read_bundle(&oversized_bundle)
+        .unwrap_err()
+        .to_string()
+        .contains("byte limit"));
 }
 
 #[test]

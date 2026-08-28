@@ -42,6 +42,9 @@ SKILL_FILE="${REFINE_PORTRAIT_SKILL:-${PROJECT_DIR}/skills/cognitive-portrait/SK
 STATE_ROOT="${REFINE_PORTRAIT_STATE_ROOT:-${HOME}/.refine/cognitive-portrait-runs}"
 STAGING_ROOT="${REFINE_PORTRAIT_STAGING_ROOT:-${TMPDIR:-/tmp}}"
 LOG_PREFIX="[refine-portrait]"
+MAX_BUNDLE_BYTES=$((64 * 1024 * 1024))
+MAX_PREVIOUS_BYTES=$((4 * 1024 * 1024))
+MAX_CANDIDATE_BYTES=$((1024 * 1024))
 
 log() { echo "${LOG_PREFIX} $(date '+%Y-%m-%d %H:%M:%S') $*"; }
 
@@ -75,6 +78,14 @@ file_owner() {
     stat -f '%u' "$1"
   else
     stat -c '%u' "$1"
+  fi
+}
+
+file_size() {
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    stat -f '%z' "$1"
+  else
+    stat -c '%s' "$1"
   fi
 }
 
@@ -162,7 +173,11 @@ write_publication_journal() {
   printf '%s %s\n' "$phase" "$base" > "$stage"
   chmod 600 "$stage" 2>/dev/null || true
   sync
-  trigger_failpoint after-journal-stage
+  if [[ "$phase" == "PREPARE" ]]; then
+    trigger_failpoint after-journal-stage
+  else
+    trigger_failpoint after-commit-journal-stage
+  fi
   mv -f -- "$stage" "$PUBLICATION_JOURNAL"
   sync_directory "$PORTRAIT_DIR"
 }
@@ -301,6 +316,11 @@ fi
 latest=$(find "$PORTRAIT_DIR" -maxdepth 1 -type f -name 'cognitive-portrait-*.md' -print \
   | LC_ALL=C sort | tail -1 || true)
 if [[ -n "$latest" ]]; then
+  if ! require_private_regular "$latest" \
+    || (( $(file_size "$latest") > MAX_PREVIOUS_BYTES )); then
+    log "ERROR: previous portrait exceeds the trusted ${MAX_PREVIOUS_BYTES} byte limit"
+    exit 1
+  fi
   base=$(basename "$latest")
   date_part=$(sed -n 's/^cognitive-portrait-\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\)-.*$/\1/p' <<<"$base")
   if [[ -n "$date_part" ]]; then
@@ -456,6 +476,10 @@ if [[ "$collector_result" != *'"comparison_status":"OK"'* ]]; then
   exit 1
 fi
 require_private_regular "$bundle_file" || { log "ERROR: collector output is unsafe"; exit 1; }
+if (( $(file_size "$bundle_file") > MAX_BUNDLE_BYTES )); then
+  log "ERROR: collector bundle exceeds the trusted ${MAX_BUNDLE_BYTES} byte limit"
+  exit 1
+fi
 bundle_hash=$(sha256_file "$bundle_file")
 cp -p "$bundle_file" "$agent_bundle"
 chmod 600 "$agent_bundle" 2>/dev/null || true
@@ -517,6 +541,10 @@ if [[ $(find "$staging_dir" -maxdepth 1 -type f ! -name bundle.json ! -name prev
 fi
 if ! require_private_regular "$agent_candidate"; then
   log "ERROR: candidate must be a regular single-link file"
+  exit 1
+fi
+if (( $(file_size "$agent_candidate") > MAX_CANDIDATE_BYTES )); then
+  log "ERROR: candidate exceeds the trusted ${MAX_CANDIDATE_BYTES} byte limit"
   exit 1
 fi
 chmod 500 "$staging_dir" 2>/dev/null || true

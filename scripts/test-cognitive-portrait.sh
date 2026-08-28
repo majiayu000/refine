@@ -49,6 +49,7 @@ case "${FAKE_AGENT_MODE:-normal}" in
     exit 7
     ;;
   candidate-symlink) ln -s "$FAKE_VICTIM" "$REFINE_COGNITIVE_PORTRAIT_OUTPUT" ;;
+  oversized-sparse) truncate -s 1048577 "$REFINE_COGNITIVE_PORTRAIT_OUTPUT" ;;
   tamper-validator)
     printf '#!/usr/bin/env bash\nprintf exploited > "%s"\n' "$FAKE_VALIDATOR_MARKER" > "$FAKE_VALIDATOR_TARGET"
     chmod 700 "$FAKE_VALIDATOR_TARGET"
@@ -75,6 +76,9 @@ while [[ $# -gt 0 ]]; do
   case "$1" in --output) output="$2"; shift 2 ;; *) shift ;; esac
 done
 printf '{"metric":1}\n' > "$output"
+if [[ "${FAKE_COLLECTOR_OVERSIZE:-0}" == "1" ]]; then
+  truncate -s 67108865 "$output"
+fi
 printf '{"comparison_status":"%s"}\n' "${FAKE_COLLECTOR_STATUS:-OK}"
 EOF
   cat > "$root/bin/fake-validator" <<'EOF'
@@ -156,6 +160,34 @@ if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/pr
   fail 'unsafe agent sandbox accepted'
 fi
 [[ ! -e "$root/agent.log" ]] || fail 'unsafe sandbox reached agent'
+
+run_case oversized-candidate oversized-sparse && fail 'oversized sparse candidate accepted'
+[[ ! -e "$TEST_ROOT/oversized-candidate/portraits/${REPORT_BASE}.md" ]] \
+  || fail 'oversized sparse candidate entered archive'
+
+prepare_case oversized-bundle
+root="$TEST_ROOT/oversized-bundle"
+if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
+  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state" \
+  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector" \
+  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+  FAKE_COLLECTOR_OVERSIZE=1 FAKE_AGENT_MODE=normal FAKE_AGENT_LOG="$root/agent.log" \
+  bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
+  fail 'oversized sparse bundle accepted'
+fi
+[[ ! -e "$root/agent.log" ]] || fail 'oversized bundle reached agent'
+
+prepare_case oversized-previous
+root="$TEST_ROOT/oversized-previous"
+truncate -s 4194305 "$root/portraits/cognitive-portrait-2026-01-01-v3.md"
+if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
+  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state" \
+  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector" \
+  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+  FAKE_AGENT_MODE=normal FAKE_AGENT_LOG="$root/agent.log" bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
+  fail 'oversized previous portrait accepted'
+fi
+[[ ! -e "$root/agent.log" ]] || fail 'oversized previous portrait reached agent'
 
 prepare_case evidence-file
 rm -rf "$TEST_ROOT/evidence-file/portraits/evidence"
@@ -266,7 +298,7 @@ fi
 run_case validator-tamper tamper-validator && fail 'validator tamper accepted'
 [[ ! -e "$TEST_ROOT/validator-tamper/validator.called" ]] || fail 'modified validator executed'
 
-for failpoint in after-journal-stage after-journal after-backup after-bundle after-quality after-report after-index during-index-replace; do
+for failpoint in after-journal-stage after-journal after-backup after-bundle after-quality after-report after-index during-index-replace after-commit-journal-stage; do
   prepare_case "crash-${failpoint}"
   root="$TEST_ROOT/crash-${failpoint}"
   crash_env=(HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project"
@@ -291,6 +323,22 @@ for failpoint in after-journal-stage after-journal after-backup after-bundle aft
     || fail "crash recovery left partial artifacts: ${failpoint}"
   [[ "$(cat "$root/portraits/INDEX.md")" == '# Index' ]] || fail "crash recovery did not restore index: ${failpoint}"
 done
+
+prepare_case orphan-backup
+root="$TEST_ROOT/orphan-backup"
+cp "$root/portraits/INDEX.md" "$root/portraits/.portrait-publish.index-backup"
+rm "$root/portraits/INDEX.md"
+orphan_env=(HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project"
+  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state"
+  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector"
+  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0)
+if env -i "${orphan_env[@]}" FAKE_AGENT_MODE=exit \
+  bash "$SCRIPT_DIR/cognitive-portrait.sh" >/dev/null 2>&1; then
+  fail 'orphan backup recovery probe unexpectedly succeeded'
+fi
+[[ "$(cat "$root/portraits/INDEX.md")" == '# Index' \
+  && ! -e "$root/portraits/.portrait-publish.index-backup" ]] \
+  || fail 'backup-only startup recovery did not restore INDEX'
 
 for failpoint in after-commit after-backup-removal; do
   prepare_case "crash-${failpoint}"

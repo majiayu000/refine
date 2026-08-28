@@ -78,6 +78,12 @@ facts. A canonical catalog line inside fenced/indented code, a block quote, or
 HTML is not visible evidence and does not count. CommonMark paragraph text is
 the rendered surface; soft-wrapped paragraphs are one paragraph.
 
+Raw HTML, Markdown images, and `javascript:`, `data:`, `file:`, protocol-relative,
+or other non-HTTP/non-relative link targets are forbidden in the candidate.
+The candidate is capped at 1 MiB; a single Markdown line is capped at 64 KiB
+and the rendered report at 4096 blocks. The trusted bundle is capped at 64 MiB
+and the previous portrait at 4 MiB.
+
 A layer may cite interpretations and recommendations with these machine-readable
 forms:
 
@@ -116,7 +122,8 @@ links, and publishes the report, evidence, and index transactionally. No agent
 or layer may overwrite a prior artifact.
 
 The validator requires complete factual traceability, zero unsupported numeric
-claims, canonical catalog usage, trends absent when the cohort is not
+claims, complete inference evidence traceability, canonical catalog usage,
+trends absent when the cohort is not
 comparable, at least 60% paragraph novelty when a previous portrait exists, and
 verifiable actions with owner, deadline, and verification condition.
 
