@@ -331,6 +331,8 @@ mod tests {
                 mode_excluded_observations: 0,
                 source_excluded_observations: 0,
                 eligible_observations: 2,
+                ambiguous_project_alias_observations: 0,
+                ambiguous_project_aliases: 0,
                 cohort_identity: "sha256:changed".into(),
             },
             ..checkpoint.signature.clone()

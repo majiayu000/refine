@@ -3,8 +3,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const SCHEMA_VERSION: u32 = 2;
-const SOURCE_REVISION: &str = "mirror-profile-context-v2";
+const SCHEMA_VERSION: u32 = 3;
+const SOURCE_REVISION: &str = "mirror-profile-context-v3-project-identity";
 const COHORT_RELATION: &str = "exact-source-snapshot";
 const STALE_AFTER_DAYS: i64 = 14;
 
@@ -174,8 +174,8 @@ mod tests {
         let loaded = load_profile_context_from_path(&path, now, &expected)
             .unwrap()
             .expect("fresh exact profile context");
-        assert!(loaded.contains("schema_version=2"));
-        assert!(loaded.contains("source_revision=mirror-profile-context-v2"));
+        assert!(loaded.contains("schema_version=3"));
+        assert!(loaded.contains("source_revision=mirror-profile-context-v3-project-identity"));
         assert!(loaded.contains("cohort_relation=exact-match"));
     }
 

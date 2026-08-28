@@ -10,7 +10,7 @@ use chrono::{Duration, Utc};
 use refine_core::infra::{llm_with_retry_policy, LlmClient, LlmRetryPolicy};
 use refine_core::knowledge::{Document, DocumentRepository, ItemRepository};
 use refine_core::session::{
-    build_final_prompt_with_delta, cluster_session_observations, format_data_quality_stats,
+    build_final_prompt_with_delta, cluster_session_observation_windows, format_data_quality_stats,
     merge_route_results_with_budget, plan_routes, DataQualityStats, RouteResult,
     INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
 };
@@ -193,10 +193,13 @@ pub async fn handle_insights(
         .iter()
         .map(|document| (document.id.as_str().to_string(), document.source.clone()))
         .collect();
-    let current_cohort = cluster_session_observations(&snapshot.current, &document_sources);
-    let previous_cohort = options
-        .period
-        .map(|_| cluster_session_observations(&snapshot.previous, &document_sources));
+    let mut comparison_windows = vec![snapshot.current.as_slice()];
+    if options.period.is_some() {
+        comparison_windows.push(snapshot.previous.as_slice());
+    }
+    let mut cohorts = cluster_session_observation_windows(&comparison_windows, &document_sources);
+    let current_cohort = cohorts.remove(0);
+    let previous_cohort = cohorts.pop();
     let cluster_result = &current_cohort.cluster;
     let previous_cluster = previous_cohort.as_ref().map(|cohort| &cohort.cluster);
     let stats = &cluster_result.global_stats;

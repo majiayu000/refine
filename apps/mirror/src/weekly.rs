@@ -8,7 +8,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Duration, Utc};
 use refine_core::knowledge::{DocumentRepository, ItemRepository};
 use refine_core::session::{
-    cluster_observations, format_data_quality_stats, ClusterResult, DataQualityStats,
+    cluster_observations_with_resolver, format_data_quality_stats, ClusterResult, DataQualityStats,
+    ProjectIdentityResolver,
 };
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -112,7 +113,12 @@ pub async fn handle_weekly(
     );
 
     let config = crate::config::load();
-    let this_cluster = cluster_observations(&this_week);
+    let resolver = ProjectIdentityResolver::from_observation_windows(&[
+        long_term_items.as_slice(),
+        this_week.as_slice(),
+        last_week.as_slice(),
+    ]);
+    let this_cluster = cluster_observations_with_resolver(&this_week, &resolver);
     if this_cluster.data_quality.eligible_observations == 0 {
         anyhow::bail!(
             "No eligible linked interactive observations this week (input {}, detached {}, mode-excluded {}); refusing to emit scores",
@@ -122,7 +128,7 @@ pub async fn handle_weekly(
         );
     }
     let this_score = score::compute(&this_cluster, &config.targets);
-    let long_term_cluster = cluster_observations(&long_term_items);
+    let long_term_cluster = cluster_observations_with_resolver(&long_term_items, &resolver);
     if long_term_cluster.data_quality.eligible_observations == 0 {
         anyhow::bail!(
             "No eligible linked interactive observations in the rolling-90-day portfolio window; refusing to generate portfolio advice"
@@ -131,7 +137,7 @@ pub async fn handle_weekly(
     let long_term_score = score::compute(&long_term_cluster, &config.targets);
 
     let last_cluster = if !last_week.is_empty() {
-        Some(cluster_observations(&last_week))
+        Some(cluster_observations_with_resolver(&last_week, &resolver))
     } else {
         None
     };

@@ -1,6 +1,5 @@
-use super::clustering::{
-    cluster_observations, normalize_project_name, ClusterResult, DataQualityStats,
-};
+use super::clustering::{cluster_observations_with_resolver, ClusterResult, DataQualityStats};
+use super::project_identity::{ProjectIdentityResolver, ProjectResolution};
 use crate::knowledge::{Item, ItemType};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -48,6 +47,56 @@ pub fn cluster_session_observations(
     items: &[Item],
     document_sources: &HashMap<String, String>,
 ) -> SessionCohortCluster {
+    let (cohort_items, excluded_observations) = source_validated_items(items, document_sources);
+    let resolver = ProjectIdentityResolver::from_observation_windows(&[&cohort_items]);
+    build_session_cohort(cohort_items, excluded_observations, &resolver)
+}
+
+/// Cluster comparison windows with one project identity resolver built over
+/// their combined, source-validated cohorts.
+pub fn cluster_session_observation_windows(
+    windows: &[&[Item]],
+    document_sources: &HashMap<String, String>,
+) -> Vec<SessionCohortCluster> {
+    let prepared: Vec<(Vec<Item>, usize)> = windows
+        .iter()
+        .map(|items| source_validated_items(items, document_sources))
+        .collect();
+    let cohort_windows: Vec<&[Item]> = prepared.iter().map(|(items, _)| items.as_slice()).collect();
+    let resolver = ProjectIdentityResolver::from_observation_windows(&cohort_windows);
+
+    prepared
+        .into_iter()
+        .map(|(items, excluded)| build_session_cohort(items, excluded, &resolver))
+        .collect()
+}
+
+fn build_session_cohort(
+    cohort_items: Vec<Item>,
+    excluded_observations: usize,
+    resolver: &ProjectIdentityResolver,
+) -> SessionCohortCluster {
+    let mut cluster = cluster_observations_with_resolver(&cohort_items, resolver);
+    cluster.data_quality.input_observations += excluded_observations;
+    cluster.data_quality.linked_observations += excluded_observations;
+    cluster.data_quality.source_excluded_observations = excluded_observations;
+    debug_assert_eq!(
+        cluster.data_quality.input_observations,
+        cluster.data_quality.detached_observations
+            + cluster.data_quality.mode_excluded_observations
+            + cluster.data_quality.source_excluded_observations
+            + cluster.data_quality.eligible_observations
+    );
+    SessionCohortCluster {
+        cluster,
+        cohort_items,
+    }
+}
+
+fn source_validated_items(
+    items: &[Item],
+    document_sources: &HashMap<String, String>,
+) -> (Vec<Item>, usize) {
     let mut excluded_observations = 0usize;
     let cohort_items: Vec<Item> = items
         .iter()
@@ -64,22 +113,7 @@ pub fn cluster_session_observations(
             }
         })
         .collect();
-    let mut cluster = cluster_observations(&cohort_items);
-    cluster.data_quality.input_observations += excluded_observations;
-    cluster.data_quality.linked_observations += excluded_observations;
-    cluster.data_quality.source_excluded_observations = excluded_observations;
-    debug_assert_eq!(
-        cluster.data_quality.input_observations,
-        cluster.data_quality.detached_observations
-            + cluster.data_quality.mode_excluded_observations
-            + cluster.data_quality.source_excluded_observations
-            + cluster.data_quality.eligible_observations
-    );
-
-    SessionCohortCluster {
-        cluster,
-        cohort_items,
-    }
+    (cohort_items, excluded_observations)
 }
 
 /// Source-aware portrait cohort that retains only O(rows) references and
@@ -89,6 +123,42 @@ pub fn portrait_session_observations<'a>(
     items: &'a [Item],
     document_sources: &HashMap<String, String>,
 ) -> PortraitSessionCohort<'a> {
+    let prepared = prepare_portrait_cohort(items, document_sources);
+    let resolver =
+        ProjectIdentityResolver::from_eligible_items(prepared.eligible_items.iter().copied());
+    build_portrait_cohort(prepared, &resolver)
+}
+
+/// Build comparable portrait windows with one collision-aware resolver while
+/// retaining #201's reference-only, bounded-memory cohort representation.
+pub fn portrait_session_observation_windows<'a>(
+    windows: &[&'a [Item]],
+    document_sources: &HashMap<String, String>,
+) -> Vec<PortraitSessionCohort<'a>> {
+    let prepared: Vec<_> = windows
+        .iter()
+        .map(|items| prepare_portrait_cohort(items, document_sources))
+        .collect();
+    let resolver = ProjectIdentityResolver::from_eligible_items(
+        prepared
+            .iter()
+            .flat_map(|cohort| cohort.eligible_items.iter().copied()),
+    );
+    prepared
+        .into_iter()
+        .map(|cohort| build_portrait_cohort(cohort, &resolver))
+        .collect()
+}
+
+struct PreparedPortraitCohort<'a> {
+    eligible_items: Vec<&'a Item>,
+    data_quality: DataQualityStats,
+}
+
+fn prepare_portrait_cohort<'a>(
+    items: &'a [Item],
+    document_sources: &HashMap<String, String>,
+) -> PreparedPortraitCohort<'a> {
     let input_observations = items
         .iter()
         .filter(|item| item.item_type() == ItemType::Observation)
@@ -167,14 +237,39 @@ pub fn portrait_session_observations<'a>(
         mode_excluded_observations,
         source_excluded_observations,
         eligible_observations: eligible_items.len(),
+        ambiguous_project_alias_observations: 0,
+        ambiguous_project_aliases: 0,
         cohort_identity: format!("sha256:{:x}", cohort_hasher.finalize()),
     };
 
+    PreparedPortraitCohort {
+        eligible_items,
+        data_quality,
+    }
+}
+
+fn build_portrait_cohort<'a>(
+    prepared: PreparedPortraitCohort<'a>,
+    resolver: &ProjectIdentityResolver,
+) -> PortraitSessionCohort<'a> {
+    let PreparedPortraitCohort {
+        eligible_items,
+        mut data_quality,
+    } = prepared;
+
     let mut document_projects: HashMap<&str, String> = HashMap::new();
     for item in &eligible_items {
-        if let (Some(document_id), Some(project)) = (item.document_id(), project_from_tags(item)) {
+        let tags: Vec<&str> = item.tags().iter().map(|tag| tag.as_str()).collect();
+        if let (Some(document_id), Some(ProjectResolution::Canonical(project))) =
+            (item.document_id(), resolver.resolve_tags(&tags))
+        {
             document_projects
                 .entry(document_id.as_str())
+                .and_modify(|existing| {
+                    if project < *existing {
+                        existing.clone_from(&project);
+                    }
+                })
                 .or_insert(project);
         }
     }
@@ -187,16 +282,25 @@ pub fn portrait_session_observations<'a>(
     let mut total_bugfixes = 0usize;
     let mut total_summaries = 0usize;
     let mut untagged_count = 0usize;
+    let mut ambiguous_aliases = HashSet::new();
     for item in &eligible_items {
-        let project = project_from_tags(item)
-            .or_else(|| {
-                item.document_id()
-                    .and_then(|id| document_projects.get(id.as_str()).cloned())
-            })
-            .unwrap_or_else(|| {
-                untagged_count += 1;
-                "other".to_string()
-            });
+        let tags: Vec<&str> = item.tags().iter().map(|tag| tag.as_str()).collect();
+        let own_resolution = resolver.resolve_tags(&tags);
+        if let Some(ProjectResolution::AmbiguousAlias(alias)) = &own_resolution {
+            data_quality.ambiguous_project_alias_observations += 1;
+            ambiguous_aliases.insert(alias.clone());
+        }
+        let project = match own_resolution {
+            Some(ProjectResolution::Canonical(project)) => Some(project),
+            Some(ProjectResolution::AmbiguousAlias(_)) => None,
+            None => item
+                .document_id()
+                .and_then(|id| document_projects.get(id.as_str()).cloned()),
+        }
+        .unwrap_or_else(|| {
+            untagged_count += 1;
+            "other".to_string()
+        });
         if let Some(document_id) = item.document_id() {
             all_documents.insert(document_id.as_str());
             project_documents
@@ -239,6 +343,7 @@ pub fn portrait_session_observations<'a>(
         }
         item_projects.push(project);
     }
+    data_quality.ambiguous_project_aliases = ambiguous_aliases.len();
     let mut project_ranking: Vec<(String, usize)> = project_documents
         .into_iter()
         .map(|(project, documents)| (project, documents.len()))
@@ -260,36 +365,6 @@ pub fn portrait_session_observations<'a>(
         data_quality,
         untagged_count,
     }
-}
-
-const PORTRAIT_META_TAGS: &[&str] = &[
-    "decision",
-    "bugfix",
-    "novice",
-    "advanced_beginner",
-    "competent",
-    "proficient",
-    "expert",
-    "delegation",
-    "pair_programming",
-    "review",
-    "exploration",
-    "teaching",
-    "deep_inquiry",
-    "debugging",
-    "session_mode_interactive",
-    "session_mode_unattended",
-    "session_mode_subagent",
-    "session_mode_unknown",
-];
-
-fn project_from_tags(item: &Item) -> Option<String> {
-    item.tags()
-        .iter()
-        .map(|tag| tag.as_str())
-        .filter(|tag| !PORTRAIT_META_TAGS.contains(tag))
-        .filter_map(normalize_project_name)
-        .max_by_key(String::len)
 }
 
 #[cfg(test)]
@@ -398,6 +473,54 @@ mod tests {
         for (item, project) in portrait.eligible_items.iter().zip(&portrait.item_projects) {
             assert!(items.iter().any(|original| std::ptr::eq(*item, original)));
             assert_eq!(full.cluster.item_projects[item.id().as_str()], *project);
+        }
+    }
+
+    #[test]
+    fn portrait_comparison_windows_share_collision_aware_project_identity() {
+        let mut current_path = linked_observation("current-path");
+        current_path
+            .set_tags(vec![Tag::new("/root/a/work/mutil-om").unwrap()])
+            .unwrap();
+        let mut current_alias = linked_observation("current-alias");
+        current_alias
+            .set_tags(vec![Tag::new("om").unwrap()])
+            .unwrap();
+        let mut previous_path = linked_observation("previous-path");
+        previous_path
+            .set_tags(vec![Tag::new("/root/b/work/mutil-om").unwrap()])
+            .unwrap();
+        let current = vec![current_path, current_alias];
+        let previous = vec![previous_path];
+        let sources = HashMap::from([
+            ("current-path".into(), "codex-session".into()),
+            ("current-alias".into(), "codex-session".into()),
+            ("previous-path".into(), "claude-code-session".into()),
+        ]);
+
+        let portrait = portrait_session_observation_windows(&[&current, &previous], &sources);
+        let full = cluster_session_observation_windows(&[&current, &previous], &sources);
+
+        assert_eq!(
+            portrait[0].item_projects,
+            vec!["path:root-a-work-mutil-om", "other"]
+        );
+        assert_eq!(portrait[1].item_projects, vec!["path:root-b-work-mutil-om"]);
+        assert_eq!(
+            portrait[0]
+                .data_quality
+                .ambiguous_project_alias_observations,
+            1
+        );
+        for index in 0..2 {
+            assert_eq!(
+                portrait[index].data_quality,
+                full[index].cluster.data_quality
+            );
+            assert_eq!(
+                portrait[index].global_stats.project_ranking,
+                full[index].cluster.global_stats.project_ranking
+            );
         }
     }
 }

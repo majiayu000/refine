@@ -5,7 +5,7 @@ use crate::insights_manifest::{
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use refine_core::knowledge::{ItemRepository, ObservationWindowSnapshot};
-use refine_core::session::portrait_session_observations;
+use refine_core::session::portrait_session_observation_windows;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -234,8 +234,16 @@ pub(crate) fn build_bundle_from_snapshot(
         .iter()
         .map(|document| (document.id.as_str().to_string(), document.source.clone()))
         .collect();
-    let current_cohort = portrait_session_observations(&snapshot.current, &document_sources);
-    let previous_cohort = portrait_session_observations(&snapshot.previous, &document_sources);
+    let mut cohorts = portrait_session_observation_windows(
+        &[snapshot.current.as_slice(), snapshot.previous.as_slice()],
+        &document_sources,
+    );
+    let previous_cohort = cohorts
+        .pop()
+        .context("portrait comparison did not produce the previous cohort")?;
+    let current_cohort = cohorts
+        .pop()
+        .context("portrait comparison did not produce the current cohort")?;
     if current_cohort.data_quality.eligible_observations == 0 {
         bail!(
             "NO_CORE_DATA: current rolling window contains no eligible linked session observations"

@@ -498,6 +498,8 @@ mod tests {
                 mode_excluded_observations: 0,
                 source_excluded_observations: 0,
                 eligible_observations: 450,
+                ambiguous_project_alias_observations: 0,
+                ambiguous_project_aliases: 0,
                 cohort_identity: format!("sha256:{}", "a".repeat(64)),
             },
             untagged_count: 0,

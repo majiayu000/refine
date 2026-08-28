@@ -2,6 +2,7 @@
 //!
 //! 将 9740 条 observation 按项目分组、去重、统计，无 LLM 调用
 
+use super::project_identity::{ProjectIdentityResolver, ProjectResolution};
 use crate::knowledge::{Item, ItemType};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -93,6 +94,12 @@ pub struct DataQualityStats {
     #[serde(default)]
     pub source_excluded_observations: usize,
     pub eligible_observations: usize,
+    /// Eligible observations whose short project alias maps to multiple paths.
+    #[serde(default)]
+    pub ambiguous_project_alias_observations: usize,
+    /// Distinct ambiguous project aliases observed in this window.
+    #[serde(default)]
+    pub ambiguous_project_aliases: usize,
     /// Stable identity of the exact eligible item set, used by checkpoints.
     pub cohort_identity: String,
 }
@@ -161,6 +168,24 @@ pub fn eligible_observations(items: &[Item]) -> Vec<&Item> {
 
 /// 主函数：从全量 observation 生成聚类结果
 pub fn cluster_observations(items: &[Item]) -> ClusterResult {
+    let resolver = ProjectIdentityResolver::from_observation_windows(&[items]);
+    cluster_observations_with_resolver(items, &resolver)
+}
+
+/// Cluster related windows with one snapshot-level project identity resolver.
+pub fn cluster_observation_windows(windows: &[&[Item]]) -> Vec<ClusterResult> {
+    let resolver = ProjectIdentityResolver::from_observation_windows(windows);
+    windows
+        .iter()
+        .map(|items| cluster_observations_with_resolver(items, &resolver))
+        .collect()
+}
+
+/// Cluster one window with an identity resolver shared by all comparison windows.
+pub fn cluster_observations_with_resolver(
+    items: &[Item],
+    resolver: &ProjectIdentityResolver,
+) -> ClusterResult {
     let observations: Vec<&Item> = items
         .iter()
         .filter(|item| item.item_type() == ItemType::Observation)
@@ -208,13 +233,15 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
         cohort_hasher.update(id.as_bytes());
         cohort_hasher.update([0]);
     }
-    let data_quality = DataQualityStats {
+    let mut data_quality = DataQualityStats {
         input_observations,
         linked_observations,
         detached_observations,
         mode_excluded_observations,
         source_excluded_observations: 0,
         eligible_observations: eligible_observation_count,
+        ambiguous_project_alias_observations: 0,
+        ambiguous_project_aliases: 0,
         cohort_identity: format!("sha256:{:x}", cohort_hasher.finalize()),
     };
 
@@ -222,9 +249,14 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
     let mut doc_project_map: HashMap<String, String> = HashMap::new();
     for (item, tags) in &obs_with_tags {
         if let Some(doc_id) = item.document_id() {
-            if let Some(name) = extract_project_from_tags(tags) {
+            if let Some(ProjectResolution::Canonical(name)) = resolver.resolve_tags(tags) {
                 doc_project_map
                     .entry(doc_id.as_str().to_string())
+                    .and_modify(|existing| {
+                        if name < *existing {
+                            existing.clone_from(&name);
+                        }
+                    })
                     .or_insert(name);
             }
         }
@@ -240,13 +272,22 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
     let mut total_decisions = 0usize;
     let mut total_bugfixes = 0usize;
     let mut total_summaries = 0usize;
+    let mut ambiguous_aliases = HashSet::new();
 
     for (item, tags) in &obs_with_tags {
         // Try own tags first, then inherit from session's summary item
-        let project = extract_project_from_tags(tags).or_else(|| {
-            item.document_id()
-                .and_then(|doc_id| doc_project_map.get(doc_id.as_str()).cloned())
-        });
+        let own_resolution = resolver.resolve_tags(tags);
+        if let Some(ProjectResolution::AmbiguousAlias(alias)) = &own_resolution {
+            data_quality.ambiguous_project_alias_observations += 1;
+            ambiguous_aliases.insert(alias.clone());
+        }
+        let project = match own_resolution {
+            Some(ProjectResolution::Canonical(name)) => Some(name),
+            Some(ProjectResolution::AmbiguousAlias(_)) => None,
+            None => item
+                .document_id()
+                .and_then(|doc_id| doc_project_map.get(doc_id.as_str()).cloned()),
+        };
 
         let project_name = match project {
             Some(name) => name,
@@ -346,6 +387,7 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
                 .extend(extract_section_items_capped(content, "代码产出", 20));
         }
     }
+    data_quality.ambiguous_project_aliases = ambiguous_aliases.len();
 
     // 对每个项目去重 decision/bugfix titles
     for cluster in projects.values_mut() {
@@ -378,15 +420,15 @@ pub fn cluster_observations(items: &[Item]) -> ClusterResult {
     }
 }
 
-fn extract_project_from_tags(tags: &[&str]) -> Option<String> {
-    // Try all non-META tags, pick the one that normalizes to the most specific name
-    tags.iter()
-        .filter(|t| !META_TAGS.contains(t))
-        .filter_map(|s| normalize_project_name(s))
-        .max_by_key(|s| s.len())
+pub(super) fn is_project_meta_tag(tag: &str) -> bool {
+    META_TAGS.contains(&tag)
 }
 
-fn is_session_id(segment: &str) -> bool {
+pub(super) fn is_generic_project_path_segment(segment: &str) -> bool {
+    GENERIC_PATH_SEGMENTS.contains(&segment)
+}
+
+pub(super) fn is_session_id(segment: &str) -> bool {
     segment
         .strip_prefix("agent_")
         .is_some_and(|rest| rest.len() >= 16 && rest.chars().all(|c| c.is_ascii_hexdigit()))
