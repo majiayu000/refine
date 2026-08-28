@@ -1,25 +1,34 @@
 use crate::insights_manifest::{
-    build_manifest, build_window_manifest, report_source, EventTimeWindow, InsightsManifest,
-    WindowManifest,
+    build_manifest, build_window_manifest, EventTimeWindow, InsightsManifest, WindowManifest,
 };
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
-use refine_core::knowledge::{
-    Item, ItemRepository, ObservationDocumentMeta, ObservationWindowSnapshot,
-};
-use refine_core::session::{cluster_session_observations, eligible_observations, ClusterResult};
+use refine_core::knowledge::{ItemRepository, ObservationWindowSnapshot};
+use refine_core::session::cluster_session_observations;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 
+use super::projection::{build_window_data, enforce_bundle_budgets, validate_window_projection};
 use super::{read_utf8_bounded, MAX_PORTRAIT_BUNDLE_BYTES};
 
-pub(crate) const PORTRAIT_BUNDLE_SCHEMA_VERSION: u32 = 1;
-pub(crate) const PORTRAIT_COLLECTOR_VERSION: &str = "cognitive-portrait-collector-v1";
-pub(crate) const PORTRAIT_CLAIM_CATALOG_VERSION: u32 = 1;
-const PORTRAIT_PROMPT_IDENTITY: &str = "cognitive-portrait-v4:evidence-bundle-v1";
+pub(crate) const PORTRAIT_BUNDLE_SCHEMA_VERSION: u32 = 2;
+pub(crate) const PORTRAIT_COLLECTOR_VERSION: &str = "cognitive-portrait-collector-v2";
+pub(crate) const PORTRAIT_CLAIM_CATALOG_VERSION: u32 = 2;
+pub(crate) const PORTRAIT_PROJECTION_POLICY: &str = "stratified-provenance-v1";
+pub(crate) const MAX_PROJECTED_BUNDLE_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_WINDOW_EVIDENCE_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_WINDOW_DIMENSIONS_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_CLAIM_CATALOG_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_SELECTED_EVIDENCE_PER_WINDOW: usize = 2048;
+pub(crate) const MAX_DIMENSION_ENTRIES: usize = 128;
+pub(crate) const MAX_DIMENSION_EVIDENCE_IDS: usize = 4;
+pub(crate) const MAX_BREAKDOWN_ENTRIES: usize = 128;
+pub(crate) const MAX_TOP_PROJECT_STRATA: usize = 32;
+pub(crate) const MAX_PROJECTION_TEXT_BYTES: usize = 512;
+const PORTRAIT_PROMPT_IDENTITY: &str = "cognitive-portrait-v4:evidence-bundle-v2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CognitivePortraitBundle {
@@ -63,6 +72,7 @@ pub(crate) struct ComparisonContract {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PortraitWindowData {
     pub metrics: PortraitMetrics,
+    pub evidence_selection: EvidenceSelection,
     pub evidence: Vec<EvidenceRecord>,
     pub dimensions: PortraitDimensions,
 }
@@ -74,27 +84,98 @@ pub(crate) struct PortraitMetrics {
     pub total_bugfixes: usize,
     pub total_summaries: usize,
     pub untagged_observations: usize,
-    pub project_ranking: Vec<(String, usize)>,
+    pub project_ranking: CountBreakdown,
     pub cognitive_levels: BTreeMap<String, usize>,
     pub collaboration_modes: BTreeMap<String, usize>,
-    pub tool_frequency: BTreeMap<String, usize>,
+    pub tool_frequency: CountBreakdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CountBreakdown {
+    pub total_entries: usize,
+    pub selected_entries: usize,
+    pub omitted_entries: usize,
+    pub full_digest: String,
+    pub selection_digest: String,
+    pub entries: Vec<CountEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CountEntry {
+    pub value: String,
+    pub original_bytes: usize,
+    pub value_digest: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct EvidenceSelection {
+    pub policy_version: String,
+    pub eligible_observations: usize,
+    pub selected_observations: usize,
+    pub omitted_observations: usize,
+    pub evidence_byte_budget: usize,
+    pub full_payload_digest: String,
+    pub selection_digest: String,
+    pub strata: Vec<SelectionStratum>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SelectionStratum {
+    pub source: String,
+    pub category: String,
+    pub project_bucket: String,
+    pub eligible_observations: usize,
+    pub selected_observations: usize,
+    pub omitted_observations: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PortraitDimensions {
-    pub projects: Vec<DimensionEvidence>,
-    pub decisions: Vec<DimensionEvidence>,
-    pub bugfixes: Vec<DimensionEvidence>,
-    pub knowledge: Vec<DimensionEvidence>,
-    pub patterns: Vec<DimensionEvidence>,
-    pub architectures: Vec<DimensionEvidence>,
-    pub frictions: Vec<DimensionEvidence>,
+    pub projects: DimensionProjection,
+    pub decisions: DimensionProjection,
+    pub bugfixes: DimensionProjection,
+    pub knowledge: DimensionProjection,
+    pub patterns: DimensionProjection,
+    pub architectures: DimensionProjection,
+    pub frictions: DimensionProjection,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DimensionProjection {
+    pub total_values: usize,
+    pub selected_values: usize,
+    pub omitted_values: usize,
+    pub total_evidence_refs: usize,
+    pub selected_evidence_refs: usize,
+    pub omitted_evidence_refs: usize,
+    pub full_digest: String,
+    pub entries: Vec<DimensionEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DimensionEvidence {
     pub value: String,
+    pub original_bytes: usize,
+    pub value_digest: String,
+    pub support_count: usize,
+    pub omitted_evidence_count: usize,
     pub evidence_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FieldFingerprint {
+    pub bytes: usize,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct EvidenceFieldFingerprints {
+    pub title: FieldFingerprint,
+    pub summary: FieldFingerprint,
+    pub content: FieldFingerprint,
+    pub excerpt: Option<FieldFingerprint>,
+    pub tags: FieldFingerprint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,11 +187,10 @@ pub(crate) struct EvidenceRecord {
     pub source: String,
     pub project: String,
     pub categories: Vec<String>,
-    pub title: String,
-    pub summary: String,
-    pub content: String,
-    pub excerpt: Option<String>,
-    pub tags: Vec<String>,
+    pub display_text: String,
+    pub display_text_original_bytes: usize,
+    pub display_text_digest: String,
+    pub original_fields: EvidenceFieldFingerprints,
 }
 
 pub(crate) async fn collect_bundle(
@@ -202,7 +282,7 @@ pub(crate) fn build_bundle_from_snapshot(
         &snapshot.documents,
     )?;
     let claim_catalog = build_claim_catalog(&current, &previous, comparison.comparable)?;
-    Ok(CognitivePortraitBundle {
+    let bundle = CognitivePortraitBundle {
         schema_version: PORTRAIT_BUNDLE_SCHEMA_VERSION,
         collector_version: PORTRAIT_COLLECTOR_VERSION.to_string(),
         period_days,
@@ -212,7 +292,9 @@ pub(crate) fn build_bundle_from_snapshot(
         claim_catalog,
         current,
         previous,
-    })
+    };
+    enforce_bundle_budgets(&bundle)?;
+    Ok(bundle)
 }
 
 fn build_claim_catalog(
@@ -342,180 +424,8 @@ fn collector_identity() -> String {
     )
 }
 
-fn build_window_data(
-    cohort_items: &[Item],
-    cluster: &ClusterResult,
-    documents: &[ObservationDocumentMeta],
-) -> Result<PortraitWindowData> {
-    let documents: BTreeMap<&str, &ObservationDocumentMeta> = documents
-        .iter()
-        .map(|document| (document.id.as_str(), document))
-        .collect();
-    let eligible = eligible_observations(cohort_items);
-    let mut dimensions = DimensionAccumulator::default();
-    let mut evidence = Vec::with_capacity(eligible.len());
-    for item in eligible {
-        let document_id = item
-            .document_id()
-            .context("eligible portrait observation unexpectedly lacks document_id")?;
-        let document = documents.get(document_id.as_str()).with_context(|| {
-            format!(
-                "eligible portrait observation references missing document metadata {}",
-                document_id
-            )
-        })?;
-        let evidence_id = format!("obs:{}", item.id());
-        let tags: Vec<String> = item
-            .tags()
-            .iter()
-            .map(|tag| tag.as_str().to_string())
-            .collect();
-        let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
-        let project = cluster
-            .item_projects
-            .get(item.id().as_str())
-            .with_context(|| {
-                format!(
-                    "eligible portrait observation is missing its direct project assignment {}",
-                    item.id()
-                )
-            })?
-            .clone();
-        let mut categories = BTreeSet::new();
-        dimensions.projects.add(&project, &evidence_id);
-        if tag_refs.contains(&"decision") {
-            categories.insert("decision".to_string());
-            dimensions.decisions.add(item.title(), &evidence_id);
-        } else if tag_refs.contains(&"bugfix") {
-            categories.insert("bugfix".to_string());
-            dimensions.bugfixes.add(item.title(), &evidence_id);
-        } else {
-            categories.insert("summary".to_string());
-        }
-        add_sections(item, &evidence_id, &mut categories, &mut dimensions);
-        evidence.push(EvidenceRecord {
-            evidence_id,
-            item_id: item.id().as_str().to_string(),
-            document_id: document_id.as_str().to_string(),
-            event_time: document.captured_at,
-            source: report_source(&document.source).to_string(),
-            project,
-            categories: categories.into_iter().collect(),
-            title: item.title().to_string(),
-            summary: item.summary().to_string(),
-            content: item.content().to_string(),
-            excerpt: item.excerpt().map(ToOwned::to_owned),
-            tags,
-        });
-    }
-    evidence.sort_by(|left, right| {
-        left.event_time
-            .cmp(&right.event_time)
-            .then_with(|| left.item_id.cmp(&right.item_id))
-    });
-    let stats = &cluster.global_stats;
-    Ok(PortraitWindowData {
-        metrics: PortraitMetrics {
-            total_sessions: stats.total_sessions,
-            total_decisions: stats.total_decisions,
-            total_bugfixes: stats.total_bugfixes,
-            total_summaries: stats.total_summaries,
-            untagged_observations: cluster.untagged_count,
-            project_ranking: stats.project_ranking.clone(),
-            cognitive_levels: stats.cognitive_levels.clone().into_iter().collect(),
-            collaboration_modes: stats.collaboration_modes.clone().into_iter().collect(),
-            tool_frequency: stats.tool_frequency.clone().into_iter().collect(),
-        },
-        evidence,
-        dimensions: dimensions.finish(),
-    })
-}
-
-fn add_sections(
-    item: &Item,
-    evidence_id: &str,
-    categories: &mut BTreeSet<String>,
-    dimensions: &mut DimensionAccumulator,
-) {
-    for (category, section, target) in [
-        ("knowledge", "知识", &mut dimensions.knowledge),
-        ("pattern", "模式", &mut dimensions.patterns),
-        ("architecture", "架构", &mut dimensions.architectures),
-        ("friction", "阻力", &mut dimensions.frictions),
-    ] {
-        for value in extract_section_items(item.content(), section) {
-            categories.insert(category.to_string());
-            target.add(&value, evidence_id);
-        }
-    }
-}
-
-fn extract_section_items(content: &str, section: &str) -> Vec<String> {
-    let mut in_section = false;
-    let mut values = Vec::new();
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.ends_with(':') && !trimmed.starts_with('-') {
-            in_section = trimmed.trim_end_matches(':') == section;
-            continue;
-        }
-        if in_section && trimmed.starts_with("- ") {
-            values.push(trimmed.trim_start_matches("- ").to_string());
-        } else if in_section && !trimmed.is_empty() {
-            in_section = false;
-        }
-    }
-    values
-}
-
-#[derive(Default)]
-struct DimensionAccumulator {
-    projects: EvidenceValues,
-    decisions: EvidenceValues,
-    bugfixes: EvidenceValues,
-    knowledge: EvidenceValues,
-    patterns: EvidenceValues,
-    architectures: EvidenceValues,
-    frictions: EvidenceValues,
-}
-
-impl DimensionAccumulator {
-    fn finish(self) -> PortraitDimensions {
-        PortraitDimensions {
-            projects: self.projects.finish(),
-            decisions: self.decisions.finish(),
-            bugfixes: self.bugfixes.finish(),
-            knowledge: self.knowledge.finish(),
-            patterns: self.patterns.finish(),
-            architectures: self.architectures.finish(),
-            frictions: self.frictions.finish(),
-        }
-    }
-}
-
-#[derive(Default)]
-struct EvidenceValues(BTreeMap<String, BTreeSet<String>>);
-
-impl EvidenceValues {
-    fn add(&mut self, value: &str, evidence_id: &str) {
-        self.0
-            .entry(value.to_string())
-            .or_default()
-            .insert(evidence_id.to_string());
-    }
-
-    fn finish(self) -> Vec<DimensionEvidence> {
-        self.0
-            .into_iter()
-            .map(|(value, evidence_ids)| DimensionEvidence {
-                value,
-                evidence_ids: evidence_ids.into_iter().collect(),
-            })
-            .collect()
-    }
-}
-
 pub(crate) fn write_bundle(path: &Path, bundle: &CognitivePortraitBundle) -> Result<()> {
+    enforce_bundle_budgets(bundle)?;
     let mut json = serde_json::to_string_pretty(bundle).context("serialize portrait bundle")?;
     json.push('\n');
     if json.len() > MAX_PORTRAIT_BUNDLE_BYTES {
@@ -554,10 +464,12 @@ pub(crate) fn read_bundle(path: &Path) -> Result<CognitivePortraitBundle> {
         .previous_window
         .as_ref()
         .context("SCHEMA_INVALID: previous window manifest is required")?;
-    if bundle.manifest.current_window.eligible_observations != bundle.current.evidence.len()
-        || previous_manifest.eligible_observations != bundle.previous.evidence.len()
+    if bundle.manifest.current_window.eligible_observations
+        != bundle.current.evidence_selection.eligible_observations
+        || previous_manifest.eligible_observations
+            != bundle.previous.evidence_selection.eligible_observations
     {
-        bail!("SCHEMA_INVALID: manifest, cohort, and evidence counts disagree");
+        bail!("SCHEMA_INVALID: manifest, cohort, and projection counts disagree");
     }
     if bundle.comparison != comparison_contract(&bundle.manifest.current_window, previous_manifest)
     {
@@ -573,5 +485,8 @@ pub(crate) fn read_bundle(path: &Path) -> Result<CognitivePortraitBundle> {
             "SCHEMA_INVALID: claim catalog disagrees with trusted metrics or canonical rendering"
         );
     }
+    validate_window_projection(&bundle.current, "current")?;
+    validate_window_projection(&bundle.previous, "previous")?;
+    enforce_bundle_budgets(&bundle)?;
     Ok(bundle)
 }

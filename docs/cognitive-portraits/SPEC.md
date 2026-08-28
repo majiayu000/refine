@@ -1,10 +1,10 @@
-# Cognitive Portrait v4 — deterministic evidence contract
+# Cognitive Portrait v4 — deterministic bounded evidence contract
 
 Status: implemented specification
 
 Date: 2026-08-28
 
-Issue: #191
+Issues: #191, #199
 
 ## Problem
 
@@ -32,23 +32,69 @@ only generative step.
 
 ## Bundle contract
 
-The collector is `cognitive-portrait-collector-v1`; bundle schema is `1`.
+The collector is `cognitive-portrait-collector-v2`; bundle schema is `2`.
 Every bundle records:
 
 - fixed cutoff and current/previous event-time boundaries;
 - the same `InsightsManifest` builder, cohort identity, source allowlist, source
   freshness, unknown-platform counts, binary identity, and source revision used
   by Session Insights;
-- current/previous project, decision, bugfix, summary, cognitive-level,
-  collaboration-mode, tool, knowledge, pattern, architecture, and friction data
-  from the exact eligible cohort;
-- stable `obs:<item-id>` evidence IDs with document event time and source;
+- exact full-cohort scalar metrics plus bounded project/tool breakdowns with
+  total/selected/omitted counts and full-breakdown digests;
+- current/previous project, decision, bugfix, knowledge, pattern, architecture,
+  and friction projections selected deterministically from the exact eligible
+  cohort;
+- stable `obs:<item-id>` provenance anchors with document event time, source,
+  direct item-to-project assignment, categories, bounded display text, and
+  original field byte lengths/digests;
 - a comparison status and explicit reasons when trends are not valid.
 - a closed `claim_catalog` with a schema version, stable claim IDs, typed
   metric/pointer metadata, and canonical `rendered_line` text for every
   numeric fact and comparable trend. Claims are sorted by `claim_id`; escaping
-  and rendered text are deterministic. Stable opaque evidence-record claims
-  cover non-numeric facts without embedding untrusted titles into Markdown.
+  and rendered text are deterministic. Stable opaque claims cover only retained
+  provenance anchors; omitted observations never manufacture a usable claim.
+
+### Bounded projection
+
+Every window includes `evidence_selection` using policy
+`stratified-provenance-v1`. Full-cohort metrics, source counts/freshness,
+comparison status, and cohort identity are computed before projection and are
+never sampled. The selection manifest records:
+
+- eligible, retained, and omitted observation counts;
+- a fixed per-window evidence component budget and the global 16 MiB internal
+  bundle target;
+- the full eligible payload digest and retained selection digest;
+- deterministic strata counts across source, primary category, and the top 32
+  full-cohort projects plus an explicit other-project bucket.
+
+Within each sorted stratum, observations rank by event time descending and
+evidence ID ascending. Selection round-robins across sorted strata up to 2048
+anchors per window. It is therefore neither SQL first-N nor recency-only.
+
+Each qualitative dimension discloses total/selected/omitted unique values,
+total/selected/omitted evidence references, and a digest of all full-cohort
+values and references. At most 128 entries per dimension and four retained
+evidence IDs per entry are emitted. Entries rank by full support descending,
+latest retained event descending, then full value ascending. Display values and
+anchor display text are UTF-8 safely bounded to 512 bytes while their original
+byte length and SHA-256 remain available.
+
+Project ranking and tool frequency retain exact full-entry counts, full digests,
+and reproducible retained-selection digests but emit at most 128 ranked entries.
+Fixed scalar totals, cognitive levels, and collaboration modes remain exact.
+
+The builder measures evidence, dimensions, and claim-catalog components before
+final serialization. Any implementation invariant exceeding its component
+budget is `INTERNAL_BUDGET_VIOLATION`; it is never handled by silently dropping
+additional data at write time. The final pretty JSON must be at most 16 MiB.
+The independent 64 MiB reader/wrapper safety limit remains unchanged.
+
+The projection is internally closed: every dimension reference resolves to one
+retained anchor; every retained anchor has a unique claim and pointer; selection
+and component digests reproduce; eligible equals retained plus omitted; and all
+arrays use canonical stable ordering. Unknown, duplicate, or omitted references
+fail bundle validation.
 
 `claude-code-session`, `codex-session`, and `remem-raw-session` are supported
 session containers. Remem remains `platform_unknown` until upstream provenance
@@ -130,7 +176,8 @@ comments, link destinations, HTML metadata, and machine fields are excluded
 from rendered structure and novelty checks, so metadata-only edits do not
 count as insight. Soft-wrapped paragraphs are reconstructed before validation.
 Candidates are capped at 1 MiB, individual Markdown lines at 64 KiB, and the
-rendered report at 4096 blocks. Bundles are capped at 64 MiB and previous
+rendered report at 4096 blocks. Projected bundles target 16 MiB and are capped
+independently at 64 MiB; previous
 portraits at 4 MiB. Both the host wrapper and Rust reader enforce the byte caps
 before hashing, copying, or parsing.
 
@@ -171,6 +218,12 @@ real Refine schema. It covers:
 - unsupported Observation disclosure and trend suppression;
 - empty and schema-invalid failure;
 - validator failure preventing index eligibility.
+- at least 100,000 long-Unicode, high-cardinality observations producing a
+  deterministic projected bundle below both internal and outer byte limits;
+- repeated-process fixed-cutoff bundle SHA stability;
+- bounded source/project/category strata, full-cohort digest/count disclosure,
+  direct same-title cross-project provenance, and fail-closed reference
+  invariants.
 
 Historical v0-v3 reports are immutable evidence of the former process. Their
 line counts remain historical metadata, not a v4 acceptance signal.

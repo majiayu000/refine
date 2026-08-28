@@ -403,7 +403,7 @@ mod tests {
     #[tokio::test]
     async fn cli_extract_persists_document_and_items_together() {
         let temp = tempdir().unwrap();
-        let store = SqliteStore::open(&temp.path().join("refine.db")).unwrap();
+        let store = SqliteStore::open(temp.path().join("refine.db")).unwrap();
 
         let items =
             extract_and_persist_cli_content("Human: hello\nAssistant: world", &store, &FakeLlm)

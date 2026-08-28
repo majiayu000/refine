@@ -191,6 +191,14 @@ fn empty_core_data_fails_clearly() {
 #[test]
 fn bundle_round_trip_is_versioned_and_deterministic() {
     let bundle = fixture(false);
+    assert_eq!(bundle.current.evidence_selection.eligible_observations, 1);
+    assert_eq!(bundle.current.evidence_selection.selected_observations, 1);
+    assert_eq!(bundle.current.evidence_selection.omitted_observations, 0);
+    assert!(bundle
+        .current
+        .evidence_selection
+        .full_payload_digest
+        .starts_with("sha256:"));
     let directory = tempfile::tempdir().unwrap();
     let first = directory.path().join("first.json");
     let second = directory.path().join("second.json");
@@ -221,6 +229,32 @@ fn bundle_round_trip_is_versioned_and_deterministic() {
         .unwrap_err()
         .to_string()
         .contains("claim catalog"));
+}
+
+#[test]
+fn bounded_projection_invariants_fail_closed() {
+    let bundle = fixture(false);
+    let directory = tempfile::tempdir().unwrap();
+    let invalid = directory.path().join("invalid-projection.json");
+    let assert_invalid = |value: serde_json::Value, expected: &str| {
+        std::fs::write(&invalid, serde_json::to_vec(&value).unwrap()).unwrap();
+        let error = read_bundle(&invalid).unwrap_err().to_string();
+        assert!(error.contains(expected), "unexpected error: {error}");
+    };
+
+    let mut tampered = serde_json::to_value(&bundle).unwrap();
+    tampered["current"]["evidence_selection"]["omitted_observations"] = serde_json::json!(1);
+    assert_invalid(tampered, "evidence selection invariant");
+
+    let mut tampered = serde_json::to_value(&bundle).unwrap();
+    tampered["current"]["dimensions"]["projects"]["entries"][0]["evidence_ids"][0] =
+        serde_json::json!("obs:does-not-exist");
+    assert_invalid(tampered, "dangling evidence reference");
+
+    let mut tampered = serde_json::to_value(&bundle).unwrap();
+    tampered["current"]["evidence_selection"]["full_payload_digest"] =
+        serde_json::json!("sha256:not-a-digest");
+    assert_invalid(tampered, "evidence selection invariant");
 }
 
 #[test]
@@ -686,7 +720,14 @@ fn duplicate_titles_keep_direct_cross_project_assignment_and_stable_ties() {
     assert_eq!(projects["alpha-item"], "alpha");
     assert_eq!(projects["zeta-item"], "zeta");
     assert_eq!(
-        bundle.current.metrics.project_ranking,
-        vec![("alpha".into(), 1), ("zeta".into(), 1)]
+        bundle
+            .current
+            .metrics
+            .project_ranking
+            .entries
+            .iter()
+            .map(|entry| (entry.value.as_str(), entry.count))
+            .collect::<Vec<_>>(),
+        vec![("alpha", 1), ("zeta", 1)]
     );
 }

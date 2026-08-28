@@ -5,6 +5,7 @@
 //! bundle, then validates a candidate before archival.
 
 mod bundle;
+mod projection;
 mod quality;
 
 use anyhow::{bail, Context, Result};

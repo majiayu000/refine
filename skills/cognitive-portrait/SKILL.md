@@ -13,8 +13,8 @@ never treats output length as evidence quality.
 Require all of the following or stop with a specific error:
 
 - `REFINE_COGNITIVE_PORTRAIT_BUNDLE` points to a readable JSON bundle.
-- The bundle has `schema_version=1` and
-  `collector_version=cognitive-portrait-collector-v1`.
+- The bundle has `schema_version=2` and
+  `collector_version=cognitive-portrait-collector-v2`.
 - `claim_catalog.schema_version` is the supported catalog version. The catalog
   is the closed set of evidence, numeric, and trend facts for this run.
 - `REFINE_COGNITIVE_PORTRAIT_OUTPUT` names the only final candidate file this
@@ -83,6 +83,16 @@ or other non-HTTP/non-relative link targets are forbidden in the candidate.
 The candidate is capped at 1 MiB; a single Markdown line is capped at 64 KiB
 and the rendered report at 4096 blocks. The trusted bundle is capped at 64 MiB
 and the previous portrait at 4 MiB.
+
+The bundle is a bounded projection of one exact full cohort. Scalar metrics,
+source freshness, comparison status, and cohort identity remain full-cohort
+facts. Qualitative dimensions and provenance anchors are selected by the
+versioned deterministic policy recorded in each window. Read and disclose
+`evidence_selection.eligible_observations`, `selected_observations`,
+`omitted_observations`, and the dimension omission counts; never describe the
+retained qualitative slice as exhaustive. Only retained `evidence[]` IDs and
+their catalog claims may be cited. Do not infer facts about omitted rows from a
+selection digest.
 
 A layer may cite interpretations and recommendations with these machine-readable
 forms:
