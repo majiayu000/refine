@@ -163,9 +163,12 @@ scripts/install-local.sh --cognitive-portrait \
   --cognitive-portrait-root /absolute/path/to/refine-portrait-workspace
 ```
 
-The workspace must already exist, must not be a symlink, and must contain both
-`skills/cognitive-portrait/SKILL.md` and
-`docs/cognitive-portraits/INDEX.md`. Paths containing spaces are supported.
+The workspace must already exist, must not be a symlink, and must contain the
+complete v2 `skills/cognitive-portrait` tree from the installing checkout plus
+`docs/cognitive-portraits/INDEX.md`. The installer pins the skill-tree SHA-256,
+bundle schema, claim-catalog schema, and contract version in the manifest;
+legacy or mixed v1/v2 roots fail before binaries are changed. Paths containing
+spaces are supported.
 The installer binds `WorkingDirectory` and `REFINE_ROOT` to that workspace and
 binds `REFINE_PORTRAIT_DIR` to its `docs/cognitive-portraits` archive.
 It also installs the deterministic `collect-cognitive-portrait.sh` and
@@ -176,8 +179,10 @@ the generated v4 bundle/quality artifacts under the portrait archive.
 On later installs, omit `--cognitive-portrait-root`: the installer preserves the
 root recorded in the manifest. When upgrading a legacy plist that has no
 manifest root, a valid `REFINE_ROOT` is preserved and promoted into the new
-manifest. An invalid, missing, relative, or symlinked legacy root stops the
-upgrade before binaries or LaunchAgents are changed. To move the archive,
+manifest. An invalid, missing, relative, symlinked, or legacy-skill root stops
+the upgrade before binaries or LaunchAgents are changed. Migrate the skill tree
+to the checkout's v2 contract explicitly; existing report and evidence archives
+remain untouched. To move the archive,
 create and verify the new workspace first, then pass the explicit option once.
 
 Disable the portrait job with:
@@ -188,8 +193,9 @@ scripts/install-local.sh --no-cognitive-portrait
 
 Doctor treats a remaining portrait plist or loaded label as an orphan. When the
 job is enabled, Doctor verifies the manifest/plist root, output directory,
-agent executable, collector/validator path and hash bindings, log binding, and
-latest archived portrait without reading or printing credential values.
+agent executable, collector/validator path and hash bindings, v2 schema and
+skill-tree hash bindings, log binding, and latest archived portrait without
+reading or printing credential values.
 
 Write LaunchAgents without starting them:
 

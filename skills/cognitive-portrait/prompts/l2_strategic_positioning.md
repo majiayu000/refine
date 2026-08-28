@@ -10,7 +10,10 @@ Write `## L2：战略定位` with:
 - `### 2.3 来源覆盖与战略盲区`
 - `### 2.4 当前证据支持的机会边界`
 
-Ground project claims in `current.metrics.project_ranking` and observation IDs.
+Ground project claims in `current.metrics.project_ranking.entries` and retained
+observation IDs. Disclose `total_occurrences`, `selected_occurrences`,
+`omitted_occurrences`, and `selected_entries`; a bounded ranking is not proof that omitted projects do not
+exist.
 Disclose Claude, Codex, platform-unknown, and unsupported-source freshness from
 the manifest. Grok/Gemini knowledge-only material is context coverage, never a
 session count. Do not infer absent work from an absent source.

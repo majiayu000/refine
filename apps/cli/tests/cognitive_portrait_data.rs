@@ -7,9 +7,10 @@ mod insights_manifest;
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use cognitive_portrait_data::{
-    read_bundle, validate_files, validate_portrait, write_bundle, CognitivePortraitBundle,
-    MAX_PORTRAIT_BUNDLE_BYTES, MAX_PORTRAIT_CANDIDATE_BYTES, MAX_PREVIOUS_PORTRAIT_BYTES,
-    PORTRAIT_BUNDLE_SCHEMA_VERSION, PORTRAIT_COLLECTOR_VERSION,
+    build_bundle_from_snapshot, read_bundle, validate_files, validate_portrait, write_bundle,
+    CognitivePortraitBundle, MAX_PORTRAIT_BUNDLE_BYTES, MAX_PORTRAIT_CANDIDATE_BYTES,
+    MAX_PREVIOUS_PORTRAIT_BYTES, MAX_WINDOW_DIMENSIONS_BYTES, PORTRAIT_BUNDLE_SCHEMA_VERSION,
+    PORTRAIT_COLLECTOR_VERSION,
 };
 use refine_core::knowledge::{
     DocumentId, Item, ItemId, ItemType, ObservationDocumentMeta, ObservationWindowSnapshot,
@@ -150,8 +151,59 @@ fn collector_reuses_source_cohort_and_emits_traceable_evidence() {
         .collect();
     assert!(claim_ids.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(claim_ids.contains(&"fact.current.total_sessions"));
+    assert!(claim_ids.contains(&"fact.current.evidence_selection.omitted_observations"));
+    assert!(claim_ids.contains(&"fact.current.dimensions.knowledge.omitted_occurrences"));
+    assert!(claim_ids.contains(&"fact.current.metrics.project_ranking.omitted_occurrences"));
+    assert!(claim_ids.contains(&"fact.current.metrics.tool_frequency.selected_entries"));
+    assert!(claim_ids.contains(&"fact.current.manifest.source.claude.coverage"));
+    assert!(claim_ids.contains(&"fact.current.manifest.source.codex.coverage"));
+    assert!(claim_ids.contains(&"fact.current.manifest.source.platform_unknown.coverage"));
+    assert!(claim_ids.contains(&"fact.current.manifest.unsupported_sources.coverage"));
     assert!(claim_ids.contains(&"fact.current.evidence.000000"));
     assert!(claim_ids.contains(&"trend.total_sessions"));
+}
+
+#[test]
+fn required_projection_disclosures_are_canonical_catalog_claims() {
+    let bundle = fixture(false);
+    let candidate = portrait(&format!(
+        "{}\n\n{}",
+        claim_line(
+            &bundle,
+            "fact.current.evidence_selection.omitted_observations"
+        ),
+        valid_action()
+    ));
+    let report = validate_portrait(&bundle, &candidate, None);
+    assert!(report.passed, "{:?}", report.errors);
+    assert_eq!(report.unsupported_numeric_claims, 0);
+}
+
+#[test]
+fn required_source_counts_and_freshness_are_canonical_catalog_claims() {
+    let bundle = fixture(false);
+    assert!(
+        claim_line(&bundle, "fact.current.manifest.source.codex.coverage")
+            .contains("freshest_event_time=2026-08-27T00:00:00+00:00")
+    );
+    assert!(
+        claim_line(&bundle, "fact.current.manifest.source.claude.coverage").contains(
+            "observations=0 observation; sessions=0 session; freshest_event_time=unavailable"
+        )
+    );
+    let body = [
+        "fact.current.manifest.source.claude.coverage",
+        "fact.current.manifest.source.codex.coverage",
+        "fact.current.manifest.source.platform_unknown.coverage",
+        "fact.current.manifest.unsupported_sources.coverage",
+    ]
+    .map(|claim_id| claim_line(&bundle, claim_id))
+    .join("\n\n");
+    let candidate = portrait(&format!("{body}\n\n{}", valid_action()));
+    let report = validate_portrait(&bundle, &candidate, None);
+    assert!(report.passed, "{:?}", report.errors);
+    assert_eq!(report.factual_claims, 4);
+    assert_eq!(report.unsupported_numeric_claims, 0);
 }
 
 #[test]
@@ -160,7 +212,7 @@ fn unsupported_knowledge_source_is_disclosed_and_suppresses_trends() {
     assert_eq!(bundle.current.metrics.total_sessions, 1);
     assert_eq!(bundle.current.evidence.len(), 1);
     assert_eq!(
-        bundle.manifest.current_window.unsupported_source_counts[0].source,
+        bundle.manifest.current_window.unsupported_sources.entries[0].source,
         "grok-knowledge"
     );
     assert!(!bundle.comparison.comparable);
@@ -191,6 +243,14 @@ fn empty_core_data_fails_clearly() {
 #[test]
 fn bundle_round_trip_is_versioned_and_deterministic() {
     let bundle = fixture(false);
+    assert_eq!(bundle.current.evidence_selection.eligible_observations, 1);
+    assert_eq!(bundle.current.evidence_selection.selected_observations, 1);
+    assert_eq!(bundle.current.evidence_selection.omitted_observations, 0);
+    assert!(bundle
+        .current
+        .evidence_selection
+        .full_payload_digest
+        .starts_with("sha256:"));
     let directory = tempfile::tempdir().unwrap();
     let first = directory.path().join("first.json");
     let second = directory.path().join("second.json");
@@ -221,6 +281,170 @@ fn bundle_round_trip_is_versioned_and_deterministic() {
         .unwrap_err()
         .to_string()
         .contains("claim catalog"));
+}
+
+#[test]
+fn full_payload_digest_distinguishes_omitted_null_and_empty_excerpt() {
+    let cutoff = Utc.with_ymd_and_hms(2026, 8, 28, 0, 0, 0).unwrap();
+    let event_time = cutoff - Duration::days(1);
+    let make_item = |id: &str, excerpt: Option<String>| {
+        Item::restore(RestoreParams {
+            id: ItemId::from(id),
+            item_type: ItemType::Observation,
+            title: id.to_string(),
+            summary: String::new(),
+            content: String::new(),
+            tags: vec![Tag::new("refine").unwrap()],
+            source: None,
+            document_id: Some(DocumentId::from("digest-doc")),
+            excerpt,
+            created_at: event_time,
+            updated_at: event_time,
+        })
+        .unwrap()
+    };
+    let build = |excerpt: Option<String>| {
+        let mut current: Vec<Item> = (0..2049)
+            .map(|index| make_item(&format!("item-{index:04}"), Some("same".to_string())))
+            .collect();
+        current.push(make_item("zzzz-omitted", excerpt));
+        build_bundle_from_snapshot(
+            ObservationWindowSnapshot {
+                current,
+                previous: Vec::new(),
+                documents: vec![ObservationDocumentMeta {
+                    id: DocumentId::from("digest-doc"),
+                    source: "codex-session".to_string(),
+                    captured_at: event_time,
+                }],
+            },
+            cutoff,
+            90,
+        )
+        .unwrap()
+    };
+    let null_excerpt = build(None);
+    let empty_excerpt = build(Some(String::new()));
+    assert!(!null_excerpt
+        .current
+        .evidence
+        .iter()
+        .any(|record| record.item_id == "zzzz-omitted"));
+    assert_ne!(
+        null_excerpt.current.evidence_selection.full_payload_digest,
+        empty_excerpt.current.evidence_selection.full_payload_digest
+    );
+}
+
+#[test]
+fn dimension_projection_packs_final_escaped_json_bytes() {
+    let cutoff = Utc.with_ymd_and_hms(2026, 8, 28, 0, 0, 0).unwrap();
+    let event_time = cutoff - Duration::days(1);
+    let escaped = "\u{1}".repeat(500);
+    let current: Vec<Item> = (0..256)
+        .map(|index| {
+            let category = if index < 128 { "decision" } else { "bugfix" };
+            observation_with_title(
+                &format!("escaped-dimension-{index:03}"),
+                &format!("{escaped}-title-{index:03}"),
+                Some("escaped-dimension-current"),
+                event_time,
+                &["refine", category],
+                &format!(
+                    "知识:\n- {escaped}-knowledge-{index:03}\n模式:\n- {escaped}-pattern-{index:03}\n架构:\n- {escaped}-architecture-{index:03}\n阻力:\n- {escaped}-friction-{index:03}"
+                ),
+            )
+        })
+        .collect();
+    let snapshot = || ObservationWindowSnapshot {
+        current: current.clone(),
+        previous: vec![observation(
+            "escaped-dimension-previous",
+            Some("escaped-dimension-previous-doc"),
+            cutoff - Duration::days(91),
+            &["refine"],
+            "知识:\n- previous",
+        )],
+        documents: vec![
+            ObservationDocumentMeta {
+                id: DocumentId::from("escaped-dimension-current"),
+                source: "codex-session".to_string(),
+                captured_at: event_time,
+            },
+            ObservationDocumentMeta {
+                id: DocumentId::from("escaped-dimension-previous-doc"),
+                source: "claude-code-session".to_string(),
+                captured_at: cutoff - Duration::days(91),
+            },
+        ],
+    };
+    let first = build_bundle_from_snapshot(snapshot(), cutoff, 90).unwrap();
+    let second = build_bundle_from_snapshot(snapshot(), cutoff, 90).unwrap();
+    let bytes = serde_json::to_vec(&first.current.dimensions).unwrap().len();
+    assert!(
+        bytes <= MAX_WINDOW_DIMENSIONS_BYTES,
+        "dimensions use {bytes} bytes"
+    );
+    assert!(
+        first.current.dimensions.knowledge.selected_values < 128
+            || first.current.dimensions.patterns.selected_values < 128
+            || first.current.dimensions.architectures.selected_values < 128
+            || first.current.dimensions.frictions.selected_values < 128
+    );
+    for dimension in [
+        &first.current.dimensions.knowledge,
+        &first.current.dimensions.patterns,
+        &first.current.dimensions.architectures,
+        &first.current.dimensions.frictions,
+    ] {
+        assert_eq!(dimension.total_occurrences, 256);
+        assert_eq!(
+            dimension.selected_occurrences + dimension.omitted_occurrences,
+            dimension.total_occurrences
+        );
+        assert!(dimension.full_digest.starts_with("sha256:"));
+    }
+    assert_eq!(first.current.dimensions, second.current.dimensions);
+}
+
+#[test]
+fn bounded_projection_invariants_fail_closed() {
+    let bundle = fixture(false);
+    let directory = tempfile::tempdir().unwrap();
+    let invalid = directory.path().join("invalid-projection.json");
+    let assert_invalid = |value: serde_json::Value, expected: &str| {
+        std::fs::write(&invalid, serde_json::to_vec(&value).unwrap()).unwrap();
+        let error = read_bundle(&invalid).unwrap_err().to_string();
+        assert!(error.contains(expected), "unexpected error: {error}");
+    };
+
+    let mut tampered = serde_json::to_value(&bundle).unwrap();
+    tampered["current"]["evidence_selection"]["omitted_observations"] = serde_json::json!(1);
+    assert_invalid(tampered, "evidence selection invariant");
+
+    let mut tampered = serde_json::to_value(&bundle).unwrap();
+    tampered["current"]["dimensions"]["projects"]["entries"][0]["evidence_ids"][0] =
+        serde_json::json!("obs:does-not-exist");
+    assert_invalid(tampered, "dangling evidence reference");
+
+    let mut tampered = serde_json::to_value(&bundle).unwrap();
+    tampered["current"]["evidence_selection"]["full_payload_digest"] =
+        serde_json::json!("sha256:not-a-digest");
+    assert_invalid(tampered, "evidence selection invariant");
+
+    let mut tampered = serde_json::to_value(&bundle).unwrap();
+    tampered["manifest"]["manifest_version"] = serde_json::json!(1);
+    assert_invalid(tampered, "unsupported insights manifest schema 1");
+
+    let mut tampered = serde_json::to_value(&bundle).unwrap();
+    tampered["current"]["metrics"]["project_ranking"]["omitted_occurrences"] =
+        serde_json::json!(999);
+    assert_invalid(tampered, "count breakdown invariant");
+
+    let mut tampered = serde_json::to_value(fixture(true)).unwrap();
+    tampered["manifest"]["current_window"]["unsupported_sources"]["selected_observations"] =
+        serde_json::json!(999);
+    assert_invalid(tampered, "unsupported source breakdown invariant");
 }
 
 #[test]
@@ -686,7 +910,14 @@ fn duplicate_titles_keep_direct_cross_project_assignment_and_stable_ties() {
     assert_eq!(projects["alpha-item"], "alpha");
     assert_eq!(projects["zeta-item"], "zeta");
     assert_eq!(
-        bundle.current.metrics.project_ranking,
-        vec![("alpha".into(), 1), ("zeta".into(), 1)]
+        bundle
+            .current
+            .metrics
+            .project_ranking
+            .entries
+            .iter()
+            .map(|entry| (entry.value.as_str(), entry.count))
+            .collect::<Vec<_>>(),
+        vec![("alpha", 1), ("zeta", 1)]
     );
 }

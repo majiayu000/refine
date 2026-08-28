@@ -1,25 +1,35 @@
 use crate::insights_manifest::{
-    build_manifest, build_window_manifest, report_source, EventTimeWindow, InsightsManifest,
-    WindowManifest,
+    build_manifest, build_window_manifest_from_refs, validate_window_manifest, EventTimeWindow,
+    InsightsManifest, WindowManifest,
 };
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
-use refine_core::knowledge::{
-    Item, ItemRepository, ObservationDocumentMeta, ObservationWindowSnapshot,
-};
-use refine_core::session::{cluster_session_observations, eligible_observations, ClusterResult};
+use refine_core::knowledge::{ItemRepository, ObservationWindowSnapshot};
+use refine_core::session::portrait_session_observations;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 
+use super::projection::{build_window_data, enforce_bundle_budgets, validate_window_projection};
 use super::{read_utf8_bounded, MAX_PORTRAIT_BUNDLE_BYTES};
 
-pub(crate) const PORTRAIT_BUNDLE_SCHEMA_VERSION: u32 = 1;
-pub(crate) const PORTRAIT_COLLECTOR_VERSION: &str = "cognitive-portrait-collector-v1";
-pub(crate) const PORTRAIT_CLAIM_CATALOG_VERSION: u32 = 1;
-const PORTRAIT_PROMPT_IDENTITY: &str = "cognitive-portrait-v4:evidence-bundle-v1";
+pub(crate) const PORTRAIT_BUNDLE_SCHEMA_VERSION: u32 = 2;
+pub(crate) const PORTRAIT_COLLECTOR_VERSION: &str = "cognitive-portrait-collector-v2";
+pub(crate) const PORTRAIT_CLAIM_CATALOG_VERSION: u32 = 2;
+pub(crate) const PORTRAIT_PROJECTION_POLICY: &str = "stratified-provenance-v1";
+pub(crate) const MAX_PROJECTED_BUNDLE_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_WINDOW_EVIDENCE_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_WINDOW_DIMENSIONS_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_CLAIM_CATALOG_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_SELECTED_EVIDENCE_PER_WINDOW: usize = 2048;
+pub(crate) const MAX_DIMENSION_ENTRIES: usize = 128;
+pub(crate) const MAX_DIMENSION_EVIDENCE_IDS: usize = 4;
+pub(crate) const MAX_BREAKDOWN_ENTRIES: usize = 128;
+pub(crate) const MAX_TOP_PROJECT_STRATA: usize = 32;
+pub(crate) const MAX_PROJECTION_TEXT_BYTES: usize = 512;
+const PORTRAIT_PROMPT_IDENTITY: &str = "cognitive-portrait-v4:evidence-bundle-v2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CognitivePortraitBundle {
@@ -63,6 +73,7 @@ pub(crate) struct ComparisonContract {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PortraitWindowData {
     pub metrics: PortraitMetrics,
+    pub evidence_selection: EvidenceSelection,
     pub evidence: Vec<EvidenceRecord>,
     pub dimensions: PortraitDimensions,
 }
@@ -74,27 +85,98 @@ pub(crate) struct PortraitMetrics {
     pub total_bugfixes: usize,
     pub total_summaries: usize,
     pub untagged_observations: usize,
-    pub project_ranking: Vec<(String, usize)>,
+    pub project_ranking: CountBreakdown,
     pub cognitive_levels: BTreeMap<String, usize>,
     pub collaboration_modes: BTreeMap<String, usize>,
-    pub tool_frequency: BTreeMap<String, usize>,
+    pub tool_frequency: CountBreakdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CountBreakdown {
+    pub total_occurrences: usize,
+    pub selected_occurrences: usize,
+    pub omitted_occurrences: usize,
+    pub selected_entries: usize,
+    pub full_digest: String,
+    pub selection_digest: String,
+    pub entries: Vec<CountEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CountEntry {
+    pub value: String,
+    pub original_bytes: usize,
+    pub value_digest: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct EvidenceSelection {
+    pub policy_version: String,
+    pub eligible_observations: usize,
+    pub selected_observations: usize,
+    pub omitted_observations: usize,
+    pub evidence_byte_budget: usize,
+    pub full_payload_digest: String,
+    pub selection_digest: String,
+    pub strata: Vec<SelectionStratum>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SelectionStratum {
+    pub source: String,
+    pub category: String,
+    pub project_bucket: String,
+    pub eligible_observations: usize,
+    pub selected_observations: usize,
+    pub omitted_observations: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PortraitDimensions {
-    pub projects: Vec<DimensionEvidence>,
-    pub decisions: Vec<DimensionEvidence>,
-    pub bugfixes: Vec<DimensionEvidence>,
-    pub knowledge: Vec<DimensionEvidence>,
-    pub patterns: Vec<DimensionEvidence>,
-    pub architectures: Vec<DimensionEvidence>,
-    pub frictions: Vec<DimensionEvidence>,
+    pub projects: DimensionProjection,
+    pub decisions: DimensionProjection,
+    pub bugfixes: DimensionProjection,
+    pub knowledge: DimensionProjection,
+    pub patterns: DimensionProjection,
+    pub architectures: DimensionProjection,
+    pub frictions: DimensionProjection,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DimensionProjection {
+    pub total_occurrences: usize,
+    pub selected_occurrences: usize,
+    pub omitted_occurrences: usize,
+    pub selected_values: usize,
+    pub selected_evidence_refs: usize,
+    pub full_digest: String,
+    pub entries: Vec<DimensionEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DimensionEvidence {
     pub value: String,
+    pub original_bytes: usize,
+    pub value_digest: String,
+    pub support_count: usize,
+    pub omitted_evidence_count: usize,
     pub evidence_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FieldFingerprint {
+    pub bytes: usize,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct EvidenceFieldFingerprints {
+    pub title: FieldFingerprint,
+    pub summary: FieldFingerprint,
+    pub content: FieldFingerprint,
+    pub excerpt: Option<FieldFingerprint>,
+    pub tags: FieldFingerprint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,11 +188,10 @@ pub(crate) struct EvidenceRecord {
     pub source: String,
     pub project: String,
     pub categories: Vec<String>,
-    pub title: String,
-    pub summary: String,
-    pub content: String,
-    pub excerpt: Option<String>,
-    pub tags: Vec<String>,
+    pub display_text: String,
+    pub display_text_original_bytes: usize,
+    pub display_text_digest: String,
+    pub original_fields: EvidenceFieldFingerprints,
 }
 
 pub(crate) async fn collect_bundle(
@@ -153,32 +234,32 @@ pub(crate) fn build_bundle_from_snapshot(
         .iter()
         .map(|document| (document.id.as_str().to_string(), document.source.clone()))
         .collect();
-    let current_cohort = cluster_session_observations(&snapshot.current, &document_sources);
-    let previous_cohort = cluster_session_observations(&snapshot.previous, &document_sources);
-    if current_cohort.cluster.data_quality.eligible_observations == 0 {
+    let current_cohort = portrait_session_observations(&snapshot.current, &document_sources);
+    let previous_cohort = portrait_session_observations(&snapshot.previous, &document_sources);
+    if current_cohort.data_quality.eligible_observations == 0 {
         bail!(
             "NO_CORE_DATA: current rolling window contains no eligible linked session observations"
         );
     }
 
-    let current_manifest = build_window_manifest(
+    let current_manifest = build_window_manifest_from_refs(
         EventTimeWindow {
             start: Some(current_start),
             end: Some(cutoff),
         },
-        &current_cohort.cohort_items,
+        &current_cohort.eligible_items,
         &snapshot.current,
-        &current_cohort.cluster,
+        &current_cohort.data_quality,
         &snapshot.documents,
     )?;
-    let previous_manifest = build_window_manifest(
+    let previous_manifest = build_window_manifest_from_refs(
         EventTimeWindow {
             start: Some(previous_start),
             end: Some(current_start),
         },
-        &previous_cohort.cohort_items,
+        &previous_cohort.eligible_items,
         &snapshot.previous,
-        &previous_cohort.cluster,
+        &previous_cohort.data_quality,
         &snapshot.documents,
     )?;
     let comparison = comparison_contract(&current_manifest, &previous_manifest);
@@ -191,18 +272,19 @@ pub(crate) fn build_bundle_from_snapshot(
         PORTRAIT_PROMPT_IDENTITY,
         collector_identity(),
     );
-    let current = build_window_data(
-        &current_cohort.cohort_items,
-        &current_cohort.cluster,
-        &snapshot.documents,
+    let current = build_window_data(&current_cohort, &snapshot.documents)?;
+    let previous = build_window_data(&previous_cohort, &snapshot.documents)?;
+    let claim_catalog = build_claim_catalog(
+        &current,
+        &previous,
+        &manifest.current_window,
+        manifest
+            .previous_window
+            .as_ref()
+            .context("previous window manifest is required")?,
+        comparison.comparable,
     )?;
-    let previous = build_window_data(
-        &previous_cohort.cohort_items,
-        &previous_cohort.cluster,
-        &snapshot.documents,
-    )?;
-    let claim_catalog = build_claim_catalog(&current, &previous, comparison.comparable)?;
-    Ok(CognitivePortraitBundle {
+    let bundle = CognitivePortraitBundle {
         schema_version: PORTRAIT_BUNDLE_SCHEMA_VERSION,
         collector_version: PORTRAIT_COLLECTOR_VERSION.to_string(),
         period_days,
@@ -212,12 +294,16 @@ pub(crate) fn build_bundle_from_snapshot(
         claim_catalog,
         current,
         previous,
-    })
+    };
+    enforce_bundle_budgets(&bundle)?;
+    Ok(bundle)
 }
 
 fn build_claim_catalog(
     current: &PortraitWindowData,
     previous: &PortraitWindowData,
+    current_manifest: &WindowManifest,
+    previous_manifest: &WindowManifest,
     comparable: bool,
 ) -> Result<PortraitClaimCatalog> {
     let metrics = [
@@ -273,10 +359,12 @@ fn build_claim_catalog(
             });
         }
     }
-    for (window, window_label, data) in [
-        ("current", "当前窗口", current),
-        ("previous", "上一窗口", previous),
+    for (window, window_label, data, window_manifest) in [
+        ("current", "当前窗口", current, current_manifest),
+        ("previous", "上一窗口", previous, previous_manifest),
     ] {
+        add_source_manifest_claims(&mut claims, window, window_label, window_manifest)?;
+        add_projection_claims(&mut claims, window, window_label, data)?;
         for (index, _) in data.evidence.iter().enumerate() {
             let claim_id = format!("fact.{window}.evidence.{index:06}");
             let pointer = format!("/{window}/evidence/{index}");
@@ -300,6 +388,264 @@ fn build_claim_catalog(
         schema_version: PORTRAIT_CLAIM_CATALOG_VERSION,
         claims,
     })
+}
+
+fn add_source_manifest_claims(
+    claims: &mut Vec<PortraitClaim>,
+    window: &str,
+    window_label: &str,
+    manifest: &WindowManifest,
+) -> Result<()> {
+    let manifest_window = format!("{window}_window");
+    for (source, source_label) in [
+        ("claude", "Claude"),
+        ("codex", "Codex"),
+        ("platform_unknown", "platform-unknown"),
+    ] {
+        let stats = manifest
+            .source_counts
+            .iter()
+            .enumerate()
+            .find(|(_, stats)| stats.source == source);
+        let (observations, sessions, freshness, pointers) = if let Some((index, stats)) = stats {
+            let prefix = format!("/manifest/{manifest_window}/source_counts/{index}");
+            (
+                stats.observation_count,
+                stats.session_count,
+                format_freshness(stats.freshest_event_time),
+                vec![
+                    format!("{prefix}/observation_count"),
+                    format!("{prefix}/session_count"),
+                    format!("{prefix}/freshest_event_time"),
+                ],
+            )
+        } else {
+            (
+                0,
+                0,
+                "unavailable".to_string(),
+                vec![format!("/manifest/{manifest_window}/source_counts")],
+            )
+        };
+        let claim_id = format!("fact.{window}.manifest.source.{source}.coverage");
+        claims.push(PortraitClaim {
+            claim_id: claim_id.clone(),
+            kind: "fact".to_string(),
+            metric: format!("manifest.source.{source}.coverage"),
+            label: format!("{source_label} 来源覆盖与新鲜度"),
+            unit: "observation,session,timestamp".to_string(),
+            windows: vec![window.to_string()],
+            pointers,
+            values: vec![
+                u64::try_from(observations).context("source observation count exceeds u64")?,
+                u64::try_from(sessions).context("source session count exceeds u64")?,
+            ],
+            rendered_line: format!(
+                "[事实][claim:{claim_id}] {window_label}{source_label} 来源：observations={observations} observation; sessions={sessions} session; freshest_event_time={freshness}。"
+            ),
+        });
+    }
+
+    let unsupported = &manifest.unsupported_sources;
+    let claim_id = format!("fact.{window}.manifest.unsupported_sources.coverage");
+    claims.push(PortraitClaim {
+        claim_id: claim_id.clone(),
+        kind: "fact".to_string(),
+        metric: "manifest.unsupported_sources.coverage".to_string(),
+        label: "unsupported 来源覆盖与新鲜度".to_string(),
+        unit: "observation,session,timestamp".to_string(),
+        windows: vec![window.to_string()],
+        pointers: vec![
+            format!("/manifest/{manifest_window}/unsupported_sources/total_observations"),
+            format!("/manifest/{manifest_window}/unsupported_sources/total_sessions"),
+            format!("/manifest/{manifest_window}/unsupported_sources/freshest_event_time"),
+        ],
+        values: vec![
+            u64::try_from(unsupported.total_observations)
+                .context("unsupported source observation count exceeds u64")?,
+            u64::try_from(unsupported.total_sessions)
+                .context("unsupported source session count exceeds u64")?,
+        ],
+        rendered_line: format!(
+            "[事实][claim:{claim_id}] {window_label}unsupported 来源：observations={} observation; sessions={} session; freshest_event_time={}。",
+            unsupported.total_observations,
+            unsupported.total_sessions,
+            format_freshness(unsupported.freshest_event_time),
+        ),
+    });
+    Ok(())
+}
+
+fn format_freshness(freshness: Option<DateTime<Utc>>) -> String {
+    freshness
+        .map(|value| value.to_rfc3339())
+        .unwrap_or_else(|| "unavailable".to_string())
+}
+
+fn add_projection_claims(
+    claims: &mut Vec<PortraitClaim>,
+    window: &str,
+    window_label: &str,
+    data: &PortraitWindowData,
+) -> Result<()> {
+    for (metric, label, unit, pointer, value) in [
+        (
+            "evidence_selection.eligible_observations",
+            "可用观察总量",
+            "observation",
+            format!("/{window}/evidence_selection/eligible_observations"),
+            data.evidence_selection.eligible_observations,
+        ),
+        (
+            "evidence_selection.selected_observations",
+            "保留证据观察量",
+            "observation",
+            format!("/{window}/evidence_selection/selected_observations"),
+            data.evidence_selection.selected_observations,
+        ),
+        (
+            "evidence_selection.omitted_observations",
+            "省略证据观察量",
+            "observation",
+            format!("/{window}/evidence_selection/omitted_observations"),
+            data.evidence_selection.omitted_observations,
+        ),
+    ] {
+        push_projection_claim(
+            claims,
+            window,
+            window_label,
+            metric,
+            label,
+            unit,
+            pointer,
+            value,
+        )?;
+    }
+    for (name, label, dimension) in [
+        ("projects", "项目维度", &data.dimensions.projects),
+        ("decisions", "决策维度", &data.dimensions.decisions),
+        ("bugfixes", "修复维度", &data.dimensions.bugfixes),
+        ("knowledge", "知识维度", &data.dimensions.knowledge),
+        ("patterns", "模式维度", &data.dimensions.patterns),
+        ("architectures", "架构维度", &data.dimensions.architectures),
+        ("frictions", "阻力维度", &data.dimensions.frictions),
+    ] {
+        for (field, field_label, unit, value) in [
+            (
+                "total_occurrences",
+                "完整 occurrence 总量",
+                "occurrence",
+                dimension.total_occurrences,
+            ),
+            (
+                "selected_occurrences",
+                "保留 occurrence 总量",
+                "occurrence",
+                dimension.selected_occurrences,
+            ),
+            (
+                "omitted_occurrences",
+                "省略 occurrence 总量",
+                "occurrence",
+                dimension.omitted_occurrences,
+            ),
+            (
+                "selected_values",
+                "保留值总量",
+                "value",
+                dimension.selected_values,
+            ),
+            (
+                "selected_evidence_refs",
+                "保留证据引用总量",
+                "reference",
+                dimension.selected_evidence_refs,
+            ),
+        ] {
+            let metric = format!("dimensions.{name}.{field}");
+            push_projection_claim(
+                claims,
+                window,
+                window_label,
+                &metric,
+                &format!("{label}{field_label}"),
+                unit,
+                format!("/{window}/dimensions/{name}/{field}"),
+                value,
+            )?;
+        }
+    }
+    for (name, label, breakdown) in [
+        ("project_ranking", "项目排名", &data.metrics.project_ranking),
+        ("tool_frequency", "工具频率", &data.metrics.tool_frequency),
+    ] {
+        for (field, field_label, unit, value) in [
+            (
+                "total_occurrences",
+                "完整 occurrence 总量",
+                "occurrence",
+                breakdown.total_occurrences,
+            ),
+            (
+                "selected_occurrences",
+                "保留 occurrence 总量",
+                "occurrence",
+                breakdown.selected_occurrences,
+            ),
+            (
+                "omitted_occurrences",
+                "省略 occurrence 总量",
+                "occurrence",
+                breakdown.omitted_occurrences,
+            ),
+            (
+                "selected_entries",
+                "保留条目总量",
+                "entry",
+                breakdown.selected_entries,
+            ),
+        ] {
+            let metric = format!("metrics.{name}.{field}");
+            push_projection_claim(
+                claims,
+                window,
+                window_label,
+                &metric,
+                &format!("{label}{field_label}"),
+                unit,
+                format!("/{window}/metrics/{name}/{field}"),
+                value,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_projection_claim(
+    claims: &mut Vec<PortraitClaim>,
+    window: &str,
+    window_label: &str,
+    metric: &str,
+    label: &str,
+    unit: &str,
+    pointer: String,
+    value: usize,
+) -> Result<()> {
+    let claim_id = format!("fact.{window}.{metric}");
+    claims.push(PortraitClaim {
+        claim_id: claim_id.clone(),
+        kind: "fact".to_string(),
+        metric: metric.to_string(),
+        label: label.to_string(),
+        unit: unit.to_string(),
+        windows: vec![window.to_string()],
+        pointers: vec![pointer],
+        values: vec![u64::try_from(value).context("portrait projection count exceeds u64")?],
+        rendered_line: format!("[事实][claim:{claim_id}] {window_label}{label}：{value} {unit}。"),
+    });
+    Ok(())
 }
 
 fn metric_value(metrics: &PortraitMetrics, metric: &str) -> Result<usize> {
@@ -342,189 +688,18 @@ fn collector_identity() -> String {
     )
 }
 
-fn build_window_data(
-    cohort_items: &[Item],
-    cluster: &ClusterResult,
-    documents: &[ObservationDocumentMeta],
-) -> Result<PortraitWindowData> {
-    let documents: BTreeMap<&str, &ObservationDocumentMeta> = documents
-        .iter()
-        .map(|document| (document.id.as_str(), document))
-        .collect();
-    let eligible = eligible_observations(cohort_items);
-    let mut dimensions = DimensionAccumulator::default();
-    let mut evidence = Vec::with_capacity(eligible.len());
-    for item in eligible {
-        let document_id = item
-            .document_id()
-            .context("eligible portrait observation unexpectedly lacks document_id")?;
-        let document = documents.get(document_id.as_str()).with_context(|| {
-            format!(
-                "eligible portrait observation references missing document metadata {}",
-                document_id
-            )
-        })?;
-        let evidence_id = format!("obs:{}", item.id());
-        let tags: Vec<String> = item
-            .tags()
-            .iter()
-            .map(|tag| tag.as_str().to_string())
-            .collect();
-        let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
-        let project = cluster
-            .item_projects
-            .get(item.id().as_str())
-            .with_context(|| {
-                format!(
-                    "eligible portrait observation is missing its direct project assignment {}",
-                    item.id()
-                )
-            })?
-            .clone();
-        let mut categories = BTreeSet::new();
-        dimensions.projects.add(&project, &evidence_id);
-        if tag_refs.contains(&"decision") {
-            categories.insert("decision".to_string());
-            dimensions.decisions.add(item.title(), &evidence_id);
-        } else if tag_refs.contains(&"bugfix") {
-            categories.insert("bugfix".to_string());
-            dimensions.bugfixes.add(item.title(), &evidence_id);
-        } else {
-            categories.insert("summary".to_string());
-        }
-        add_sections(item, &evidence_id, &mut categories, &mut dimensions);
-        evidence.push(EvidenceRecord {
-            evidence_id,
-            item_id: item.id().as_str().to_string(),
-            document_id: document_id.as_str().to_string(),
-            event_time: document.captured_at,
-            source: report_source(&document.source).to_string(),
-            project,
-            categories: categories.into_iter().collect(),
-            title: item.title().to_string(),
-            summary: item.summary().to_string(),
-            content: item.content().to_string(),
-            excerpt: item.excerpt().map(ToOwned::to_owned),
-            tags,
-        });
-    }
-    evidence.sort_by(|left, right| {
-        left.event_time
-            .cmp(&right.event_time)
-            .then_with(|| left.item_id.cmp(&right.item_id))
-    });
-    let stats = &cluster.global_stats;
-    Ok(PortraitWindowData {
-        metrics: PortraitMetrics {
-            total_sessions: stats.total_sessions,
-            total_decisions: stats.total_decisions,
-            total_bugfixes: stats.total_bugfixes,
-            total_summaries: stats.total_summaries,
-            untagged_observations: cluster.untagged_count,
-            project_ranking: stats.project_ranking.clone(),
-            cognitive_levels: stats.cognitive_levels.clone().into_iter().collect(),
-            collaboration_modes: stats.collaboration_modes.clone().into_iter().collect(),
-            tool_frequency: stats.tool_frequency.clone().into_iter().collect(),
-        },
-        evidence,
-        dimensions: dimensions.finish(),
-    })
-}
-
-fn add_sections(
-    item: &Item,
-    evidence_id: &str,
-    categories: &mut BTreeSet<String>,
-    dimensions: &mut DimensionAccumulator,
-) {
-    for (category, section, target) in [
-        ("knowledge", "知识", &mut dimensions.knowledge),
-        ("pattern", "模式", &mut dimensions.patterns),
-        ("architecture", "架构", &mut dimensions.architectures),
-        ("friction", "阻力", &mut dimensions.frictions),
-    ] {
-        for value in extract_section_items(item.content(), section) {
-            categories.insert(category.to_string());
-            target.add(&value, evidence_id);
-        }
-    }
-}
-
-fn extract_section_items(content: &str, section: &str) -> Vec<String> {
-    let mut in_section = false;
-    let mut values = Vec::new();
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.ends_with(':') && !trimmed.starts_with('-') {
-            in_section = trimmed.trim_end_matches(':') == section;
-            continue;
-        }
-        if in_section && trimmed.starts_with("- ") {
-            values.push(trimmed.trim_start_matches("- ").to_string());
-        } else if in_section && !trimmed.is_empty() {
-            in_section = false;
-        }
-    }
-    values
-}
-
-#[derive(Default)]
-struct DimensionAccumulator {
-    projects: EvidenceValues,
-    decisions: EvidenceValues,
-    bugfixes: EvidenceValues,
-    knowledge: EvidenceValues,
-    patterns: EvidenceValues,
-    architectures: EvidenceValues,
-    frictions: EvidenceValues,
-}
-
-impl DimensionAccumulator {
-    fn finish(self) -> PortraitDimensions {
-        PortraitDimensions {
-            projects: self.projects.finish(),
-            decisions: self.decisions.finish(),
-            bugfixes: self.bugfixes.finish(),
-            knowledge: self.knowledge.finish(),
-            patterns: self.patterns.finish(),
-            architectures: self.architectures.finish(),
-            frictions: self.frictions.finish(),
-        }
-    }
-}
-
-#[derive(Default)]
-struct EvidenceValues(BTreeMap<String, BTreeSet<String>>);
-
-impl EvidenceValues {
-    fn add(&mut self, value: &str, evidence_id: &str) {
-        self.0
-            .entry(value.to_string())
-            .or_default()
-            .insert(evidence_id.to_string());
-    }
-
-    fn finish(self) -> Vec<DimensionEvidence> {
-        self.0
-            .into_iter()
-            .map(|(value, evidence_ids)| DimensionEvidence {
-                value,
-                evidence_ids: evidence_ids.into_iter().collect(),
-            })
-            .collect()
-    }
-}
-
 pub(crate) fn write_bundle(path: &Path, bundle: &CognitivePortraitBundle) -> Result<()> {
-    let mut json = serde_json::to_string_pretty(bundle).context("serialize portrait bundle")?;
-    json.push('\n');
+    enforce_bundle_budgets(bundle)?;
+    let mut json = Vec::with_capacity(1024 * 1024);
+    serde_json::to_writer_pretty(&mut json, bundle).context("serialize portrait bundle")?;
+    json.push(b'\n');
     if json.len() > MAX_PORTRAIT_BUNDLE_BYTES {
         bail!(
             "DATA_QUALITY_DEGRADED: cognitive portrait bundle exceeds the {} byte limit",
             MAX_PORTRAIT_BUNDLE_BYTES
         );
     }
-    fs::write(path, json)
+    fs::write(path, &json)
         .with_context(|| format!("write cognitive portrait bundle {}", path.display()))
 }
 
@@ -546,6 +721,13 @@ pub(crate) fn read_bundle(path: &Path) -> Result<CognitivePortraitBundle> {
             PORTRAIT_COLLECTOR_VERSION
         );
     }
+    if bundle.manifest.manifest_version != crate::insights_manifest::MANIFEST_VERSION {
+        bail!(
+            "SCHEMA_INVALID: unsupported insights manifest schema {}; expected {}",
+            bundle.manifest.manifest_version,
+            crate::insights_manifest::MANIFEST_VERSION
+        );
+    }
     if bundle.period_days == 0 || bundle.manifest.event_time_cutoff != bundle.cutoff {
         bail!("SCHEMA_INVALID: bundle cutoff/period invariant failed");
     }
@@ -554,18 +736,26 @@ pub(crate) fn read_bundle(path: &Path) -> Result<CognitivePortraitBundle> {
         .previous_window
         .as_ref()
         .context("SCHEMA_INVALID: previous window manifest is required")?;
-    if bundle.manifest.current_window.eligible_observations != bundle.current.evidence.len()
-        || previous_manifest.eligible_observations != bundle.previous.evidence.len()
+    if bundle.manifest.current_window.eligible_observations
+        != bundle.current.evidence_selection.eligible_observations
+        || previous_manifest.eligible_observations
+            != bundle.previous.evidence_selection.eligible_observations
     {
-        bail!("SCHEMA_INVALID: manifest, cohort, and evidence counts disagree");
+        bail!("SCHEMA_INVALID: manifest, cohort, and projection counts disagree");
     }
     if bundle.comparison != comparison_contract(&bundle.manifest.current_window, previous_manifest)
     {
         bail!("SCHEMA_INVALID: comparison contract disagrees with window manifests");
     }
+    validate_window_manifest(&bundle.manifest.current_window, "current")?;
+    validate_window_manifest(previous_manifest, "previous")?;
+    validate_window_projection(&bundle.current, "current")?;
+    validate_window_projection(&bundle.previous, "previous")?;
     let expected_catalog = build_claim_catalog(
         &bundle.current,
         &bundle.previous,
+        &bundle.manifest.current_window,
+        previous_manifest,
         bundle.comparison.comparable,
     )?;
     if bundle.claim_catalog != expected_catalog {
@@ -573,5 +763,6 @@ pub(crate) fn read_bundle(path: &Path) -> Result<CognitivePortraitBundle> {
             "SCHEMA_INVALID: claim catalog disagrees with trusted metrics or canonical rendering"
         );
     }
+    enforce_bundle_budgets(&bundle)?;
     Ok(bundle)
 }

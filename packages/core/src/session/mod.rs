@@ -36,7 +36,8 @@ pub use report::{
     INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
 };
 pub use source_cohort::{
-    cluster_session_observations, is_supported_session_document_source, SessionCohortCluster,
-    SUPPORTED_SESSION_DOCUMENT_SOURCES,
+    cluster_session_observations, is_supported_session_document_source,
+    portrait_session_observations, PortraitGlobalStats, PortraitSessionCohort,
+    SessionCohortCluster, SUPPORTED_SESSION_DOCUMENT_SOURCES,
 };
 pub use types::{MessageRole, Session, SessionMessage, SessionMeta, SessionMode, SessionSource};

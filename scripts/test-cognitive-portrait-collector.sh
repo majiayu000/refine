@@ -48,10 +48,16 @@ REFINE_COGNITIVE_PORTRAIT_REFINE_BIN="$REFINE_TEST_BIN" \
   --period 90 --cutoff "$cutoff" --output "$bundle_again"
 cmp -s "$bundle" "$bundle_again" || fail 'fixed-cutoff collector output is not deterministic'
 
-jq -e '.schema_version == 1 and .collector_version == "cognitive-portrait-collector-v1"' "$bundle" >/dev/null \
+jq -e '.schema_version == 2 and .collector_version == "cognitive-portrait-collector-v2"' "$bundle" >/dev/null \
   || fail 'bundle version contract is missing'
-jq -e '.claim_catalog.schema_version == 1
+jq -e '.manifest.manifest_version == 2' "$bundle" >/dev/null \
+  || fail 'insights manifest version was not bumped with the bounded source schema'
+jq -e '.claim_catalog.schema_version == 2
   and ([.claim_catalog.claims[].claim_id] == ([.claim_catalog.claims[].claim_id] | sort | unique))
+  and ([.claim_catalog.claims[].claim_id] | index("fact.current.evidence_selection.omitted_observations") != null)
+  and ([.claim_catalog.claims[].claim_id] | index("fact.current.dimensions.knowledge.omitted_occurrences") != null)
+  and ([.claim_catalog.claims[].claim_id] | index("fact.current.metrics.project_ranking.omitted_occurrences") != null)
+  and ([.claim_catalog.claims[].claim_id] | index("fact.current.metrics.tool_frequency.selected_entries") != null)
   and ([.claim_catalog.claims[].kind] | index("trend") == null)' "$bundle" >/dev/null \
   || fail 'DEGRADED bundle claim catalog is not stable or trend-free'
 jq -e '.current.evidence | map(.item_id) | sort == ["codex-item", "remem-item"]' "$bundle" >/dev/null \
@@ -60,12 +66,19 @@ jq -e '.previous.evidence | map(.item_id) == ["claude-item"]' "$bundle" >/dev/nu
   || fail 'previous 90-day window is wrong'
 jq -e '.manifest.current_window.source_counts | map(.source) | sort == ["codex", "platform_unknown"]' "$bundle" >/dev/null \
   || fail 'Codex/remem provenance reporting is wrong'
-jq -e '.manifest.current_window.unsupported_source_counts[0].source == "grok-knowledge"' "$bundle" >/dev/null \
+jq -e '.manifest.current_window.unsupported_sources.entries[0].source == "grok-knowledge"' "$bundle" >/dev/null \
   || fail 'Grok knowledge-only source was not disclosed'
 jq -e '.current.metrics.total_sessions == 2 and .comparison.status == "DEGRADED" and (.comparison.comparable | not)' "$bundle" >/dev/null \
   || fail 'unsupported source did not suppress trend comparability'
-jq -e '.current.metrics.project_ranking == [["alpha",1],["zeta",1]]' "$bundle" >/dev/null \
+jq -e '.current.metrics.project_ranking.entries | map([.value,.count]) == [["alpha",1],["zeta",1]]' "$bundle" >/dev/null \
   || fail 'equal-count project ranking is not name-stable'
+jq -e '.current.evidence_selection.policy_version == "stratified-provenance-v1"
+  and .current.evidence_selection.eligible_observations == 2
+  and .current.evidence_selection.selected_observations == 2
+  and .current.evidence_selection.omitted_observations == 0
+  and (.current.evidence_selection.full_payload_digest | startswith("sha256:"))
+  and (.current.evidence_selection.selection_digest | startswith("sha256:"))' "$bundle" >/dev/null \
+  || fail 'bounded projection disclosure is incomplete'
 jq -e '.current.evidence | map({key:.item_id,value:.project}) | from_entries == {"codex-item":"zeta","remem-item":"alpha"}' "$bundle" >/dev/null \
   || fail 'same-title observations were not assigned by direct item/project identity'
 jq -e '.current.evidence | map(.item_id) | index("stale-item") == null' "$bundle" >/dev/null \
@@ -120,6 +133,195 @@ REFINE_COGNITIVE_PORTRAIT_REFINE_BIN="$REFINE_TEST_BIN" \
 jq -e '.passed and .factual_traceability_rate == 1 and .unsupported_number_rate == 0 and .action_verifiability_rate == 1' "$quality" >/dev/null \
   || fail 'canonical candidate failed evidence quality gate'
 
+# Production-scale real-schema fixture: 100,000 eligible observations across
+# both windows, 400 projects, three supported provenance classes, and unique
+# high-cardinality dimension values. The projection must stay bounded without
+# changing the full cohort metrics or outer 64 MiB contract.
+large_db="${TEST_ROOT}/large-fixture.db"
+large_bundle="${TEST_ROOT}/large-bundle.json"
+large_bundle_again="${TEST_ROOT}/large-bundle-again.json"
+sqlite3 "$large_db" < "${PROJECT_DIR}/packages/core/src/infra/schema.sql"
+sqlite3 "$large_db" <<'SQL'
+PRAGMA journal_mode=MEMORY;
+PRAGMA synchronous=OFF;
+BEGIN;
+WITH RECURSIVE sequence(n) AS (
+  SELECT 0
+  UNION ALL
+  SELECT n + 1 FROM sequence WHERE n < 399
+)
+INSERT INTO documents (id,title,raw_content,source,url,captured_at,created_at,updated_at)
+SELECT
+  printf('large-doc-%03d', n),
+  printf('large document %03d', n),
+  'bounded fixture transcript',
+  CASE n % 3
+    WHEN 0 THEN 'codex-session'
+    WHEN 1 THEN 'claude-code-session'
+    ELSE 'remem-raw-session'
+  END,
+  printf('fixture://large/%03d', n),
+  CASE WHEN n < 200 THEN '2026-08-20T00:00:00Z' ELSE '2026-05-20T00:00:00Z' END,
+  '2026-08-27T00:00:00Z',
+  '2026-08-27T00:00:00Z'
+FROM sequence;
+
+WITH RECURSIVE sequence(n) AS (
+  SELECT 0
+  UNION ALL
+  SELECT n + 1 FROM sequence WHERE n < 99999
+)
+INSERT INTO items (id,item_type,title,summary,content,tags,source,created_at,updated_at,document_id,excerpt)
+SELECT
+  printf('large-item-%06d', n),
+  'observation',
+  printf('unique title %06d with deterministic evidence payload', n),
+  printf('unique summary %06d with deterministic evidence payload', n),
+  printf('知识:') || char(10) || printf('- unique knowledge %06d', n)
+    || char(10) || printf('模式:') || char(10) || printf('- unique pattern %06d', n)
+    || char(10) || printf('架构:') || char(10) || printf('- unique architecture %06d', n)
+    || char(10) || printf('阻力:') || char(10) || printf('- unique friction %06d', n)
+    || char(10) || printf('工具:') || char(10) || printf('- tool-%04d', n % 1000),
+  printf(
+    '["project-%03d","%s","competent"]',
+    n % 400,
+    CASE n % 3 WHEN 0 THEN 'decision' WHEN 1 THEN 'bugfix' ELSE 'review' END
+  ),
+  NULL,
+  '2026-08-27T00:00:00Z',
+  '2026-08-27T00:00:00Z',
+  printf('large-doc-%03d', n % 400),
+  printf('unique excerpt %06d', n)
+FROM sequence;
+COMMIT;
+SQL
+
+REFINE_COGNITIVE_PORTRAIT_REFINE_BIN="$REFINE_TEST_BIN" REFINE_DB_PATH="$large_db" \
+  "${SCRIPT_DIR}/collect-cognitive-portrait.sh" \
+  --period 90 --cutoff "$cutoff" --output "$large_bundle"
+REFINE_COGNITIVE_PORTRAIT_REFINE_BIN="$REFINE_TEST_BIN" REFINE_DB_PATH="$large_db" \
+  "${SCRIPT_DIR}/collect-cognitive-portrait.sh" \
+  --period 90 --cutoff "$cutoff" --output "$large_bundle_again"
+large_sha=$(shasum -a 256 "$large_bundle" | awk '{print $1}')
+large_sha_again=$(shasum -a 256 "$large_bundle_again" | awk '{print $1}')
+[[ "$large_sha" == "$large_sha_again" ]] || fail '100k cross-process bundle SHA is not deterministic'
+large_bytes=$(wc -c < "$large_bundle" | tr -d '[:space:]')
+(( large_bytes <= 16 * 1024 * 1024 )) || fail '100k projected bundle exceeds the internal 16 MiB budget'
+jq -e '
+  .manifest.current_window.eligible_observations == 50000
+  and .manifest.previous_window.eligible_observations == 50000
+  and .current.evidence_selection.eligible_observations == 50000
+  and .previous.evidence_selection.eligible_observations == 50000
+  and .current.evidence_selection.selected_observations == 2048
+  and .previous.evidence_selection.selected_observations == 2048
+  and .current.evidence_selection.omitted_observations == 47952
+  and .previous.evidence_selection.omitted_observations == 47952
+  and .current.metrics.total_sessions == 200
+  and .previous.metrics.total_sessions == 200
+  and .current.metrics.project_ranking.total_occurrences == 200
+  and .current.metrics.project_ranking.selected_occurrences == 128
+  and .current.metrics.project_ranking.omitted_occurrences == 72
+  and .current.metrics.project_ranking.selected_entries == 128
+  and .current.metrics.tool_frequency.total_occurrences == 50000
+  and .current.metrics.tool_frequency.selected_occurrences == 6400
+  and .current.metrics.tool_frequency.omitted_occurrences == 43600
+  and .current.metrics.tool_frequency.selected_entries == 128
+  and .current.dimensions.knowledge.total_occurrences == 50000
+  and .current.dimensions.knowledge.selected_occurrences == 128
+  and .current.dimensions.knowledge.omitted_occurrences == 49872
+  and .current.dimensions.knowledge.selected_values == 128
+  and ([.current.evidence_selection.strata[].eligible_observations] | add) == 50000
+  and ([.current.evidence_selection.strata[].selected_observations] | add) == 2048
+  and ([.current.evidence_selection.strata[].omitted_observations] | add) == 47952
+  and .comparison.status == "OK"
+  and .comparison.comparable' "$large_bundle" >/dev/null \
+  || fail '100k projection counts, bounds, or comparability are inconsistent'
+
+# Exact escaped-byte packing: the 512-byte control-character title serializes
+# much larger than its UTF-8 length. The collector must shrink the retained set
+# instead of exceeding the declared 4 MiB evidence component budget.
+escaped_db="${TEST_ROOT}/escaped-fixture.db"
+escaped_bundle="${TEST_ROOT}/escaped-bundle.json"
+sqlite3 "$escaped_db" < "${PROJECT_DIR}/packages/core/src/infra/schema.sql"
+sqlite3 "$escaped_db" <<'SQL'
+BEGIN;
+INSERT INTO documents (id,title,raw_content,source,url,captured_at,created_at,updated_at) VALUES
+ ('escaped-current','current','raw','codex-session','fixture://escaped/current','2026-08-20T00:00:00Z','2026-08-20T00:00:00Z','2026-08-20T00:00:00Z'),
+ ('escaped-previous','previous','raw','codex-session','fixture://escaped/previous','2026-05-20T00:00:00Z','2026-05-20T00:00:00Z','2026-05-20T00:00:00Z');
+WITH RECURSIVE sequence(n) AS (
+  SELECT 0 UNION ALL SELECT n + 1 FROM sequence WHERE n < 2199
+)
+INSERT INTO items (id,item_type,title,summary,content,tags,source,created_at,updated_at,document_id,excerpt)
+SELECT printf('escaped-%04d', n), 'observation', replace(printf('%512s',''),' ',char(1)),
+  '', '', '["project","decision"]', NULL, '2026-08-20T00:00:00Z',
+  '2026-08-20T00:00:00Z', 'escaped-current', NULL FROM sequence;
+INSERT INTO items (id,item_type,title,summary,content,tags,source,created_at,updated_at,document_id,excerpt)
+VALUES ('escaped-previous-item','observation','previous','','','["project"]',NULL,
+  '2026-05-20T00:00:00Z','2026-05-20T00:00:00Z','escaped-previous',NULL);
+COMMIT;
+SQL
+REFINE_COGNITIVE_PORTRAIT_REFINE_BIN="$REFINE_TEST_BIN" REFINE_DB_PATH="$escaped_db" \
+  "${SCRIPT_DIR}/collect-cognitive-portrait.sh" \
+  --period 90 --cutoff "$cutoff" --output "$escaped_bundle"
+jq -e '.current.evidence_selection.eligible_observations == 2200
+  and .current.evidence_selection.selected_observations < 2048
+  and .current.evidence_selection.selected_observations > 0
+  and ([.current.evidence_selection.strata[].selected_observations] | add)
+    == .current.evidence_selection.selected_observations' "$escaped_bundle" >/dev/null \
+  || fail 'JSON-escaped evidence bytes were not packed into the declared budget'
+escaped_evidence_bytes=$(jq -c '.current.evidence' "$escaped_bundle" | wc -c | tr -d '[:space:]')
+(( escaped_evidence_bytes <= 4 * 1024 * 1024 + 1 )) \
+  || fail 'escaped evidence exceeded the 4 MiB compact JSON budget'
+
+# High-cardinality unsupported sources also exercise the chunked metadata
+# lookup beyond SQLite's variable limit. The diagnostic remains DEGRADED and
+# bounded while preserving exact observation/session totals and full digest.
+unsupported_db="${TEST_ROOT}/unsupported-fixture.db"
+unsupported_bundle="${TEST_ROOT}/unsupported-bundle.json"
+sqlite3 "$unsupported_db" < "${PROJECT_DIR}/packages/core/src/infra/schema.sql"
+sqlite3 "$unsupported_db" <<'SQL'
+PRAGMA journal_mode=MEMORY;
+PRAGMA synchronous=OFF;
+BEGIN;
+WITH RECURSIVE sequence(n) AS (
+  SELECT 0 UNION ALL SELECT n + 1 FROM sequence WHERE n < 34999
+)
+INSERT INTO documents (id,title,raw_content,source,url,captured_at,created_at,updated_at)
+SELECT printf('unsupported-doc-%05d',n), 'unsupported', 'raw',
+  printf('unsupported-%05d-',n) || replace(printf('%1000s',''),' ','x'),
+  printf('fixture://unsupported/%05d',n), '2026-08-20T00:00:00Z',
+  '2026-08-20T00:00:00Z','2026-08-20T00:00:00Z' FROM sequence;
+WITH RECURSIVE sequence(n) AS (
+  SELECT 0 UNION ALL SELECT n + 1 FROM sequence WHERE n < 34999
+)
+INSERT INTO items (id,item_type,title,summary,content,tags,source,created_at,updated_at,document_id,excerpt)
+SELECT printf('unsupported-item-%05d',n),'observation','unsupported','','','[]',NULL,
+  '2026-08-20T00:00:00Z','2026-08-20T00:00:00Z',printf('unsupported-doc-%05d',n),NULL
+FROM sequence;
+INSERT INTO documents (id,title,raw_content,source,url,captured_at,created_at,updated_at) VALUES
+ ('valid-current','valid','raw','codex-session','fixture://valid/current','2026-08-20T00:00:00Z','2026-08-20T00:00:00Z','2026-08-20T00:00:00Z'),
+ ('valid-previous','valid','raw','codex-session','fixture://valid/previous','2026-05-20T00:00:00Z','2026-05-20T00:00:00Z','2026-05-20T00:00:00Z');
+INSERT INTO items (id,item_type,title,summary,content,tags,source,created_at,updated_at,document_id,excerpt) VALUES
+ ('valid-current-item','observation','valid','','','["project"]',NULL,'2026-08-20T00:00:00Z','2026-08-20T00:00:00Z','valid-current',NULL),
+ ('valid-previous-item','observation','valid','','','["project"]',NULL,'2026-05-20T00:00:00Z','2026-05-20T00:00:00Z','valid-previous',NULL);
+COMMIT;
+SQL
+REFINE_COGNITIVE_PORTRAIT_REFINE_BIN="$REFINE_TEST_BIN" REFINE_DB_PATH="$unsupported_db" \
+  "${SCRIPT_DIR}/collect-cognitive-portrait.sh" \
+  --period 90 --cutoff "$cutoff" --output "$unsupported_bundle"
+jq -e '.comparison.status == "DEGRADED"
+  and .manifest.current_window.unsupported_sources.total_observations == 35000
+  and .manifest.current_window.unsupported_sources.total_sessions == 35000
+  and (.manifest.current_window.unsupported_sources.entries | length) == 128
+  and .manifest.current_window.unsupported_sources.selected_observations == 128
+  and .manifest.current_window.unsupported_sources.omitted_observations == 34872
+  and (.manifest.current_window.unsupported_sources.full_digest | startswith("sha256:"))' \
+  "$unsupported_bundle" >/dev/null \
+  || fail 'high-cardinality unsupported source disclosure is not bounded and exact'
+unsupported_bytes=$(wc -c < "$unsupported_bundle" | tr -d '[:space:]')
+(( unsupported_bytes <= 16 * 1024 * 1024 )) \
+  || fail 'high-cardinality DEGRADED diagnostic exceeds the 16 MiB budget'
+
 empty_db="${TEST_ROOT}/empty.db"
 sqlite3 "$empty_db" < "${PROJECT_DIR}/packages/core/src/infra/schema.sql"
 if REFINE_COGNITIVE_PORTRAIT_REFINE_BIN="$REFINE_TEST_BIN" REFINE_DB_PATH="$empty_db" \
@@ -137,5 +339,12 @@ if REFINE_COGNITIVE_PORTRAIT_REFINE_BIN="$REFINE_TEST_BIN" REFINE_DB_PATH="$inva
   fail 'schema-invalid core data was accepted'
 fi
 grep -q 'SCHEMA_INVALID' "${TEST_ROOT}/invalid.log" || fail 'schema error is not explicit'
+
+# Isolated allocator oracle: snapshot construction is excluded, then 5,000
+# observations with unique 16 KiB section lines must project without cloning
+# the cohort text. This catches regressions before serialization budgets run.
+cargo test -q -p refine-cli --test cognitive_portrait_memory \
+  bounded_projection_does_not_clone_long_unique_cohort_text --locked -- \
+  --ignored --exact --test-threads=1 --nocapture
 
 echo 'All cognitive portrait collector tests passed'

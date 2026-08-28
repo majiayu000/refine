@@ -45,6 +45,9 @@ auth_mode="dev-anon"
 cognitive_portrait_enabled="auto"
 cognitive_portrait_root=""
 cognitive_portrait_root_explicit=0
+cognitive_portrait_contract_version=2
+cognitive_portrait_bundle_schema=2
+cognitive_portrait_catalog_schema=2
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -113,6 +116,28 @@ file_sha256() {
     sha256sum "$path" | awk '{print $1}'
   else
     die "missing shasum or sha256sum; cannot write install manifest"
+  fi
+}
+
+portrait_skill_tree_sha256() {
+  local root="$1" path relative hash
+  local paths=()
+  [[ -z "$(find "$root" -type l -print -quit)" ]] || return 1
+  while IFS= read -r path; do
+    paths+=("$path")
+  done < <(find "$root" -type f -print | LC_ALL=C sort)
+  [[ ${#paths[@]} -gt 0 ]] || return 1
+  {
+    for path in "${paths[@]}"; do
+      relative="${path#${root}/}"
+      [[ "$relative" != "$path" && "$relative" != *$'\n'* ]] || return 1
+      hash="$(file_sha256 "$path")" || return 1
+      printf '%s\t%s\n' "$relative" "$hash"
+    done
+  } | if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    sha256sum | awk '{print $1}'
   fi
 }
 
@@ -532,7 +557,7 @@ PY
 }
 
 validate_cognitive_portrait_root() {
-  local root="$1"
+  local root="$1" expected_skill_hash actual_skill_hash
   [[ -n "$root" ]] || die "cognitive portrait root is empty"
   [[ "$root" == /* ]] || die "cognitive portrait root must be absolute: ${root}"
   [[ "$root" != *$'\n'* && "$root" != *$'\r'* && "$root" != *$'\t'* ]] \
@@ -542,6 +567,12 @@ validate_cognitive_portrait_root() {
   [[ ! -L "${root}/skills/cognitive-portrait" \
     && -f "${root}/skills/cognitive-portrait/SKILL.md" ]] \
     || die "cognitive portrait root is missing skills/cognitive-portrait/SKILL.md: ${root}"
+  expected_skill_hash="$(portrait_skill_tree_sha256 "${repo_root}/skills/cognitive-portrait")" \
+    || die "source cognitive portrait skill tree is incomplete"
+  actual_skill_hash="$(portrait_skill_tree_sha256 "${root}/skills/cognitive-portrait")" \
+    || die "cognitive portrait root has an incomplete or unsafe v2 skill tree: ${root}"
+  [[ "$actual_skill_hash" == "$expected_skill_hash" ]] \
+    || die "cognitive portrait root skill contract is legacy or mismatched; migrate skills/cognitive-portrait to v2 before installing: ${root}"
   [[ ! -L "${root}/docs/cognitive-portraits" \
     && -d "${root}/docs/cognitive-portraits" \
     && -f "${root}/docs/cognitive-portraits/INDEX.md" ]] \
@@ -597,7 +628,7 @@ write_install_manifest() {
     || die "installation changed tracked source files; refusing a clean-source manifest"
   mkdir -p "${HOME}/.refine"
   local install_manifest="${HOME}/.refine/install-manifest"
-  local portrait_collector="" portrait_collector_sha256=""
+  local portrait_collector="" portrait_collector_sha256="" portrait_skill_tree_sha256=""
   local portrait_validator="" portrait_validator_sha256=""
   if [[ -f "${installed_scripts}/collect-cognitive-portrait.sh" ]]; then
     portrait_collector="${installed_scripts}/collect-cognitive-portrait.sh"
@@ -606,6 +637,10 @@ write_install_manifest() {
   if [[ -f "${installed_scripts}/validate-cognitive-portrait.sh" ]]; then
     portrait_validator="${installed_scripts}/validate-cognitive-portrait.sh"
     portrait_validator_sha256="$(file_sha256 "$portrait_validator")"
+  fi
+  if [[ "$cognitive_portrait_enabled" == "1" ]]; then
+    portrait_skill_tree_sha256="$(portrait_skill_tree_sha256 "${cognitive_portrait_root}/skills/cognitive-portrait")" \
+      || die "cannot hash cognitive portrait v2 skill tree"
   fi
   write_file "$install_manifest" <<EOF
 source_root=${repo_root}
@@ -626,6 +661,10 @@ cognitive_portrait_collector=${portrait_collector}
 cognitive_portrait_collector_sha256=${portrait_collector_sha256}
 cognitive_portrait_validator=${portrait_validator}
 cognitive_portrait_validator_sha256=${portrait_validator_sha256}
+cognitive_portrait_contract_version=${cognitive_portrait_contract_version}
+cognitive_portrait_bundle_schema=${cognitive_portrait_bundle_schema}
+cognitive_portrait_catalog_schema=${cognitive_portrait_catalog_schema}
+cognitive_portrait_skill_tree_sha256=${portrait_skill_tree_sha256}
 EOF
 }
 

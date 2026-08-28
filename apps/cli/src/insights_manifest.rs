@@ -1,16 +1,22 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use refine_core::knowledge::{Item, ObservationDocumentMeta};
 use refine_core::session::{
     eligible_observations, is_supported_session_document_source, AnalysisRoute, ClusterResult,
+    DataQualityStats,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Read;
 
-pub(crate) const MANIFEST_VERSION: u32 = 1;
+use crate::cognitive_portrait_data::projection::hashing::{
+    sha256_bytes, truncate_projection_text, MultisetDigest, StableDigest,
+};
+
+pub(crate) const MANIFEST_VERSION: u32 = 2;
 pub(crate) const COHORT_CONTRACT_IDENTITY: &str = "source-aware-linked-interactive-v2";
+pub(crate) const MAX_UNSUPPORTED_SOURCE_ENTRIES: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct EventTimeWindow {
@@ -27,6 +33,28 @@ pub(crate) struct SourceStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct UnsupportedSourceEntry {
+    pub source: String,
+    pub source_original_bytes: usize,
+    pub source_digest: String,
+    pub observation_count: usize,
+    pub session_count: usize,
+    pub freshest_event_time: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct UnsupportedSourceBreakdown {
+    pub total_observations: usize,
+    pub selected_observations: usize,
+    pub omitted_observations: usize,
+    pub total_sessions: usize,
+    pub freshest_event_time: Option<DateTime<Utc>>,
+    pub full_digest: String,
+    pub selection_digest: String,
+    pub entries: Vec<UnsupportedSourceEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WindowManifest {
     pub event_time: EventTimeWindow,
     pub input_observations: usize,
@@ -40,7 +68,7 @@ pub(crate) struct WindowManifest {
     pub cohort_contract_identity: String,
     pub cohort_identity: String,
     pub source_counts: Vec<SourceStats>,
-    pub unsupported_source_counts: Vec<SourceStats>,
+    pub unsupported_sources: UnsupportedSourceBreakdown,
     pub platform_unknown_observations: usize,
     pub platform_unknown_sessions: usize,
 }
@@ -73,11 +101,27 @@ pub(crate) fn build_window_manifest(
     cluster: &ClusterResult,
     documents: &[ObservationDocumentMeta],
 ) -> Result<WindowManifest> {
+    let eligible = eligible_observations(cohort_observations);
+    build_window_manifest_from_refs(
+        window,
+        &eligible,
+        all_observations,
+        &cluster.data_quality,
+        documents,
+    )
+}
+
+pub(crate) fn build_window_manifest_from_refs(
+    window: EventTimeWindow,
+    eligible: &[&Item],
+    all_observations: &[Item],
+    quality: &DataQualityStats,
+    documents: &[ObservationDocumentMeta],
+) -> Result<WindowManifest> {
     let document_map: BTreeMap<&str, &ObservationDocumentMeta> = documents
         .iter()
         .map(|document| (document.id.as_str(), document))
         .collect();
-    let eligible = eligible_observations(cohort_observations);
     let mut sources: BTreeMap<String, SourceAccumulator> = BTreeMap::new();
     for item in eligible {
         let document_id = item
@@ -104,31 +148,7 @@ pub(crate) fn build_window_manifest(
         );
     }
 
-    let mut unsupported_sources: BTreeMap<String, SourceAccumulator> = BTreeMap::new();
-    for item in all_observations {
-        let Some(document_id) = item.document_id() else {
-            continue;
-        };
-        let (source, captured_at) = document_map
-            .get(document_id.as_str())
-            .map(|document| (document.source.as_str(), Some(document.captured_at)))
-            .unwrap_or(("missing_document_metadata", None));
-        if is_supported_session_document_source(source) {
-            continue;
-        }
-        let accumulator = unsupported_sources.entry(source.to_string()).or_default();
-        accumulator.observation_count += 1;
-        accumulator
-            .document_ids
-            .insert(document_id.as_str().to_string());
-        if let Some(captured_at) = captured_at {
-            accumulator.freshest_event_time = Some(
-                accumulator
-                    .freshest_event_time
-                    .map_or(captured_at, |current| current.max(captured_at)),
-            );
-        }
-    }
+    let unsupported_sources = bounded_unsupported_sources(all_observations, &document_map);
 
     let source_counts: Vec<SourceStats> = sources
         .into_iter()
@@ -139,7 +159,6 @@ pub(crate) fn build_window_manifest(
             freshest_event_time: accumulator.freshest_event_time,
         })
         .collect();
-    let unsupported_source_counts = source_stats(unsupported_sources);
     let platform_unknown_observations = source_counts
         .iter()
         .filter(|stats| stats.source == "platform_unknown")
@@ -150,8 +169,6 @@ pub(crate) fn build_window_manifest(
         .filter(|stats| stats.source == "platform_unknown")
         .map(|stats| stats.session_count)
         .sum();
-    let quality = &cluster.data_quality;
-
     Ok(WindowManifest {
         event_time: window,
         input_observations: quality.input_observations,
@@ -165,22 +182,193 @@ pub(crate) fn build_window_manifest(
         cohort_contract_identity: COHORT_CONTRACT_IDENTITY.to_string(),
         cohort_identity: quality.cohort_identity.clone(),
         source_counts,
-        unsupported_source_counts,
+        unsupported_sources,
         platform_unknown_observations,
         platform_unknown_sessions,
     })
 }
 
-fn source_stats(sources: BTreeMap<String, SourceAccumulator>) -> Vec<SourceStats> {
-    sources
-        .into_iter()
-        .map(|(source, accumulator)| SourceStats {
-            source,
-            observation_count: accumulator.observation_count,
-            session_count: accumulator.document_ids.len(),
-            freshest_event_time: accumulator.freshest_event_time,
+#[derive(Default)]
+struct UnsupportedSample {
+    source: String,
+    original_bytes: usize,
+    digest: String,
+    observation_count: usize,
+    session_count: usize,
+    freshest_event_time: Option<DateTime<Utc>>,
+}
+
+fn bounded_unsupported_sources(
+    observations: &[Item],
+    documents: &BTreeMap<&str, &ObservationDocumentMeta>,
+) -> UnsupportedSourceBreakdown {
+    let mut total_observations = 0usize;
+    let mut freshest_event_time = None;
+    let mut full_digest = MultisetDigest::default();
+    let mut samples: BTreeMap<String, UnsupportedSample> = BTreeMap::new();
+    let mut window_document_ids = HashSet::new();
+    for item in observations {
+        let Some(document_id) = item.document_id() else {
+            continue;
+        };
+        window_document_ids.insert(document_id.as_str());
+        let (source, captured_at) = documents
+            .get(document_id.as_str())
+            .map(|document| (document.source.as_str(), Some(document.captured_at)))
+            .unwrap_or(("missing_document_metadata", None));
+        if is_supported_session_document_source(source) {
+            continue;
+        }
+        total_observations += 1;
+        freshest_event_time = captured_at.map_or(freshest_event_time, |time| {
+            Some(freshest_event_time.map_or(time, |current: DateTime<Utc>| current.max(time)))
+        });
+        let source_digest = sha256_bytes(source.as_bytes());
+        let mut row = StableDigest::new("insights-unsupported-source-row-v2");
+        row.text(source);
+        row.text(document_id.as_str());
+        row.text(item.id().as_str());
+        full_digest.add(row.finish_bytes());
+        if !samples.contains_key(&source_digest) {
+            if samples.len() == MAX_UNSUPPORTED_SOURCE_ENTRIES {
+                let largest = samples.last_key_value().map(|(key, _)| key.clone());
+                if largest.as_ref().is_some_and(|key| source_digest >= *key) {
+                    continue;
+                }
+                if let Some(largest) = largest {
+                    samples.remove(&largest);
+                }
+            }
+            samples.insert(
+                source_digest.clone(),
+                UnsupportedSample {
+                    source: truncate_projection_text(source),
+                    original_bytes: source.len(),
+                    digest: source_digest,
+                    ..UnsupportedSample::default()
+                },
+            );
+        }
+    }
+    for item in observations {
+        let Some(document_id) = item.document_id() else {
+            continue;
+        };
+        let (source, captured_at) = documents
+            .get(document_id.as_str())
+            .map(|document| (document.source.as_str(), Some(document.captured_at)))
+            .unwrap_or(("missing_document_metadata", None));
+        if let Some(sample) = samples.get_mut(&sha256_bytes(source.as_bytes())) {
+            sample.observation_count += 1;
+            if let Some(time) = captured_at {
+                sample.freshest_event_time = Some(
+                    sample
+                        .freshest_event_time
+                        .map_or(time, |current| current.max(time)),
+                );
+            }
+        }
+    }
+    let mut total_sessions = 0usize;
+    for document_id in window_document_ids {
+        let source = documents
+            .get(document_id)
+            .map(|document| document.source.as_str())
+            .unwrap_or("missing_document_metadata");
+        if is_supported_session_document_source(source) {
+            continue;
+        }
+        total_sessions += 1;
+        if let Some(sample) = samples.get_mut(&sha256_bytes(source.as_bytes())) {
+            sample.session_count += 1;
+        }
+    }
+    let entries: Vec<UnsupportedSourceEntry> = samples
+        .into_values()
+        .map(|sample| UnsupportedSourceEntry {
+            source: sample.source,
+            source_original_bytes: sample.original_bytes,
+            source_digest: sample.digest,
+            observation_count: sample.observation_count,
+            session_count: sample.session_count,
+            freshest_event_time: sample.freshest_event_time,
         })
-        .collect()
+        .collect();
+    let selected_observations = entries.iter().map(|entry| entry.observation_count).sum();
+    let selection_digest = unsupported_selection_digest(&entries);
+    UnsupportedSourceBreakdown {
+        total_observations,
+        selected_observations,
+        omitted_observations: total_observations - selected_observations,
+        total_sessions,
+        freshest_event_time,
+        full_digest: full_digest.finish("insights-unsupported-source-multiset-v2"),
+        selection_digest,
+        entries,
+    }
+}
+
+fn unsupported_selection_digest(entries: &[UnsupportedSourceEntry]) -> String {
+    let mut digest = StableDigest::new("insights-unsupported-source-selection-v2");
+    digest.usize(entries.len());
+    for entry in entries {
+        digest.text(&entry.source_digest);
+        digest.usize(entry.source_original_bytes);
+        digest.usize(entry.observation_count);
+        digest.usize(entry.session_count);
+        digest.text(
+            &entry
+                .freshest_event_time
+                .map(|time| time.to_rfc3339())
+                .unwrap_or_default(),
+        );
+    }
+    digest.finish()
+}
+
+pub(crate) fn validate_window_manifest(manifest: &WindowManifest, window: &str) -> Result<()> {
+    let unsupported = &manifest.unsupported_sources;
+    let valid_digest = |value: &str| {
+        value.len() == 71
+            && value.starts_with("sha256:")
+            && value[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    };
+    let selected_observations: usize = unsupported
+        .entries
+        .iter()
+        .map(|entry| entry.observation_count)
+        .sum();
+    let selected_sessions: usize = unsupported
+        .entries
+        .iter()
+        .map(|entry| entry.session_count)
+        .sum();
+    if unsupported.total_observations
+        != unsupported.selected_observations + unsupported.omitted_observations
+        || unsupported.selected_observations != selected_observations
+        || selected_sessions > unsupported.total_sessions
+        || unsupported.entries.len() > MAX_UNSUPPORTED_SOURCE_ENTRIES
+        || !valid_digest(&unsupported.full_digest)
+        || unsupported.selection_digest != unsupported_selection_digest(&unsupported.entries)
+    {
+        bail!("SCHEMA_INVALID: {window} unsupported source breakdown invariant failed");
+    }
+    let mut previous_digest = None;
+    for entry in &unsupported.entries {
+        if entry.source.len() > 512
+            || entry.source_original_bytes < entry.source.len()
+            || !valid_digest(&entry.source_digest)
+            || (entry.source_original_bytes == entry.source.len()
+                && entry.source_digest != sha256_bytes(entry.source.as_bytes()))
+            || previous_digest.is_some_and(|previous| previous >= entry.source_digest.as_str())
+        {
+            bail!("SCHEMA_INVALID: {window} unsupported source entry invariant failed");
+        }
+        previous_digest = Some(entry.source_digest.as_str());
+    }
+    Ok(())
 }
 
 pub(crate) fn report_source(document_source: &str) -> &str {
@@ -264,7 +452,7 @@ pub(crate) fn manifest_identity(manifest: &InsightsManifest) -> Result<String> {
 pub(crate) fn render_manifest(manifest: &InsightsManifest) -> Result<String> {
     let json = serde_json::to_string_pretty(manifest).context("serialize insights manifest")?;
     Ok(format!(
-        "<!-- refine-insights-manifest-v1 -->\n```json\n{json}\n```"
+        "<!-- refine-insights-manifest-v2 -->\n```json\n{json}\n```"
     ))
 }
 
@@ -393,7 +581,7 @@ mod tests {
             cohort_contract_identity: COHORT_CONTRACT_IDENTITY.into(),
             cohort_identity: "sha256:test".into(),
             source_counts: Vec::new(),
-            unsupported_source_counts: Vec::new(),
+            unsupported_sources: UnsupportedSourceBreakdown::default(),
             platform_unknown_observations: 0,
             platform_unknown_sessions: 0,
         }
@@ -471,10 +659,10 @@ mod tests {
         assert_eq!(manifest.status, "DEGRADED");
         assert_eq!(manifest.source_counts[0].source, "codex");
         assert_eq!(
-            manifest.unsupported_source_counts[0].source,
+            manifest.unsupported_sources.entries[0].source,
             "grok-knowledge"
         );
-        assert_eq!(manifest.unsupported_source_counts[0].observation_count, 1);
+        assert_eq!(manifest.unsupported_sources.entries[0].observation_count, 1);
     }
 
     #[test]
@@ -515,7 +703,8 @@ mod tests {
             source_revision: "unknown".into(),
         };
         let rendered = render_manifest(&manifest).unwrap();
-        assert!(rendered.starts_with("<!-- refine-insights-manifest-v1 -->\n```json"));
+        assert!(rendered.starts_with("<!-- refine-insights-manifest-v2 -->\n```json"));
+        assert_eq!(manifest.manifest_version, 2);
         for field in [
             "event_time_cutoff",
             "current_window",
