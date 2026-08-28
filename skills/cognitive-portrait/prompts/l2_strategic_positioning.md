@@ -15,16 +15,23 @@ Disclose Claude, Codex, platform-unknown, and unsupported-source freshness from
 the manifest. Grok/Gemini knowledge-only material is context coverage, never a
 session count. Do not infer absent work from an absent source.
 
-If `comparison.comparable=false`, suppress all cross-window trends. Every fact
-and inference must cite `[evidence:obs:<id>]` or a valid
-`[bundle:/json/pointer]`. Numeric claims use only a structured
-`[metric:/allowed/numeric/pointer=<canonical JSON number>]` field. Every
-recommendation must include evidence plus `[owner:...] [due:YYYY-MM-DD]` and a
-structured `[verify:metric:/pointer==target]` or artifact/check equivalent.
+If `comparison.comparable=false`, suppress all cross-window trends. Every fact,
+including a non-numeric evidence fact, must be copied byte-for-byte from the
+catalog. Interpretations use `[推断]` plus `[evidence:obs:<id>]` or a valid
+`[bundle:/json/pointer]`. Numeric facts and trends must also be copied byte-for-byte
+from the matching `claim_catalog.claims[].rendered_line`, including
+`[claim:<claim_id>]`; never self-write values, labels, units, windows, or
+trend prose. Unknown or duplicate claim IDs, modified catalog lines, and
+catalog lines inside code, quotes, or HTML are invalid. Every recommendation
+must include evidence plus `[owner:...] [due:YYYY-MM-DD]` and one typed check,
+such as `[verify:metric|/comparison/status|eq|"OK"]`,
+`[verify:artifact|portrait-review|present]`, or
+`[verify:check|weekly-reflection|pass]`.
 Avoid paragraphs repeated from the
 previous portrait. There is no line-count target.
 
-Each metric field must equal its cited scalar. A comparable trend must use
-`[趋势]` and cite current and previous metric fields. A degraded layer must
-instead state `[事实][趋势抑制] ... [bundle:/comparison/status]`. Due dates must
-be within 90 days after cutoff and verification must be machine-checkable.
+Each catalog line must remain an exact copy of its rendered line. A comparable
+trend must use the catalog's canonical trend line and `[趋势]`. A `DEGRADED`
+bundle is blocked by the host and must not produce a layer. Due dates must be
+within 90 days after cutoff and verification must use typed JSON metric targets
+or the artifact/check enum forms.

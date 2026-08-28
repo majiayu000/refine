@@ -15,6 +15,8 @@ Require all of the following or stop with a specific error:
 - `REFINE_COGNITIVE_PORTRAIT_BUNDLE` points to a readable JSON bundle.
 - The bundle has `schema_version=1` and
   `collector_version=cognitive-portrait-collector-v1`.
+- `claim_catalog.schema_version` is the supported catalog version. The catalog
+  is the closed set of evidence, numeric, and trend facts for this run.
 - `REFINE_COGNITIVE_PORTRAIT_OUTPUT` names the only final candidate file this
   invocation may write; its parent is the unique writable staging directory.
 - All four prompt templates exist at the trusted skill path.
@@ -41,11 +43,12 @@ already uses one SQLite read snapshot, event time, the Session Insights source
 allowlist, and the strict eligible cohort for current rolling 90 days and the
 previous 90 days.
 
-If collection reports `NO_CORE_DATA` or `SCHEMA_INVALID`, stop. If the bundle
-reports `DEGRADED`, analysis may describe the evidence gap, but all trend,
-direction, increase/decrease, and current-versus-previous claims are forbidden.
-Include one `[事实][趋势抑制]` line bound to
-`[bundle:/comparison/status]` so suppression is explicit.
+`DEGRADED` is a host-level stop condition. The wrapper must not launch the
+agent, create a candidate, publish a report, or update `INDEX.md` when the
+collector reports `DEGRADED`; the collector output remains a diagnostic bundle,
+while the scheduled archive stays unchanged.
+If collection reports `NO_CORE_DATA` or `SCHEMA_INVALID`, stop with a specific
+error as well.
 
 ## Stage 2 — four parallel layers
 
@@ -58,21 +61,43 @@ Dispatch four independent agents in parallel. Each receives:
   `layer-l{1..4}.md`.
 
 No layer may write another layer, the final report, `INDEX.md`, the bundle, or
-the database. A layer must cite claims with one of these machine-readable forms:
+the database.
+
+### Closed claim catalog
+
+The collector is the sole authority for numeric facts and trends. For every
+numeric or trend statement, the model must copy the corresponding
+`claim_catalog.claims[].rendered_line` byte-for-byte, including its
+`[claim:<claim_id>]` marker. The model must not compose, paraphrase, round,
+translate, or recalculate a catalog line. Its label, unit, window, pointers,
+and values are already fixed by the catalog.
+
+Unknown claim IDs, duplicate claim IDs, or a line that differs from its
+catalog `rendered_line` fail closed. A claim ID cannot be used as multiple
+facts. A canonical catalog line inside fenced/indented code, a block quote, or
+HTML is not visible evidence and does not count. CommonMark paragraph text is
+the rendered surface; soft-wrapped paragraphs are one paragraph.
+
+A layer may cite interpretations and recommendations with these machine-readable
+forms:
 
 - `[evidence:obs:<item-id>]` for an observation in the bundle;
 - `[bundle:/json/pointer]` for a non-numeric aggregate or manifest field;
-- `[metric:/allowed/numeric/pointer=<canonical JSON number>]` for a numeric
-  claim. Keep numeric tokens out of the surrounding factual prose.
 
-Every `[事实]` claim must have a valid reference. Numeric claims use only the
-structured metric field; free-prose numbers fail closed. A comparable
-cross-window statement must be tagged `[趋势]` and cite structured current and
-previous metrics. Every `[建议]` must carry allowlisted evidence, a meaningful
-owner, a due date no later than 90 days after the bundle cutoff, and one of
-`[verify:metric:/pointer==target]`, `[verify:artifact:name==present]`, or
-`[verify:check:name==pass]`. Do not cite knowledge-only Grok/Gemini sources as
-sessions.
+Every `[事实]` line, including a non-numeric evidence fact, must be an exact,
+unique catalog `rendered_line`. The collector emits opaque evidence-record
+claims for this purpose, so the model never invents a factual label. Free-prose
+facts, numbers, and self-written trend lines fail closed. `[推断]` prose must
+carry a valid evidence ID or bundle pointer. If `comparison.comparable=false`, no trend, direction,
+increase/decrease, or current-versus-previous claim is allowed. Do not cite
+knowledge-only Grok/Gemini sources as sessions.
+
+Every `[建议]` must carry allowlisted evidence, a meaningful owner, a due date
+no later than 90 days after the bundle cutoff, and one typed verification
+condition. Valid examples are `[verify:metric|/comparison/status|eq|"OK"]`,
+`[verify:artifact|portrait-review|present]`, and
+`[verify:check|weekly-reflection|pass]`. Metric targets are typed JSON values;
+artifact/check states are fixed enums. Free-form verification text is invalid.
 
 ## Stage 3 — merge only; wrapper validates and archives
 
@@ -91,9 +116,9 @@ links, and publishes the report, evidence, and index transactionally. No agent
 or layer may overwrite a prior artifact.
 
 The validator requires complete factual traceability, zero unsupported numeric
-claims, comparable cohorts for any trend claim, at least 60% paragraph novelty
-when a previous portrait exists, and verifiable actions with owner, deadline,
-and verification condition.
+claims, canonical catalog usage, trends absent when the cohort is not
+comparable, at least 60% paragraph novelty when a previous portrait exists, and
+verifiable actions with owner, deadline, and verification condition.
 
 ## Output contract
 

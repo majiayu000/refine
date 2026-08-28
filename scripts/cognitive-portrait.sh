@@ -87,10 +87,24 @@ directory_identity() {
   fi
 }
 
+sync_directory() {
+  /usr/bin/perl -MFcntl=O_RDONLY -MIO::Handle -e '
+    sysopen(my $directory, $ARGV[0], O_RDONLY) or die "open directory: $!\n";
+    $directory->sync or die "fsync directory: $!\n";
+  ' "$1"
+}
+
 require_private_regular() {
+  local mode
   [[ -f "$1" && ! -L "$1" ]] || return 1
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    mode=$(stat -f '%Lp' "$1")
+  else
+    mode=$(stat -c '%a' "$1")
+  fi
   [[ "$(file_identity "$1" | awk -F: '{print $3}')" == "1" \
-    && "$(file_owner "$1")" == "$(id -u)" ]]
+    && "$(file_owner "$1")" == "$(id -u)" ]] \
+    && (( (8#$mode & 8#022) == 0 ))
 }
 
 atomic_copy() {
@@ -107,7 +121,8 @@ atomic_copy() {
     rm -f -- "$temporary"
     return 1
   fi
-  mv -- "$temporary" "$destination"
+  mv -- "$temporary" "$destination" || return 1
+  sync_directory "$parent"
 }
 
 atomic_replace() {
@@ -118,24 +133,99 @@ atomic_replace() {
   cp -p -- "$source" "$temporary" || { rm -f -- "$temporary"; return 1; }
   chmod 600 "$temporary" 2>/dev/null || true
   rm -f -- "$destination" || { rm -f -- "$temporary"; return 1; }
+  if [[ "$destination" == "$INDEX_FILE" \
+    && ( -e "$PUBLICATION_JOURNAL" || -L "$PUBLICATION_JOURNAL" ) \
+    && "${REFINE_PORTRAIT_FAILPOINT:-}" == "during-index-replace" ]]; then
+    kill -KILL "$$"
+  fi
   mv -f -- "$temporary" "$destination"
+  sync_directory "$parent"
+}
+
+remove_journal_stages() {
+  local stage
+  if find "$PORTRAIT_DIR" -maxdepth 1 -type l -name '.portrait-journal.*' -print -quit \
+    | grep -q .; then
+    return 1
+  fi
+  while IFS= read -r stage; do
+    require_private_regular "$stage" || return 1
+    rm -f -- "$stage" || return 1
+  done < <(find "$PORTRAIT_DIR" -maxdepth 1 -type f -name '.portrait-journal.*' -print)
+  sync_directory "$PORTRAIT_DIR"
+}
+
+write_publication_journal() {
+  local phase="$1" base="$2" stage
+  [[ "$phase" == "PREPARE" || "$phase" == "COMMITTED" ]] || return 1
+  stage=$(mktemp "${PORTRAIT_DIR}/.portrait-journal.XXXXXX") || return 1
+  printf '%s %s\n' "$phase" "$base" > "$stage"
+  chmod 600 "$stage" 2>/dev/null || true
+  sync
+  trigger_failpoint after-journal-stage
+  mv -f -- "$stage" "$PUBLICATION_JOURNAL"
+  sync_directory "$PORTRAIT_DIR"
 }
 
 recover_incomplete_publication() {
-  local base report bundle quality
-  [[ -e "$PUBLICATION_JOURNAL" || -L "$PUBLICATION_JOURNAL" ]] || return 0
-  require_private_regular "$PUBLICATION_JOURNAL" \
-    && require_private_regular "$PUBLICATION_INDEX_BACKUP" || return 1
-  IFS= read -r base < "$PUBLICATION_JOURNAL"
+  local phase base extra report bundle quality had_partial=0
+  if [[ ! -e "$PUBLICATION_JOURNAL" && ! -L "$PUBLICATION_JOURNAL" ]]; then
+    if [[ -e "$PUBLICATION_INDEX_BACKUP" || -L "$PUBLICATION_INDEX_BACKUP" ]]; then
+      require_private_regular "$PUBLICATION_INDEX_BACKUP" || return 1
+      atomic_replace "$PUBLICATION_INDEX_BACKUP" "$INDEX_FILE" || return 1
+      rm -f -- "$PUBLICATION_INDEX_BACKUP" || return 1
+      sync_directory "$PORTRAIT_DIR"
+    fi
+    remove_journal_stages || return 1
+    return 0
+  fi
+  require_private_regular "$PUBLICATION_JOURNAL" || return 1
+  [[ "$(wc -l < "$PUBLICATION_JOURNAL" | tr -d ' ')" == "1" ]] || return 1
+  read -r phase base extra < "$PUBLICATION_JOURNAL"
+  [[ -z "${extra:-}" && ( "$phase" == "PREPARE" || "$phase" == "COMMITTED" ) ]] || return 1
   [[ "$base" =~ ^cognitive-portrait-[0-9]{4}-[0-9]{2}-[0-9]{2}-v4$ ]] || return 1
   report="${PORTRAIT_DIR}/${base}.md"
   bundle="${PORTRAIT_DIR}/evidence/${base}.bundle.json"
   quality="${PORTRAIT_DIR}/evidence/${base}.quality.json"
-  rm -f -- "$report" "$bundle" "$quality"
-  atomic_replace "$PUBLICATION_INDEX_BACKUP" "$INDEX_FILE" || return 1
-  rm -f -- "$PUBLICATION_JOURNAL" "$PUBLICATION_INDEX_BACKUP"
-  sync
-  log "recovered incomplete publication: ${base}"
+  if [[ "$phase" == "COMMITTED" ]]; then
+    if ! require_private_regular "$report" \
+      || ! require_private_regular "$bundle" \
+      || ! require_private_regular "$quality" \
+      || [[ ! -f "$INDEX_FILE" || -L "$INDEX_FILE" ]] \
+      || ! grep -Fq "(./${base}.md)" "$INDEX_FILE"; then
+      [[ -e "$PUBLICATION_INDEX_BACKUP" && ! -L "$PUBLICATION_INDEX_BACKUP" ]] || return 1
+      phase="PREPARE"
+    else
+      if [[ -e "$PUBLICATION_INDEX_BACKUP" || -L "$PUBLICATION_INDEX_BACKUP" ]]; then
+        require_private_regular "$PUBLICATION_INDEX_BACKUP" || return 1
+        rm -f -- "$PUBLICATION_INDEX_BACKUP" || return 1
+        sync_directory "$PORTRAIT_DIR"
+      fi
+      remove_journal_stages || return 1
+      rm -f -- "$PUBLICATION_JOURNAL" || return 1
+      sync_directory "$PORTRAIT_DIR"
+      log "finalized committed publication marker: ${base}"
+      return 0
+    fi
+  fi
+  [[ -e "$report" || -L "$report" || -e "$bundle" || -L "$bundle" \
+    || -e "$quality" || -L "$quality" ]] && had_partial=1
+  rm -f -- "$report" "$bundle" "$quality" || return 1
+  [[ ! -d "${PORTRAIT_DIR}/evidence" || -L "${PORTRAIT_DIR}/evidence" ]] \
+    || sync_directory "${PORTRAIT_DIR}/evidence"
+  sync_directory "$PORTRAIT_DIR"
+  if [[ -e "$PUBLICATION_INDEX_BACKUP" || -L "$PUBLICATION_INDEX_BACKUP" ]]; then
+    require_private_regular "$PUBLICATION_INDEX_BACKUP" || return 1
+    atomic_replace "$PUBLICATION_INDEX_BACKUP" "$INDEX_FILE" || return 1
+    rm -f -- "$PUBLICATION_INDEX_BACKUP" || return 1
+    sync_directory "$PORTRAIT_DIR"
+  elif [[ "$had_partial" == "1" || ! -f "$INDEX_FILE" || -L "$INDEX_FILE" ]]; then
+    return 1
+  fi
+  remove_journal_stages || return 1
+  rm -f -- "$PUBLICATION_JOURNAL" || return 1
+  sync_directory "$PORTRAIT_DIR"
+  log "recovered prepared publication: ${base}"
 }
 
 tree_fingerprint() {
@@ -146,11 +236,19 @@ tree_fingerprint() {
 }
 
 log "=== Cognitive Portrait Run Start ==="
+if [[ "$AGENT_SANDBOX" != "workspace-write" ]]; then
+  log "ERROR: unattended portrait sandbox must be exactly workspace-write"
+  exit 1
+fi
 if [[ ! -d "$PORTRAIT_DIR" || -L "$PORTRAIT_DIR" ]]; then
   log "ERROR: portrait archive must be a real directory: ${PORTRAIT_DIR}"
   exit 1
 fi
 PORTRAIT_DIR_ID=$(directory_identity "$PORTRAIT_DIR")
+if ! recover_incomplete_publication; then
+  log "ERROR: incomplete publication journal is unsafe or unrecoverable"
+  exit 1
+fi
 if [[ ! -f "$INDEX_FILE" || -L "$INDEX_FILE" ]] || ! require_private_regular "$INDEX_FILE"; then
   log "ERROR: INDEX.md must be a regular single-link file"
   exit 1
@@ -167,6 +265,12 @@ if find "$SKILL_DIR" \( -type l -o -type f -links +1 \) -print -quit | grep -q .
   log "ERROR: trusted skill tree contains a symlink or hard-linked file"
   exit 1
 fi
+while IFS= read -r trusted_skill_file; do
+  if ! require_private_regular "$trusted_skill_file"; then
+    log "ERROR: trusted skill tree contains an unsafe file"
+    exit 1
+  fi
+done < <(find "$SKILL_DIR" -type f -print)
 if ! command -v "$AGENT_BIN" >/dev/null 2>&1; then
   log "ERROR: agent executable not found: ${AGENT_BIN}"
   notify "agent 未找到" "Refine Cognitive Portrait 失败"
@@ -186,10 +290,6 @@ if [[ "$(basename "$AGENT_BIN")" == "codex" ]]; then
 fi
 if find "$PORTRAIT_DIR" \( -type l -o -type f -links +1 \) -print -quit | grep -q .; then
   log "ERROR: archive contains a symlink or hard-linked file"
-  exit 1
-fi
-if ! recover_incomplete_publication; then
-  log "ERROR: incomplete publication journal is unsafe or unrecoverable"
   exit 1
 fi
 if [[ -e "${PORTRAIT_DIR}/.failed" && ! -d "${PORTRAIT_DIR}/.failed" ]] \
@@ -275,10 +375,16 @@ restore_archive_file() {
   [[ "$(directory_identity "$PORTRAIT_DIR" 2>/dev/null || true)" == "$PORTRAIT_DIR_ID" ]] || return 1
   [[ "$parent" == "$PORTRAIT_DIR" || "$parent" == "${PORTRAIT_DIR}/evidence" ]] || return 1
   [[ -d "$parent" && ! -L "$parent" ]] || return 1
-  rm -f -- "$destination" || return 1
   temporary=$(mktemp "${parent}/.portrait-restore.XXXXXX") || return 1
   cp -p -- "$snapshot" "$temporary" || { rm -f -- "$temporary"; return 1; }
-  mv -f -- "$temporary" "$destination"
+  rm -f -- "$destination" || { rm -f -- "$temporary"; return 1; }
+  if [[ "$destination" == "$INDEX_FILE" \
+    && ( -e "$PUBLICATION_JOURNAL" || -L "$PUBLICATION_JOURNAL" ) \
+    && "${REFINE_PORTRAIT_FAILPOINT:-}" == "during-index-replace" ]]; then
+    kill -KILL "$$"
+  fi
+  mv -f -- "$temporary" "$destination" || return 1
+  sync_directory "$parent"
 }
 
 restore_archive() {
@@ -306,11 +412,16 @@ cleanup() {
     [[ -z "$published_report" ]] || rm -f -- "$published_report" || true
     [[ -z "$published_bundle" ]] || rm -f -- "$published_bundle" || true
     [[ -z "$published_quality" ]] || rm -f -- "$published_quality" || true
+    recover_incomplete_publication || log "ERROR: publication journal recovery failed"
     restore_archive || log "ERROR: archive rollback could not be completed safely"
   fi
   chmod 700 "$staging_dir" 2>/dev/null || true
   rm -rf -- "$staging_dir" "$trusted_dir"
   exit "$status"
+}
+
+trigger_failpoint() {
+  [[ "${REFINE_PORTRAIT_FAILPOINT:-}" != "$1" ]] || kill -KILL "$$"
 }
 
 forward_agent_signal() {
@@ -330,8 +441,18 @@ if ! require_private_regular "$COLLECTOR_SCRIPT" \
   log "ERROR: trusted collector identity changed before execution"
   exit 1
 fi
-if ! "$COLLECTOR_SCRIPT" --period 90 --cutoff "$cutoff" --output "$bundle_file"; then
+collector_result=""
+if ! collector_result=$("$COLLECTOR_SCRIPT" --period 90 --cutoff "$cutoff" --output "$bundle_file"); then
   log "ERROR: deterministic collector failed"
+  exit 1
+fi
+log "collector result: ${collector_result}"
+if [[ "$collector_result" == *'"comparison_status":"DEGRADED"'* ]]; then
+  log "ERROR: comparison is DEGRADED; agent generation and publication are disabled"
+  exit 1
+fi
+if [[ "$collector_result" != *'"comparison_status":"OK"'* ]]; then
+  log "ERROR: collector did not return a recognized comparison status"
   exit 1
 fi
 require_private_regular "$bundle_file" || { log "ERROR: collector output is unsafe"; exit 1; }
@@ -443,25 +564,24 @@ if [[ -e "$PUBLICATION_JOURNAL" || -L "$PUBLICATION_JOURNAL" \
   log "ERROR: refusing to overwrite publication recovery state"
   exit 1
 fi
+write_publication_journal PREPARE "${new_base%.md}"
+trigger_failpoint after-journal
 atomic_copy "$INDEX_FILE" "$PUBLICATION_INDEX_BACKUP"
-journal_stage=$(mktemp "${PORTRAIT_DIR}/.portrait-journal.XXXXXX")
-printf '%s\n' "${new_base%.md}" > "$journal_stage"
-chmod 600 "$journal_stage" 2>/dev/null || true
-mv -- "$journal_stage" "$PUBLICATION_JOURNAL"
-sync
+sync_directory "$PORTRAIT_DIR"
+trigger_failpoint after-backup
 
 atomic_copy "$bundle_file" "$bundle_destination"
 published_bundle="$bundle_destination"
 sync
-if [[ "${REFINE_PORTRAIT_FAILPOINT:-}" == "after-bundle" ]]; then
-  kill -KILL "$$"
-fi
+trigger_failpoint after-bundle
 atomic_copy "$quality_file" "$quality_destination"
 published_quality="$quality_destination"
 sync
+trigger_failpoint after-quality
 atomic_copy "$candidate_trusted" "$report_destination"
 published_report="$report_destination"
 sync
+trigger_failpoint after-report
 index_stage="${trusted_dir}/INDEX.next.md"
 index_row="| [${report_date}](./${new_base}) | v4 | bundle | evidence | ✅ | ✅ | ✅ | ✅ | deterministic collector + gated agent | ✅ |"
 awk -v row="$index_row" '
@@ -475,9 +595,15 @@ awk -v row="$index_row" '
   END { if (!inserted) print row }
 ' "$INDEX_FILE" > "$index_stage"
 restore_archive_file "$index_stage" "$INDEX_FILE"
-sync
-rm -f -- "$PUBLICATION_JOURNAL" "$PUBLICATION_INDEX_BACKUP"
-sync
+sync_directory "$PORTRAIT_DIR"
+trigger_failpoint after-index
+write_publication_journal COMMITTED "${new_base%.md}"
+trigger_failpoint after-commit
+rm -f -- "$PUBLICATION_INDEX_BACKUP"
+sync_directory "$PORTRAIT_DIR"
+trigger_failpoint after-backup-removal
+rm -f -- "$PUBLICATION_JOURNAL"
+sync_directory "$PORTRAIT_DIR"
 run_committed=1
 trap - EXIT HUP INT TERM
 chmod 700 "$staging_dir" 2>/dev/null || true

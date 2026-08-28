@@ -44,6 +44,11 @@ Every bundle records:
   from the exact eligible cohort;
 - stable `obs:<item-id>` evidence IDs with document event time and source;
 - a comparison status and explicit reasons when trends are not valid.
+- a closed `claim_catalog` with a schema version, stable claim IDs, typed
+  metric/pointer metadata, and canonical `rendered_line` text for every
+  numeric fact and comparable trend. Claims are sorted by `claim_id`; escaping
+  and rendered text are deterministic. Stable opaque evidence-record claims
+  cover non-numeric facts without embedding untrusted titles into Markdown.
 
 `claude-code-session`, `codex-session`, and `remem-raw-session` are supported
 session containers. Remem remains `platform_unknown` until upstream provenance
@@ -56,31 +61,49 @@ window makes comparison `DEGRADED`. An empty current eligible cohort is
 
 ## Claim syntax
 
-Every factual claim binds to one or more of:
+Every factual line, including a non-numeric evidence fact, is an exact unique
+`claim_catalog.claims[].rendered_line`. The collector emits stable evidence
+record claims as well as metric and trend claims. Interpretations and actions
+bind to one or more of:
 
 ```text
 [evidence:obs:<item-id>]
 [bundle:/valid/json/pointer]
-[metric:/allowed/numeric/json/pointer=<canonical JSON number>]
 ```
 
-Numeric facts and inferences use only the structured `metric` form. Numeric
-tokens in free factual prose (including scientific notation, percent,
+Numeric facts and trends do not have a free-form numeric syntax. The model must
+copy the matching `claim_catalog.claims[].rendered_line` byte-for-byte,
+including `[claim:<claim_id>]`. The catalog's label, unit, window, pointers,
+and values are authoritative. It is forbidden to calculate, round, translate,
+or paraphrase a catalog line. Unknown or duplicate claim IDs, a modified
+rendered line, and reusing one claim ID as multiple facts fail closed.
+
+Catalog lines inside fenced or indented code, block quotes, or HTML are not
+visible claims. The validator parses the rendered CommonMark surface, so a
+soft-wrapped paragraph is one paragraph.
+
+Numeric tokens in free factual prose (including scientific notation, percent,
 thousands separators, full-width digits, and Chinese numerals) fail closed.
-Metadata/version pointers are not metric pointers. Every action carries:
+Metadata/version pointers are not catalog claims. Every action carries:
 
 ```text
-[owner:<person>] [due:YYYY-MM-DD] [verify:metric:/pointer<operator>target]
-[verify:artifact:<name>==present|absent]
-[verify:check:<name>==pass|fail]
+[owner:<person>] [due:YYYY-MM-DD] [verify:metric|/pointer|<comparator>|<typed-JSON-target>]
+[verify:artifact|<name>|present]
+[verify:check|<name>|pass]
 ```
 
-When `comparison.comparable=false`, trend markers and current-to-previous
-directional claims are forbidden and the report must include an explicit
-`[事实][趋势抑制]` claim bound to `/comparison/status`. A comparable trend must
-use `[趋势]` and bind both current and previous structured metric fields. A
-pointer that merely exists does not support an unrelated number. A degraded
-report may describe the current window and the evidence gap only.
+Metric comparators are `eq`, `gt`, `gte`, `lt`, and `lte`; numeric targets
+must be JSON numbers, while string and boolean targets support `eq` only.
+Artifact states are `present` or `absent`; check states are `pass` or `fail`.
+Pointers and names are allowlisted by the validator. Free-form verification
+text is invalid.
+
+When `comparison.comparable=false`, the host wrapper records the diagnostic
+bundle and does not launch the agent, create a candidate, publish a report, or
+update `INDEX.md`. Therefore no degraded portrait or trend-suppression prose
+is generated. A comparable trend must use the catalog's canonical trend line
+and `[趋势]`. A pointer that merely exists does not support an unrelated
+number.
 
 ## Quality gate
 
@@ -89,15 +112,17 @@ The gate replaces all raw line-count requirements. A candidate passes only when:
 - factual traceability is 100%;
 - unsupported-number rate is 0%;
 - trends are absent when the cohort is not comparable;
+- every numeric/trend line is an exact line from the closed claim catalog;
 - paragraph novelty is at least 60% relative to the previous portrait when one
   exists;
 - every recommendation has allowlisted evidence, a meaningful owner, a deadline
   within 90 days of the bundle cutoff, and a structured verification target.
 
 The four exact L1-L4 main headings are mandatory and ordered. Deadlines must be
-valid bounded ISO dates. Fenced/indented code, frontmatter, HTML comments, link
-destinations, HTML metadata, and machine fields are excluded from rendered
-structure and novelty checks, so metadata-only edits do not count as insight.
+valid bounded ISO dates. Fenced/indented code, block quotes, frontmatter, HTML
+comments, link destinations, HTML metadata, and machine fields are excluded
+from rendered structure and novelty checks, so metadata-only edits do not
+count as insight. Soft-wrapped paragraphs are reconstructed before validation.
 
 A failed gate returns non-zero. One kernel-backed lock owns a run. The scheduled
 wrapper gives the untrusted agent a unique writable staging directory and an

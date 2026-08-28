@@ -75,6 +75,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in --output) output="$2"; shift 2 ;; *) shift ;; esac
 done
 printf '{"metric":1}\n' > "$output"
+printf '{"comparison_status":"%s"}\n' "${FAKE_COLLECTOR_STATUS:-OK}"
 EOF
   cat > "$root/bin/fake-validator" <<'EOF'
 #!/usr/bin/env bash
@@ -131,6 +132,31 @@ run_case validator-fail normal 9 && fail 'validator failure accepted'
 [[ ! -e "$TEST_ROOT/validator-fail/portraits/${REPORT_BASE}.md" ]] || fail 'failed validation published report'
 [[ "$(cat "$TEST_ROOT/validator-fail/portraits/INDEX.md")" == '# Index' ]] || fail 'failed validation changed index'
 
+prepare_case degraded
+root="$TEST_ROOT/degraded"
+if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
+  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state" \
+  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector" \
+  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+  FAKE_COLLECTOR_STATUS=DEGRADED FAKE_AGENT_MODE=normal FAKE_AGENT_LOG="$root/agent.log" \
+  bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
+  fail 'DEGRADED comparison launched publication workflow'
+fi
+[[ ! -e "$root/agent.log" && ! -e "$root/portraits/${REPORT_BASE}.md" ]] \
+  || fail 'DEGRADED comparison launched agent or published report'
+
+prepare_case unsafe-sandbox
+root="$TEST_ROOT/unsafe-sandbox"
+if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
+  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state" \
+  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector" \
+  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+  REFINE_PORTRAIT_SANDBOX=danger-full-access FAKE_AGENT_MODE=normal FAKE_AGENT_LOG="$root/agent.log" \
+  bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
+  fail 'unsafe agent sandbox accepted'
+fi
+[[ ! -e "$root/agent.log" ]] || fail 'unsafe sandbox reached agent'
+
 prepare_case evidence-file
 rm -rf "$TEST_ROOT/evidence-file/portraits/evidence"
 printf unsafe > "$TEST_ROOT/evidence-file/portraits/evidence"
@@ -176,6 +202,17 @@ if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/pr
   REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
   FAKE_AGENT_MODE=normal bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
   fail 'hard-linked collector accepted'
+fi
+
+prepare_case trusted-script-writable
+root="$TEST_ROOT/trusted-script-writable"
+chmod 722 "$root/bin/fake-collector"
+if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
+  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state" \
+  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector" \
+  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+  FAKE_AGENT_MODE=normal bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
+  fail 'group/world-writable collector accepted'
 fi
 
 prepare_case state-parent-symlink
@@ -229,27 +266,54 @@ fi
 run_case validator-tamper tamper-validator && fail 'validator tamper accepted'
 [[ ! -e "$TEST_ROOT/validator-tamper/validator.called" ]] || fail 'modified validator executed'
 
-prepare_case crash-recovery
-root="$TEST_ROOT/crash-recovery"
-crash_env=(HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project"
-  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state"
-  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector"
-  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0
-  FAKE_INDEX_TARGET="$root/portraits/INDEX.md" FAKE_HISTORY_TARGET="$root/portraits/cognitive-portrait-2026-01-01-v3.md")
-if env -i "${crash_env[@]}" FAKE_AGENT_MODE=normal REFINE_PORTRAIT_FAILPOINT=after-bundle \
-  bash "$SCRIPT_DIR/cognitive-portrait.sh" >/dev/null 2>&1; then
-  fail 'SIGKILL publication failpoint succeeded'
-fi
-[[ -f "$root/portraits/.portrait-publish.journal" ]] || fail 'crash journal was not durable'
-if env -i "${crash_env[@]}" FAKE_AGENT_MODE=exit bash "$SCRIPT_DIR/cognitive-portrait.sh" >/dev/null 2>&1; then
-  fail 'recovery probe unexpectedly succeeded'
-fi
-[[ ! -e "$root/portraits/.portrait-publish.journal" \
-  && ! -e "$root/portraits/.portrait-publish.index-backup" ]] || fail 'recovery state remained'
-[[ ! -e "$root/portraits/${REPORT_BASE}.md" \
-  && ! -e "$root/portraits/evidence/${REPORT_BASE}.bundle.json" \
-  && ! -e "$root/portraits/evidence/${REPORT_BASE}.quality.json" ]] || fail 'crash recovery left partial artifacts'
-[[ "$(cat "$root/portraits/INDEX.md")" == '# Index' ]] || fail 'crash recovery did not restore index'
+for failpoint in after-journal-stage after-journal after-backup after-bundle after-quality after-report after-index during-index-replace; do
+  prepare_case "crash-${failpoint}"
+  root="$TEST_ROOT/crash-${failpoint}"
+  crash_env=(HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project"
+    REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state"
+    REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector"
+    REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0
+    FAKE_INDEX_TARGET="$root/portraits/INDEX.md" FAKE_HISTORY_TARGET="$root/portraits/cognitive-portrait-2026-01-01-v3.md")
+  if env -i "${crash_env[@]}" FAKE_AGENT_MODE=normal REFINE_PORTRAIT_FAILPOINT="$failpoint" \
+    bash "$SCRIPT_DIR/cognitive-portrait.sh" >/dev/null 2>&1; then
+    fail "SIGKILL publication failpoint succeeded: ${failpoint}"
+  fi
+  if env -i "${crash_env[@]}" FAKE_AGENT_MODE=exit bash "$SCRIPT_DIR/cognitive-portrait.sh" >/dev/null 2>&1; then
+    fail "recovery probe unexpectedly succeeded: ${failpoint}"
+  fi
+  [[ ! -e "$root/portraits/.portrait-publish.journal" \
+    && ! -e "$root/portraits/.portrait-publish.index-backup" ]] || fail "recovery state remained: ${failpoint}"
+  find "$root/portraits" -maxdepth 1 -name '.portrait-journal.*' | grep -q . \
+    && fail "temporary journal remained: ${failpoint}"
+  [[ ! -e "$root/portraits/${REPORT_BASE}.md" \
+    && ! -e "$root/portraits/evidence/${REPORT_BASE}.bundle.json" \
+    && ! -e "$root/portraits/evidence/${REPORT_BASE}.quality.json" ]] \
+    || fail "crash recovery left partial artifacts: ${failpoint}"
+  [[ "$(cat "$root/portraits/INDEX.md")" == '# Index' ]] || fail "crash recovery did not restore index: ${failpoint}"
+done
+
+for failpoint in after-commit after-backup-removal; do
+  prepare_case "crash-${failpoint}"
+  root="$TEST_ROOT/crash-${failpoint}"
+  crash_env=(HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project"
+    REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state"
+    REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector"
+    REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0)
+  if env -i "${crash_env[@]}" FAKE_AGENT_MODE=normal REFINE_PORTRAIT_FAILPOINT="$failpoint" \
+    bash "$SCRIPT_DIR/cognitive-portrait.sh" >/dev/null 2>&1; then
+    fail "post-commit failpoint succeeded: ${failpoint}"
+  fi
+  env -i "${crash_env[@]}" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=13 FAKE_AGENT_MODE=exit \
+    bash "$SCRIPT_DIR/cognitive-portrait.sh" >/dev/null 2>&1 \
+    || fail "committed journal marker was not finalized on restart: ${failpoint}"
+  [[ ! -e "$root/portraits/.portrait-publish.journal" \
+    && ! -e "$root/portraits/.portrait-publish.index-backup" \
+    && -f "$root/portraits/${REPORT_BASE}.md" \
+    && -f "$root/portraits/evidence/${REPORT_BASE}.bundle.json" \
+    && -f "$root/portraits/evidence/${REPORT_BASE}.quality.json" ]] \
+    || fail "post-commit recovery did not preserve publication: ${failpoint}"
+  grep -q "$REPORT_BASE" "$root/portraits/INDEX.md" || fail "post-commit recovery lost index row: ${failpoint}"
+done
 
 for path_kind in report evidence; do
   prepare_case "${path_kind}-symlink"

@@ -12,16 +12,23 @@ Write `## L3：工作方式健康度` with:
 
 Use the same eligible cohort for sessions, decisions, bugfixes, knowledge, and
 friction. Never combine detached/unsupported numerators with linked-session
-denominators. If comparison is degraded, describe only the current window and
-the reason trends are unavailable.
+denominators. A `DEGRADED` bundle is blocked by the host and must not reach this
+prompt; do not generate a layer for it.
 
-All facts require a valid evidence ID or bundle JSON pointer. Numeric claims use
-only `[metric:/allowed/numeric/pointer=<canonical JSON number>]` and keep numbers
-out of surrounding factual prose. Every `[建议]` requires evidence plus owner,
-due date, and structured metric/artifact/check verification on the same line. Favor novel mechanisms and concrete frictions over
-generic productivity prose. There is no line-count target.
+All facts, including non-numeric evidence facts, must be copied byte-for-byte
+from the matching catalog line. Interpretations use `[推断]` plus a valid
+evidence ID or bundle JSON pointer. Numeric facts and trends use the matching
+`claim_catalog.claims[].rendered_line`, including `[claim:<claim_id>]`; do not
+compose values, labels, units, windows, or trend prose. Unknown or duplicate
+claim IDs, modified catalog lines, and catalog lines inside code, quotes, or
+HTML are invalid. Every `[建议]` requires evidence plus owner, due date, and a
+typed metric, artifact, or check verification on the same line. Favor novel
+mechanisms and concrete frictions over generic productivity prose. There is no
+line-count target.
 
-Each metric field must equal its cited scalar. Comparable trends require
-`[趋势]` plus current and previous metric fields; degraded data requires an explicit
-`[事实][趋势抑制]` status claim and no directional prose. Due dates must be valid
-and no later than 90 days after cutoff; verification must be machine-checkable.
+Each catalog line must remain an exact copy of its rendered line. Comparable
+trends require `[趋势]` plus the canonical catalog trend line; a `DEGRADED`
+bundle is blocked by the host and must not produce a layer. Due dates must be
+valid and no later than 90 days after cutoff. Verification must use typed JSON
+metric targets or the artifact/check enum forms, for example
+`[verify:metric|/comparison/status|eq|"OK"]`.

@@ -104,10 +104,18 @@ fi
   || fail 'runtime lock followed a symlink victim'
 rm -f "$lock_file"
 printf 'lock\n' > "${TEST_ROOT}/lock-hardlink-source"
+chmod 640 "${TEST_ROOT}/lock-hardlink-source"
 ln "${TEST_ROOT}/lock-hardlink-source" "$lock_file"
 if run_refine_runtime_job_locked true >/dev/null 2>&1; then
   fail 'runtime lock accepted a hard-linked file'
 fi
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  hardlink_mode=$(stat -f '%Lp' "${TEST_ROOT}/lock-hardlink-source")
+else
+  hardlink_mode=$(stat -c '%a' "${TEST_ROOT}/lock-hardlink-source")
+fi
+[[ "$hardlink_mode" == "640" && "$(cat "${TEST_ROOT}/lock-hardlink-source")" == 'lock' ]] \
+  || fail 'runtime lock mutated a rejected hardlink victim'
 rm -f "$lock_file" "${TEST_ROOT}/lock-hardlink-source"
 mkdir "${TEST_ROOT}/real-lock-parent"
 ln -s "${TEST_ROOT}/real-lock-parent" "${TEST_ROOT}/linked-lock-parent"

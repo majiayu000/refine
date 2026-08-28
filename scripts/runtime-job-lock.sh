@@ -51,11 +51,14 @@ run_refine_runtime_job_locked() {
     use strict;
     use warnings;
     my ($path, $wait, @command) = @ARGV;
-    sysopen(my $lock, $path, O_RDWR | O_CREAT | O_NOFOLLOW, 0600)
+    sysopen(my $lock, $path, O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0600)
       or die "ERROR: cannot safely open runtime lock $path: $!\n";
-    chmod 0600, $lock or die "ERROR: cannot chmod runtime lock $path: $!\n";
     my @opened = stat($lock);
     die "ERROR: runtime lock is not a regular single-link owner file\n"
+      unless @opened && S_ISREG($opened[2]) && $opened[3] == 1 && $opened[4] == $<;
+    chmod 0600, $lock or die "ERROR: cannot chmod runtime lock $path: $!\n";
+    @opened = stat($lock);
+    die "ERROR: runtime lock identity changed during validation\n"
       unless @opened && S_ISREG($opened[2]) && $opened[3] == 1 && $opened[4] == $<;
     my $deadline = time() + $wait;
     while (!flock($lock, LOCK_EX | LOCK_NB)) {

@@ -116,6 +116,21 @@ fn portrait(body: &str) -> String {
     )
 }
 
+fn claim_line(bundle: &CognitivePortraitBundle, claim_id: &str) -> String {
+    bundle
+        .claim_catalog
+        .claims
+        .iter()
+        .find(|claim| claim.claim_id == claim_id)
+        .unwrap_or_else(|| panic!("missing claim {claim_id}"))
+        .rendered_line
+        .clone()
+}
+
+fn valid_action() -> &'static str {
+    "[建议] 在截止日前检查 cohort。[evidence:obs:current] [owner:lifcc] [due:2026-09-01] [verify:metric|/comparison/status|eq|\"OK\"]"
+}
+
 #[test]
 fn collector_reuses_source_cohort_and_emits_traceable_evidence() {
     let bundle = fixture(false);
@@ -126,6 +141,16 @@ fn collector_reuses_source_cohort_and_emits_traceable_evidence() {
     assert_eq!(bundle.current.evidence[0].source, "codex");
     assert_eq!(bundle.previous.evidence[0].source, "claude");
     assert!(bundle.comparison.comparable);
+    let claim_ids: Vec<_> = bundle
+        .claim_catalog
+        .claims
+        .iter()
+        .map(|claim| claim.claim_id.as_str())
+        .collect();
+    assert!(claim_ids.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(claim_ids.contains(&"fact.current.total_sessions"));
+    assert!(claim_ids.contains(&"fact.current.evidence.000000"));
+    assert!(claim_ids.contains(&"trend.total_sessions"));
 }
 
 #[test]
@@ -139,6 +164,11 @@ fn unsupported_knowledge_source_is_disclosed_and_suppresses_trends() {
     );
     assert!(!bundle.comparison.comparable);
     assert_eq!(bundle.comparison.status, "DEGRADED");
+    assert!(bundle
+        .claim_catalog
+        .claims
+        .iter()
+        .all(|claim| claim.kind != "trend"));
 }
 
 #[test]
@@ -182,12 +212,24 @@ fn bundle_round_trip_is_versioned_and_deterministic() {
         .unwrap_err()
         .to_string()
         .contains("comparison contract"));
+
+    let mut tampered = serde_json::to_value(&bundle).unwrap();
+    tampered["claim_catalog"]["claims"][0]["rendered_line"] = serde_json::json!("spoofed");
+    std::fs::write(&invalid, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    assert!(read_bundle(&invalid)
+        .unwrap_err()
+        .to_string()
+        .contains("claim catalog"));
 }
 
 #[test]
 fn quality_gate_requires_evidence_numbers_novelty_and_verifiable_actions() {
     let bundle = fixture(false);
-    let candidate = portrait("[事实] 当前窗口 session 总量见机器指标。[metric:/current/metrics/total_sessions=1]\n\n[建议] 在截止日前检查 cohort。[evidence:obs:current] [owner:lifcc] [due:2026-09-01] [verify:metric:/comparison/status==OK]\n\n这是一段足够长且全新的认知分析内容，用于证明本期相对上一期具备真实新增信息。");
+    let candidate = portrait(&format!(
+        "{}\n\n{}\n\n这是一段足够长且全新的认知分析内容，用于证明本期具备真实新增信息。",
+        claim_line(&bundle, "fact.current.total_sessions"),
+        valid_action()
+    ));
     let previous = "# Portrait\n\n这是一段足够长但完全不同的旧版认知分析内容，用于建立上一期基线。";
     let report = validate_portrait(&bundle, &candidate, Some(previous));
     assert!(report.passed, "{:?}", report.errors);
@@ -204,28 +246,36 @@ fn quality_gate_requires_evidence_numbers_novelty_and_verifiable_actions() {
 }
 
 #[test]
-fn degraded_comparison_rejects_trend_claims_but_allows_explicit_suppression() {
+fn degraded_comparison_disables_portrait_validation_entirely() {
     let bundle = fixture(true);
-    let trend = portrait("[事实][趋势] session 指标跨窗口变化。[metric:/current/metrics/total_sessions=1]\n\n[建议] 暂停趋势判断。[bundle:/comparison/status] [owner:lifcc] [due:2026-09-01] [verify:metric:/comparison/status==OK]");
-    assert!(!validate_portrait(&bundle, &trend, None).passed);
-    let prose_trend = portrait("[推断，置信度：高] session 相较前期呈更强态势。[bundle:/comparison/status]\n\n[事实] 当前比较状态不可用。[bundle:/comparison/status]\n\n[建议] 暂停趋势判断。[bundle:/comparison/status] [owner:lifcc] [due:2026-09-01] [verify:metric:/comparison/status==OK]");
-    assert!(!validate_portrait(&bundle, &prose_trend, None).passed);
-    let english_trend = portrait("[事实] Session concentration outperformed the previous window。[bundle:/comparison/status]\n\n[事实][趋势抑制] 当前不可比较。[bundle:/comparison/status]\n\n[建议] 暂停趋势判断。[bundle:/comparison/status] [owner:lifcc] [due:2026-09-01] [verify:metric:/comparison/status==OK]");
-    assert!(!validate_portrait(&bundle, &english_trend, None).passed);
-    let chinese_bypass = portrait("[事实] 本期表现优于前一窗口。[bundle:/comparison/status]\n\n[事实][趋势抑制] 当前不可比较。[bundle:/comparison/status]\n\n[建议] 暂停趋势判断。[bundle:/comparison/status] [owner:lifcc] [due:2026-09-01] [verify:metric:/comparison/status==OK]");
-    assert!(!validate_portrait(&bundle, &chinese_bypass, None).passed);
-    let suppressed = portrait("[事实][趋势抑制] 当前不可比较。[bundle:/comparison/status]\n\n[建议] 暂停跨期判断。[bundle:/comparison/status] [owner:lifcc] [due:2026-09-01] [verify:metric:/comparison/status==OK]");
-    assert!(validate_portrait(&bundle, &suppressed, None).passed);
+    let candidate = portrait(&format!(
+        "{}\n\n{}",
+        claim_line(&bundle, "fact.current.total_sessions"),
+        valid_action()
+    ));
+    let report = validate_portrait(&bundle, &candidate, None);
+    assert!(!report.passed);
+    assert!(report
+        .errors
+        .iter()
+        .any(|error| error.contains("generation is disabled")));
 }
 
 #[test]
 fn comparable_trends_require_explicit_marker_and_both_window_scalars() {
     let bundle = fixture(false);
-    let valid = portrait("[事实][趋势] session 总量在当前与上一窗口保持一致。[metric:/current/metrics/total_sessions=1] [metric:/previous/metrics/total_sessions=1]\n\n[建议] 保持观察。[bundle:/comparison/status] [owner:lifcc] [due:2026-09-01] [verify:metric:/comparison/status==OK]");
+    let valid = portrait(&format!(
+        "{}\n\n{}",
+        claim_line(&bundle, "trend.total_sessions"),
+        valid_action()
+    ));
     let report = validate_portrait(&bundle, &valid, None);
     assert!(report.passed, "{:?}", report.errors);
 
-    let implicit = portrait("[事实] session 总量较上期持平。[metric:/current/metrics/total_sessions=1] [metric:/previous/metrics/total_sessions=1]\n\n[建议] 保持观察。[bundle:/comparison/status] [owner:lifcc] [due:2026-09-01] [verify:metric:/comparison/status==OK]");
+    let implicit = portrait(&format!(
+        "[事实] session 总量较上期持平。[bundle:/current/metrics/total_sessions] [bundle:/previous/metrics/total_sessions]\n\n{}",
+        valid_action()
+    ));
     assert!(!validate_portrait(&bundle, &implicit, None).passed);
 }
 
@@ -240,16 +290,39 @@ fn numeric_claim_must_equal_its_referenced_scalar() {
         "[事实] 当前窗口有 1,000 个 session。[bundle:/schema_version]",
         "[事实] 当前窗口有 １ 个 session。[bundle:/schema_version]",
         "[事实] 当前窗口有一百个 session。[bundle:/schema_version]",
-        "[事实] 当前窗口 session 总量见指标。[metric:/schema_version=1]",
-        "[事实] 当前窗口 session 总量见指标。[metric:/current/metrics/total_sessions=1e0]",
-        "[事实] 当前窗口 session 总量见指标。[metric:/current/metrics/total_sessions=+1]",
-        "[事实] 当前窗口 session 总量见指标。[metric:/current/metrics/total_sessions=01]",
+        "[事实] 当前窗口 session 总量见指标。[claim:unknown]",
+        "[事实] 当前窗口 session 总量见指标。[claim:fact.current.total_sessions]",
     ] {
-        let candidate = portrait(&format!("{claim}\n\n[建议] 核对统计。[bundle:/current/metrics/total_sessions] [owner:lifcc] [due:2026-09-01] [verify:metric:/comparison/status==OK]"));
+        let candidate = portrait(&format!("{claim}\n\n{}", valid_action()));
         let report = validate_portrait(&bundle, &candidate, None);
         assert!(!report.passed, "claim unexpectedly passed: {claim}");
-        assert_eq!(report.unsupported_numeric_claims, 1, "claim: {claim}");
     }
+
+    let spoof = portrait(&format!(
+        "[事实][claim:fact.current.total_sessions] 当前决策总量：1 decision。\n\n{}",
+        valid_action()
+    ));
+    assert!(!validate_portrait(&bundle, &spoof, None).passed);
+
+    let canonical = claim_line(&bundle, "fact.current.total_sessions");
+    let duplicate = portrait(&format!("{canonical}\n\n{canonical}\n\n{}", valid_action()));
+    assert!(!validate_portrait(&bundle, &duplicate, None).passed);
+}
+
+#[test]
+fn non_numeric_facts_must_use_the_closed_evidence_catalog() {
+    let bundle = fixture(false);
+    let evidence_fact = claim_line(&bundle, "fact.current.evidence.000000");
+    let valid = portrait(&format!("{evidence_fact}\n\n{}", valid_action()));
+    assert!(validate_portrait(&bundle, &valid, None).passed);
+
+    let invented = portrait(&format!(
+        "[事实] 当前工作明显更成熟。[evidence:obs:current]\n\n{}",
+        valid_action()
+    ));
+    let report = validate_portrait(&bundle, &invented, None);
+    assert!(!report.passed);
+    assert_eq!(report.factual_traceability_rate, 0.0);
 }
 
 #[test]
@@ -268,7 +341,7 @@ fn required_sections_due_date_and_observable_verification_fail_closed() {
 #[test]
 fn html_nonce_does_not_create_false_novelty() {
     let bundle = fixture(false);
-    let previous = portrait("[事实] 当前窗口 session 总量见指标。[metric:/current/metrics/total_sessions=1]\n\n[建议] 核对统计。[bundle:/current/metrics/total_sessions] [owner:lifcc] [due:2026-09-01] [verify:metric:/comparison/status==OK]\n\n[可见标签](https://old.example) 这一段分析文字在两期完全相同，只修改隐藏元数据也不能算作新增洞察。\n\n[ref]: https://old.example");
+    let previous = portrait(&format!("{}\n\n{}\n\n[可见标签](https://old.example) 这一段分析文字在两期完全相同，只修改隐藏元数据也不能算作新增洞察。\n\n[ref]: https://old.example", claim_line(&bundle, "fact.current.total_sessions"), valid_action()));
     let candidate = previous
         .replace("https://old.example", "https://new.example")
         .replace(
@@ -283,7 +356,11 @@ fn html_nonce_does_not_create_false_novelty() {
 #[test]
 fn fenced_or_commented_report_content_is_not_a_portrait() {
     let bundle = fixture(false);
-    let hidden = portrait("[事实] 当前窗口 session 总量见指标。[metric:/current/metrics/total_sessions=1]\n\n[建议] 核对统计。[evidence:obs:current] [owner:lifcc] [due:2026-09-01] [verify:metric:/comparison/status==OK]");
+    let hidden = portrait(&format!(
+        "{}\n\n{}",
+        claim_line(&bundle, "fact.current.total_sessions"),
+        valid_action()
+    ));
     let fenced = format!("~~~markdown\n{hidden}~~~\n<!-- ## L1：认知演进 -->");
     let report = validate_portrait(&bundle, &fenced, None);
     assert!(!report.passed);
@@ -300,10 +377,60 @@ fn action_contract_rejects_placeholder_owner_unbounded_due_and_prose_verify() {
     assert!(!report.passed);
     assert_eq!(report.verifiable_actions, 0);
 
-    let metadata_verify = portrait("[事实] 当前窗口状态已采集。[bundle:/comparison/status]\n\n[建议] 核对统计。[evidence:obs:current] [owner:lifcc] [due:2026-09-01] [verify:metric:/schema_version==1]");
+    let metadata_verify = portrait("[事实] 当前窗口状态已采集。[bundle:/comparison/status]\n\n[建议] 核对统计。[evidence:obs:current] [owner:lifcc] [due:2026-09-01] [verify:metric|/schema_version|eq|1]");
     let report = validate_portrait(&bundle, &metadata_verify, None);
     assert!(!report.passed);
     assert_eq!(report.verifiable_actions, 0);
+
+    let typed_mismatch = portrait("[事实] 当前窗口状态已采集。[bundle:/comparison/status]\n\n[建议] 核对统计。[evidence:obs:current] [owner:lifcc] [due:2026-09-01] [verify:metric|/current/metrics/total_sessions|eq|\"banana\"]");
+    assert_eq!(
+        validate_portrait(&bundle, &typed_mismatch, None).verifiable_actions,
+        0
+    );
+
+    let noncanonical_target = portrait("[事实] 当前窗口状态已采集。[bundle:/comparison/status]\n\n[建议] 核对统计。[evidence:obs:current] [owner:lifcc] [due:2026-09-01] [verify:metric|/current/metrics/total_sessions|eq|1e0]");
+    assert_eq!(
+        validate_portrait(&bundle, &noncanonical_target, None).verifiable_actions,
+        0
+    );
+}
+
+#[test]
+fn soft_wrapping_visible_prose_does_not_create_false_novelty() {
+    let bundle = fixture(false);
+    let prose = "同一段可见分析文字即使只改变 Markdown 源码软换行，也不能被统计为新的认知洞察。";
+    let previous = portrait(&format!(
+        "{}\n\n{}\n\n{prose}",
+        claim_line(&bundle, "fact.current.total_sessions"),
+        valid_action()
+    ));
+    let candidate = previous.replace("即使只改变", "即使\n只改变");
+    let report = validate_portrait(&bundle, &candidate, Some(&previous));
+    assert!(!report.passed);
+    assert_eq!(report.novelty_rate, Some(0.0));
+}
+
+#[test]
+fn catalog_claims_in_quotes_code_or_html_do_not_count() {
+    let bundle = fixture(false);
+    let claim = claim_line(&bundle, "fact.current.total_sessions");
+    for hidden in [
+        format!("> {claim}"),
+        format!("`{claim}`"),
+        format!("<!-- {claim} -->"),
+        format!("<span>{claim}</span>"),
+    ] {
+        let candidate = portrait(&format!("{hidden}\n\n{}", valid_action()));
+        let report = validate_portrait(&bundle, &candidate, None);
+        assert!(!report.passed, "hidden claim unexpectedly passed: {hidden}");
+        assert_eq!(report.factual_claims, 0);
+    }
+
+    let reformatted = portrait(&format!("**{claim}**\n\n{}", valid_action()));
+    let report = validate_portrait(&bundle, &reformatted, None);
+    assert!(!report.passed);
+    assert_eq!(report.factual_claims, 1);
+    assert_eq!(report.unsupported_numeric_claims, 1);
 }
 
 #[test]

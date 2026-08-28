@@ -40,7 +40,7 @@
 | v1 | deprecated | 单 agent 单线程 | 419 | 输出衰减，不达 600 行下限 |
 | v2 PoC | archived | 4 sub-agent + 手工 dispatcher | 1364 | 验证 multi-agent 假设 |
 | v3 | archived | 4 sub-agent + ad-hoc SQL | variable | 历史报告保留，停止新增 |
-| v4 | current | deterministic bundle + 4 agents + evidence gate | evidence-based | 默认 current/previous 90d |
+| v4 | current | deterministic bundle + closed claim catalog + 4 agents + evidence gate | evidence-based | 默认 current/previous 90d；DEGRADED 由 host 阻断 |
 | v5 | spec | v4 + 处方追踪 + 自我演进 | evidence-based | Phase 4 |
 
 ## Phase 路线图
@@ -57,7 +57,7 @@
   validator 均由 host wrapper 独占。Codex 运行同时忽略用户配置/规则并使用 ephemeral
   session。plist 使用安装时发现的 agent 绝对路径及其
   runtime PATH。升级 agent runtime 后重新运行安装命令即可刷新。
-- **Phase 3.1（当前）**: v4 固定 cutoff 证据 bundle + evidence quality gate，见 [SPEC.md](./SPEC.md)
+- **Phase 3.1（当前）**: v4 固定 cutoff 证据 bundle、closed claim catalog + evidence quality gate，见 [SPEC.md](./SPEC.md)。catalog version、stable ordering 和 canonical rendered lines 是数值/趋势事实的唯一来源；DEGRADED 不启动 agent、不发布报告、不更新本索引。
 - **Phase 4（长期）**: 处方追踪 + 指标自校准 + 自我演进
 
 ## 命名约定

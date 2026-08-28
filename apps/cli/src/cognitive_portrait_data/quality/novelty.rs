@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use super::markdown::visible_lines;
+use super::markdown::{visible_blocks, VisibleBlockKind};
 
 pub(super) fn novelty_rate(candidate: &str, previous: &str) -> f64 {
     let candidate = normalized_paragraphs(candidate);
@@ -16,16 +16,13 @@ pub(super) fn novelty_rate(candidate: &str, previous: &str) -> f64 {
 }
 
 fn normalized_paragraphs(report: &str) -> Vec<String> {
-    visible_lines(report)
+    visible_blocks(report)
         .into_iter()
-        .map(|line| line.text)
+        .filter(|block| block.kind == VisibleBlockKind::Paragraph)
+        .map(|block| block.text)
         .filter_map(|line| {
             let line = line.trim();
-            if line.starts_with('#')
-                || line.starts_with("---")
-                || line.starts_with('|')
-                || is_reference_definition(line)
-            {
+            if line.starts_with("---") || line.starts_with('|') {
                 return None;
             }
             let body = line.to_string();
@@ -41,13 +38,6 @@ fn normalized_paragraphs(report: &str) -> Vec<String> {
             (normalized.chars().count() >= 20).then_some(normalized)
         })
         .collect()
-}
-
-fn is_reference_definition(line: &str) -> bool {
-    line.starts_with('[')
-        && line
-            .find("]:")
-            .is_some_and(|end| end > 1 && !line[..end].contains(' '))
 }
 
 fn strip_render_metadata(value: &str) -> String {
@@ -155,6 +145,7 @@ fn is_machine_metadata(value: &str) -> bool {
         || value.starts_with("推断")
         || value.starts_with("evidence:")
         || value.starts_with("bundle:")
+        || value.starts_with("claim:")
         || value.starts_with("metric:")
         || value.starts_with("owner:")
         || value.starts_with("due:")

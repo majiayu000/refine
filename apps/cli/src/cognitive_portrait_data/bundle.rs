@@ -16,6 +16,7 @@ use std::path::Path;
 
 pub(crate) const PORTRAIT_BUNDLE_SCHEMA_VERSION: u32 = 1;
 pub(crate) const PORTRAIT_COLLECTOR_VERSION: &str = "cognitive-portrait-collector-v1";
+pub(crate) const PORTRAIT_CLAIM_CATALOG_VERSION: u32 = 1;
 const PORTRAIT_PROMPT_IDENTITY: &str = "cognitive-portrait-v4:evidence-bundle-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,8 +27,28 @@ pub(crate) struct CognitivePortraitBundle {
     pub cutoff: DateTime<Utc>,
     pub manifest: InsightsManifest,
     pub comparison: ComparisonContract,
+    pub claim_catalog: PortraitClaimCatalog,
     pub current: PortraitWindowData,
     pub previous: PortraitWindowData,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PortraitClaimCatalog {
+    pub schema_version: u32,
+    pub claims: Vec<PortraitClaim>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PortraitClaim {
+    pub claim_id: String,
+    pub kind: String,
+    pub metric: String,
+    pub label: String,
+    pub unit: String,
+    pub windows: Vec<String>,
+    pub pointers: Vec<String>,
+    pub values: Vec<u64>,
+    pub rendered_line: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +199,7 @@ pub(crate) fn build_bundle_from_snapshot(
         &previous_cohort.cluster,
         &snapshot.documents,
     )?;
+    let claim_catalog = build_claim_catalog(&current, &previous, comparison.comparable)?;
     Ok(CognitivePortraitBundle {
         schema_version: PORTRAIT_BUNDLE_SCHEMA_VERSION,
         collector_version: PORTRAIT_COLLECTOR_VERSION.to_string(),
@@ -185,9 +207,108 @@ pub(crate) fn build_bundle_from_snapshot(
         cutoff,
         manifest,
         comparison,
+        claim_catalog,
         current,
         previous,
     })
+}
+
+fn build_claim_catalog(
+    current: &PortraitWindowData,
+    previous: &PortraitWindowData,
+    comparable: bool,
+) -> Result<PortraitClaimCatalog> {
+    let metrics = [
+        ("total_sessions", "会话总量", "session"),
+        ("total_decisions", "决策总量", "decision"),
+        ("total_bugfixes", "修复总量", "bugfix"),
+        ("total_summaries", "总结总量", "summary"),
+        ("untagged_observations", "未标记观察总量", "observation"),
+    ];
+    let mut claims = Vec::new();
+    for (metric, label, unit) in metrics {
+        let current_value = metric_value(&current.metrics, metric)?;
+        let previous_value = metric_value(&previous.metrics, metric)?;
+        for (window, window_label, value) in [
+            ("current", "当前窗口", current_value),
+            ("previous", "上一窗口", previous_value),
+        ] {
+            let claim_id = format!("fact.{window}.{metric}");
+            claims.push(PortraitClaim {
+                claim_id: claim_id.clone(),
+                kind: "fact".to_string(),
+                metric: metric.to_string(),
+                label: label.to_string(),
+                unit: unit.to_string(),
+                windows: vec![window.to_string()],
+                pointers: vec![format!("/{window}/metrics/{metric}")],
+                values: vec![u64::try_from(value).context("portrait metric exceeds u64")?],
+                rendered_line: format!(
+                    "[事实][claim:{claim_id}] {window_label}{label}：{value} {unit}。"
+                ),
+            });
+        }
+        if comparable {
+            let claim_id = format!("trend.{metric}");
+            claims.push(PortraitClaim {
+                claim_id: claim_id.clone(),
+                kind: "trend".to_string(),
+                metric: metric.to_string(),
+                label: label.to_string(),
+                unit: unit.to_string(),
+                windows: vec!["previous".to_string(), "current".to_string()],
+                pointers: vec![
+                    format!("/previous/metrics/{metric}"),
+                    format!("/current/metrics/{metric}"),
+                ],
+                values: vec![
+                    u64::try_from(previous_value).context("portrait metric exceeds u64")?,
+                    u64::try_from(current_value).context("portrait metric exceeds u64")?,
+                ],
+                rendered_line: format!(
+                    "[事实][趋势][claim:{claim_id}] {label}：previous={previous_value} {unit}; current={current_value} {unit}。"
+                ),
+            });
+        }
+    }
+    for (window, window_label, data) in [
+        ("current", "当前窗口", current),
+        ("previous", "上一窗口", previous),
+    ] {
+        for (index, _) in data.evidence.iter().enumerate() {
+            let claim_id = format!("fact.{window}.evidence.{index:06}");
+            let pointer = format!("/{window}/evidence/{index}");
+            claims.push(PortraitClaim {
+                claim_id: claim_id.clone(),
+                kind: "evidence".to_string(),
+                metric: "evidence_record".to_string(),
+                label: "证据记录".to_string(),
+                unit: String::new(),
+                windows: vec![window.to_string()],
+                pointers: vec![pointer.clone()],
+                values: Vec::new(),
+                rendered_line: format!(
+                    "[事实][claim:{claim_id}] {window_label}证据记录。[bundle:{pointer}]"
+                ),
+            });
+        }
+    }
+    claims.sort_by(|left, right| left.claim_id.cmp(&right.claim_id));
+    Ok(PortraitClaimCatalog {
+        schema_version: PORTRAIT_CLAIM_CATALOG_VERSION,
+        claims,
+    })
+}
+
+fn metric_value(metrics: &PortraitMetrics, metric: &str) -> Result<usize> {
+    match metric {
+        "total_sessions" => Ok(metrics.total_sessions),
+        "total_decisions" => Ok(metrics.total_decisions),
+        "total_bugfixes" => Ok(metrics.total_bugfixes),
+        "total_summaries" => Ok(metrics.total_summaries),
+        "untagged_observations" => Ok(metrics.untagged_observations),
+        _ => bail!("SCHEMA_INVALID: unsupported portrait claim metric {metric}"),
+    }
 }
 
 fn comparison_contract(current: &WindowManifest, previous: &WindowManifest) -> ComparisonContract {
@@ -434,6 +555,16 @@ pub(crate) fn read_bundle(path: &Path) -> Result<CognitivePortraitBundle> {
     if bundle.comparison != comparison_contract(&bundle.manifest.current_window, previous_manifest)
     {
         bail!("SCHEMA_INVALID: comparison contract disagrees with window manifests");
+    }
+    let expected_catalog = build_claim_catalog(
+        &bundle.current,
+        &bundle.previous,
+        bundle.comparison.comparable,
+    )?;
+    if bundle.claim_catalog != expected_catalog {
+        bail!(
+            "SCHEMA_INVALID: claim catalog disagrees with trusted metrics or canonical rendering"
+        );
     }
     Ok(bundle)
 }
