@@ -55,10 +55,10 @@ impl MultisetDigest {
         for (target, byte) in self.xor.iter_mut().zip(value) {
             *target ^= byte;
         }
-        for (index, chunk) in value.chunks_exact(8).enumerate() {
-            self.sums[index] = self.sums[index].wrapping_add(u64::from_le_bytes(
-                chunk.try_into().expect("8-byte digest lane"),
-            ));
+        let (lanes, remainder) = value.as_chunks::<8>();
+        debug_assert!(remainder.is_empty());
+        for (index, lane) in lanes.iter().enumerate() {
+            self.sums[index] = self.sums[index].wrapping_add(u64::from_le_bytes(*lane));
         }
     }
 

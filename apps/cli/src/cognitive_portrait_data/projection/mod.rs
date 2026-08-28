@@ -6,7 +6,7 @@ mod validate;
 use crate::insights_manifest::report_source;
 use anyhow::{Context, Result};
 use refine_core::knowledge::{Item, ObservationDocumentMeta};
-use refine_core::session::{eligible_observations, ClusterResult};
+use refine_core::session::PortraitSessionCohort;
 use std::collections::{BTreeMap, BTreeSet};
 
 use self::dimensions::DimensionAccumulators;
@@ -25,16 +25,15 @@ use super::bundle::{
 pub(super) use validate::{enforce_bundle_budgets, validate_window_projection};
 
 pub(super) fn build_window_data(
-    cohort_items: &[Item],
-    cluster: &ClusterResult,
+    cohort: &PortraitSessionCohort<'_>,
     documents: &[ObservationDocumentMeta],
 ) -> Result<PortraitWindowData> {
     let documents: BTreeMap<&str, &ObservationDocumentMeta> = documents
         .iter()
         .map(|document| (document.id.as_str(), document))
         .collect();
-    let eligible = eligible_observations(cohort_items);
-    let top_projects: BTreeSet<String> = cluster
+    let eligible = &cohort.eligible_items;
+    let top_projects: BTreeSet<String> = cohort
         .global_stats
         .project_ranking
         .iter()
@@ -45,8 +44,9 @@ pub(super) fn build_window_data(
     // Pass 1 stores only bounded stratum counters and a commutative digest.
     let mut stratum_counts = BTreeMap::new();
     let mut payload_digest = MultisetDigest::default();
-    for item in &eligible {
-        let (document, project) = item_context(item, cluster, &documents)?;
+    for (index, item) in eligible.iter().enumerate() {
+        let document = item_document(item, &documents)?;
+        let project = &cohort.item_projects[index];
         let key = stratum_key(item, document, project, &top_projects);
         *stratum_counts.entry(key).or_default() += 1;
         payload_digest.add(payload_row_digest(item, document, project));
@@ -56,7 +56,8 @@ pub(super) fn build_window_data(
     // Pass 2 retains at most 2,048 indices across deterministic strata.
     let mut selector = BoundedSelection::new(allocate_quotas(&stratum_counts));
     for (index, item) in eligible.iter().enumerate() {
-        let (document, project) = item_context(item, cluster, &documents)?;
+        let document = item_document(item, &documents)?;
+        let project = &cohort.item_projects[index];
         selector.consider(
             stratum_key(item, document, project, &top_projects),
             index,
@@ -83,7 +84,8 @@ pub(super) fn build_window_data(
             *offset += 1;
             progressed = true;
             let item = eligible[index];
-            let (document, project) = item_context(item, cluster, &documents)?;
+            let document = item_document(item, &documents)?;
+            let project = &cohort.item_projects[index];
             let record = build_evidence_record(item, document, project)?;
             let record_bytes = serde_json::to_vec(&record)
                 .context("serialize portrait evidence record for byte budget")?
@@ -117,11 +119,12 @@ pub(super) fn build_window_data(
     let mut dimension_accumulators = DimensionAccumulators::default();
     for index in &selected_indices {
         let item = eligible[*index];
-        let (_, project) = item_context(item, cluster, &documents)?;
+        let project = &cohort.item_projects[*index];
         dimension_accumulators.sample_item(item, project);
     }
     for (index, item) in eligible.iter().enumerate() {
-        let (document, project) = item_context(item, cluster, &documents)?;
+        let document = item_document(item, &documents)?;
+        let project = &cohort.item_projects[index];
         dimension_accumulators.observe_item(
             item,
             project,
@@ -132,19 +135,19 @@ pub(super) fn build_window_data(
     let dimensions = dimension_accumulators.finish();
     let selection_digest =
         selection_digest(&evidence, &dimensions, &strata, MAX_WINDOW_EVIDENCE_BYTES)?;
-    let eligible_observations = cluster.data_quality.eligible_observations;
+    let eligible_observations = cohort.data_quality.eligible_observations;
     let selected_observations = evidence.len();
     let omitted_observations = eligible_observations
         .checked_sub(selected_observations)
         .context("projection selected more observations than the eligible cohort")?;
-    let stats = &cluster.global_stats;
+    let stats = &cohort.global_stats;
     let data = PortraitWindowData {
         metrics: PortraitMetrics {
             total_sessions: stats.total_sessions,
             total_decisions: stats.total_decisions,
             total_bugfixes: stats.total_bugfixes,
             total_summaries: stats.total_summaries,
-            untagged_observations: cluster.untagged_count,
+            untagged_observations: cohort.untagged_count,
             project_ranking: build_count_breakdown(
                 stats
                     .project_ranking
@@ -153,12 +156,7 @@ pub(super) fn build_window_data(
             )?,
             cognitive_levels: stats.cognitive_levels.clone().into_iter().collect(),
             collaboration_modes: stats.collaboration_modes.clone().into_iter().collect(),
-            tool_frequency: build_count_breakdown(
-                stats
-                    .tool_frequency
-                    .iter()
-                    .map(|(value, count)| (value.as_str(), *count)),
-            )?,
+            tool_frequency: build_tool_breakdown(eligible)?,
         },
         evidence_selection: EvidenceSelection {
             policy_version: PORTRAIT_PROJECTION_POLICY.to_string(),
@@ -177,11 +175,10 @@ pub(super) fn build_window_data(
     Ok(data)
 }
 
-fn item_context<'a>(
+fn item_document<'a>(
     item: &Item,
-    cluster: &'a ClusterResult,
     documents: &BTreeMap<&str, &'a ObservationDocumentMeta>,
-) -> Result<(&'a ObservationDocumentMeta, &'a str)> {
+) -> Result<&'a ObservationDocumentMeta> {
     let document_id = item
         .document_id()
         .context("eligible portrait observation unexpectedly lacks document_id")?;
@@ -193,16 +190,7 @@ fn item_context<'a>(
                 "eligible portrait observation references missing document metadata {document_id}"
             )
         })?;
-    let project = cluster
-        .item_projects
-        .get(item.id().as_str())
-        .with_context(|| {
-            format!(
-                "eligible portrait observation is missing its direct project assignment {}",
-                item.id()
-            )
-        })?;
-    Ok((document, project))
+    Ok(document)
 }
 
 fn stratum_key(
@@ -321,7 +309,13 @@ fn payload_row_digest(item: &Item, document: &ObservationDocumentMeta, project: 
     row.text(item.title());
     row.text(item.summary());
     row.text(item.content());
-    row.text(item.excerpt().unwrap_or(""));
+    match item.excerpt() {
+        Some(excerpt) => {
+            row.text("excerpt:some");
+            row.text(excerpt);
+        }
+        None => row.text("excerpt:none"),
+    }
     row.usize(item.tags().len());
     for tag in item.tags() {
         row.text(tag.as_str());
@@ -333,10 +327,12 @@ fn build_count_breakdown<'a>(
     entries: impl Iterator<Item = (&'a str, usize)>,
 ) -> Result<CountBreakdown> {
     let mut full = MultisetDigest::default();
-    let mut total_entries = 0usize;
+    let mut total_occurrences = 0usize;
     let mut selected = Vec::with_capacity(MAX_BREAKDOWN_ENTRIES);
     for (value, count) in entries {
-        total_entries += 1;
+        total_occurrences = total_occurrences
+            .checked_add(count)
+            .context("portrait count breakdown total overflow")?;
         let mut row = StableDigest::new("cognitive-portrait-count-row-v2");
         row.text(value);
         row.usize(count);
@@ -354,13 +350,99 @@ fn build_count_breakdown<'a>(
             count,
         })
         .collect();
+    let selected_occurrences = selected.iter().map(|entry| entry.count).sum();
     Ok(CountBreakdown {
-        total_entries,
+        total_occurrences,
+        selected_occurrences,
+        omitted_occurrences: total_occurrences - selected_occurrences,
         selected_entries: selected.len(),
-        omitted_entries: total_entries - selected.len(),
         full_digest: full.finish("cognitive-portrait-count-breakdown-v2"),
         selection_digest: sha256_json(&selected)?,
         entries: selected,
+    })
+}
+
+#[derive(Default)]
+struct ToolSample {
+    value: String,
+    original_bytes: usize,
+    value_digest: String,
+    count: usize,
+}
+
+fn build_tool_breakdown(eligible: &[&Item]) -> Result<CountBreakdown> {
+    let mut total_occurrences = 0usize;
+    let mut full = MultisetDigest::default();
+    let mut samples: BTreeMap<String, ToolSample> = BTreeMap::new();
+
+    // First pass retains only the 128 lowest deterministic value hashes. The
+    // full multiset digest commits to every occurrence without a value map.
+    for item in eligible {
+        for_each_section_item(item.content(), "工具", |value| {
+            total_occurrences += 1;
+            let mut row = StableDigest::new("cognitive-portrait-tool-occurrence-v2");
+            row.text(value);
+            row.text(item.id().as_str());
+            full.add(row.finish_bytes());
+            let value_digest = sha256_bytes(value.as_bytes());
+            if !samples.contains_key(&value_digest) {
+                if samples.len() == MAX_BREAKDOWN_ENTRIES {
+                    let largest = samples.last_key_value().map(|(key, _)| key.clone());
+                    if largest.as_ref().is_some_and(|key| value_digest >= *key) {
+                        return;
+                    }
+                    if let Some(largest) = largest {
+                        samples.remove(&largest);
+                    }
+                }
+                samples.insert(
+                    value_digest.clone(),
+                    ToolSample {
+                        value: truncate_projection_text(value),
+                        original_bytes: value.len(),
+                        value_digest,
+                        count: 0,
+                    },
+                );
+            }
+        });
+    }
+
+    // Second pass computes exact support only for retained values.
+    for item in eligible {
+        for_each_section_item(item.content(), "工具", |value| {
+            let digest = sha256_bytes(value.as_bytes());
+            if let Some(sample) = samples.get_mut(&digest) {
+                sample.count += 1;
+            }
+        });
+    }
+    let mut entries: Vec<CountEntry> = samples
+        .into_values()
+        .filter(|sample| sample.count > 0)
+        .map(|sample| CountEntry {
+            value: sample.value,
+            original_bytes: sample.original_bytes,
+            value_digest: sample.value_digest,
+            count: sample.count,
+        })
+        .collect();
+    entries.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.value.cmp(&right.value))
+            .then_with(|| left.value_digest.cmp(&right.value_digest))
+    });
+    let selected_occurrences = entries.iter().map(|entry| entry.count).sum();
+    Ok(CountBreakdown {
+        total_occurrences,
+        selected_occurrences,
+        omitted_occurrences: total_occurrences - selected_occurrences,
+        selected_entries: entries.len(),
+        full_digest: full.finish("cognitive-portrait-tool-breakdown-v2"),
+        selection_digest: sha256_json(&entries)?,
+        entries,
     })
 }
 

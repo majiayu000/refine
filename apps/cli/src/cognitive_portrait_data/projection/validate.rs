@@ -117,13 +117,22 @@ fn valid_fingerprint(value: &FieldFingerprint) -> bool {
 }
 
 fn validate_count_breakdown(breakdown: &CountBreakdown, window: &str, name: &str) -> Result<()> {
-    if breakdown.total_entries != breakdown.selected_entries + breakdown.omitted_entries
+    if breakdown.total_occurrences != breakdown.selected_occurrences + breakdown.omitted_occurrences
         || breakdown.selected_entries != breakdown.entries.len()
         || breakdown.selected_entries > MAX_BREAKDOWN_ENTRIES
         || !valid_digest(&breakdown.full_digest)
         || !valid_digest(&breakdown.selection_digest)
     {
         bail!("SCHEMA_INVALID: {window} {name} count breakdown invariant failed");
+    }
+    if breakdown.selected_occurrences
+        != breakdown
+            .entries
+            .iter()
+            .map(|entry| entry.count)
+            .sum::<usize>()
+    {
+        bail!("SCHEMA_INVALID: {window} {name} occurrence totals disagree");
     }
     for entry in &breakdown.entries {
         if entry.value.len() > MAX_PROJECTION_TEXT_BYTES
@@ -137,7 +146,10 @@ fn validate_count_breakdown(breakdown: &CountBreakdown, window: &str, name: &str
     }
     if !breakdown.entries.windows(2).all(|pair| {
         pair[0].count > pair[1].count
-            || (pair[0].count == pair[1].count && pair[0].value <= pair[1].value)
+            || (pair[0].count == pair[1].count
+                && (pair[0].value < pair[1].value
+                    || (pair[0].value == pair[1].value
+                        && pair[0].value_digest <= pair[1].value_digest)))
     }) {
         bail!("SCHEMA_INVALID: {window} {name} ordering invariant failed");
     }

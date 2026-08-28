@@ -50,6 +50,8 @@ cmp -s "$bundle" "$bundle_again" || fail 'fixed-cutoff collector output is not d
 
 jq -e '.schema_version == 2 and .collector_version == "cognitive-portrait-collector-v2"' "$bundle" >/dev/null \
   || fail 'bundle version contract is missing'
+jq -e '.manifest.manifest_version == 2' "$bundle" >/dev/null \
+  || fail 'insights manifest version was not bumped with the bounded source schema'
 jq -e '.claim_catalog.schema_version == 2
   and ([.claim_catalog.claims[].claim_id] == ([.claim_catalog.claims[].claim_id] | sort | unique))
   and ([.claim_catalog.claims[].kind] | index("trend") == null)' "$bundle" >/dev/null \
@@ -212,9 +214,14 @@ jq -e '
   and .previous.evidence_selection.omitted_observations == 47952
   and .current.metrics.total_sessions == 200
   and .previous.metrics.total_sessions == 200
-  and .current.metrics.project_ranking.total_entries == 200
+  and .current.metrics.project_ranking.total_occurrences == 200
+  and .current.metrics.project_ranking.selected_occurrences == 128
+  and .current.metrics.project_ranking.omitted_occurrences == 72
   and .current.metrics.project_ranking.selected_entries == 128
-  and .current.metrics.project_ranking.omitted_entries == 72
+  and .current.metrics.tool_frequency.total_occurrences == 50000
+  and .current.metrics.tool_frequency.selected_occurrences == 6400
+  and .current.metrics.tool_frequency.omitted_occurrences == 43600
+  and .current.metrics.tool_frequency.selected_entries == 128
   and .current.dimensions.knowledge.total_occurrences == 50000
   and .current.dimensions.knowledge.selected_occurrences == 128
   and .current.dimensions.knowledge.omitted_occurrences == 49872
@@ -328,5 +335,12 @@ if REFINE_COGNITIVE_PORTRAIT_REFINE_BIN="$REFINE_TEST_BIN" REFINE_DB_PATH="$inva
   fail 'schema-invalid core data was accepted'
 fi
 grep -q 'SCHEMA_INVALID' "${TEST_ROOT}/invalid.log" || fail 'schema error is not explicit'
+
+# Isolated allocator oracle: snapshot construction is excluded, then 5,000
+# observations with unique 16 KiB section lines must project without cloning
+# the cohort text. This catches regressions before serialization budgets run.
+cargo test -q -p refine-cli --test cognitive_portrait_memory \
+  bounded_projection_does_not_clone_long_unique_cohort_text --locked -- \
+  --ignored --exact --test-threads=1 --nocapture
 
 echo 'All cognitive portrait collector tests passed'

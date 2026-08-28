@@ -205,13 +205,16 @@ manifest、inactivity/removals 和 evidence-gap 的 deterministic 报告，不�
 `--all`，文档 title、URL 和 manifest mode 均标记为 `snapshot`，不得把连续
 snapshot 的差异写成趋势。
 
-保存的报告第一段是 `refine-insights-manifest-v1` JSON，至少记录：
+保存的报告第一段是 `refine-insights-manifest-v2` JSON。v2 将不受支持的
+source 改为有界 breakdown，避免高基数原始 source 名称撑爆报告；至少记录：
 
 - 唯一 cutoff 与 current/previous 的 event-time start/end；
 - 两个窗口各自的 input、linked、detached、mode-excluded、source-excluded、eligible、linked
   ratio、status、cohort contract identity 和 exact cohort identity；
 - eligible cohort 按来源的 observation/session 数与 freshest event time，以及
-  platform-unknown 数；不受支持的 source 另列 observation/session 数与 freshness；
+  platform-unknown 数；不受支持的 source 记录精确 observation/session 总量与
+  freshness、selected/omitted observation 数、完整 digest，并最多列出 128 个
+  deterministic min-hash source entry；
 - LLM model identity、prompt identity/version、route plan identity、binary content identity、
   source revision。
 

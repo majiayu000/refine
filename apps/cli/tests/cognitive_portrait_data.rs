@@ -7,9 +7,9 @@ mod insights_manifest;
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use cognitive_portrait_data::{
-    read_bundle, validate_files, validate_portrait, write_bundle, CognitivePortraitBundle,
-    MAX_PORTRAIT_BUNDLE_BYTES, MAX_PORTRAIT_CANDIDATE_BYTES, MAX_PREVIOUS_PORTRAIT_BYTES,
-    PORTRAIT_BUNDLE_SCHEMA_VERSION, PORTRAIT_COLLECTOR_VERSION,
+    build_bundle_from_snapshot, read_bundle, validate_files, validate_portrait, write_bundle,
+    CognitivePortraitBundle, MAX_PORTRAIT_BUNDLE_BYTES, MAX_PORTRAIT_CANDIDATE_BYTES,
+    MAX_PREVIOUS_PORTRAIT_BYTES, PORTRAIT_BUNDLE_SCHEMA_VERSION, PORTRAIT_COLLECTOR_VERSION,
 };
 use refine_core::knowledge::{
     DocumentId, Item, ItemId, ItemType, ObservationDocumentMeta, ObservationWindowSnapshot,
@@ -232,6 +232,59 @@ fn bundle_round_trip_is_versioned_and_deterministic() {
 }
 
 #[test]
+fn full_payload_digest_distinguishes_omitted_null_and_empty_excerpt() {
+    let cutoff = Utc.with_ymd_and_hms(2026, 8, 28, 0, 0, 0).unwrap();
+    let event_time = cutoff - Duration::days(1);
+    let make_item = |id: &str, excerpt: Option<String>| {
+        Item::restore(RestoreParams {
+            id: ItemId::from(id),
+            item_type: ItemType::Observation,
+            title: id.to_string(),
+            summary: String::new(),
+            content: String::new(),
+            tags: vec![Tag::new("refine").unwrap()],
+            source: None,
+            document_id: Some(DocumentId::from("digest-doc")),
+            excerpt,
+            created_at: event_time,
+            updated_at: event_time,
+        })
+        .unwrap()
+    };
+    let build = |excerpt: Option<String>| {
+        let mut current: Vec<Item> = (0..2049)
+            .map(|index| make_item(&format!("item-{index:04}"), Some("same".to_string())))
+            .collect();
+        current.push(make_item("zzzz-omitted", excerpt));
+        build_bundle_from_snapshot(
+            ObservationWindowSnapshot {
+                current,
+                previous: Vec::new(),
+                documents: vec![ObservationDocumentMeta {
+                    id: DocumentId::from("digest-doc"),
+                    source: "codex-session".to_string(),
+                    captured_at: event_time,
+                }],
+            },
+            cutoff,
+            90,
+        )
+        .unwrap()
+    };
+    let null_excerpt = build(None);
+    let empty_excerpt = build(Some(String::new()));
+    assert!(!null_excerpt
+        .current
+        .evidence
+        .iter()
+        .any(|record| record.item_id == "zzzz-omitted"));
+    assert_ne!(
+        null_excerpt.current.evidence_selection.full_payload_digest,
+        empty_excerpt.current.evidence_selection.full_payload_digest
+    );
+}
+
+#[test]
 fn bounded_projection_invariants_fail_closed() {
     let bundle = fixture(false);
     let directory = tempfile::tempdir().unwrap();
@@ -255,6 +308,15 @@ fn bounded_projection_invariants_fail_closed() {
     tampered["current"]["evidence_selection"]["full_payload_digest"] =
         serde_json::json!("sha256:not-a-digest");
     assert_invalid(tampered, "evidence selection invariant");
+
+    let mut tampered = serde_json::to_value(&bundle).unwrap();
+    tampered["manifest"]["manifest_version"] = serde_json::json!(1);
+    assert_invalid(tampered, "unsupported insights manifest schema 1");
+
+    let mut tampered = serde_json::to_value(&bundle).unwrap();
+    tampered["current"]["metrics"]["project_ranking"]["omitted_occurrences"] =
+        serde_json::json!(999);
+    assert_invalid(tampered, "count breakdown invariant");
 
     let mut tampered = serde_json::to_value(fixture(true)).unwrap();
     tampered["manifest"]["current_window"]["unsupported_sources"]["selected_observations"] =

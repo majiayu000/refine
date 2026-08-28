@@ -1,11 +1,11 @@
 use crate::insights_manifest::{
-    build_manifest, build_window_manifest, validate_window_manifest, EventTimeWindow,
+    build_manifest, build_window_manifest_from_refs, validate_window_manifest, EventTimeWindow,
     InsightsManifest, WindowManifest,
 };
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use refine_core::knowledge::{ItemRepository, ObservationWindowSnapshot};
-use refine_core::session::cluster_session_observations;
+use refine_core::session::portrait_session_observations;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -93,9 +93,10 @@ pub(crate) struct PortraitMetrics {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CountBreakdown {
-    pub total_entries: usize,
+    pub total_occurrences: usize,
+    pub selected_occurrences: usize,
+    pub omitted_occurrences: usize,
     pub selected_entries: usize,
-    pub omitted_entries: usize,
     pub full_digest: String,
     pub selection_digest: String,
     pub entries: Vec<CountEntry>,
@@ -233,32 +234,32 @@ pub(crate) fn build_bundle_from_snapshot(
         .iter()
         .map(|document| (document.id.as_str().to_string(), document.source.clone()))
         .collect();
-    let current_cohort = cluster_session_observations(&snapshot.current, &document_sources);
-    let previous_cohort = cluster_session_observations(&snapshot.previous, &document_sources);
-    if current_cohort.cluster.data_quality.eligible_observations == 0 {
+    let current_cohort = portrait_session_observations(&snapshot.current, &document_sources);
+    let previous_cohort = portrait_session_observations(&snapshot.previous, &document_sources);
+    if current_cohort.data_quality.eligible_observations == 0 {
         bail!(
             "NO_CORE_DATA: current rolling window contains no eligible linked session observations"
         );
     }
 
-    let current_manifest = build_window_manifest(
+    let current_manifest = build_window_manifest_from_refs(
         EventTimeWindow {
             start: Some(current_start),
             end: Some(cutoff),
         },
-        &current_cohort.cohort_items,
+        &current_cohort.eligible_items,
         &snapshot.current,
-        &current_cohort.cluster,
+        &current_cohort.data_quality,
         &snapshot.documents,
     )?;
-    let previous_manifest = build_window_manifest(
+    let previous_manifest = build_window_manifest_from_refs(
         EventTimeWindow {
             start: Some(previous_start),
             end: Some(current_start),
         },
-        &previous_cohort.cohort_items,
+        &previous_cohort.eligible_items,
         &snapshot.previous,
-        &previous_cohort.cluster,
+        &previous_cohort.data_quality,
         &snapshot.documents,
     )?;
     let comparison = comparison_contract(&current_manifest, &previous_manifest);
@@ -271,16 +272,8 @@ pub(crate) fn build_bundle_from_snapshot(
         PORTRAIT_PROMPT_IDENTITY,
         collector_identity(),
     );
-    let current = build_window_data(
-        &current_cohort.cohort_items,
-        &current_cohort.cluster,
-        &snapshot.documents,
-    )?;
-    let previous = build_window_data(
-        &previous_cohort.cohort_items,
-        &previous_cohort.cluster,
-        &snapshot.documents,
-    )?;
+    let current = build_window_data(&current_cohort, &snapshot.documents)?;
+    let previous = build_window_data(&previous_cohort, &snapshot.documents)?;
     let claim_catalog = build_claim_catalog(&current, &previous, comparison.comparable)?;
     let bundle = CognitivePortraitBundle {
         schema_version: PORTRAIT_BUNDLE_SCHEMA_VERSION,
@@ -455,6 +448,13 @@ pub(crate) fn read_bundle(path: &Path) -> Result<CognitivePortraitBundle> {
             "SCHEMA_INVALID: unsupported collector version {}; expected {}",
             bundle.collector_version,
             PORTRAIT_COLLECTOR_VERSION
+        );
+    }
+    if bundle.manifest.manifest_version != crate::insights_manifest::MANIFEST_VERSION {
+        bail!(
+            "SCHEMA_INVALID: unsupported insights manifest schema {}; expected {}",
+            bundle.manifest.manifest_version,
+            crate::insights_manifest::MANIFEST_VERSION
         );
     }
     if bundle.period_days == 0 || bundle.manifest.event_time_cutoff != bundle.cutoff {

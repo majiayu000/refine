@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use refine_core::knowledge::{Item, ObservationDocumentMeta};
 use refine_core::session::{
     eligible_observations, is_supported_session_document_source, AnalysisRoute, ClusterResult,
+    DataQualityStats,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,7 +14,7 @@ use crate::cognitive_portrait_data::projection::hashing::{
     sha256_bytes, truncate_projection_text, MultisetDigest, StableDigest,
 };
 
-pub(crate) const MANIFEST_VERSION: u32 = 1;
+pub(crate) const MANIFEST_VERSION: u32 = 2;
 pub(crate) const COHORT_CONTRACT_IDENTITY: &str = "source-aware-linked-interactive-v2";
 pub(crate) const MAX_UNSUPPORTED_SOURCE_ENTRIES: usize = 128;
 
@@ -100,11 +101,27 @@ pub(crate) fn build_window_manifest(
     cluster: &ClusterResult,
     documents: &[ObservationDocumentMeta],
 ) -> Result<WindowManifest> {
+    let eligible = eligible_observations(cohort_observations);
+    build_window_manifest_from_refs(
+        window,
+        &eligible,
+        all_observations,
+        &cluster.data_quality,
+        documents,
+    )
+}
+
+pub(crate) fn build_window_manifest_from_refs(
+    window: EventTimeWindow,
+    eligible: &[&Item],
+    all_observations: &[Item],
+    quality: &DataQualityStats,
+    documents: &[ObservationDocumentMeta],
+) -> Result<WindowManifest> {
     let document_map: BTreeMap<&str, &ObservationDocumentMeta> = documents
         .iter()
         .map(|document| (document.id.as_str(), document))
         .collect();
-    let eligible = eligible_observations(cohort_observations);
     let mut sources: BTreeMap<String, SourceAccumulator> = BTreeMap::new();
     for item in eligible {
         let document_id = item
@@ -152,8 +169,6 @@ pub(crate) fn build_window_manifest(
         .filter(|stats| stats.source == "platform_unknown")
         .map(|stats| stats.session_count)
         .sum();
-    let quality = &cluster.data_quality;
-
     Ok(WindowManifest {
         event_time: window,
         input_observations: quality.input_observations,
@@ -437,7 +452,7 @@ pub(crate) fn manifest_identity(manifest: &InsightsManifest) -> Result<String> {
 pub(crate) fn render_manifest(manifest: &InsightsManifest) -> Result<String> {
     let json = serde_json::to_string_pretty(manifest).context("serialize insights manifest")?;
     Ok(format!(
-        "<!-- refine-insights-manifest-v1 -->\n```json\n{json}\n```"
+        "<!-- refine-insights-manifest-v2 -->\n```json\n{json}\n```"
     ))
 }
 
@@ -688,7 +703,8 @@ mod tests {
             source_revision: "unknown".into(),
         };
         let rendered = render_manifest(&manifest).unwrap();
-        assert!(rendered.starts_with("<!-- refine-insights-manifest-v1 -->\n```json"));
+        assert!(rendered.starts_with("<!-- refine-insights-manifest-v2 -->\n```json"));
+        assert_eq!(manifest.manifest_version, 2);
         for field in [
             "event_time_cutoff",
             "current_window",
