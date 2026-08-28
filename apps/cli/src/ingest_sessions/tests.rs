@@ -4,7 +4,7 @@ use chrono::TimeZone;
 use refine_core::error::{InfraError, InfraResult};
 use refine_core::infra::SqliteStore;
 use refine_core::knowledge::{DocumentId, DocumentRepository, Item, ItemRepository, ItemType, Tag};
-use refine_core::session::discover_sessions_in;
+use refine_core::session::{discover_sessions_in, parse_session_content};
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
@@ -166,6 +166,102 @@ fn project_for_ingest_prefers_discovered_project_then_session_metadata() {
 }
 
 #[test]
+fn project_identity_for_ingest_prefers_raw_parser_evidence() {
+    assert_eq!(
+        project_identity_for_ingest(Some("bar"), Some("/r/Foo/bar")).as_deref(),
+        Some("/r/Foo/bar")
+    );
+    assert_eq!(
+        project_identity_for_ingest(Some("-r-Foo-bar"), None).as_deref(),
+        Some("-r-Foo-bar")
+    );
+    assert_eq!(project_identity_for_ingest(None, None), None);
+}
+
+#[tokio::test]
+async fn parser_to_sqlite_portrait_preserves_case_sensitive_cwd_collisions() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+        response: r#"{
+            "session_summary": "project identity fixture",
+            "cognitive_level": "competent",
+            "collaboration_mode": "review",
+            "decisions": [], "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+        .to_string(),
+    });
+    let cutoff = Utc.with_ymd_and_hms(2026, 8, 28, 0, 0, 0).unwrap();
+    let captured_at = cutoff - chrono::Duration::days(1);
+
+    for (index, cwd) in ["/r/Foo/bar", "/r/foo/bar", "bar"].into_iter().enumerate() {
+        let transcript = format!("{{\"type\":\"turn_context\",\"payload\":{{\"cwd\":{cwd:?}}}}}\n");
+        let session = parse_session_content(
+            &transcript,
+            &PathBuf::from(format!("/tmp/project-identity-{index}.jsonl")),
+            SessionSource::Codex,
+        )
+        .expect("real Codex cwd metadata should parse");
+        let project = project_for_ingest(None, session.meta.project.as_deref());
+        let project_identity = project_identity_for_ingest(
+            project.as_deref(),
+            session.meta.project_identity.as_deref(),
+        );
+        let pending = PendingSession {
+            idx: index,
+            total: 3,
+            url: format!("file:///tmp/project-identity-{index}.jsonl"),
+            source: session.source.clone(),
+            project,
+            project_identity,
+            mode: session.meta.mode,
+            captured_at,
+            has_embedded_timestamp: false,
+            raw_content: session.to_document_content(),
+            source_version: None,
+            needs_chunk: false,
+            chunks: Vec::new(),
+            existing_document: None,
+            legacy_documents_to_delete: Vec::new(),
+        };
+        process_single_session(
+            &pending,
+            &client,
+            &doc_store,
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .expect("parsed session should persist facets");
+    }
+
+    let bundle = crate::cognitive_portrait_data::collect_bundle(store.as_ref(), cutoff, 90)
+        .await
+        .expect("persisted parser evidence should reach the portrait");
+    let ranking: std::collections::BTreeMap<_, _> = bundle
+        .current
+        .metrics
+        .project_ranking
+        .entries
+        .iter()
+        .map(|entry| (entry.value.as_str(), entry.count))
+        .collect();
+    assert_eq!(ranking["path:/r/Foo/bar"], 1);
+    assert_eq!(ranking["path:/r/foo/bar"], 1);
+    assert_eq!(ranking["other"], 1);
+    assert!(!ranking.contains_key("bar"));
+    assert_eq!(
+        bundle
+            .manifest
+            .current_window
+            .ambiguous_project_alias_observations,
+        1
+    );
+    assert_eq!(bundle.manifest.current_window.ambiguous_project_aliases, 1);
+}
+
+#[test]
 fn session_captured_at_prefers_session_started_at_then_file_mtime() {
     let started_at = Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap();
     let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(42);
@@ -284,6 +380,7 @@ async fn complete_record_appended_during_llm_is_ingested_on_next_pass() {
         url: url.clone(),
         source: SessionSource::ClaudeCode,
         project: None,
+        project_identity: None,
         mode: SessionMode::Unknown,
         captured_at: Utc::now(),
         has_embedded_timestamp: false,
@@ -324,6 +421,7 @@ async fn complete_record_appended_during_llm_is_ingested_on_next_pass() {
         url: url.clone(),
         source: SessionSource::ClaudeCode,
         project: None,
+        project_identity: None,
         mode: SessionMode::Unknown,
         captured_at: Utc::now(),
         has_embedded_timestamp: false,
@@ -657,6 +755,7 @@ async fn process_single_session_links_items_to_saved_document_id() {
         url: "file:///tmp/session.jsonl".to_string(),
         source: SessionSource::Codex,
         project: Some("refine".to_string()),
+        project_identity: Some("refine".to_string()),
         mode: SessionMode::Interactive,
         captured_at: Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap(),
         has_embedded_timestamp: true,
@@ -739,6 +838,7 @@ async fn process_single_session_refresh_replaces_old_items_and_preserves_raw_tra
         url: existing_doc.url().to_string(),
         source: SessionSource::Codex,
         project: Some("refine".to_string()),
+        project_identity: Some("refine".to_string()),
         mode: SessionMode::Unknown,
         captured_at: Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap(),
         has_embedded_timestamp: false,
@@ -805,6 +905,7 @@ async fn remem_save_removes_superseded_legacy_document_and_facets() {
         url: "remem-raw://v1/local/repo/session-1".to_string(),
         source: SessionSource::RememRaw,
         project: Some("refine".to_string()),
+        project_identity: Some("refine".to_string()),
         mode: SessionMode::Unknown,
         captured_at: Utc.with_ymd_and_hms(2026, 7, 20, 0, 0, 0).unwrap(),
         has_embedded_timestamp: true,

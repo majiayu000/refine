@@ -3,7 +3,9 @@
 //! 从会话内容中提取结构化认知维度 (facets)
 
 use super::SessionMode;
-use crate::knowledge::{DocumentId, Item, Tag};
+use crate::knowledge::{DocumentId, Item, Source, Tag};
+
+pub(super) const SESSION_PROJECT_SOURCE_PLATFORM: &str = "session-project";
 
 /// Facet 提取结果
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -148,7 +150,23 @@ pub fn facets_to_items_with_mode(
     project: Option<&str>,
     mode: SessionMode,
 ) -> Vec<Item> {
+    facets_to_items_with_mode_and_identity(facets, document_id, project, project, mode)
+}
+
+/// Convert facets while retaining the exact pre-normalization project identity.
+///
+/// `project` remains the backward-compatible display/tag value. The optional
+/// identity carries raw cwd evidence through case-normalizing `Tag` storage.
+pub fn facets_to_items_with_mode_and_identity(
+    facets: &FacetResponse,
+    document_id: &DocumentId,
+    project: Option<&str>,
+    project_identity: Option<&str>,
+    mode: SessionMode,
+) -> Vec<Item> {
     let mut items = Vec::new();
+    let project_source = project_identity
+        .map(|identity| Source::new(SESSION_PROJECT_SOURCE_PLATFORM).with_url(identity));
 
     // 宏观标注作为一个综合 observation
     let mut summary_item = Item::new_observation(&facets.session_summary, &facets.session_summary);
@@ -206,6 +224,9 @@ pub fn facets_to_items_with_mode(
     }
     summary_item.set_content(&content);
     summary_item.set_document_id(document_id.clone());
+    if let Some(source) = &project_source {
+        summary_item.set_source(source.clone());
+    }
 
     // 构建标签
     let mut tags = vec![
@@ -227,6 +248,9 @@ pub fn facets_to_items_with_mode(
     for decision in &facets.decisions {
         let mut item = Item::new_observation(decision, decision);
         item.set_document_id(document_id.clone());
+        if let Some(source) = &project_source {
+            item.set_source(source.clone());
+        }
         let mut dtags: Vec<Tag> = Tag::try_new("decision").into_iter().collect();
         dtags.extend(Tag::try_new(mode.as_tag()));
         if let Some(proj) = project {
@@ -242,6 +266,9 @@ pub fn facets_to_items_with_mode(
     for bug in &facets.bugs_fixed {
         let mut item = Item::new_observation(bug, bug);
         item.set_document_id(document_id.clone());
+        if let Some(source) = &project_source {
+            item.set_source(source.clone());
+        }
         let mut btags: Vec<Tag> = Tag::try_new("bugfix").into_iter().collect();
         btags.extend(Tag::try_new(mode.as_tag()));
         if let Some(proj) = project {
@@ -355,11 +382,8 @@ mod tests {
             code_artifacts: Vec::new(),
         };
         let doc_id = DocumentId::new();
-        let items = facets_to_items(
-            &facets,
-            &doc_id,
-            Some("-users-lifcc-desktop-code-ai-tools-harness"),
-        );
+        let project = "-Users-Lifcc-Desktop-Code-AI-Tools-Harness";
+        let items = facets_to_items(&facets, &doc_id, Some(project));
 
         // decision item (index 1) should carry both "decision" and project tag
         let decision_tags: Vec<&str> = items[1].tags().iter().map(|t| t.as_str()).collect();
@@ -370,6 +394,10 @@ mod tests {
         let bugfix_tags: Vec<&str> = items[2].tags().iter().map(|t| t.as_str()).collect();
         assert!(bugfix_tags.contains(&"bugfix"));
         assert!(bugfix_tags.contains(&"-users-lifcc-desktop-code-ai-tools-harness"));
+        assert!(items.iter().all(|item| item
+            .source()
+            .is_some_and(|source| source.platform == SESSION_PROJECT_SOURCE_PLATFORM
+                && source.url.as_deref() == Some(project))));
     }
 
     #[test]

@@ -112,7 +112,7 @@ pub fn format_global_stats(stats: &GlobalStats) -> String {
 /// Visible cohort metadata shared by prompts and persisted reports.
 pub fn format_data_quality_stats(quality: &DataQualityStats) -> String {
     format!(
-        "状态: {} | 输入观测: {} | 已关联: {} ({:.1}%) | 脱链排除: {} | 模式排除: {} | 来源排除: {} | 合格 cohort: {}",
+        "状态: {} | 输入观测: {} | 已关联: {} ({:.1}%) | 脱链排除: {} | 模式排除: {} | 来源排除: {} | 合格 cohort: {} | 项目别名歧义: {} 条观测 / {} 个别名",
         quality.status_label(),
         quality.input_observations,
         quality.linked_observations,
@@ -121,6 +121,8 @@ pub fn format_data_quality_stats(quality: &DataQualityStats) -> String {
         quality.mode_excluded_observations,
         quality.source_excluded_observations,
         quality.eligible_observations,
+        quality.ambiguous_project_alias_observations,
+        quality.ambiguous_project_aliases,
     )
 }
 
@@ -329,6 +331,8 @@ mod tests {
             mode_excluded_observations: 0,
             source_excluded_observations: 0,
             eligible_observations: 2,
+            ambiguous_project_alias_observations: 0,
+            ambiguous_project_aliases: 0,
             cohort_identity: "sha256:test".into(),
         };
 

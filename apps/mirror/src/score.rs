@@ -13,7 +13,9 @@ mod tests;
 use anyhow::Result;
 use chrono::{DateTime, NaiveDate, Utc};
 use refine_core::knowledge::{Item, ItemRepository, ItemType};
-use refine_core::session::cluster_observations;
+use refine_core::session::{
+    cluster_observations, cluster_observations_with_resolver, ProjectIdentityResolver,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -276,8 +278,12 @@ async fn compute_portfolio_advice_scores(
         .await
         .map_err(|error| anyhow::anyhow!("failed to load rolling-7-day advice cohort: {error}"))?;
 
-    let long_term = cluster_observations(&long_term_items);
-    let recent = cluster_observations(&recent_items);
+    let resolver = ProjectIdentityResolver::from_observation_windows(&[
+        long_term_items.as_slice(),
+        recent_items.as_slice(),
+    ]);
+    let long_term = cluster_observations_with_resolver(&long_term_items, &resolver);
+    let recent = cluster_observations_with_resolver(&recent_items, &resolver);
     if long_term.data_quality.eligible_observations == 0 {
         anyhow::bail!(
             "portfolio advice requires eligible linked observations in the rolling-90-day window"

@@ -63,6 +63,10 @@ pub(crate) struct WindowManifest {
     pub mode_excluded_observations: usize,
     pub source_excluded_observations: usize,
     pub eligible_observations: usize,
+    #[serde(default)]
+    pub ambiguous_project_alias_observations: usize,
+    #[serde(default)]
+    pub ambiguous_project_aliases: usize,
     pub linked_ratio: String,
     pub status: String,
     pub cohort_contract_identity: String,
@@ -177,6 +181,8 @@ pub(crate) fn build_window_manifest_from_refs(
         mode_excluded_observations: quality.mode_excluded_observations,
         source_excluded_observations: quality.source_excluded_observations,
         eligible_observations: quality.eligible_observations,
+        ambiguous_project_alias_observations: quality.ambiguous_project_alias_observations,
+        ambiguous_project_aliases: quality.ambiguous_project_aliases,
         linked_ratio: format!("{:.6}", quality.linked_ratio()),
         status: quality.status_label().to_string(),
         cohort_contract_identity: COHORT_CONTRACT_IDENTITY.to_string(),
@@ -491,12 +497,14 @@ pub(crate) fn build_delta_summary(
         .project_ranking
         .iter()
         .map(|(name, _)| name.as_str())
+        .filter(|name| *name != "other")
         .collect();
     let previous_projects: BTreeSet<&str> = previous_cluster
         .global_stats
         .project_ranking
         .iter()
         .map(|(name, _)| name.as_str())
+        .filter(|name| *name != "other")
         .collect();
     let additions = current_projects
         .difference(&previous_projects)
@@ -532,9 +540,10 @@ fn list_or_none(values: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use refine_core::knowledge::DocumentId;
+    use refine_core::knowledge::{DocumentId, ItemId, ItemType, RestoreParams, Tag};
     use refine_core::session::{
-        cluster_session_observations, ClusterResult, DataQualityStats, GlobalStats,
+        cluster_session_observation_windows, cluster_session_observations, ClusterResult,
+        DataQualityStats, GlobalStats,
     };
     use std::collections::HashMap;
 
@@ -576,6 +585,8 @@ mod tests {
             mode_excluded_observations: 0,
             source_excluded_observations: 0,
             eligible_observations: 1,
+            ambiguous_project_alias_observations: 0,
+            ambiguous_project_aliases: 0,
             linked_ratio: "1.000000".into(),
             status: status.into(),
             cohort_contract_identity: COHORT_CONTRACT_IDENTITY.into(),
@@ -585,6 +596,24 @@ mod tests {
             platform_unknown_observations: 0,
             platform_unknown_sessions: 0,
         }
+    }
+
+    fn tagged_observation(id: &str, document_id: &str, project: &str) -> Item {
+        let now = Utc::now();
+        Item::restore(RestoreParams {
+            id: ItemId::from(id),
+            item_type: ItemType::Observation,
+            title: id.into(),
+            summary: String::new(),
+            content: String::new(),
+            tags: vec![Tag::new(project).unwrap()],
+            source: None,
+            document_id: Some(DocumentId::from(document_id)),
+            excerpt: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap()
     }
 
     #[test]
@@ -614,6 +643,34 @@ mod tests {
         );
         assert!(delta.contains("消失项目: inactive"));
         assert!(delta.contains("sessions 2→0"));
+    }
+
+    #[test]
+    fn path_and_alias_across_windows_do_not_create_false_project_delta() {
+        let current = vec![tagged_observation(
+            "current",
+            "current-doc",
+            "/any/home/ai/tools/page-lingo",
+        )];
+        let previous = vec![tagged_observation("previous", "previous-doc", "page-lingo")];
+        let sources = HashMap::from([
+            ("current-doc".into(), "codex-session".into()),
+            ("previous-doc".into(), "claude-code-session".into()),
+        ]);
+        let cohorts = cluster_session_observation_windows(&[&current, &previous], &sources);
+        let delta = build_delta_summary(
+            &cohorts[0].cluster,
+            &window("OK"),
+            Some(&cohorts[1].cluster),
+            Some(&window("OK")),
+        );
+
+        assert!(delta.contains("新增项目: 无"));
+        assert!(delta.contains("消失项目: 无"));
+        assert_eq!(
+            cohorts[0].cluster.global_stats.project_ranking,
+            cohorts[1].cluster.global_stats.project_ranking
+        );
     }
 
     #[test]
@@ -710,6 +767,8 @@ mod tests {
             "current_window",
             "previous_window",
             "source_counts",
+            "ambiguous_project_alias_observations",
+            "ambiguous_project_aliases",
             "model_identity",
             "prompt_identity",
             "route_identity",

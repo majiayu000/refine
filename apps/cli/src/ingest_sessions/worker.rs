@@ -8,7 +8,7 @@ use refine_core::infra::{
 };
 use refine_core::knowledge::{Document, DocumentRepository, RestoreDocumentParams};
 use refine_core::session::{
-    build_facet_prompt, facets_to_items_with_mode, parse_facet_response, SessionMode,
+    build_facet_prompt, facets_to_items_with_mode_and_identity, parse_facet_response, SessionMode,
     SessionSource, FACET_SYSTEM_PROMPT,
 };
 use std::collections::HashSet;
@@ -33,6 +33,7 @@ pub(super) struct PendingSession {
     pub(super) url: String,
     pub(super) source: SessionSource,
     pub(super) project: Option<String>,
+    pub(super) project_identity: Option<String>,
     pub(super) mode: SessionMode,
     pub(super) captured_at: DateTime<Utc>,
     pub(super) has_embedded_timestamp: bool,
@@ -286,10 +287,11 @@ pub(super) async fn process_single_session(
 
     let facet_response = extract_and_parse_facets_with_retry(&content, client, quota_hit).await?;
     let document = build_session_document(session, &facet_response.session_summary);
-    let items = facets_to_items_with_mode(
+    let items = facets_to_items_with_mode_and_identity(
         &facet_response,
         document.id(),
         session.project.as_deref(),
+        session.project_identity.as_deref(),
         session.mode,
     );
     let item_count = items.len();

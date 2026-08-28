@@ -566,6 +566,28 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_alias_bucket_never_becomes_a_portfolio_candidate() {
+        let score = score_with_breadth(vec![
+            indicator("exploration", 20.0, Signal::Green),
+            indicator("fragmentation", 40.0, Signal::Red),
+        ]);
+        let mut cluster = cluster(vec![
+            project("core", 4, None),
+            project("other", 100, Some("ambiguous short alias")),
+        ]);
+        cluster.data_quality.ambiguous_project_alias_observations = 100;
+        cluster.data_quality.ambiguous_project_aliases = 1;
+
+        let card = build_weekly_action_card(&score, &score, &cluster, &cluster)
+            .unwrap()
+            .unwrap()
+            .join("\n");
+        assert!(card.contains("Promote core"));
+        assert!(!card.contains("Promote other"));
+        assert!(!card.contains("ambiguous short alias"));
+    }
+
+    #[test]
     fn long_term_fragmentation_uses_long_term_candidates() {
         let long_term = score_with_breadth(vec![
             indicator("exploration", 20.0, Signal::Green),

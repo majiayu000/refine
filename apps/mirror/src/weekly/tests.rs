@@ -118,6 +118,8 @@ fn cluster_with_project_evidence() -> ClusterResult {
             mode_excluded_observations: 0,
             source_excluded_observations: 0,
             eligible_observations: 1,
+            ambiguous_project_alias_observations: 0,
+            ambiguous_project_aliases: 0,
             cohort_identity: "sha256:test-weekly".into(),
         },
         untagged_count: 0,
@@ -191,6 +193,8 @@ fn test_build_weekly_report_with_prior_data_shows_delta() {
         mode_excluded_observations: 0,
         source_excluded_observations: 0,
         eligible_observations: 1,
+        ambiguous_project_alias_observations: 0,
+        ambiguous_project_aliases: 0,
         cohort_identity: "sha256:last-week".into(),
     };
     let report = build_weekly_report(
@@ -243,6 +247,8 @@ fn degraded_quality_suppresses_week_over_week_trend() {
         mode_excluded_observations: 0,
         source_excluded_observations: 0,
         eligible_observations: 2,
+        ambiguous_project_alias_observations: 0,
+        ambiguous_project_aliases: 0,
         cohort_identity: "sha256:degraded".into(),
     };
 

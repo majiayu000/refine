@@ -135,6 +135,19 @@ fn project_name_from_cwd(cwd: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn update_project_from_cwd(cwd: &str, meta: &mut SessionMeta) {
+    let identity = cwd.trim();
+    if identity.is_empty() {
+        return;
+    }
+    if meta.project_identity.is_none() {
+        meta.project_identity = Some(identity.to_string());
+    }
+    if meta.project.is_none() {
+        meta.project = project_name_from_cwd(identity);
+    }
+}
+
 fn update_codex_session_mode(value: &serde_json::Value, meta: &mut SessionMeta) {
     let observed = if value
         .pointer("/payload/thread_source")
@@ -185,6 +198,9 @@ fn parse_claude_code_line(
     messages: &mut Vec<SessionMessage>,
     meta: &mut SessionMeta,
 ) {
+    if let Some(cwd) = value.get("cwd").and_then(|value| value.as_str()) {
+        update_project_from_cwd(cwd, meta);
+    }
     let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
     match msg_type {
@@ -294,10 +310,8 @@ fn parse_codex_line(
             {
                 meta.model = Some(model.to_string());
             }
-            if meta.project.is_none() {
-                if let Some(cwd) = value.pointer("/payload/cwd").and_then(|v| v.as_str()) {
-                    meta.project = project_name_from_cwd(cwd);
-                }
+            if let Some(cwd) = value.pointer("/payload/cwd").and_then(|v| v.as_str()) {
+                update_project_from_cwd(cwd, meta);
             }
         }
         "turn_context" => {
@@ -305,10 +319,8 @@ fn parse_codex_line(
             if let Some(model) = value.pointer("/payload/model").and_then(|v| v.as_str()) {
                 meta.model = Some(model.to_string());
             }
-            if meta.project.is_none() {
-                if let Some(cwd) = value.pointer("/payload/cwd").and_then(|v| v.as_str()) {
-                    meta.project = project_name_from_cwd(cwd);
-                }
+            if let Some(cwd) = value.pointer("/payload/cwd").and_then(|v| v.as_str()) {
+                update_project_from_cwd(cwd, meta);
             }
         }
         "user_message" => {
@@ -517,9 +529,29 @@ mod tests {
         assert_eq!(session.meta.model.as_deref(), Some("gpt-5.3-codex"));
         assert_eq!(session.meta.project.as_deref(), Some("refine"));
         assert_eq!(
+            session.meta.project_identity.as_deref(),
+            Some("/Users/lifcc/Desktop/code/AI/tools/refine")
+        );
+        assert_eq!(
             session.meta.started_at.as_ref().map(|ts| ts.to_rfc3339()),
             Some("2026-05-25T08:00:00+00:00".to_string())
         );
+    }
+
+    #[test]
+    fn parse_claude_preserves_raw_cwd_without_changing_display_project() {
+        let jsonl = r#"{"type":"user","cwd":"/r/Foo/bar","message":{"content":"hello"}}
+{"type":"assistant","cwd":"/r/Foo/bar","message":{"content":[{"type":"text","text":"hi"}]}}
+"#;
+        let session = parse_session_content(
+            jsonl,
+            &PathBuf::from("/tmp/claude-cwd.jsonl"),
+            SessionSource::ClaudeCode,
+        )
+        .unwrap();
+
+        assert_eq!(session.meta.project.as_deref(), Some("bar"));
+        assert_eq!(session.meta.project_identity.as_deref(), Some("/r/Foo/bar"));
     }
 
     #[test]

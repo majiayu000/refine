@@ -7,14 +7,15 @@ mod insights_manifest;
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use cognitive_portrait_data::{
-    build_bundle_from_snapshot, read_bundle, validate_files, validate_portrait, write_bundle,
-    CognitivePortraitBundle, MAX_PORTRAIT_BUNDLE_BYTES, MAX_PORTRAIT_CANDIDATE_BYTES,
+    build_bundle_from_snapshot, collect_bundle, read_bundle, validate_files, validate_portrait,
+    write_bundle, CognitivePortraitBundle, MAX_PORTRAIT_BUNDLE_BYTES, MAX_PORTRAIT_CANDIDATE_BYTES,
     MAX_PREVIOUS_PORTRAIT_BYTES, MAX_WINDOW_DIMENSIONS_BYTES, PORTRAIT_BUNDLE_SCHEMA_VERSION,
     PORTRAIT_COLLECTOR_VERSION,
 };
+use refine_core::infra::SqliteStore;
 use refine_core::knowledge::{
-    DocumentId, Item, ItemId, ItemType, ObservationDocumentMeta, ObservationWindowSnapshot,
-    RestoreParams, Tag,
+    Document, DocumentId, DocumentRepository, Item, ItemId, ItemType, ObservationDocumentMeta,
+    ObservationWindowSnapshot, RestoreDocumentParams, RestoreParams, Source, Tag,
 };
 
 fn observation(
@@ -161,6 +162,188 @@ fn collector_reuses_source_cohort_and_emits_traceable_evidence() {
     assert!(claim_ids.contains(&"fact.current.manifest.unsupported_sources.coverage"));
     assert!(claim_ids.contains(&"fact.current.evidence.000000"));
     assert!(claim_ids.contains(&"trend.total_sessions"));
+}
+
+#[tokio::test]
+async fn sqlite_portrait_preserves_bounded_resolver_evidence() {
+    let store = SqliteStore::in_memory().unwrap();
+    let cutoff = Utc.with_ymd_and_hms(2026, 8, 28, 0, 0, 0).unwrap();
+    let captured_at = cutoff - Duration::days(1);
+    let oversized_project = format!("/r/{}a", "x".repeat(1_021));
+    assert_eq!(oversized_project.len(), 1_025);
+    let fixtures = [
+        ("dot", "/r/a.b/foo"),
+        ("hyphen", "/r/a-b/foo"),
+        ("alias", "foo"),
+        ("tool-path", "/users/me/work/my-tools-app"),
+        ("independent-app", "app"),
+        ("encoded-a", "-root-a-work-mutil-om"),
+        ("encoded-b", "-root-b-work-mutil-om"),
+        ("encoded-alias", "om"),
+        ("oversized", oversized_project.as_str()),
+    ];
+    for (id, project) in fixtures {
+        let document_id = DocumentId::from(format!("{id}-doc").as_str());
+        let document = Document::restore(RestoreDocumentParams {
+            id: document_id.clone(),
+            title: Some(id.into()),
+            raw_content: format!("raw {id}"),
+            source: "codex-session".into(),
+            url: format!("sqlite-fixture://{id}"),
+            source_version: None,
+            captured_at,
+            created_at: captured_at,
+            updated_at: captured_at,
+        });
+        let mut item = observation(
+            id,
+            Some(document_id.as_str()),
+            captured_at,
+            &[if project.len() > 50 {
+                "oversized"
+            } else {
+                project
+            }],
+            "进展:\n- exact sqlite portrait fixture",
+        );
+        item.set_source(Source::new("session-project").with_url(project));
+        DocumentRepository::save_with_replaced_items(&store, &document, &[item])
+            .await
+            .unwrap();
+    }
+
+    let bundle = collect_bundle(&store, cutoff, 90).await.unwrap();
+    let projects: std::collections::BTreeMap<_, _> = bundle
+        .current
+        .evidence
+        .iter()
+        .map(|evidence| (evidence.item_id.as_str(), evidence.project.as_str()))
+        .collect();
+    assert_eq!(projects["dot"], "path:/r/a.b/foo");
+    assert_eq!(projects["hyphen"], "path:/r/a-b/foo");
+    assert_eq!(projects["alias"], "other");
+    assert_eq!(projects["tool-path"], "my-tools-app");
+    assert_eq!(projects["independent-app"], "other");
+    assert_eq!(projects["encoded-a"], "encoded:-root-a-work-mutil-om");
+    assert_eq!(projects["encoded-b"], "encoded:-root-b-work-mutil-om");
+    assert_eq!(projects["encoded-alias"], "other");
+    let oversized_identity = projects["oversized"];
+    assert!(oversized_identity.starts_with("path:/r/"));
+    assert!(oversized_identity.contains("~%bytes=1025;sha256="));
+    assert!(oversized_identity.len() <= 512);
+    assert_eq!(
+        bundle
+            .manifest
+            .current_window
+            .ambiguous_project_alias_observations,
+        3
+    );
+    assert_eq!(bundle.manifest.current_window.ambiguous_project_aliases, 3);
+    let ranking: std::collections::BTreeMap<_, _> = bundle
+        .current
+        .metrics
+        .project_ranking
+        .entries
+        .iter()
+        .map(|entry| (entry.value.as_str(), entry.count))
+        .collect();
+    assert_eq!(ranking["path:/r/a.b/foo"], 1);
+    assert_eq!(ranking["path:/r/a-b/foo"], 1);
+    assert_eq!(ranking["my-tools-app"], 1);
+    assert_eq!(ranking["encoded:-root-a-work-mutil-om"], 1);
+    assert_eq!(ranking["encoded:-root-b-work-mutil-om"], 1);
+    assert_eq!(ranking[oversized_identity], 1);
+    assert_eq!(ranking["other"], 3);
+    assert!(!ranking.contains_key("foo"));
+    assert!(!ranking.contains_key("app"));
+    assert!(!ranking.contains_key("om"));
+}
+
+#[tokio::test]
+async fn sqlite_portrait_distinguishes_bounded_sentinels_from_literal_paths() {
+    async fn save_project(
+        store: &SqliteStore,
+        id: &str,
+        project: &str,
+        captured_at: DateTime<Utc>,
+    ) {
+        let document_id = DocumentId::from(format!("{id}-doc").as_str());
+        let document = Document::restore(RestoreDocumentParams {
+            id: document_id.clone(),
+            title: Some(id.into()),
+            raw_content: format!("raw {id}"),
+            source: "codex-session".into(),
+            url: format!("sentinel-fixture://{id}"),
+            source_version: None,
+            captured_at,
+            created_at: captured_at,
+            updated_at: captured_at,
+        });
+        let mut item = observation(
+            id,
+            Some(document_id.as_str()),
+            captured_at,
+            &["sentinel-fixture"],
+            "进展:\n- sentinel collision fixture",
+        );
+        item.set_source(Source::new("session-project").with_url(project));
+        DocumentRepository::save_with_replaced_items(store, &document, &[item])
+            .await
+            .unwrap();
+    }
+
+    let store = SqliteStore::in_memory().unwrap();
+    let cutoff = Utc.with_ymd_and_hms(2026, 8, 28, 0, 0, 0).unwrap();
+    let captured_at = cutoff - Duration::days(1);
+    let raw_long = format!("/r/{}a", "x".repeat(1_021));
+    let encoded_long = format!("-{}a", "y".repeat(1_023));
+    assert_eq!(raw_long.len(), 1_025);
+    assert_eq!(encoded_long.len(), 1_025);
+    save_project(&store, "raw-long", &raw_long, captured_at).await;
+    save_project(&store, "encoded-long", &encoded_long, captured_at).await;
+
+    let initial = collect_bundle(&store, cutoff, 90).await.unwrap();
+    let initial_projects: std::collections::BTreeMap<_, _> = initial
+        .current
+        .evidence
+        .iter()
+        .map(|evidence| (evidence.item_id.as_str(), evidence.project.as_str()))
+        .collect();
+    let raw_literal = initial_projects["raw-long"]
+        .strip_prefix("path:")
+        .unwrap()
+        .to_string();
+    let encoded_literal = initial_projects["encoded-long"]
+        .strip_prefix("encoded:")
+        .unwrap()
+        .to_string();
+    save_project(&store, "raw-literal", &raw_literal, captured_at).await;
+    save_project(&store, "encoded-literal", &encoded_literal, captured_at).await;
+
+    let bundle = collect_bundle(&store, cutoff, 90).await.unwrap();
+    let projects: std::collections::BTreeMap<_, _> = bundle
+        .current
+        .evidence
+        .iter()
+        .map(|evidence| (evidence.item_id.as_str(), evidence.project.as_str()))
+        .collect();
+    assert_ne!(projects["raw-long"], projects["raw-literal"]);
+    assert_ne!(projects["encoded-long"], projects["encoded-literal"]);
+    assert_eq!(
+        projects
+            .values()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        4
+    );
+    assert!(bundle
+        .current
+        .metrics
+        .project_ranking
+        .entries
+        .iter()
+        .all(|entry| entry.count == 1));
 }
 
 #[test]

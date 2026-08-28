@@ -360,6 +360,7 @@ fn load_one_session<R: Runner>(runner: &R, summary: RememSessionSummary) -> Resu
             messages,
             meta: SessionMeta {
                 project: None,
+                project_identity: None,
                 model: None,
                 started_at: Some(started_at),
                 mode: SessionMode::Unknown,
@@ -368,6 +369,7 @@ fn load_one_session<R: Runner>(runner: &R, summary: RememSessionSummary) -> Resu
         },
     };
     result.session.meta.project = Some(result.project.clone());
+    result.session.meta.project_identity = Some(result.project.clone());
     result.session.file_path = PathBuf::from(result.stable_document_url());
     Ok(result)
 }

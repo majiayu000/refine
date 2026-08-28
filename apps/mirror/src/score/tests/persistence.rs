@@ -46,7 +46,7 @@ fn test_persist_and_load() {
     };
 
     persist_score_to_path(&path, &result).unwrap();
-    assert_eq!(SCORE_SCHEMA_VERSION, 4);
+    assert_eq!(SCORE_SCHEMA_VERSION, 5);
 
     let persisted: serde_json::Value =
         serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
@@ -223,29 +223,30 @@ fn test_known_old_schema_is_excluded_from_metrics_but_kept_as_activity() {
 }
 
 #[test]
-fn linked_only_v4_excludes_mixed_cohort_v3_from_metrics_but_keeps_activity() {
+fn collision_safe_v5_excludes_pre_resolver_v4_from_metrics_but_keeps_activity() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scores.jsonl");
-    let mixed_cohort_v3 = make_score_at_date(chrono::NaiveDate::from_ymd_opt(2026, 8, 20).unwrap());
-    let linked_only_v4 = make_score_at_date(chrono::NaiveDate::from_ymd_opt(2026, 8, 27).unwrap());
+    let pre_resolver_v4 = make_score_at_date(chrono::NaiveDate::from_ymd_opt(2026, 8, 20).unwrap());
+    let collision_safe_v5 =
+        make_score_at_date(chrono::NaiveDate::from_ymd_opt(2026, 8, 27).unwrap());
     std::fs::write(
         &path,
         format!(
             "{}\n{}\n",
-            score_line(&mixed_cohort_v3, Some(3)),
-            score_line(&linked_only_v4, Some(4)),
+            score_line(&pre_resolver_v4, Some(4)),
+            score_line(&collision_safe_v5, Some(5)),
         ),
     )
     .unwrap();
 
     let metrics = load_recent_scores_from_path(&path, 10).unwrap();
     assert_eq!(metrics.len(), 1);
-    assert_eq!(metrics[0].timestamp, linked_only_v4.timestamp);
+    assert_eq!(metrics[0].timestamp, collision_safe_v5.timestamp);
 
     let activity = load_score_activity_from_path(&path, 10).unwrap();
     assert_eq!(activity.len(), 2);
-    assert_eq!(activity[0].timestamp, mixed_cohort_v3.timestamp);
-    assert_eq!(activity[1].timestamp, linked_only_v4.timestamp);
+    assert_eq!(activity[0].timestamp, pre_resolver_v4.timestamp);
+    assert_eq!(activity[1].timestamp, collision_safe_v5.timestamp);
 }
 
 #[test]
