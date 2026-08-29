@@ -52,6 +52,7 @@ pub(super) async fn process_pending_sessions(
     skipped_filter: usize,
     stale_refresh: usize,
     mut skipped_quarantined: usize,
+    mut selected_identities: HashSet<String>,
     dry_run: bool,
     retry_quarantined: bool,
     quarantine: Option<QuarantineStore>,
@@ -81,10 +82,11 @@ pub(super) async fn process_pending_sessions(
         Some(quarantine) => quarantine,
         None => QuarantineStore::load()?,
     };
-    let selected_identities: HashSet<String> = pending
-        .iter()
-        .map(|session| quarantine_key(&session.url, session.source_version.as_deref()))
-        .collect();
+    selected_identities.extend(
+        pending
+            .iter()
+            .map(|session| quarantine_key(&session.url, session.source_version.as_deref())),
+    );
     if !retry_quarantined {
         pending.retain(|session| {
             if quarantine.contains(&session.url, session.source_version.as_deref()) {
