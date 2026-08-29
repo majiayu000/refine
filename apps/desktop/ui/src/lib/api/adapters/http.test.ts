@@ -78,3 +78,42 @@ describe('HTTP adapter bearer token', () => {
     expect(() => adapter.setAuthToken('中文-token')).toThrow('ASCII')
   })
 })
+
+describe('HTTP adapter document errors', () => {
+  test('returns null only when the document endpoint returns 404', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: false, message: 'Document not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    )
+
+    await expect(createHttpAdapter().getDocument('missing')).resolves.toBeNull()
+  })
+
+  test('surfaces invalid JSON even when the document endpoint returns 404', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response('not json', {
+        status: 404,
+        headers: { 'Content-Type': 'text/plain' },
+      })
+    )
+
+    await expect(createHttpAdapter().getDocument('broken-response')).rejects.toThrow(
+      'HTTP 404 返回了无效 JSON'
+    )
+  })
+
+  test('surfaces Remem hydration failures from the server', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: false, message: 'Remem hydration failed: stale' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    )
+
+    await expect(createHttpAdapter().getDocument('remem-session')).rejects.toThrow(
+      'Remem hydration failed: stale'
+    )
+  })
+})

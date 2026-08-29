@@ -26,8 +26,16 @@ type ApiEnvelope<T extends object> = T & {
   message?: string
 }
 
+type HttpRequestError = Error & {
+  status: number
+}
+
 const DEFAULT_API_BASE = 'http://127.0.0.1:21567'
 const TOKEN_STORAGE_KEY = 'refine_api_token'
+
+function httpRequestError(status: number, message: string): HttpRequestError {
+  return Object.assign(new Error(message), { status })
+}
 
 const capabilities: ApiCapabilities = {
   runtime: 'http',
@@ -130,7 +138,7 @@ async function requestJson<T extends object>(path: string, init?: RequestInit): 
   }
 
   if (!res.ok || data.success === false) {
-    throw new Error(data.message || `HTTP ${res.status}`)
+    throw httpRequestError(res.status, data.message || `HTTP ${res.status}`)
   }
 
   return data
@@ -248,8 +256,11 @@ export function createHttpAdapter(): RefineApiClient {
       try {
         const data = await requestJson<DocumentDetail>(`/v1/documents/${encodeURIComponent(id)}`)
         return data
-      } catch {
-        return null
+      } catch (error) {
+        if (error instanceof Error && 'status' in error && error.status === 404) {
+          return null
+        }
+        throw error
       }
     },
 

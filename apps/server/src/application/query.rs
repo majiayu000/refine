@@ -230,10 +230,28 @@ pub async fn get_document(
         .await
         .map_err(|e| QueryError::Internal(e.to_string()))?;
 
+    let raw_content = if doc.raw_content().is_empty()
+        && doc.url().starts_with("remem://raw-session/v2/")
+    {
+        let session_ref = doc.url().to_string();
+        let expected_hash = doc
+            .source_version()
+            .ok_or_else(|| QueryError::Internal("Remem document is missing snapshot hash".into()))?
+            .to_string();
+        tokio::task::spawn_blocking(move || {
+            refine_core::session::load_remem_document_content(&session_ref, &expected_hash)
+        })
+        .await
+        .map_err(|error| QueryError::Internal(format!("Remem hydration task failed: {error}")))?
+        .map_err(|error| QueryError::Internal(format!("Remem hydration failed: {error}")))?
+    } else {
+        doc.raw_content().to_string()
+    };
+
     Ok(DocumentDetailDto {
         id: doc.id().to_string(),
         title: doc.title().map(ToString::to_string),
-        raw_content: doc.raw_content().to_string(),
+        raw_content,
         source: doc.source().to_string(),
         url: doc.url().to_string(),
         captured_at: doc.captured_at().to_rfc3339(),
@@ -268,7 +286,53 @@ fn paginate_next_cursor(cursor: usize, returned: usize, limit: usize) -> Option<
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::get_document;
     use super::paginate_next_cursor;
+    #[cfg(unix)]
+    use crate::state::{AppState, AuthConfig};
+    #[cfg(unix)]
+    use refine_core::knowledge::Document;
+    #[cfg(unix)]
+    use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::path::Path;
+    #[cfg(unix)]
+    use std::sync::{Arc, Mutex, MutexGuard};
+
+    #[cfg(unix)]
+    static REMEM_BIN_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(unix)]
+    struct RememBinGuard {
+        previous: Option<OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    #[cfg(unix)]
+    impl RememBinGuard {
+        fn install(path: &Path) -> Self {
+            let lock = REMEM_BIN_LOCK.lock().expect("lock REFINE_REMEM_BIN");
+            let previous = std::env::var_os("REFINE_REMEM_BIN");
+            std::env::set_var("REFINE_REMEM_BIN", path);
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for RememBinGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var("REFINE_REMEM_BIN", previous),
+                None => std::env::remove_var("REFINE_REMEM_BIN"),
+            }
+        }
+    }
 
     #[test]
     fn paginate_next_cursor_returns_none_on_last_page() {
@@ -286,5 +350,66 @@ mod tests {
     fn paginate_next_cursor_ignores_stale_total_after_delete() {
         assert_eq!(paginate_next_cursor(20, 0, 20), None);
         assert_eq!(paginate_next_cursor(20, 5, 20), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn get_document_hydrates_remem_reference_without_persisting_the_body() {
+        let temp = tempfile::tempdir().expect("create test directory");
+        let binary = temp.path().join("fake-remem");
+        std::fs::write(
+            &binary,
+            concat!(
+                "#!/bin/sh\n",
+                "case \"$2\" in\n",
+                "sessions) printf '%s\\n' '",
+                r#"{"since_epoch":null,"until_epoch":null,"project":"/repo","sample":0,"latest":null,"count":1,"sessions":[{"session_ref":"remem://raw-session/v2/636f6465782d636c69/6c6f63616c/2f7265706f/7331","host":"codex-cli","source_root":"local","project":"/repo","session_id":"s1","first_epoch":10,"last_epoch":20,"message_count":2,"user_message_count":1,"assistant_message_count":1,"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","user_message_samples":[]}]}"#,
+                "' ;;\n",
+                "messages) printf '%s\\n' '",
+                r#"{"source_type":"raw_archive","host":"codex-cli","source_root":"local","project":"/repo","session_id":"s1","order":"created_at_epoch_asc_id_asc","limit":2000,"count":2,"has_more":false,"next_cursor":null,"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","messages":[{"id":1,"role":"user","content":"question","source":"codex","branch":null,"cwd":"/repo","created_at_epoch":10},{"id":2,"role":"assistant","content":"answer","source":"codex","branch":null,"cwd":"/repo","created_at_epoch":20}]}"#,
+                "' ;;\n",
+                "*) exit 2 ;;\n",
+                "esac\n",
+            ),
+        )
+        .expect("write fake remem");
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).expect("make fake remem executable");
+        let _remem_bin = RememBinGuard::install(&binary);
+
+        let state = Arc::new(
+            AppState::build_for_test(
+                temp.path().join("refine.sqlite"),
+                AuthConfig {
+                    api_token: None,
+                    dev_anon: true,
+                },
+            )
+            .await
+            .expect("build app state"),
+        );
+        let mut document = Document::new("codex-session", "");
+        document.set_url("remem://raw-session/v2/636f6465782d636c69/6c6f63616c/2f7265706f/7331");
+        document.set_source_version(Some(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ));
+        state
+            .doc_store
+            .save(&document)
+            .await
+            .expect("save referenced document");
+
+        let detail = get_document(state.clone(), document.id().as_str())
+            .await
+            .expect("hydrate document detail");
+        assert_eq!(detail.raw_content, "User: question\nAssistant: answer\n");
+        let persisted = state
+            .doc_store
+            .find_by_id(document.id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(persisted.raw_content().is_empty());
     }
 }

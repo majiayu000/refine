@@ -724,9 +724,9 @@ fn save_document_with_replaced_items_and_delete_documents(
 ) -> InfraResult<()> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|e| InfraError::Database(e.to_string()))?;
-    let carry_canonical = source_document_ids.iter().any(|id| id == doc.id().as_str());
+    let input_document_id = doc.id().clone();
     let (doc, replacement_items) = canonicalize_document_items(&tx, doc, items)?;
-    let source_items = doc_ops::load_items(&tx, source_document_ids, doc.id(), carry_canonical)?;
+    let source_items = doc_ops::load_items(&tx, source_document_ids, &input_document_id, doc.id())?;
     doc_ops::delete_same_id_with_different_url(&tx, &doc)?;
     doc_ops::save(&tx, &doc)?;
     ops::delete_by_document_id(&tx, doc.id().as_str())?;
