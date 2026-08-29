@@ -39,7 +39,7 @@ pub(crate) fn lock_session_mutations_for_repair(db_path: &Path) -> Result<std::f
     cursor::try_lock_session_mutations(db_path)
 }
 use provenance::backfill_session_metadata;
-use quarantine::QuarantineStore;
+use quarantine::{record_key as quarantine_key, QuarantineStore};
 use worker::{process_pending_sessions, PendingSession};
 
 #[cfg(test)]
@@ -246,7 +246,7 @@ where
     let mut skipped_dup = 0usize;
     let mut skipped_filter = 0usize;
     let mut stale_refresh = 0usize;
-    let mut skipped_quarantined = 0usize;
+    let mut selected_quarantined_identities = HashSet::new();
     let mut fully_loaded = 0usize;
 
     for (idx, summary) in summaries.into_iter().enumerate() {
@@ -309,7 +309,7 @@ where
         }
 
         if !options.retry_quarantined && quarantine.contains(&url, Some(&source_version)) {
-            skipped_quarantined += 1;
+            selected_quarantined_identities.insert(quarantine_key(&url, Some(&source_version)));
             continue;
         }
 
@@ -459,12 +459,14 @@ where
 
     println!("摘要预筛选后拉取了 {fully_loaded}/{total} 个完整会话");
 
+    let skipped_quarantined = selected_quarantined_identities.len();
     process_pending_sessions(
         pending,
         skipped_dup,
         skipped_filter,
         stale_refresh,
         skipped_quarantined,
+        selected_quarantined_identities,
         options.dry_run,
         options.retry_quarantined,
         Some(quarantine),
@@ -752,6 +754,7 @@ async fn handle_legacy_ingest_sessions(
         skipped_filter,
         stale_refresh,
         0,
+        HashSet::new(),
         options.dry_run,
         options.retry_quarantined,
         None,

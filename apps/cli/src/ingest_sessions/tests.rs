@@ -1217,6 +1217,81 @@ async fn latest_counts_only_eligible_pending_sessions_and_stops_loading_older_bo
 }
 
 #[tokio::test]
+async fn quarantined_latest_does_not_consume_quota_but_keeps_ingest_incomplete() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let quarantined = remem_summary("quarantined", 300, 'c');
+    let eligible = remem_summary("eligible", 200, 'd');
+    let eligible_url = eligible.stable_document_url();
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let mut quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    quarantine.record(
+        &quarantined.stable_document_url(),
+        Some(&quarantined.content_hash),
+        "provider_rejected",
+        "fixture",
+    );
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+    let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+        response: r#"{
+            "session_summary": "eligible replacement",
+            "cognitive_level": "competent",
+            "collaboration_mode": "review",
+            "decisions": [], "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+        .to_string(),
+    });
+
+    let error = handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: Some(1),
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![eligible, quarantined],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            Ok(loaded_remem_session(
+                &summary,
+                "ordinary user question with enough useful detail",
+            ))
+        },
+        doc_store.clone(),
+        Some(client),
+    )
+    .await
+    .expect_err("a selected quarantined identity must keep scheduled ingestion incomplete");
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["eligible".to_string()],
+        "the quarantined latest identity must not be retried or consume latest=1"
+    );
+    assert!(error.to_string().contains("摄入不完整"));
+    assert!(error.to_string().contains("本次相关隔离 1"));
+    assert!(
+        doc_store
+            .find_by_url(&eligible_url)
+            .await
+            .unwrap()
+            .is_some(),
+        "the eligible replacement must still be processed before final failure"
+    );
+}
+
+#[tokio::test]
 async fn omitting_latest_scans_every_eligible_session_body() {
     let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
     let doc_store: Arc<dyn DocumentRepository> = store;
