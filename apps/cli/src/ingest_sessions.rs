@@ -1,17 +1,14 @@
-//! ingest-sessions 命令实现
-//!
-//! 默认优先从 remem raw archive 读取；remem 不存在时自动扫描本地会话
-//! 文件；支持可配置并发、断点续传和 API 限流重试
+//! ingest-sessions：从 Remem raw archive 导入会话投影。
 
 use crate::cli::IngestProvider;
 use crate::remem_sessions::{
-    is_missing_remem_executable, load_remem_session, load_remem_session_summaries,
+    is_missing_remem_executable, load_remem_session, load_remem_session_summaries, RememSession,
     RememSessionSummary,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use refine_core::infra::LlmClient;
-use refine_core::knowledge::{Document, DocumentRepository, RestoreDocumentParams};
+use refine_core::knowledge::{Document, DocumentRepository};
 use refine_core::session::{
     chunk_session, discover_sessions, needs_chunking, parse_session_file, FilterConfig,
     SessionMode, SessionSource,
@@ -23,6 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod cursor;
+mod legacy_convergence;
 mod legacy_migration;
 mod provenance;
 mod quarantine;
@@ -32,11 +30,16 @@ use cursor::{
     cursor_failure, lock_incremental_cursor, lock_session_mutations, read_last_ingest_mtime,
     safe_cursor_watermark, write_last_ingest_mtime, CursorPurpose,
 };
+use legacy_convergence::{
+    include_hostless_v1_document, might_have_legacy_documents, referenced_session_document,
+    save_referenced_session_and_delete_legacy,
+};
 
 pub(crate) fn lock_session_mutations_for_repair(db_path: &Path) -> Result<std::fs::File> {
     cursor::try_lock_session_mutations(db_path)
 }
 use provenance::backfill_session_metadata;
+use quarantine::QuarantineStore;
 use worker::{process_pending_sessions, PendingSession};
 
 #[cfg(test)]
@@ -54,7 +57,7 @@ pub struct IngestOptions {
     pub source: Option<SessionSource>,
     pub provider: IngestProvider,
     pub limit: Option<usize>,
-    /// 按 mtime 降序取最近 N 个会话，与 limit 互斥
+    /// 从新到旧选择最多 N 个通过去重、质量与隔离检查的待处理会话
     pub latest: Option<usize>,
     pub dry_run: bool,
     pub retry_quarantined: bool,
@@ -117,20 +120,6 @@ fn content_source_version(provider: &str, raw_content: &str) -> String {
     format!("{provider}:v2:sha256:{digest:x}")
 }
 
-fn document_with_source_version(document: &Document, source_version: &str) -> Document {
-    Document::restore(RestoreDocumentParams {
-        id: document.id().clone(),
-        title: document.title().map(ToOwned::to_owned),
-        raw_content: document.raw_content().to_string(),
-        source: document.source().to_string(),
-        url: document.url().to_string(),
-        source_version: Some(source_version.to_string()),
-        captured_at: document.captured_at(),
-        created_at: document.created_at(),
-        updated_at: document.updated_at(),
-    })
-}
-
 pub async fn handle_ingest_sessions(
     options: IngestOptions,
     db_path: &Path,
@@ -160,9 +149,7 @@ pub async fn handle_ingest_sessions(
         }
         IngestProvider::Auto => {
             println!("provider=requested:auto");
-            match select_auto_provider(|| {
-                load_remem_session_summaries(options.limit, options.latest)
-            }) {
+            match select_auto_provider(load_remem_session_summaries) {
                 Ok(AutoProviderSelection::Remem(summaries)) => {
                     println!("provider=selected:remem");
                     handle_remem_ingest_sessions_with_summaries(
@@ -186,8 +173,8 @@ async fn handle_remem_ingest_sessions(
     doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
-    let summaries = load_remem_session_summaries(options.limit, options.latest)
-        .context("failed to load session summaries from remem")?;
+    let summaries =
+        load_remem_session_summaries().context("failed to load session summaries from remem")?;
     handle_remem_ingest_sessions_with_summaries(options, db_path, summaries, doc_store, llm_client)
         .await
 }
@@ -199,6 +186,30 @@ async fn handle_remem_ingest_sessions_with_summaries(
     doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
+    handle_remem_ingest_sessions_with_loader(
+        options,
+        db_path,
+        summaries,
+        None,
+        load_remem_session,
+        doc_store,
+        llm_client,
+    )
+    .await
+}
+
+async fn handle_remem_ingest_sessions_with_loader<F>(
+    options: IngestOptions,
+    db_path: &Path,
+    mut summaries: Vec<RememSessionSummary>,
+    quarantine: Option<QuarantineStore>,
+    mut load_session: F,
+    doc_store: Arc<dyn DocumentRepository>,
+    llm_client: Option<Arc<dyn LlmClient>>,
+) -> Result<()>
+where
+    F: FnMut(RememSessionSummary) -> Result<RememSession>,
+{
     if options.source.is_some() {
         anyhow::bail!(
             "--source requires --provider local because remem does not expose a trustworthy Claude/Codex source"
@@ -209,16 +220,25 @@ async fn handle_remem_ingest_sessions_with_summaries(
     } else {
         Some(lock_session_mutations(db_path)?)
     };
+    let quarantine = match quarantine {
+        Some(quarantine) => quarantine,
+        None => QuarantineStore::load()?,
+    };
 
     println!("remem 返回 {} 个会话摘要", summaries.len());
+
+    // `sort_by` is stable, so equal timestamps preserve Remem's declared order.
+    summaries.sort_by_key(|summary| std::cmp::Reverse(summary.last_epoch));
+    if let Some(limit) = options.limit {
+        summaries.truncate(limit);
+    }
 
     let total = summaries.len();
     let filter_config = FilterConfig::default();
     let document_count = doc_store.count().await?;
     let existing_documents = doc_store.find_recent(0, document_count).await?;
-    let existing_remem_documents: HashMap<&str, &Document> = existing_documents
+    let existing_documents_by_url: HashMap<&str, &Document> = existing_documents
         .iter()
-        .filter(|document| document.source() == "remem-raw-session")
         .map(|document| (document.url(), document))
         .collect();
     let mut claimed_legacy_documents = HashSet::new();
@@ -226,23 +246,79 @@ async fn handle_remem_ingest_sessions_with_summaries(
     let mut skipped_dup = 0usize;
     let mut skipped_filter = 0usize;
     let mut stale_refresh = 0usize;
+    let mut skipped_quarantined = 0usize;
     let mut fully_loaded = 0usize;
 
     for (idx, summary) in summaries.into_iter().enumerate() {
+        if options.latest.is_some_and(|latest| pending.len() >= latest) {
+            break;
+        }
         let url = summary.stable_document_url();
-        let existing_document = existing_remem_documents.get(url.as_str()).copied().cloned();
+        let legacy_url = summary.legacy_document_url();
+        let stable_document = existing_documents_by_url.get(url.as_str()).copied();
+        let legacy_document = existing_documents_by_url.get(legacy_url.as_str()).copied();
+        let existing_document = match (stable_document, legacy_document) {
+            (Some(document), _) => Some(document.clone()),
+            (None, Some(document)) if summary.legacy_identity_is_unique => Some(document.clone()),
+            (None, Some(_)) => anyhow::bail!(
+                "ambiguous hostless legacy Remem identity for selector ({:?}, {:?})",
+                summary.source_root,
+                summary.session_id,
+            ),
+            (None, None) => None,
+        };
+        let existing_document_uses_legacy_identity =
+            stable_document.is_none() && existing_document.is_some();
+        let session_source = match summary.host.as_str() {
+            "claude-code" => SessionSource::ClaudeCode,
+            "codex-cli" => SessionSource::Codex,
+            "cursor" => SessionSource::Cursor,
+            other => anyhow::bail!("unsupported Remem session host {other:?}"),
+        };
+        let source_version = summary.content_hash.clone();
+        let might_have_legacy_documents =
+            might_have_legacy_documents(&summary, legacy_document, &existing_documents);
         if summary.user_message_count < filter_config.min_user_messages as i64 {
             skipped_filter += 1;
             continue;
         }
 
+        if let Some(existing_doc) = existing_document
+            .as_ref()
+            .filter(|_| !existing_document_uses_legacy_identity && !might_have_legacy_documents)
+        {
+            if existing_doc.source_version() == Some(source_version.as_str()) {
+                if !options.dry_run
+                    && (!existing_doc.raw_content().is_empty()
+                        || existing_doc.url() != url
+                        || existing_doc.source() != session_source.as_str())
+                {
+                    doc_store
+                        .save(&referenced_session_document(
+                            existing_doc,
+                            session_source.clone(),
+                            &url,
+                            &source_version,
+                        ))
+                        .await
+                        .context("save referenced Remem session metadata")?;
+                }
+                skipped_dup += 1;
+                continue;
+            }
+        }
+
+        if !options.retry_quarantined && quarantine.contains(&url, Some(&source_version)) {
+            skipped_quarantined += 1;
+            continue;
+        }
+
         let legacy_identity_is_unique = summary.legacy_identity_is_unique;
-        let remem_session = load_remem_session(summary)
+        let remem_session = load_session(summary)
             .with_context(|| format!("failed to load full remem session for {url}"))?;
         fully_loaded += 1;
         let raw_content = remem_session.session.to_document_content();
-        let source_version = content_source_version("remem", &raw_content);
-        let legacy_documents_to_delete = if legacy_identity_is_unique {
+        let mut legacy_documents_to_delete = if legacy_identity_is_unique {
             let document_ids = legacy_migration::matching_legacy_document_ids(
                 &existing_documents,
                 &remem_session,
@@ -263,43 +339,71 @@ async fn handle_remem_ingest_sessions_with_summaries(
                 &raw_content,
             )
         {
-            if legacy_migration::claim_legacy_coverage_once(
-                &mut claimed_legacy_documents,
-                Some(document_id),
-            ) {
-                skipped_dup += 1;
-                continue;
-            }
-            Vec::new()
+            anyhow::bail!(
+                "legacy document {document_id} ambiguously matches non-unique Remem selector ({:?}, {:?})",
+                remem_session.source_root,
+                remem_session.session_id,
+            );
         } else {
             Vec::new()
         };
+        include_hostless_v1_document(
+            &mut legacy_documents_to_delete,
+            stable_document,
+            legacy_document,
+            legacy_identity_is_unique,
+            &remem_session.source_root,
+            &remem_session.session_id,
+        )?;
+        if existing_document.is_none() && legacy_documents_to_delete.len() == 1 {
+            let legacy_id = &legacy_documents_to_delete[0];
+            let legacy_document = existing_documents
+                .iter()
+                .find(|document| document.id() == legacy_id)
+                .context(
+                    "matched legacy session document disappeared from the migration snapshot",
+                )?;
+            if legacy_document.raw_content() == raw_content {
+                if !options.dry_run {
+                    let referenced = referenced_session_document(
+                        legacy_document,
+                        session_source.clone(),
+                        &url,
+                        &source_version,
+                    );
+                    save_referenced_session_and_delete_legacy(
+                        &doc_store,
+                        legacy_document,
+                        &referenced,
+                        &legacy_documents_to_delete,
+                    )
+                    .await
+                    .context("migrate exact legacy session without LLM")?;
+                }
+                skipped_dup += 1;
+                continue;
+            }
+        }
         if let Some(existing_doc) = existing_document.as_ref() {
-            if existing_doc.raw_content() == raw_content {
-                if options.dry_run {
-                    if existing_doc.source_version() != Some(source_version.as_str()) {
-                        println!("  [dry-run] {url} | would backfill source snapshot metadata");
-                    }
-                    if !legacy_documents_to_delete.is_empty() {
-                        println!(
-                            "  [dry-run] {} | would remove {} superseded legacy document(s)",
-                            url,
-                            legacy_documents_to_delete.len()
-                        );
-                    }
-                } else {
-                    if existing_doc.source_version() != Some(source_version.as_str()) {
-                        let versioned_document =
-                            document_with_source_version(existing_doc, &source_version);
-                        doc_store
-                            .save(&versioned_document)
-                            .await
-                            .context("save remem source snapshot metadata")?;
-                    }
-                    doc_store
-                        .delete_documents_with_items(&legacy_documents_to_delete)
-                        .await
-                        .context("delete superseded legacy documents and facets")?;
+            if existing_doc.raw_content() == raw_content
+                || (!existing_document_uses_legacy_identity
+                    && existing_doc.source_version() == Some(source_version.as_str()))
+            {
+                if !options.dry_run {
+                    let referenced = referenced_session_document(
+                        existing_doc,
+                        session_source.clone(),
+                        &url,
+                        &source_version,
+                    );
+                    save_referenced_session_and_delete_legacy(
+                        &doc_store,
+                        existing_doc,
+                        &referenced,
+                        &legacy_documents_to_delete,
+                    )
+                    .await
+                    .context("migrate Remem session and clean legacy documents/facets")?;
                 }
                 skipped_dup += 1;
                 continue;
@@ -309,16 +413,6 @@ async fn handle_remem_ingest_sessions_with_summaries(
 
         if !refine_core::session::passes_filter(&remem_session.session, &filter_config) {
             skipped_filter += 1;
-            continue;
-        }
-
-        if options.dry_run {
-            println!(
-                "  [dry-run] {} | {} msgs | {} chars | remem",
-                url,
-                remem_session.session.messages.len(),
-                remem_session.session.char_count(),
-            );
             continue;
         }
 
@@ -357,16 +451,23 @@ async fn handle_remem_ingest_sessions_with_summaries(
         });
     }
 
+    let selected_total = pending.len();
+    for (idx, session) in pending.iter_mut().enumerate() {
+        session.idx = idx;
+        session.total = selected_total;
+    }
+
     println!("摘要预筛选后拉取了 {fully_loaded}/{total} 个完整会话");
 
     process_pending_sessions(
         pending,
-        total,
         skipped_dup,
         skipped_filter,
         stale_refresh,
+        skipped_quarantined,
         options.dry_run,
         options.retry_quarantined,
+        Some(quarantine),
         doc_store,
         llm_client,
     )
@@ -379,8 +480,7 @@ async fn handle_legacy_ingest_sessions(
     doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
-    // Incremental scan: only active for full (no --limit/--latest) non-dry-run runs.
-    // 1-hour overlap on the cutoff absorbs clock skew and files modified near the boundary.
+    // Full non-dry runs overlap the incremental cutoff by one hour for clock skew.
     let incremental = options.limit.is_none() && options.latest.is_none() && !options.dry_run;
     let source = options.source.clone();
     let cursor_purpose = if options.backfill_session_metadata {
@@ -421,13 +521,11 @@ async fn handle_legacy_ingest_sessions(
         println!("发现 {} 个会话文件", discovered.len());
     }
 
-    // --latest: sort by mtime descending, keep N most recent
     if let Some(n) = options.latest {
         discovered.sort_by_key(|d| std::cmp::Reverse(d.modified_at));
         discovered.truncate(n);
     }
 
-    // --limit: path-ordered take (only active when latest is None, enforced by clap)
     let sessions_to_process: Vec<_> = match options.limit {
         Some(limit) => discovered.into_iter().take(limit).collect(),
         None => discovered,
@@ -447,7 +545,6 @@ async fn handle_legacy_ingest_sessions(
     let mut metadata_already_current = 0usize;
     let mut metadata_missing = 0usize;
 
-    // 阶段 1: 串行做去重 + 过滤 + 解析（快，不需要 LLM）
     for (idx, ds) in sessions_to_process.iter().enumerate() {
         let legacy_url = ds.path.to_string_lossy().to_string();
         let legacy_document = doc_store.find_by_url(&legacy_url).await?;
@@ -651,12 +748,13 @@ async fn handle_legacy_ingest_sessions(
 
     let process_result = process_pending_sessions(
         pending,
-        total,
         skipped_dup,
         skipped_filter,
         stale_refresh,
+        0,
         options.dry_run,
         options.retry_quarantined,
+        None,
         doc_store,
         llm_client,
     )
@@ -688,3 +786,6 @@ async fn handle_legacy_ingest_sessions(
 #[cfg(test)]
 #[path = "ingest_sessions/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod legacy_convergence_tests;

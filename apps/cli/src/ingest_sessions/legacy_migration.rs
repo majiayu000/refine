@@ -13,6 +13,17 @@ const LOCAL_SOURCE_ROOT: &str = "local";
 const LOCAL_SOURCE_ROOT_HEX: &str = "6c6f63616c";
 const LEGACY_SOURCES: [&str; 2] = ["claude-code-session", "codex-session"];
 
+pub(super) fn legacy_document_might_match_summary(
+    document: &Document,
+    summary: &crate::remem_sessions::RememSessionSummary,
+) -> bool {
+    summary.source_root == LOCAL_SOURCE_ROOT
+        && LEGACY_SOURCES.contains(&document.source())
+        && !document.url().starts_with("remem://raw-session/v2/")
+        && (url_matches_session_id(document.url(), &summary.session_id)
+            || document.captured_at().timestamp() == summary.first_epoch)
+}
+
 #[cfg(test)]
 pub(super) fn legacy_document_index(documents: &[Document]) -> HashMap<String, Vec<&Document>> {
     let mut index = HashMap::new();
@@ -107,13 +118,6 @@ pub(super) fn legacy_document_covering_nonunique_summary(
         })
         .flatten()
         .map(|document| document.id().clone())
-}
-
-pub(super) fn claim_legacy_coverage_once(
-    claimed: &mut HashSet<DocumentId>,
-    document_id: Option<DocumentId>,
-) -> bool {
-    document_id.is_some_and(|document_id| claimed.insert(document_id))
 }
 
 fn unique_match(matches: Vec<&Document>, remem_session: &RememSession) -> Result<Vec<DocumentId>> {
@@ -270,6 +274,7 @@ mod tests {
 
     fn remem(source_root: &str, session_id: &str) -> RememSession {
         RememSession {
+            session_ref: format!("remem://raw-session/v2/test/{source_root}/repo/{session_id}"),
             source_root: source_root.to_string(),
             project: "/repo".to_string(),
             session_id: session_id.to_string(),
@@ -285,6 +290,8 @@ mod tests {
 
     fn summary(source_root: &str, session_id: &str) -> RememSessionSummary {
         RememSessionSummary {
+            session_ref: format!("remem://raw-session/v2/test/{source_root}/repo/{session_id}"),
+            host: "codex-cli".to_string(),
             source_root: source_root.to_string(),
             project: "/repo".to_string(),
             session_id: session_id.to_string(),
@@ -293,6 +300,7 @@ mod tests {
             message_count: 2,
             user_message_count: 1,
             assistant_message_count: 1,
+            content_hash: format!("sha256:{}", "a".repeat(64)),
             user_message_samples: Vec::new(),
             legacy_identity_is_unique: true,
         }
@@ -355,22 +363,6 @@ mod tests {
             "same",
         )
         .is_none());
-    }
-
-    #[test]
-    fn nonunique_legacy_coverage_can_only_be_claimed_once() {
-        let legacy = document("codex-session", "/tmp/session-1.jsonl", "same", 10);
-        let mut claimed = HashSet::new();
-
-        assert!(claim_legacy_coverage_once(
-            &mut claimed,
-            Some(legacy.id().clone())
-        ));
-        assert!(!claim_legacy_coverage_once(
-            &mut claimed,
-            Some(legacy.id().clone())
-        ));
-        assert!(!claim_legacy_coverage_once(&mut claimed, None));
     }
 
     #[test]

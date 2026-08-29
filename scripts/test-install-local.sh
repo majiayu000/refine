@@ -325,6 +325,11 @@ for name in "${runtime_scripts[@]}"; do
     || fail "installed runtime script differs from source: ${name}"
 done
 
+expected_daily_ingest_latest=80
+grep -Fq "REFINE_INGEST_LATEST=\${REFINE_INGEST_LATEST:-${expected_daily_ingest_latest}}" \
+  "${test_home}/.refine/scripts/daily-refresh.sh" \
+  || fail "installed daily refresh does not default to --latest ${expected_daily_ingest_latest}"
+
 launch_agents="${test_home}/Library/LaunchAgents"
 server_plist="${launch_agents}/com.lifcc.refine-server.plist"
 daily_plist="${launch_agents}/com.lifcc.refine-daily-ingest.plist"

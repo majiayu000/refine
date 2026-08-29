@@ -401,7 +401,7 @@ async fn complete_record_appended_during_llm_is_ingested_on_next_pass() {
     .await
     .unwrap();
     let first_saved = doc_store.find_by_url(&url).await.unwrap().unwrap();
-    assert_eq!(first_saved.raw_content(), first_raw);
+    assert!(first_saved.raw_content().is_empty());
     assert_eq!(first_saved.source_version(), Some(first_version.as_str()));
 
     let appended_session = parse_session_file(&path, SessionSource::ClaudeCode).unwrap();
@@ -443,12 +443,12 @@ async fn complete_record_appended_during_llm_is_ingested_on_next_pass() {
     .unwrap();
 
     let refreshed = doc_store.find_by_url(&url).await.unwrap().unwrap();
-    assert_eq!(refreshed.raw_content(), appended_raw);
+    assert!(refreshed.raw_content().is_empty());
     assert_eq!(refreshed.source_version(), Some(appended_version.as_str()));
 }
 
 #[test]
-fn source_snapshot_uses_full_content_and_preserves_document_time() {
+fn referenced_session_preserves_identity_and_time_without_duplicate_content() {
     let mut versioned = Document::new("remem-raw-session", "raw");
     let raw_version = content_source_version("remem", "raw");
     versioned.set_source_version(Some(&raw_version));
@@ -458,11 +458,19 @@ fn source_snapshot_uses_full_content_and_preserves_document_time() {
         content_source_version("remem", "raw corrected")
     );
 
-    let unversioned = Document::new("remem-raw-session", "raw");
+    let mut unversioned = Document::new("remem-raw-session", "raw");
+    unversioned.set_url("remem://raw-session/v2/test");
     let original_updated_at = unversioned.updated_at();
-    let backfilled = document_with_source_version(&unversioned, &raw_version);
+    let backfilled = referenced_session_document(
+        &unversioned,
+        SessionSource::Codex,
+        "remem://raw-session/v2/test",
+        &raw_version,
+    );
+    assert_eq!(backfilled.id(), unversioned.id());
     assert_eq!(backfilled.updated_at(), original_updated_at);
     assert_eq!(backfilled.source_version(), Some(raw_version.as_str()));
+    assert!(backfilled.raw_content().is_empty());
 }
 
 #[tokio::test]
@@ -794,7 +802,7 @@ async fn process_single_session_links_items_to_saved_document_id() {
 }
 
 #[tokio::test]
-async fn process_single_session_refresh_replaces_old_items_and_preserves_raw_transcript() {
+async fn process_single_session_refresh_replaces_old_items_without_duplicate_transcript() {
     let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
     let item_store: Arc<dyn ItemRepository> = store.clone();
     let doc_store: Arc<dyn DocumentRepository> = store.clone();
@@ -861,7 +869,7 @@ async fn process_single_session_refresh_replaces_old_items_and_preserves_raw_tra
         .expect("document query should succeed")
         .expect("document should exist");
     assert_eq!(saved_doc.id(), existing_doc.id());
-    assert_eq!(saved_doc.raw_content(), pending.raw_content);
+    assert!(saved_doc.raw_content().is_empty());
     assert_eq!(saved_doc.title(), Some("刷新后的会话"));
     assert_eq!(saved_doc.captured_at(), existing_doc.captured_at());
 
@@ -874,7 +882,7 @@ async fn process_single_session_refresh_replaces_old_items_and_preserves_raw_tra
 }
 
 #[tokio::test]
-async fn remem_save_removes_superseded_legacy_document_and_facets() {
+async fn remem_save_reparents_superseded_legacy_facets() {
     let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
     let item_store: Arc<dyn ItemRepository> = store.clone();
     let doc_store: Arc<dyn DocumentRepository> = store.clone();
@@ -942,17 +950,18 @@ async fn remem_save_removes_superseded_legacy_document_and_facets() {
         .await
         .unwrap()
         .is_empty());
-    assert!(!item_store
+    let replacement_items = item_store
         .find_by_document_id(replacement.id())
         .await
-        .unwrap()
-        .is_empty());
+        .unwrap();
+    assert!(replacement_items
+        .iter()
+        .any(|item| item.id() == &legacy_item_id));
     let observations = item_store
         .find_by_type(ItemType::Observation)
         .await
         .unwrap();
-    assert_eq!(observations.len(), replacement_item_count);
-    assert!(observations.iter().all(|item| item.id() != &legacy_item_id));
+    assert_eq!(observations.len(), replacement_item_count + 1);
 }
 
 #[tokio::test]
@@ -969,6 +978,7 @@ async fn replacement_and_legacy_cleanup_roll_back_as_one_transaction() {
         .save_with_replaced_items_and_delete_documents(
             &replacement,
             &[item.clone()],
+            &[],
             &[DocumentId::from("missing-legacy-document")],
         )
         .await
@@ -1030,5 +1040,225 @@ fn content_rejection_survives_anyhow_context() {
     assert_eq!(
         content_rejection(&error),
         Some(("sensitive_words_detected".into(), "blocked".into()))
+    );
+}
+
+#[tokio::test]
+async fn unchanged_remem_summary_skips_full_content_and_removes_duplicate_body() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let summary = RememSessionSummary {
+        session_ref: concat!(
+            "remem://raw-session/v2/",
+            "636f6465782d636c69/6c6f63616c/2f7265706f/7331"
+        )
+        .to_string(),
+        host: "codex-cli".to_string(),
+        source_root: "local".to_string(),
+        project: "/repo".to_string(),
+        session_id: "s1".to_string(),
+        first_epoch: 10,
+        last_epoch: 20,
+        message_count: 2,
+        user_message_count: 1,
+        assistant_message_count: 1,
+        content_hash: format!("sha256:{}", "a".repeat(64)),
+        user_message_samples: vec!["question".to_string()],
+        legacy_identity_is_unique: true,
+    };
+    let mut existing = Document::new("codex-session", "duplicated transcript body");
+    existing.set_url(&summary.stable_document_url());
+    existing.set_source_version(Some(&summary.content_hash));
+    doc_store
+        .save(&existing)
+        .await
+        .expect("seed existing document");
+    let temp = tempfile::tempdir().expect("temporary lock directory");
+
+    handle_remem_ingest_sessions_with_summaries(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: Some(1),
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![summary],
+        doc_store.clone(),
+        None,
+    )
+    .await
+    .expect("unchanged summary must not require Remem messages or an LLM");
+
+    let saved = doc_store
+        .find_by_url(existing.url())
+        .await
+        .expect("query referenced document")
+        .expect("referenced document remains present");
+    assert_eq!(saved.id(), existing.id());
+    assert!(saved.raw_content().is_empty());
+    assert_eq!(saved.source(), "codex-session");
+}
+
+fn remem_summary(session_id: &str, last_epoch: i64, hash_byte: char) -> RememSessionSummary {
+    RememSessionSummary {
+        session_ref: format!("remem://raw-session/v2/codex/local/repo/{session_id}"),
+        host: "codex-cli".to_string(),
+        source_root: "local".to_string(),
+        project: "/repo".to_string(),
+        session_id: session_id.to_string(),
+        first_epoch: last_epoch - 1,
+        last_epoch,
+        message_count: 2,
+        user_message_count: 1,
+        assistant_message_count: 1,
+        content_hash: format!("sha256:{}", hash_byte.to_string().repeat(64)),
+        user_message_samples: Vec::new(),
+        legacy_identity_is_unique: true,
+    }
+}
+
+fn loaded_remem_session(summary: &RememSessionSummary, first_user_message: &str) -> RememSession {
+    RememSession {
+        session_ref: summary.session_ref.clone(),
+        source_root: summary.source_root.clone(),
+        project: summary.project.clone(),
+        session_id: summary.session_id.clone(),
+        first_epoch: summary.first_epoch,
+        session: refine_core::session::Session {
+            source: SessionSource::Codex,
+            file_path: PathBuf::from(&summary.session_ref),
+            messages: vec![
+                refine_core::session::SessionMessage {
+                    role: refine_core::session::MessageRole::User,
+                    content: first_user_message.to_string(),
+                },
+                refine_core::session::SessionMessage {
+                    role: refine_core::session::MessageRole::Assistant,
+                    content: "answer ".repeat(100),
+                },
+            ],
+            meta: refine_core::session::SessionMeta::default(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn latest_counts_only_eligible_pending_sessions_and_stops_loading_older_bodies() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let duplicate = remem_summary("duplicate", 500, 'a');
+    let looper = remem_summary("looper", 400, 'b');
+    let quarantined = remem_summary("quarantined", 300, 'c');
+    let eligible = remem_summary("eligible", 200, 'd');
+    let older = remem_summary("older", 100, 'e');
+
+    let mut existing = Document::new("codex-session", "");
+    existing.set_url(&duplicate.stable_document_url());
+    existing.set_source_version(Some(&duplicate.content_hash));
+    doc_store.save(&existing).await.expect("seed duplicate");
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let mut quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    quarantine.record(
+        &quarantined.stable_document_url(),
+        Some(&quarantined.content_hash),
+        "provider_rejected",
+        "fixture",
+    );
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: Some(1),
+            dry_run: true,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        // Deliberately unsorted: Refine owns newest-first selection.
+        vec![older, eligible, quarantined, looper, duplicate],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            let user_message = if summary.session_id == "looper" {
+                "You are executing Looper scheduled skill \"daily\".\nFollow the spec."
+            } else {
+                "ordinary user question with enough useful detail"
+            };
+            Ok(loaded_remem_session(&summary, user_message))
+        },
+        doc_store.clone(),
+        None,
+    )
+    .await
+    .expect("dry-run should select one eligible pending session");
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["looper".to_string(), "eligible".to_string()],
+        "duplicate and quarantine rows must not consume the bound; older bodies must not load after it is full"
+    );
+    assert_eq!(
+        doc_store.count().await.unwrap(),
+        1,
+        "dry-run must not mutate"
+    );
+}
+
+#[tokio::test]
+async fn omitting_latest_scans_every_eligible_session_body() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store;
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: None,
+            dry_run: true,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![
+            remem_summary("older", 100, 'a'),
+            remem_summary("newer", 200, 'b'),
+        ],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            Ok(loaded_remem_session(
+                &summary,
+                "ordinary user question with enough useful detail",
+            ))
+        },
+        doc_store,
+        None,
+    )
+    .await
+    .expect("unbounded manual dry-run should scan full history");
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["newer".to_string(), "older".to_string()]
     );
 }

@@ -11,13 +11,11 @@ Use the installer from the repository root:
 scripts/install-local.sh
 ```
 
-Session ingestion defaults to `--provider auto`: it prefers a compatible
-`remem` binary on `PATH` (or an explicit `REFINE_REMEM_BIN` path), and uses the
-local Claude/Codex scanner only when that executable is absent. Remem
-subprocess, malformed JSON, contract, and pagination failures are ingest
-failures and never silently fall back. Use `--provider remem` for strict remem
-operation or `--provider local` for supported local discovery; the deprecated
-`--legacy-local-scan` option remains an alias for `--provider local`.
+Session ingestion requires a compatible `remem` binary on `PATH`, or an
+explicit binary path in `REFINE_REMEM_BIN`. `refine ingest-sessions` reads the
+Remem raw archive only. Missing executables, subprocess failures, malformed
+JSON, contract drift, and pagination failures fail the command visibly; the
+public CLI has no automatic or explicit local transcript fallback.
 
 The installer is idempotent. It can be used for first install and for upgrades from a newer checkout.
 

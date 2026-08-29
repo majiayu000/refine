@@ -48,30 +48,43 @@ pub(super) struct PendingSession {
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn process_pending_sessions(
     mut pending: Vec<PendingSession>,
-    total: usize,
     skipped_dup: usize,
     skipped_filter: usize,
     stale_refresh: usize,
+    mut skipped_quarantined: usize,
     dry_run: bool,
     retry_quarantined: bool,
+    quarantine: Option<QuarantineStore>,
     doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
     if dry_run {
-        let dry_count = total - skipped_dup - skipped_filter;
+        for session in &pending {
+            println!(
+                "  [dry-run] {} | {} chars | remem",
+                session.url,
+                session.raw_content.chars().count(),
+            );
+        }
         println!(
-            "\n[dry-run] 可处理 {}, 跳过重复 {}, 过滤 {}, 刷新过期 {}",
-            dry_count, skipped_dup, skipped_filter, stale_refresh
+            "\n[dry-run] 最终选择 {}, 跳过重复 {}, 过滤 {}, 隔离跳过 {}, 刷新过期 {}",
+            pending.len(),
+            skipped_dup,
+            skipped_filter,
+            skipped_quarantined,
+            stale_refresh
         );
         return Ok(());
     }
 
-    let mut quarantine = QuarantineStore::load()?;
+    let mut quarantine = match quarantine {
+        Some(quarantine) => quarantine,
+        None => QuarantineStore::load()?,
+    };
     let selected_identities: HashSet<String> = pending
         .iter()
         .map(|session| quarantine_key(&session.url, session.source_version.as_deref()))
         .collect();
-    let mut skipped_quarantined = 0usize;
     if !retry_quarantined {
         pending.retain(|session| {
             if quarantine.contains(&session.url, session.source_version.as_deref()) {
@@ -300,6 +313,7 @@ pub(super) async fn process_single_session(
             &document,
             &items,
             &session.legacy_documents_to_delete,
+            &session.legacy_documents_to_delete,
         )
         .await
         .context("保存 Document/Items 并清理旧会话失败")?;
@@ -336,7 +350,7 @@ fn build_session_document(session: &PendingSession, title: &str) -> Document {
         return Document::restore(RestoreDocumentParams {
             id: existing_document.id().clone(),
             title: Some(title.to_string()),
-            raw_content: session.raw_content.clone(),
+            raw_content: String::new(),
             source: session.source.as_str().to_string(),
             url: session.url.clone(),
             source_version: session.source_version.clone(),
@@ -346,7 +360,7 @@ fn build_session_document(session: &PendingSession, title: &str) -> Document {
         });
     }
 
-    let mut document = Document::new(session.source.as_str(), &session.raw_content);
+    let mut document = Document::new(session.source.as_str(), "");
     document.set_title(title);
     document.set_url(&session.url);
     document.set_source_version(session.source_version.as_deref());

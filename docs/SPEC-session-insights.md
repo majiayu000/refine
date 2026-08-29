@@ -8,6 +8,13 @@
 
 ### 数据源
 
+> 2026-08-30 current contract: Remem is the sole raw session source. The
+> provider/local fallback design below is historical implementation context.
+> The normative migration and proof contract lives in
+> `docs/feature/8-29/`. Everything below that describes provider auto/local,
+> local transcript discovery, or persisted session `raw_content` is
+> historical and must not be used to define current behavior.
+
 | 来源 | 入口 | 格式 |
 |------|------|------|
 | remem raw archive | `remem raw sessions/messages --json` | 完整 user/assistant 消息和精确 selector tuple |
@@ -75,7 +82,7 @@ pub enum ItemType {
 // 统一的会话结构（跨 Claude Code / Codex）
 pub struct Session {
     pub id: String,                    // session UUID
-    pub source: SessionSource,         // RememRaw（auto 首选）| ClaudeCode | Codex
+    pub source: SessionSource,         // RememRaw 派生投影 | ClaudeCode | Codex
     pub project: Option<String>,       // 项目路径
     pub file_path: String,             // remem 稳定 URL 或本地扫描路径文件名
     pub started_at: DateTime<Utc>,

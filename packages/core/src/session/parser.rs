@@ -23,11 +23,21 @@ use tracing::warn;
 /// jsonl 几 GB 即可耗尽进程内存。
 pub const MAX_SESSION_FILE_BYTES: u64 = 200 * 1024 * 1024;
 
+fn reject_remem_backed_source(source: &SessionSource) -> Result<(), String> {
+    match source {
+        SessionSource::Cursor => {
+            Err("Cursor sessions must be loaded through the remem CLI provider".to_string())
+        }
+        SessionSource::RememRaw => {
+            Err("RememRaw sessions must be loaded through the remem CLI provider".to_string())
+        }
+        SessionSource::ClaudeCode | SessionSource::Codex => Ok(()),
+    }
+}
+
 /// 解析 JSONL 文件为 Session
 pub fn parse_session_file(path: &Path, source: SessionSource) -> Result<Session, String> {
-    if source == SessionSource::RememRaw {
-        return Err("RememRaw sessions must be loaded through the remem CLI provider".to_string());
-    }
+    reject_remem_backed_source(&source)?;
     let metadata = std::fs::metadata(path).map_err(|e| format!("读取文件失败: {}", e))?;
     let size = metadata.len();
     if size > MAX_SESSION_FILE_BYTES {
@@ -54,9 +64,7 @@ pub fn parse_session_content(
     path: &Path,
     source: SessionSource,
 ) -> Result<Session, String> {
-    if source == SessionSource::RememRaw {
-        return Err("RememRaw sessions cannot be parsed from transcript JSONL".to_string());
-    }
+    reject_remem_backed_source(&source)?;
     let mut messages = Vec::new();
     let mut meta = SessionMeta::default();
     let last_nonempty_line = content
@@ -104,7 +112,9 @@ pub fn parse_session_content(
             SessionSource::Codex => {
                 parse_codex_line(&value, &mut messages, &mut meta);
             }
-            SessionSource::RememRaw => unreachable!("RememRaw is rejected before JSONL parsing"),
+            SessionSource::Cursor | SessionSource::RememRaw => {
+                unreachable!("Remem-backed sources are rejected before JSONL parsing")
+            }
         }
     }
 
@@ -386,13 +396,24 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn rejects_remem_raw_as_transcript_input() {
+    fn rejects_remem_backed_sources_before_file_or_content_parsing() {
         let path = Path::new("/does/not/need/to/exist.jsonl");
-        let file_error = parse_session_file(path, SessionSource::RememRaw).unwrap_err();
-        assert!(file_error.contains("remem CLI provider"));
+        for (source, name) in [
+            (SessionSource::Cursor, "Cursor"),
+            (SessionSource::RememRaw, "RememRaw"),
+        ] {
+            let file_error = parse_session_file(path, source.clone()).unwrap_err();
+            assert_eq!(
+                file_error,
+                format!("{name} sessions must be loaded through the remem CLI provider")
+            );
 
-        let content_error = parse_session_content("{}", path, SessionSource::RememRaw).unwrap_err();
-        assert!(content_error.contains("cannot be parsed"));
+            let content_error = parse_session_content("not JSON", path, source).unwrap_err();
+            assert_eq!(
+                content_error,
+                format!("{name} sessions must be loaded through the remem CLI provider")
+            );
+        }
     }
 
     #[test]

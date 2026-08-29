@@ -1,4 +1,3 @@
-use anyhow::{bail, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::fmt;
 use std::path::PathBuf;
@@ -17,22 +16,6 @@ impl IngestProvider {
             Self::Remem => "remem",
             Self::Local => "local",
         }
-    }
-
-    pub(crate) fn resolve(explicit: Option<Self>, legacy_local_scan: bool) -> Result<Self> {
-        if legacy_local_scan {
-            if let Some(provider) = explicit {
-                if provider != Self::Local {
-                    bail!(
-                        "--legacy-local-scan is a deprecated alias for --provider local and cannot be combined with --provider {}; use --provider local or remove the alias",
-                        provider.as_str()
-                    );
-                }
-            }
-            return Ok(Self::Local);
-        }
-
-        Ok(explicit.unwrap_or(Self::Auto))
     }
 }
 
@@ -146,30 +129,18 @@ pub enum Commands {
     },
     /// 从 AI 编程会话中提取认知观测
     IngestSessions {
-        /// Local scanner source filter (claude, codex); requires --provider local.
-        #[arg(long)]
-        source: Option<String>,
-        /// Session provider: auto (default), remem, or local.
-        #[arg(long, value_enum, value_name = "PROVIDER")]
-        provider: Option<IngestProvider>,
-        /// 限制处理数量（按路径顺序取前 N 个），与 --latest 互斥
+        /// 按新到旧限制扫描的 Remem 摘要数量（过滤前），与 --latest 互斥
         #[arg(short, long, conflicts_with = "latest")]
         limit: Option<usize>,
-        /// 仅处理最近修改的 N 个会话（按 mtime 降序），与 --limit 互斥
+        /// 从新到旧选择最多 N 个通过去重、质量与隔离检查的待处理会话
         #[arg(long, conflicts_with = "limit")]
         latest: Option<usize>,
         /// 仅预览，不实际处理
         #[arg(long)]
         dry_run: bool,
-        /// Deprecated alias for --provider local.
-        #[arg(long)]
-        legacy_local_scan: bool,
         /// Explicitly retry sessions previously quarantined for deterministic provider rejection.
         #[arg(long)]
         retry_quarantined: bool,
-        /// Reconcile Codex provenance tags on existing observations without an LLM call.
-        #[arg(long)]
-        backfill_session_metadata: bool,
     },
     /// 生成认知洞察报告
     Insights {
@@ -265,68 +236,28 @@ impl Commands {
 mod tests {
     use super::*;
 
-    fn ingest_command(args: &[&str]) -> (Option<IngestProvider>, bool) {
+    fn ingest_latest(args: &[&str]) -> Option<usize> {
         let cli = Cli::try_parse_from(args).expect("CLI arguments should parse");
-        let Commands::IngestSessions {
-            provider,
-            legacy_local_scan,
-            ..
-        } = cli.command
-        else {
+        let Commands::IngestSessions { latest, .. } = cli.command else {
             panic!("expected ingest-sessions command");
         };
-        (provider, legacy_local_scan)
+        latest
     }
 
     #[test]
-    fn ingest_provider_defaults_to_auto() {
-        let (provider, legacy_local_scan) = ingest_command(&["refine", "ingest-sessions"]);
+    fn ingest_sessions_has_one_remem_source_and_accepts_latest_bound() {
+        assert_eq!(ingest_latest(&["refine", "ingest-sessions"]), None);
         assert_eq!(
-            IngestProvider::resolve(provider, legacy_local_scan).unwrap(),
-            IngestProvider::Auto
+            ingest_latest(&["refine", "ingest-sessions", "--latest", "200"]),
+            Some(200)
         );
     }
 
     #[test]
-    fn ingest_provider_accepts_all_first_class_values() {
-        for (value, expected) in [
-            ("auto", IngestProvider::Auto),
-            ("remem", IngestProvider::Remem),
-            ("local", IngestProvider::Local),
-        ] {
-            let (provider, legacy_local_scan) =
-                ingest_command(&["refine", "ingest-sessions", "--provider", value]);
-            assert_eq!(
-                IngestProvider::resolve(provider, legacy_local_scan).unwrap(),
-                expected
-            );
+    fn ingest_sessions_rejects_removed_direct_scan_switches() {
+        for removed in ["--provider", "--source", "--legacy-local-scan"] {
+            assert!(Cli::try_parse_from(["refine", "ingest-sessions", removed, "local"]).is_err());
         }
-    }
-
-    #[test]
-    fn legacy_local_scan_remains_a_local_alias_and_rejects_contradictions() {
-        let (provider, legacy_local_scan) = ingest_command(&[
-            "refine",
-            "ingest-sessions",
-            "--legacy-local-scan",
-            "--source",
-            "codex",
-        ]);
-        assert_eq!(
-            IngestProvider::resolve(provider, legacy_local_scan).unwrap(),
-            IngestProvider::Local
-        );
-
-        let (provider, legacy_local_scan) = ingest_command(&[
-            "refine",
-            "ingest-sessions",
-            "--provider",
-            "remem",
-            "--legacy-local-scan",
-        ]);
-        let error = IngestProvider::resolve(provider, legacy_local_scan)
-            .expect_err("remem and the local alias contradict each other");
-        assert!(error.to_string().contains("--provider local"));
     }
 
     #[test]

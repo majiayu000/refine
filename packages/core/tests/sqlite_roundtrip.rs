@@ -184,18 +184,18 @@ async fn document_save_refreshes_existing_url_content() {
 }
 
 #[tokio::test]
-async fn document_save_preserves_existing_title_when_duplicate_url_has_no_title() {
+async fn document_save_corrects_source_and_preserves_identity_and_title_for_duplicate_url() {
     let store = SqliteStore::in_memory().expect("failed to create sqlite store");
     let url = "https://claude.ai/chat/duplicate-no-title";
 
-    let mut first = Document::new("claude", "older content");
+    let mut first = Document::new("remem-raw-session", "older content");
     first.set_title("Canonical title");
     first.set_url(url);
     refine_core::knowledge::DocumentRepository::save(&store, &first)
         .await
         .expect("failed to save first document");
 
-    let mut second = Document::new("claude", "newer content");
+    let mut second = Document::new("codex-session", "newer content");
     second.set_url(url);
     let second_captured_at = second.captured_at();
     let second_updated_at = second.updated_at();
@@ -215,10 +215,12 @@ async fn document_save_preserves_existing_title_when_duplicate_url_has_no_title(
     assert_eq!(by_url.id(), first.id());
     assert_eq!(by_url.title(), Some("Canonical title"));
     assert_eq!(by_url.raw_content(), "newer content");
+    assert_eq!(by_url.source(), "codex-session");
     assert_eq!(by_url.captured_at(), second_captured_at);
     assert_eq!(by_url.updated_at(), second_updated_at);
     assert_eq!(by_id.title(), Some("Canonical title"));
     assert_eq!(by_id.raw_content(), "newer content");
+    assert_eq!(by_id.source(), "codex-session");
     assert_eq!(by_id.captured_at(), second_captured_at);
     assert_eq!(by_id.updated_at(), second_updated_at);
 }
@@ -717,6 +719,230 @@ async fn pending_job_can_record_startup_failure_without_regressing_terminal_stat
         .expect("job should exist");
     assert_eq!(loaded.status, JobStatus::Failed);
     assert_eq!(loaded.error.as_deref(), Some("startup failed"));
+}
+
+#[tokio::test]
+async fn same_document_id_url_migration_rolls_back_with_its_items() {
+    let store = SqliteStore::in_memory().expect("failed to create sqlite store");
+    let mut original = Document::new("codex-session", "transcript");
+    original.set_url("remem-raw://v1/local/repo/session");
+    refine_core::knowledge::DocumentRepository::save(&store, &original)
+        .await
+        .expect("seed original document");
+    let mut item = Item::new_observation("preserved", "preserved");
+    item.set_document_id(original.id().clone());
+    ItemRepository::save(&store, &item)
+        .await
+        .expect("seed original item");
+    let migrated = Document::restore(RestoreDocumentParams {
+        id: original.id().clone(),
+        title: original.title().map(ToOwned::to_owned),
+        raw_content: String::new(),
+        source: original.source().to_string(),
+        url: "remem-raw://v2/host/local/repo/session".to_string(),
+        source_version: Some("sha256:snapshot".to_string()),
+        captured_at: original.captured_at(),
+        created_at: original.created_at(),
+        updated_at: original.updated_at(),
+    });
+
+    refine_core::knowledge::DocumentRepository::save_with_replaced_items_and_delete_documents(
+        &store,
+        &migrated,
+        &[],
+        std::slice::from_ref(original.id()),
+        &[DocumentId::from("missing-obsolete-document")],
+    )
+    .await
+    .expect_err("missing obsolete document must roll back URL migration");
+
+    let restored = refine_core::knowledge::DocumentRepository::find_by_id(&store, original.id())
+        .await
+        .unwrap()
+        .expect("original document restored by rollback");
+    assert_eq!(restored.url(), original.url());
+    assert!(
+        refine_core::knowledge::DocumentRepository::find_by_url(&store, migrated.url())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        ItemRepository::find_by_document_id(&store, original.id())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|saved| saved.id().to_string())
+            .collect::<Vec<_>>(),
+        vec![item.id().to_string()]
+    );
+}
+
+#[tokio::test]
+async fn url_conflict_convergence_preserves_items_from_both_document_ids() {
+    let store = SqliteStore::in_memory().expect("failed to create sqlite store");
+    let mut canonical = Document::new("codex-session", "");
+    canonical.set_url("remem://raw-session/v2/codex/local/repo/session");
+    refine_core::knowledge::DocumentRepository::save(&store, &canonical)
+        .await
+        .expect("seed canonical document");
+    let mut canonical_item = Item::new_observation("canonical", "canonical summary");
+    canonical_item.set_content("canonical content");
+    canonical_item.set_document_id(canonical.id().clone());
+    ItemRepository::save(&store, &canonical_item)
+        .await
+        .expect("seed canonical item");
+
+    let mut source = Document::new("remem-raw-session", "source transcript");
+    source.set_url("remem-raw://v1/local/repo/session");
+    refine_core::knowledge::DocumentRepository::save(&store, &source)
+        .await
+        .expect("seed source document");
+    let mut source_item = Item::new_observation("source", "source summary");
+    source_item.set_content("source content");
+    source_item.set_document_id(source.id().clone());
+    ItemRepository::save(&store, &source_item)
+        .await
+        .expect("seed source item");
+
+    let mut obsolete = Document::new("codex-session", "obsolete transcript");
+    obsolete.set_url("/tmp/rollout-session.jsonl");
+    refine_core::knowledge::DocumentRepository::save(&store, &obsolete)
+        .await
+        .expect("seed obsolete document");
+    let mut obsolete_item = Item::new_observation("obsolete", "obsolete summary");
+    obsolete_item.set_content("obsolete content");
+    obsolete_item.set_document_id(obsolete.id().clone());
+    ItemRepository::save(&store, &obsolete_item)
+        .await
+        .expect("seed obsolete item");
+
+    let referenced = Document::restore(RestoreDocumentParams {
+        id: source.id().clone(),
+        title: Some("referenced".to_string()),
+        raw_content: String::new(),
+        source: "codex-session".to_string(),
+        url: canonical.url().to_string(),
+        source_version: Some("sha256:snapshot".to_string()),
+        captured_at: source.captured_at(),
+        created_at: source.created_at(),
+        updated_at: source.updated_at(),
+    });
+    let source_ids = vec![source.id().clone(), obsolete.id().clone()];
+    refine_core::knowledge::DocumentRepository::save_with_replaced_items_and_delete_documents(
+        &store,
+        &referenced,
+        &[],
+        &source_ids,
+        &source_ids,
+    )
+    .await
+    .expect("converge both URL identities and obsolete document");
+
+    let saved = refine_core::knowledge::DocumentRepository::find_by_url(&store, canonical.url())
+        .await
+        .unwrap()
+        .expect("canonical document remains");
+    assert_eq!(saved.id(), canonical.id());
+    assert!(
+        refine_core::knowledge::DocumentRepository::find_by_id(&store, source.id())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        refine_core::knowledge::DocumentRepository::find_by_id(&store, obsolete.id())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let payloads = ItemRepository::find_by_document_id(&store, canonical.id())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|item| (item.id().to_string(), item.content().to_string()))
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        payloads,
+        HashSet::from([
+            (
+                canonical_item.id().to_string(),
+                "canonical content".to_string()
+            ),
+            (source_item.id().to_string(), "source content".to_string()),
+            (
+                obsolete_item.id().to_string(),
+                "obsolete content".to_string()
+            ),
+        ])
+    );
+}
+
+#[tokio::test]
+async fn replacement_drops_old_canonical_item_but_keeps_explicit_legacy_source_item() {
+    let store = SqliteStore::in_memory().expect("failed to create sqlite store");
+    let mut canonical = Document::new("codex-session", "");
+    canonical.set_url("remem://raw-session/v2/codex/local/repo/session");
+    refine_core::knowledge::DocumentRepository::save(&store, &canonical)
+        .await
+        .expect("seed canonical document");
+    let mut old = Item::new_observation("old", "old summary");
+    old.set_document_id(canonical.id().clone());
+    ItemRepository::save(&store, &old)
+        .await
+        .expect("seed old canonical item");
+
+    let mut legacy = Document::new("codex-session", "legacy transcript");
+    legacy.set_url("/tmp/rollout-session.jsonl");
+    refine_core::knowledge::DocumentRepository::save(&store, &legacy)
+        .await
+        .expect("seed legacy document");
+    let mut carried = Item::new_observation("carried", "carried summary");
+    carried.set_document_id(legacy.id().clone());
+    ItemRepository::save(&store, &carried)
+        .await
+        .expect("seed carried legacy item");
+
+    let replacement = Document::restore(RestoreDocumentParams {
+        id: canonical.id().clone(),
+        title: Some("replacement".to_string()),
+        raw_content: String::new(),
+        source: canonical.source().to_string(),
+        url: canonical.url().to_string(),
+        source_version: Some("sha256:new".to_string()),
+        captured_at: canonical.captured_at(),
+        created_at: canonical.created_at(),
+        updated_at: canonical.updated_at(),
+    });
+    let mut generated = Item::new_observation("generated", "generated summary");
+    generated.set_document_id(canonical.id().clone());
+    refine_core::knowledge::DocumentRepository::save_with_replaced_items_and_delete_documents(
+        &store,
+        &replacement,
+        std::slice::from_ref(&generated),
+        std::slice::from_ref(legacy.id()),
+        std::slice::from_ref(legacy.id()),
+    )
+    .await
+    .expect("replace canonical facets and carry explicit legacy facets");
+
+    let item_ids = ItemRepository::find_by_document_id(&store, canonical.id())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|item| item.id().to_string())
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        item_ids,
+        HashSet::from([generated.id().to_string(), carried.id().to_string()])
+    );
+    assert!(!ItemRepository::exists(&store, old.id()).await.unwrap());
+    assert!(
+        refine_core::knowledge::DocumentRepository::find_by_id(&store, legacy.id())
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 fn build_conversation(id: &str, status: ConversationStatus) -> ConversationRecord {

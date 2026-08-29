@@ -1,6 +1,6 @@
-use super::rows::to_fts_query;
+use super::{ops, rows::to_fts_query};
 use crate::error::{InfraError, InfraResult};
-use crate::knowledge::{Document, DocumentId, RestoreDocumentParams};
+use crate::knowledge::{Document, DocumentId, Item, RestoreDocumentParams};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -14,6 +14,7 @@ pub(super) fn save(conn: &Connection, doc: &Document) -> InfraResult<()> {
                  ELSE excluded.title
              END,
              raw_content = excluded.raw_content,
+             source = excluded.source,
              source_version = excluded.source_version,
              captured_at = excluded.captured_at,
              updated_at = excluded.updated_at",
@@ -30,6 +31,26 @@ pub(super) fn save(conn: &Connection, doc: &Document) -> InfraResult<()> {
         ],
     )
     .map_err(|e| InfraError::Database(e.to_string()))?;
+    Ok(())
+}
+
+pub(super) fn delete_same_id_with_different_url(
+    conn: &Connection,
+    doc: &Document,
+) -> InfraResult<()> {
+    let Some(existing) = find_by_id(conn, doc.id().as_str())? else {
+        return Ok(());
+    };
+    if existing.url() == doc.url() {
+        return Ok(());
+    }
+    ops::delete_by_document_id(conn, doc.id().as_str())?;
+    if !delete(conn, doc.id().as_str())? {
+        return Err(InfraError::Database(format!(
+            "document {} disappeared during URL migration",
+            doc.id()
+        )));
+    }
     Ok(())
 }
 
@@ -51,6 +72,32 @@ pub(super) fn find_by_url(conn: &Connection, url: &str) -> InfraResult<Option<Do
     stmt.query_row([url], |row| row_to_document(row).map_err(to_row_err))
         .optional()
         .map_err(|e| InfraError::Database(e.to_string()))
+}
+
+pub(super) fn load_items(
+    conn: &Connection,
+    source_document_ids: &[String],
+    canonical_document_id: &DocumentId,
+    include_canonical: bool,
+) -> InfraResult<Vec<Item>> {
+    let mut items = Vec::new();
+    for document_id in source_document_ids {
+        items.extend(ops::find_by_document_id(conn, document_id)?);
+    }
+    if include_canonical
+        && !source_document_ids
+            .iter()
+            .any(|id| id == canonical_document_id.as_str())
+    {
+        items.extend(ops::find_by_document_id(
+            conn,
+            canonical_document_id.as_str(),
+        )?);
+    }
+    for item in &mut items {
+        item.set_document_id(canonical_document_id.clone());
+    }
+    Ok(items)
 }
 
 pub(super) fn find_recent(

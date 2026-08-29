@@ -13,7 +13,6 @@ use refine_core::refinement::{
     ItemExtractionInput,
 };
 use refine_core::search::{SearchEngine, SearchQuery};
-use refine_core::session::SessionSource;
 use std::io::{self, Read};
 use std::path::Path;
 use std::sync::Arc;
@@ -36,46 +35,26 @@ pub async fn run(
             r#type,
         } => handle_add(&title, &summary, &r#type, store).await,
         Commands::IngestSessions {
-            source,
-            provider,
             limit,
             latest,
             dry_run,
-            legacy_local_scan,
             retry_quarantined,
-            backfill_session_metadata,
         } => {
-            let provider = IngestProvider::resolve(provider, legacy_local_scan)?;
-            let source_filter = source
-                .as_deref()
-                .map(|raw| {
-                    parse_session_source(raw)
-                        .with_context(|| format!("invalid session source {raw:?}"))
-                })
-                .transpose()?;
-            if source_filter.is_some() && provider != IngestProvider::Local {
-                anyhow::bail!(
-                    "--source requires --provider local because remem does not expose a trustworthy Claude/Codex source"
-                );
-            }
-            if legacy_local_scan {
-                eprintln!("warning: --legacy-local-scan is deprecated; use --provider local");
-            }
-            let llm_client = if dry_run || backfill_session_metadata {
+            let llm_client = if dry_run {
                 None
             } else {
-                Some(build_llm_client_from_env()?)
+                refine_core::infra::build_llm_client_from_env()
             };
             let doc_store: Arc<dyn DocumentRepository> = store.clone();
             handle_ingest_sessions(
                 IngestOptions {
-                    source: source_filter,
-                    provider,
+                    source: None,
+                    provider: IngestProvider::Remem,
                     limit,
                     latest,
                     dry_run,
                     retry_quarantined,
-                    backfill_session_metadata,
+                    backfill_session_metadata: false,
                 },
                 db_path,
                 doc_store,
@@ -313,7 +292,16 @@ async fn handle_doc_show(id: &str, store: Arc<SqliteStore>) -> Result<()> {
     println!("URL: {}", doc.url());
     println!("创建: {}", doc.created_at().format("%Y-%m-%d %H:%M"));
     println!("---");
-    println!("{}", doc.raw_content());
+    if doc.raw_content().is_empty() && doc.url().starts_with("remem://raw-session/v2/") {
+        let expected_hash = doc
+            .source_version()
+            .context("Remem 会话文档缺少快照 hash")?;
+        let content = crate::remem_sessions::load_document_content(doc.url(), expected_hash)
+            .context("无法从 Remem 读取会话原文")?;
+        println!("{}", content);
+    } else {
+        println!("{}", doc.raw_content());
+    }
 
     let items = item_store.find_by_document_id(&doc_id).await?;
     if !items.is_empty() {
@@ -347,14 +335,6 @@ async fn handle_doc_search(query: &str, limit: usize, store: Arc<SqliteStore>) -
     }
 
     Ok(())
-}
-
-fn parse_session_source(raw: &str) -> Option<SessionSource> {
-    match raw.to_lowercase().as_str() {
-        "claude" | "claude-code" => Some(SessionSource::ClaudeCode),
-        "codex" => Some(SessionSource::Codex),
-        _ => None,
-    }
 }
 
 fn parse_add_item_type(raw_type: &str) -> Result<ItemType> {

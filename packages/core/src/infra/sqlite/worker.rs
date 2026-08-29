@@ -107,6 +107,7 @@ pub(super) enum SqliteCommand {
     DocSaveWithReplacedItemsAndDeleteDocuments {
         doc: Document,
         items: Vec<Item>,
+        source_document_ids: Vec<String>,
         obsolete_document_ids: Vec<String>,
         resp: oneshot::Sender<InfraResult<()>>,
     },
@@ -423,6 +424,7 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
         SqliteCommand::DocSaveWithReplacedItemsAndDeleteDocuments {
             doc,
             items,
+            source_document_ids,
             obsolete_document_ids,
             resp,
         } => {
@@ -433,6 +435,7 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
                     conn,
                     &doc,
                     &items,
+                    &source_document_ids,
                     &obsolete_document_ids,
                 ),
             );
@@ -716,14 +719,21 @@ fn save_document_with_replaced_items_and_delete_documents(
     conn: &Connection,
     doc: &Document,
     items: &[Item],
+    source_document_ids: &[String],
     obsolete_document_ids: &[String],
 ) -> InfraResult<()> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|e| InfraError::Database(e.to_string()))?;
-    let (doc, items) = canonicalize_document_items(&tx, doc, items)?;
+    let carry_canonical = source_document_ids.iter().any(|id| id == doc.id().as_str());
+    let (doc, replacement_items) = canonicalize_document_items(&tx, doc, items)?;
+    let source_items = doc_ops::load_items(&tx, source_document_ids, doc.id(), carry_canonical)?;
+    doc_ops::delete_same_id_with_different_url(&tx, &doc)?;
     doc_ops::save(&tx, &doc)?;
     ops::delete_by_document_id(&tx, doc.id().as_str())?;
-    for item in &items {
+    for item in &source_items {
+        ops::save(&tx, item)?;
+    }
+    for item in &replacement_items {
         ops::save(&tx, item)?;
     }
     delete_documents_with_items_in_transaction(&tx, obsolete_document_ids)?;
@@ -731,7 +741,6 @@ fn save_document_with_replaced_items_and_delete_documents(
         .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(())
 }
-
 fn canonicalize_document_items(
     conn: &Connection,
     doc: &Document,
