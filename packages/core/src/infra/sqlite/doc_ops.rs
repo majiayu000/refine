@@ -77,14 +77,17 @@ pub(super) fn find_by_url(conn: &Connection, url: &str) -> InfraResult<Option<Do
 pub(super) fn load_items(
     conn: &Connection,
     source_document_ids: &[String],
+    input_document_id: &DocumentId,
     canonical_document_id: &DocumentId,
-    include_canonical: bool,
 ) -> InfraResult<Vec<Item>> {
     let mut items = Vec::new();
     for document_id in source_document_ids {
         items.extend(ops::find_by_document_id(conn, document_id)?);
     }
-    if include_canonical
+    if input_document_id != canonical_document_id
+        && source_document_ids
+            .iter()
+            .any(|id| id == input_document_id.as_str())
         && !source_document_ids
             .iter()
             .any(|id| id == canonical_document_id.as_str())

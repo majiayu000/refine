@@ -13,6 +13,7 @@ mod parser;
 mod prescription;
 mod project_identity;
 mod project_identity_value;
+mod remem_archive;
 mod report;
 mod source_cohort;
 mod types;
@@ -34,6 +35,10 @@ pub use filter::{filter_sessions, is_looper_scheduled_skill_session, passes_filt
 pub use parser::{parse_session_content, parse_session_file};
 pub use prescription::{build_prescription_prompt, PRESCRIPTION_SYSTEM_PROMPT};
 pub use project_identity::ProjectIdentityResolver;
+pub use remem_archive::{
+    is_missing_remem_executable, load_remem_document_content, load_remem_session,
+    load_remem_session_summaries, RememSession, RememSessionSummary,
+};
 pub use report::{
     build_final_prompt, build_final_prompt_with_delta, build_final_prompt_with_delta_and_budget,
     format_data_quality_stats, merge_route_results, merge_route_results_with_budget, RouteResult,

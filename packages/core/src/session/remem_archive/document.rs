@@ -1,7 +1,7 @@
 use super::{load_one_session, read_session_summaries, strings, ProcessRunner, Runner};
 use anyhow::{bail, ensure, Context, Result};
 
-pub(crate) fn load_document_content(session_ref: &str, expected_hash: &str) -> Result<String> {
+pub fn load_document_content(session_ref: &str, expected_hash: &str) -> Result<String> {
     load_document_content_with_runner(&ProcessRunner, session_ref, expected_hash)
 }
 
