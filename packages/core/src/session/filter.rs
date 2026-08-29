@@ -26,8 +26,12 @@ impl Default for FilterConfig {
 
 /// 判断会话是否通过质量阈值
 pub fn passes_filter(session: &Session, config: &FilterConfig) -> bool {
-    !is_looper_scheduled_skill(session)
-        && session.user_message_count() >= config.min_user_messages
+    !is_looper_scheduled_skill(session) && passes_quality_thresholds(session, config)
+}
+
+/// 判断会话是否满足结构质量阈值，不应用 LLM 内容排除规则。
+pub fn passes_quality_thresholds(session: &Session, config: &FilterConfig) -> bool {
+    session.user_message_count() >= config.min_user_messages
         && session.char_count() >= config.min_char_count
 }
 
@@ -111,6 +115,7 @@ mod tests {
         );
 
         assert!(!passes_filter(&session, &config));
+        assert!(passes_quality_thresholds(&session, &config));
     }
 
     #[test]

@@ -177,7 +177,10 @@ fn load_remem_session_summaries_with_runner<R: Runner>(
                 .then_with(|| left.session_id.cmp(&right.session_id))
         });
     }
-    if let Some(max) = latest.or(limit) {
+    // `latest` controls newest-first ordering. The ingest handler applies its
+    // bound after duplicate and content filtering so scheduled sessions cannot
+    // consume the entire unattended LLM budget.
+    if let Some(max) = limit {
         summaries.truncate(max);
     }
     Ok(summaries)
@@ -610,16 +613,19 @@ mod tests {
     }
 
     #[test]
-    fn legacy_identity_uniqueness_is_computed_before_selection() {
+    fn latest_orders_all_summaries_without_truncating_before_content_filtering() {
         let first = summary(1);
         let mut second = summary(1);
         second["project"] = Value::String("/other".into());
+        second["last_epoch"] = Value::from(30);
         let runner = FakeRunner::json(vec![sessions(2, vec![first, second])]);
 
         let loaded = load_remem_session_summaries_with_runner(&runner, None, Some(1)).unwrap();
 
-        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].project, "/other");
         assert!(!loaded[0].legacy_identity_is_unique);
+        assert!(!loaded[1].legacy_identity_is_unique);
         assert_eq!(runner.calls.borrow().len(), 1);
     }
 

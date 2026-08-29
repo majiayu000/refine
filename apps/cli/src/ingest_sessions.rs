@@ -212,7 +212,7 @@ async fn handle_remem_ingest_sessions_with_summaries(
 
     println!("remem 返回 {} 个会话摘要", summaries.len());
 
-    let total = summaries.len();
+    let available_total = summaries.len();
     let filter_config = FilterConfig::default();
     let document_count = doc_store.count().await?;
     let existing_documents = doc_store.find_recent(0, document_count).await?;
@@ -227,8 +227,14 @@ async fn handle_remem_ingest_sessions_with_summaries(
     let mut skipped_filter = 0usize;
     let mut stale_refresh = 0usize;
     let mut fully_loaded = 0usize;
+    let mut scanned = 0usize;
+    let mut selected = 0usize;
 
     for (idx, summary) in summaries.into_iter().enumerate() {
+        if options.latest.is_some_and(|max| selected >= max) {
+            break;
+        }
+        scanned += 1;
         let url = summary.stable_document_url();
         let existing_document = existing_remem_documents.get(url.as_str()).copied().cloned();
         if summary.user_message_count < filter_config.min_user_messages as i64 {
@@ -313,6 +319,7 @@ async fn handle_remem_ingest_sessions_with_summaries(
         }
 
         if options.dry_run {
+            selected += 1;
             println!(
                 "  [dry-run] {} | {} msgs | {} chars | remem",
                 url,
@@ -338,9 +345,10 @@ async fn handle_remem_ingest_sessions_with_summaries(
             Vec::new()
         };
 
+        selected += 1;
         pending.push(PendingSession {
             idx,
-            total,
+            total: available_total,
             url,
             source: remem_session.session.source,
             project_identity: Some(remem_session.project.clone()),
@@ -357,11 +365,19 @@ async fn handle_remem_ingest_sessions_with_summaries(
         });
     }
 
-    println!("摘要预筛选后拉取了 {fully_loaded}/{total} 个完整会话");
+    let pending_total = pending.len();
+    for (idx, session) in pending.iter_mut().enumerate() {
+        session.idx = idx;
+        session.total = pending_total;
+    }
+
+    println!(
+        "摘要预筛选后扫描 {scanned}/{available_total}，拉取 {fully_loaded} 个完整会话，选择 {selected} 个"
+    );
 
     process_pending_sessions(
         pending,
-        total,
+        scanned,
         skipped_dup,
         skipped_filter,
         stale_refresh,
@@ -487,7 +503,7 @@ async fn handle_legacy_ingest_sessions(
         )?;
 
         if options.backfill_session_metadata {
-            if !refine_core::session::passes_filter(&session, &filter_config) {
+            if !refine_core::session::passes_quality_thresholds(&session, &filter_config) {
                 skipped_filter += 1;
                 continue;
             }
