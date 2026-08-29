@@ -21,15 +21,6 @@ fi
 
 log "=== Weekly Insights Run Start ==="
 
-log "Step 0: backfill Codex session provenance"
-metadata_rc=0
-"$REFINE_BIN" ingest-sessions --provider local --source codex \
-  --backfill-session-metadata 2>&1 || metadata_rc=$?
-if [[ "$metadata_rc" -ne 0 ]]; then
-  log "ERROR: Step 0 metadata backfill failed with exit code ${metadata_rc}"
-  FAILED_STEPS+=("session metadata backfill")
-fi
-
 # Unattended LLM work uses process credentials or the canonical secure user
 # file. It does not depend on a project checkout or source ~/.zshrc.
 # shellcheck source=scripts/load-llm-env.sh
@@ -45,16 +36,18 @@ log "Preflight: refine=$(command -v "$REFINE_BIN" 2>/dev/null && echo "$REFINE_B
 log "Preflight: cwd=$(pwd)"
 log "Preflight: LLM source=${REFINE_LLM_ENV_SOURCE:-none} $(refine_llm_env_status)"
 
-# Step 1: 增量导入新会话
+# Step 1: import a bounded newest-session window from the sole Remem source.
 log "Step 1: ingest-sessions"
-ingest_rc=0
-"$REFINE_BIN" ingest-sessions 2>&1 || ingest_rc=$?
-if [[ "$ingest_rc" -eq 0 ]]; then
-  log "Step 1: ingest-sessions completed successfully"
-else
-  log "ERROR: Step 1 ingest-sessions failed with exit code ${ingest_rc}"
-  FAILED_STEPS+=("ingest-sessions")
+REFINE_INGEST_LATEST=${REFINE_INGEST_LATEST:-80}
+if ! [[ "$REFINE_INGEST_LATEST" =~ ^[1-9][0-9]*$ ]]; then
+  log "ERROR: REFINE_INGEST_LATEST must be a positive integer"
+  exit 1
 fi
+if ! "$REFINE_BIN" ingest-sessions --latest "$REFINE_INGEST_LATEST" 2>&1; then
+  log "ERROR: ingest-sessions failed; refusing to generate derived insights"
+  exit 1
+fi
+log "Step 1: ingest-sessions completed successfully"
 
 # Step 2: 生成当前 7 天与前一等长 7 天的 delta 处方报告。
 # 全历史输出只能由人工显式执行 `refine insights --all`。

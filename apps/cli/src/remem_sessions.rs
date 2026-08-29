@@ -14,8 +14,12 @@ const RAW_SOURCE_TYPE: &str = "raw_archive";
 const RAW_MESSAGE_ORDER: &str = "created_at_epoch_asc_id_asc";
 const RAW_MESSAGE_LIMIT: &str = "2000";
 
+mod document;
+pub(crate) use document::load_document_content;
+
 #[derive(Debug)]
 pub(crate) struct RememSession {
+    pub session_ref: String,
     pub source_root: String,
     pub project: String,
     pub session_id: String,
@@ -25,20 +29,12 @@ pub(crate) struct RememSession {
 
 impl RememSession {
     pub(crate) fn stable_document_url(&self) -> String {
-        format!(
-            "remem-raw://v1/{}/{}/{}",
-            hex_component(&self.source_root),
-            hex_component(&self.project),
-            hex_component(&self.session_id)
-        )
+        self.session_ref.clone()
     }
 }
 
-pub(crate) fn load_remem_session_summaries(
-    limit: Option<usize>,
-    latest: Option<usize>,
-) -> Result<Vec<RememSessionSummary>> {
-    load_remem_session_summaries_with_runner(&ProcessRunner, limit, latest)
+pub(crate) fn load_remem_session_summaries() -> Result<Vec<RememSessionSummary>> {
+    load_remem_session_summaries_with_runner(&ProcessRunner)
 }
 
 pub(crate) fn load_remem_session(summary: RememSessionSummary) -> Result<RememSession> {
@@ -101,12 +97,15 @@ struct SessionsEnvelope {
     until_epoch: Value,
     project: Value,
     sample: i64,
+    latest: Value,
     count: usize,
     sessions: Vec<RememSessionSummary>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct RememSessionSummary {
+    pub session_ref: String,
+    pub host: String,
     pub source_root: String,
     pub project: String,
     pub session_id: String,
@@ -115,6 +114,7 @@ pub(crate) struct RememSessionSummary {
     pub message_count: i64,
     pub user_message_count: i64,
     pub assistant_message_count: i64,
+    pub content_hash: String,
     pub user_message_samples: Vec<String>,
     #[serde(skip)]
     pub legacy_identity_is_unique: bool,
@@ -122,6 +122,10 @@ pub(crate) struct RememSessionSummary {
 
 impl RememSessionSummary {
     pub(crate) fn stable_document_url(&self) -> String {
+        self.session_ref.clone()
+    }
+
+    pub(crate) fn legacy_document_url(&self) -> String {
         format!(
             "remem-raw://v1/{}/{}/{}",
             hex_component(&self.source_root),
@@ -134,6 +138,7 @@ impl RememSessionSummary {
 #[derive(Debug, Deserialize)]
 struct MessagesEnvelope {
     source_type: String,
+    host: String,
     source_root: String,
     project: String,
     session_id: String,
@@ -142,6 +147,7 @@ struct MessagesEnvelope {
     count: usize,
     has_more: bool,
     next_cursor: Value,
+    content_hash: String,
     messages: Vec<RawMessage>,
 }
 
@@ -158,38 +164,14 @@ struct RawMessage {
 
 fn load_remem_session_summaries_with_runner<R: Runner>(
     runner: &R,
-    limit: Option<usize>,
-    latest: Option<usize>,
 ) -> Result<Vec<RememSessionSummary>> {
-    ensure!(
-        limit.is_none() || latest.is_none(),
-        "limit and latest cannot be used together"
-    );
     let args = strings(&["raw", "sessions", "--sample", "0", "--json"]);
-    let mut summaries = read_session_summaries(runner, &args)?;
-    if latest.is_some() {
-        summaries.sort_by(|left, right| {
-            right
-                .last_epoch
-                .cmp(&left.last_epoch)
-                .then_with(|| left.source_root.cmp(&right.source_root))
-                .then_with(|| left.project.cmp(&right.project))
-                .then_with(|| left.session_id.cmp(&right.session_id))
-        });
-    }
-    if let Some(max) = latest.or(limit) {
-        summaries.truncate(max);
-    }
-    Ok(summaries)
+    read_session_summaries(runner, &args)
 }
 
 #[cfg(test)]
-fn load_remem_sessions_with_runner<R: Runner>(
-    runner: &R,
-    limit: Option<usize>,
-    latest: Option<usize>,
-) -> Result<Vec<RememSession>> {
-    load_remem_session_summaries_with_runner(runner, limit, latest)?
+fn load_remem_sessions_with_runner<R: Runner>(runner: &R) -> Result<Vec<RememSession>> {
+    load_remem_session_summaries_with_runner(runner)?
         .into_iter()
         .map(|summary| load_one_session(runner, summary))
         .collect()
@@ -203,6 +185,20 @@ fn read_session_summaries<R: Runner>(
     validate_nullable_i64(&envelope.since_epoch, "raw sessions since_epoch")?;
     validate_nullable_i64(&envelope.until_epoch, "raw sessions until_epoch")?;
     validate_nullable_string(&envelope.project, "raw sessions project")?;
+    let actual_latest = match &envelope.latest {
+        Value::Null => None,
+        Value::Number(value) => Some(
+            value
+                .as_u64()
+                .context("raw sessions latest must be a non-negative integer")?,
+        ),
+        _ => bail!("raw sessions latest has invalid type"),
+    };
+    ensure!(
+        actual_latest.is_none(),
+        "raw sessions unexpectedly applied latest bound: received {:?}",
+        envelope.latest,
+    );
     ensure!(envelope.sample == 0, "raw sessions sample drifted from 0");
     ensure!(
         envelope.count == envelope.sessions.len(),
@@ -212,6 +208,18 @@ fn read_session_summaries<R: Runner>(
     );
     let mut tuples = HashSet::new();
     for summary in &envelope.sessions {
+        ensure!(!summary.session_ref.is_empty(), "raw session_ref is empty");
+        ensure!(
+            summary.session_ref.starts_with("remem://raw-session/v2/"),
+            "raw session_ref has unsupported contract version"
+        );
+        ensure!(
+            matches!(
+                summary.host.as_str(),
+                "claude-code" | "codex-cli" | "cursor"
+            ),
+            "raw session host is unsupported"
+        );
         ensure!(
             !summary.source_root.is_empty(),
             "raw session source_root is empty"
@@ -246,8 +254,34 @@ fn read_session_summaries<R: Runner>(
             "raw sessions returned samples for sample=0"
         );
         ensure!(
-            tuples.insert((&summary.source_root, &summary.project, &summary.session_id)),
+            summary.content_hash.starts_with("sha256:") && summary.content_hash.len() == 71,
+            "raw session content_hash is invalid"
+        );
+        ensure!(
+            tuples.insert((
+                &summary.host,
+                &summary.source_root,
+                &summary.project,
+                &summary.session_id,
+            )),
             "raw sessions returned a duplicate selector tuple"
+        );
+        let decoded = document::decode_session_ref(&summary.session_ref)?;
+        ensure!(
+            decoded
+                == (
+                    summary.host.clone(),
+                    summary.source_root.clone(),
+                    summary.project.clone(),
+                    summary.session_id.clone(),
+                ),
+            "raw session_ref does not encode its declared selector"
+        );
+        ensure!(
+            summary.content_hash[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit()),
+            "raw session content_hash is not hexadecimal"
         );
     }
     let mut identity_counts = HashMap::new();
@@ -350,12 +384,18 @@ fn load_one_session<R: Runner>(runner: &R, summary: RememSessionSummary) -> Resu
     let started_at = DateTime::<Utc>::from_timestamp(summary.first_epoch, 0)
         .context("raw session first_epoch is outside chrono range")?;
     let mut result = RememSession {
+        session_ref: summary.session_ref.clone(),
         source_root: summary.source_root,
         project: summary.project,
         session_id: summary.session_id,
         first_epoch: summary.first_epoch,
         session: Session {
-            source: SessionSource::RememRaw,
+            source: match summary.host.as_str() {
+                "claude-code" => SessionSource::ClaudeCode,
+                "codex-cli" => SessionSource::Codex,
+                "cursor" => SessionSource::Cursor,
+                _ => unreachable!("host validated in summary contract"),
+            },
             file_path: PathBuf::new(),
             messages,
             meta: SessionMeta {
@@ -379,6 +419,7 @@ fn validate_page(summary: &RememSessionSummary, envelope: &MessagesEnvelope) -> 
         envelope.source_type == RAW_SOURCE_TYPE,
         "raw messages source_type drift"
     );
+    ensure!(envelope.host == summary.host, "raw messages host drift");
     ensure!(
         envelope.source_root == summary.source_root,
         "raw messages source_root drift"
@@ -396,6 +437,20 @@ fn validate_page(summary: &RememSessionSummary, envelope: &MessagesEnvelope) -> 
         "raw messages order drift"
     );
     ensure!(envelope.limit == 2000, "raw messages limit drift");
+    ensure!(
+        envelope.content_hash.starts_with("sha256:") && envelope.content_hash.len() == 71,
+        "raw messages content_hash is invalid"
+    );
+    ensure!(
+        envelope.content_hash[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()),
+        "raw messages content_hash is not hexadecimal"
+    );
+    ensure!(
+        envelope.content_hash == summary.content_hash,
+        "raw messages snapshot hash drifted from the session summary"
+    );
     Ok(())
 }
 
@@ -431,6 +486,8 @@ fn message_args(summary: &RememSessionSummary, cursor: Option<&str>) -> Vec<Stri
     let mut args = strings(&[
         "raw",
         "messages",
+        "--host",
+        &summary.host,
         "--source-root",
         &summary.source_root,
         "--project",
@@ -491,271 +548,4 @@ fn value_as_optional_string(value: &Value, field: &str) -> Result<Option<String>
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::cell::RefCell;
-    use std::collections::VecDeque;
-
-    struct FakeRunner {
-        responses: RefCell<VecDeque<CommandResult>>,
-        calls: RefCell<Vec<Vec<String>>>,
-    }
-
-    impl FakeRunner {
-        fn json(values: Vec<Value>) -> Self {
-            Self {
-                responses: RefCell::new(
-                    values
-                        .into_iter()
-                        .map(|value| CommandResult {
-                            success: true,
-                            code: Some(0),
-                            stdout: serde_json::to_vec(&value).unwrap(),
-                            stderr: Vec::new(),
-                        })
-                        .collect(),
-                ),
-                calls: RefCell::new(Vec::new()),
-            }
-        }
-
-        fn one(result: CommandResult) -> Self {
-            Self {
-                responses: RefCell::new(VecDeque::from([result])),
-                calls: RefCell::new(Vec::new()),
-            }
-        }
-    }
-
-    impl Runner for FakeRunner {
-        fn run(&self, args: &[String]) -> Result<CommandResult> {
-            self.calls.borrow_mut().push(args.to_vec());
-            self.responses
-                .borrow_mut()
-                .pop_front()
-                .context("unexpected fake remem invocation")
-        }
-    }
-
-    fn sessions(count: usize, summaries: Vec<Value>) -> Value {
-        serde_json::json!({
-            "since_epoch": null, "until_epoch": null, "project": null,
-            "sample": 0, "count": count, "sessions": summaries
-        })
-    }
-
-    fn summary(message_count: i64) -> Value {
-        serde_json::json!({
-            "source_root": "local", "project": "/repo", "session_id": "s1",
-            "first_epoch": 10, "last_epoch": 20, "message_count": message_count,
-            "user_message_count": (message_count + 1) / 2,
-            "assistant_message_count": message_count / 2,
-            "user_message_samples": []
-        })
-    }
-
-    fn message(id: i64, epoch: i64, role: &str) -> Value {
-        serde_json::json!({
-            "id": id, "role": role, "content": format!("m{id}"),
-            "source": "transcript", "branch": null, "cwd": "/repo",
-            "created_at_epoch": epoch
-        })
-    }
-
-    fn page(messages: Vec<Value>, has_more: bool, cursor: Value) -> Value {
-        serde_json::json!({
-            "source_type": "raw_archive", "source_root": "local",
-            "project": "/repo", "session_id": "s1",
-            "order": "created_at_epoch_asc_id_asc", "limit": 2000,
-            "count": messages.len(), "has_more": has_more,
-            "next_cursor": cursor, "messages": messages
-        })
-    }
-
-    #[test]
-    fn loads_multiple_pages_and_builds_stable_identity() {
-        let runner = FakeRunner::json(vec![
-            sessions(1, vec![summary(3)]),
-            page(
-                vec![message(1, 10, "user"), message(2, 10, "assistant")],
-                true,
-                Value::String("c1".into()),
-            ),
-            page(vec![message(3, 20, "user")], false, Value::Null),
-        ]);
-        let loaded = load_remem_sessions_with_runner(&runner, None, None).unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].session.messages.len(), 3);
-        assert_eq!(loaded[0].session.source, SessionSource::RememRaw);
-        assert_eq!(loaded[0].first_epoch, 10);
-        assert_eq!(
-            loaded[0].stable_document_url(),
-            "remem-raw://v1/6c6f63616c/2f7265706f/7331"
-        );
-        assert!(runner.calls.borrow()[2].ends_with(&["--cursor".into(), "c1".into()]));
-    }
-
-    #[test]
-    fn summary_load_does_not_fetch_messages() {
-        let runner = FakeRunner::json(vec![sessions(1, vec![summary(3)])]);
-        let loaded = load_remem_session_summaries_with_runner(&runner, None, None).unwrap();
-
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].message_count, 3);
-        assert_eq!(
-            loaded[0].stable_document_url(),
-            "remem-raw://v1/6c6f63616c/2f7265706f/7331"
-        );
-        assert_eq!(runner.calls.borrow().len(), 1);
-    }
-
-    #[test]
-    fn legacy_identity_uniqueness_is_computed_before_selection() {
-        let first = summary(1);
-        let mut second = summary(1);
-        second["project"] = Value::String("/other".into());
-        let runner = FakeRunner::json(vec![sessions(2, vec![first, second])]);
-
-        let loaded = load_remem_session_summaries_with_runner(&runner, None, Some(1)).unwrap();
-
-        assert_eq!(loaded.len(), 1);
-        assert!(!loaded[0].legacy_identity_is_unique);
-        assert_eq!(runner.calls.borrow().len(), 1);
-    }
-
-    #[test]
-    fn reports_nonzero_and_invalid_json() {
-        let failed = FakeRunner::one(CommandResult {
-            success: false,
-            code: Some(7),
-            stdout: Vec::new(),
-            stderr: b"locked".to_vec(),
-        });
-        assert!(load_remem_sessions_with_runner(&failed, None, None)
-            .unwrap_err()
-            .to_string()
-            .contains("status Some(7)"));
-        let invalid = FakeRunner::one(CommandResult {
-            success: true,
-            code: Some(0),
-            stdout: b"not-json".to_vec(),
-            stderr: Vec::new(),
-        });
-        assert!(load_remem_sessions_with_runner(&invalid, None, None).is_err());
-    }
-
-    #[test]
-    fn only_missing_launch_errors_are_fallback_candidates() {
-        let missing = Err::<(), _>(io::Error::new(io::ErrorKind::NotFound, "remem"))
-            .with_context(|| "run remem provider binary \"remem\"")
-            .expect_err("the wrapped launch error should be preserved");
-        assert!(is_missing_remem_executable(&missing));
-
-        let denied = Err::<(), _>(io::Error::new(io::ErrorKind::PermissionDenied, "remem"))
-            .with_context(|| "run remem provider binary \"remem\"")
-            .expect_err("the wrapped launch error should be preserved");
-        assert!(!is_missing_remem_executable(&denied));
-
-        let contract = anyhow::anyhow!("raw sessions contract drift");
-        assert!(!is_missing_remem_executable(&contract));
-    }
-
-    #[test]
-    fn rejects_missing_fields_and_count_drift() {
-        let missing = FakeRunner::json(vec![serde_json::json!({"count": 0, "sessions": []})]);
-        assert!(load_remem_sessions_with_runner(&missing, None, None).is_err());
-        let drift = FakeRunner::json(vec![sessions(2, vec![summary(1)])]);
-        assert!(load_remem_sessions_with_runner(&drift, None, None)
-            .unwrap_err()
-            .to_string()
-            .contains("count mismatch"));
-    }
-
-    #[test]
-    fn rejects_selector_and_order_drift() {
-        let mut selector = page(vec![message(1, 10, "user")], false, Value::Null);
-        selector["project"] = Value::String("/other".into());
-        let runner = FakeRunner::json(vec![sessions(1, vec![summary(1)]), selector]);
-        assert!(load_remem_sessions_with_runner(&runner, None, None).is_err());
-
-        let mut order = page(vec![message(1, 10, "user")], false, Value::Null);
-        order["order"] = Value::String("id_asc".into());
-        let runner = FakeRunner::json(vec![sessions(1, vec![summary(1)]), order]);
-        assert!(load_remem_sessions_with_runner(&runner, None, None).is_err());
-    }
-
-    #[test]
-    fn rejects_cursor_stall_and_message_count_drift() {
-        let runner = FakeRunner::json(vec![
-            sessions(1, vec![summary(2)]),
-            page(
-                vec![message(1, 10, "user")],
-                true,
-                Value::String("same".into()),
-            ),
-            page(
-                vec![message(2, 20, "assistant")],
-                true,
-                Value::String("same".into()),
-            ),
-        ]);
-        assert!(load_remem_sessions_with_runner(&runner, None, None)
-            .unwrap_err()
-            .to_string()
-            .contains("did not progress"));
-
-        let runner = FakeRunner::json(vec![
-            sessions(1, vec![summary(2)]),
-            page(vec![message(1, 10, "user")], false, Value::Null),
-        ]);
-        assert!(load_remem_sessions_with_runner(&runner, None, None)
-            .unwrap_err()
-            .to_string()
-            .contains("message count drift"));
-    }
-
-    #[test]
-    fn rejects_summary_role_and_epoch_drift() {
-        let role_drift = FakeRunner::json(vec![
-            sessions(1, vec![summary(2)]),
-            page(
-                vec![message(1, 10, "user"), message(2, 20, "user")],
-                false,
-                Value::Null,
-            ),
-        ]);
-        assert!(load_remem_sessions_with_runner(&role_drift, None, None)
-            .unwrap_err()
-            .to_string()
-            .contains("role counts drifted"));
-
-        let epoch_drift = FakeRunner::json(vec![
-            sessions(1, vec![summary(2)]),
-            page(
-                vec![message(1, 11, "user"), message(2, 20, "assistant")],
-                false,
-                Value::Null,
-            ),
-        ]);
-        assert!(load_remem_sessions_with_runner(&epoch_drift, None, None)
-            .unwrap_err()
-            .to_string()
-            .contains("first_epoch drifted"));
-    }
-
-    #[test]
-    fn empty_selection_is_success_and_unknown_roles_fail() {
-        let empty = FakeRunner::json(vec![sessions(0, vec![])]);
-        assert!(load_remem_sessions_with_runner(&empty, None, None)
-            .unwrap()
-            .is_empty());
-        let runner = FakeRunner::json(vec![
-            sessions(1, vec![summary(1)]),
-            page(vec![message(1, 10, "system")], false, Value::Null),
-        ]);
-        assert!(load_remem_sessions_with_runner(&runner, None, None)
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported raw message role"));
-    }
-}
+mod tests;

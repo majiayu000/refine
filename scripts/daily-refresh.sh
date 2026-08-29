@@ -16,17 +16,6 @@ echo "=== $(date) ==="
 
 FAILED_STEPS=()
 
-# Reconcile provenance before LLM credential and quota gates. This operation
-# only reads local Codex archives and updates existing metadata.
-echo "Step 0: backfill Codex session provenance"
-metadata_rc=0
-refine ingest-sessions --provider local --source codex --backfill-session-metadata 2>&1 \
-  || metadata_rc=$?
-if [ "$metadata_rc" -ne 0 ]; then
-  echo "ERROR: Step 0 metadata backfill failed with exit code ${metadata_rc}" >&2
-  FAILED_STEPS+=("session metadata backfill")
-fi
-
 # Unattended LLM work uses process credentials or the canonical secure user
 # file. It does not depend on a project checkout or source ~/.zshrc.
 # shellcheck source=scripts/load-llm-env.sh
@@ -63,16 +52,19 @@ echo "Preflight: refine=$(command -v refine) mirror=$(command -v mirror)"
 echo "Preflight: cwd=$(pwd)"
 echo "Preflight: LLM source=${REFINE_LLM_ENV_SOURCE:-none} $(refine_llm_env_status)"
 
-# 1. Ingest new sessions (capture exit code without aborting the script)
+# 1. Ingest a bounded set of eligible pending sessions from the sole Remem source.
 echo "Step 1: ingest-sessions"
-if refine ingest-sessions 2>&1; then
-  ingest_ok=1
-else
-  ingest_ok=0
-  echo "⚠️  ingest-sessions reported failures; success timestamp will not be updated"
+REFINE_INGEST_LATEST=${REFINE_INGEST_LATEST:-80}
+if ! [[ "$REFINE_INGEST_LATEST" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: REFINE_INGEST_LATEST must be a positive integer" >&2
+  exit 1
+fi
+if ! refine ingest-sessions --latest "$REFINE_INGEST_LATEST" 2>&1; then
+  echo "ERROR: ingest-sessions failed; refusing to refresh derived reports" >&2
+  exit 1
 fi
 
-# 2. Refresh mirror score + LLM advice (run regardless of ingest result)
+# 2. Refresh mirror score + LLM advice only after ingestion succeeds.
 echo "Step 2: mirror score"
 score_rc=0
 mirror score --require-advice 2>&1 || score_rc=$?
@@ -111,10 +103,6 @@ else
 fi
 
 echo "Done."
-
-if [ "$ingest_ok" -eq 0 ]; then
-  FAILED_STEPS+=("ingest-sessions")
-fi
 
 # This marker represents the complete scheduled refresh, not ingestion alone.
 if [ ${#FAILED_STEPS[@]} -eq 0 ]; then

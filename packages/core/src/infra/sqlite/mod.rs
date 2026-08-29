@@ -247,10 +247,15 @@ impl DocumentRepository for SqliteStore {
         &self,
         doc: &Document,
         items: &[Item],
+        source_document_ids: &[DocumentId],
         obsolete_document_ids: &[DocumentId],
     ) -> InfraResult<()> {
         let doc = doc.clone();
         let items = items.to_vec();
+        let source_document_ids = source_document_ids
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
         let obsolete_document_ids = obsolete_document_ids
             .iter()
             .map(|id| id.as_str().to_string())
@@ -259,6 +264,7 @@ impl DocumentRepository for SqliteStore {
             |resp| SqliteCommand::DocSaveWithReplacedItemsAndDeleteDocuments {
                 doc,
                 items,
+                source_document_ids,
                 obsolete_document_ids,
                 resp,
             },

@@ -153,28 +153,23 @@ bun run package
 refine ingest-sessions
 refine ingest-sessions --latest 20
 refine ingest-sessions --dry-run
-
-# Provider selection: auto is the default; local is a supported provider
-refine ingest-sessions --provider remem
-refine ingest-sessions --provider local
-refine ingest-sessions --provider local --source claude
-refine ingest-sessions --provider local --source codex
-# Reconcile Codex provenance on existing observations without calling an LLM:
-refine ingest-sessions --provider local --source codex --backfill-session-metadata
-# Deprecated compatibility alias for --provider local
-refine ingest-sessions --legacy-local-scan --source claude
+refine ingest-sessions --retry-quarantined
 refine insights --prescription
 mirror dashboard
 mirror score
 ```
 
-`--provider auto` tries the remem raw archive first and falls back to local
-Claude/Codex discovery only when the remem executable cannot be launched
-because it is absent. Remem nonzero exits, malformed JSON, contract drift, and
-pagination errors fail the command instead of falling back. Use `--provider
-remem` to require remem, or `--provider local` to select local discovery
-directly. `--source` is valid with the local provider; the deprecated
-`--legacy-local-scan` flag is its backward-compatible alias.
+`--latest N` bounds the final eligible pending set. Refine still requests the
+complete Remem summary collection for identity checks, scans newest-first, and
+does not count unchanged, low-signal, explicit Looper scheduled-job, or
+quarantined sessions against N. It stops loading older message bodies as soon
+as N sessions are selected. Omit the option for a manual full-history pass.
+
+`refine ingest-sessions` reads exclusively from a compatible `remem` binary on
+`PATH`, or from the binary selected by `REFINE_REMEM_BIN`. Missing executables,
+nonzero exits, malformed JSON, contract drift, and pagination errors fail the
+command visibly. The public CLI has no automatic or explicit local transcript
+fallback.
 
 On the first remem-backed run, refine supersedes a matching local path-keyed
 session Document/items and saves the replacement facets in one transaction.

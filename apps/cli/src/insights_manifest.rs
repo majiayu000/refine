@@ -381,6 +381,7 @@ pub(crate) fn report_source(document_source: &str) -> &str {
     match document_source {
         "claude-code-session" => "claude",
         "codex-session" => "codex",
+        "cursor-session" => "cursor",
         // Remem currently preserves the archive container but not a reliable
         // upstream platform. It must remain unknown rather than being guessed.
         "remem-raw-session" => "platform_unknown",

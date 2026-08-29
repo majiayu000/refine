@@ -51,6 +51,7 @@ pub(super) fn incremental_cursor_path(
     let source_key = match source {
         Some(SessionSource::ClaudeCode) => "claude-code",
         Some(SessionSource::Codex) => "codex",
+        Some(SessionSource::Cursor) => "cursor",
         Some(SessionSource::RememRaw) => "remem-raw",
         None => "all",
     };

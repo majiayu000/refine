@@ -36,7 +36,7 @@ ln -s "$(pwd)/skills/cognitive-portrait" ~/.claude/skills/cognitive-portrait
 # If ~/.claude/skills/cognitive-portrait already exists as a directory (old copy),
 # delete it first: rm -rf ~/.claude/skills/cognitive-portrait
 
-# Import sessions (auto prefers remem and falls back to local when remem is absent)
+# Import sessions from the remem raw archive
 refine ingest-sessions
 
 # See your cognitive snapshot
@@ -164,9 +164,9 @@ exploration_green = 0.15     # exploration > 15% = green
 ### Data Flow
 
 ```
-remem raw sessions/messages         ← preferred Claude Code + Codex raw archive
+remem raw sessions/messages         ← Claude Code + Codex + Cursor raw archive
     │
-    ▼ refine ingest-sessions        (auto: remem, or local discovery if remem is absent)
+    ▼ refine ingest-sessions        (Remem only)
     │
 SQLite (observations, documents)    ← Shared data store
     │
@@ -179,32 +179,31 @@ SQLite (observations, documents)    ← Shared data store
 
 ## Refine CLI Commands
 
-`refine ingest-sessions` defaults to `--provider auto`: it prefers a compatible
-`remem` binary on `PATH` (or the path in `REFINE_REMEM_BIN`) and falls back to
-the local Claude/Codex session scanner only when that executable is absent.
-`--provider remem` is strict and fails visibly on subprocess, JSON, contract,
-or pagination errors; those errors never trigger a local fallback.
-`--provider local` is a supported provider and accepts `--source claude|codex`.
-The deprecated `--legacy-local-scan` flag remains an alias for
-`--provider local`. A matching local path-keyed Document/items and its remem
-replacement facets are changed in one transaction; ambiguous legacy identity
-fails closed and the remem identity is reused instead of creating a second
-active facet set.
+`refine ingest-sessions` reads session summaries and messages exclusively from
+a compatible `remem` binary on `PATH`, or from the binary selected by
+`REFINE_REMEM_BIN`. Missing executables, subprocess failures, malformed JSON,
+contract drift, and pagination errors fail the command visibly; there is no
+automatic or explicit local transcript fallback. Remem-backed replacement
+facets and deletion of matching legacy local path-keyed Documents/items commit
+in one transaction, and ambiguous legacy identity fails closed.
 
 ### Session Analysis
 
 ```bash
-refine ingest-sessions                  # auto: remem, then local only if remem is absent
-refine ingest-sessions --provider remem # Strict remem raw archive provider
-refine ingest-sessions --provider local # Supported local Claude/Codex scanner
-refine ingest-sessions --provider local --source claude
-refine ingest-sessions --latest 20      # Most recent sessions from the selected provider
-refine ingest-sessions --dry-run        # Preview without LLM calls
-refine ingest-sessions --legacy-local-scan --source claude
-                                        # Deprecated alias for --provider local
+refine ingest-sessions                  # Import sessions from Remem
+refine ingest-sessions --latest 20      # Up to 20 newest eligible pending sessions
+refine ingest-sessions --dry-run        # Preview without LLM calls or writes
+refine ingest-sessions --retry-quarantined
+                                        # Retry deterministic provider rejections
 refine insights --prescription          # L1-L4 cognitive report
 mirror dashboard                        # Cognitive growth dashboard
 ```
+
+`--latest N` is a Refine processing bound, not a Remem summary window. Refine
+reads the complete summary set for identity checks, orders it newest-first, and
+selects up to N sessions after unchanged, low-signal, explicit Looper job, and
+quarantine skips. Once N sessions are selected, older message bodies are not
+loaded. Omit `--latest` for a manual full-history pass.
 
 ### Knowledge Management
 

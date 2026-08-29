@@ -8,17 +8,14 @@
 
 ## 核心功能
 
-`refine ingest-sessions` 默认要求 `PATH` 中存在兼容的 `remem`，也可通过
-`REFINE_REMEM_BIN` 指定二进制路径。正常路径使用 `remem raw sessions --json`
-枚举精确 tuple，并读取全部 `remem raw messages --json` 快照分页；子进程失败、
-JSON/selector/order/cursor 契约异常都会显式报错，不会降级为空会话。直接扫描
-transcript 仅由临时的 `--legacy-local-scan` 回滚开关启用。切换期间，匹配的本地旧
-Document/items 删除与 remem 替代 facets 保存会在同一事务提交；身份匹配不唯一时
-命令会显式失败，避免下游重复计数或误删。回滚扫描也会复用匹配的 remem identity，
-不会重新建立第二套有效 facets。
+`refine ingest-sessions` 要求 `PATH` 中存在兼容的 `remem`，也可通过
+`REFINE_REMEM_BIN` 指定二进制路径。命令只读取 Remem raw archive；子进程、
+JSON、合同或分页错误都会显式失败，公开 CLI 没有自动或显式的本地
+transcript 回退。匹配的历史 Document/items 收敛与 Remem 引用投影保存会在
+同一事务提交；身份不唯一时命令显式失败。
 
 - **跨平台知识同步（主线）** — 把 ChatGPT、Claude、Gemini、Grok、Claude Code、Codex 的对话知识统一同步
-- **会话存储与可追溯** — 原文文档入库，并可回溯到对应提炼结果
+- **会话存储与可追溯** — 保存 Remem 引用与提炼结果，需要时按引用读取原文
 - **智能提炼（可选能力层）** — 从已同步对话中提取知识卡片、技能、代码片段
 - **全文搜索** — SQLite FTS5 驱动的中英混合搜索
 - **Session Insights 与成长分析（可选能力层）** — 对 Claude Code / Codex 会话做认知分析
@@ -71,11 +68,9 @@ mirror dashboard
 ### Session Insights（认知分析）
 
 ```bash
-refine ingest-sessions                  # 从 remem raw archive 导入完整会话
-refine ingest-sessions --latest 20      # 只处理 remem 中最近的 20 个会话
+refine ingest-sessions                  # 从 remem raw archive 导入会话投影
+refine ingest-sessions --latest 20      # 从新到旧最多处理 20 个有效待处理会话
 refine ingest-sessions --dry-run        # 预览，不调 LLM
-refine ingest-sessions --legacy-local-scan --source claude
-                                        # 一个发布周期内的文件扫描回滚开关
 
 refine insights                         # 生成 L1-L3 报告
 refine insights --prescription          # 含 L4 成长处方
@@ -83,6 +78,11 @@ refine insights --prescription          # 含 L4 成长处方
 mirror dashboard                        # 认知成长仪表盘（替代已移除的 refine growth）
 mirror score                            # 三层信号灯评分
 ```
+
+`--latest N` 限制的是 Refine 最终待处理集合，不是 Remem 摘要窗口。Refine 会先读取
+完整摘要集合做身份判定，再按时间从新到旧扫描；重复、低信号、显式 Looper 定时任务和
+已隔离会话都不占 N。选满后不会再读取更旧会话正文。不传 `--latest` 时仍可手动处理
+全历史。
 
 ### 知识管理
 
@@ -144,8 +144,8 @@ refine/
 │   ├── knowledge/       # 知识管理（Item, Document, Repository）
 │   ├── refinement/      # 知识提炼（Conversation, Extractor）
 │   ├── session/         # 会话分析
-│   │   ├── discovery.rs     # 临时回滚路径的会话文件发现
-│   │   ├── parser.rs        # 临时回滚路径的 JSONL 解析
+│   │   ├── discovery.rs     # 历史本地扫描实现（公开 CLI 不暴露）
+│   │   ├── parser.rs        # 历史 JSONL 解析实现
 │   │   ├── facets.rs        # 12 维度 facet 提取
 │   │   ├── clustering.rs    # 本地聚类（按项目分组）
 │   │   ├── analysis_routes.rs # 10 路 LLM 分析任务

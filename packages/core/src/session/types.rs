@@ -10,6 +10,7 @@ use std::path::PathBuf;
 pub enum SessionSource {
     ClaudeCode,
     Codex,
+    Cursor,
     RememRaw,
 }
 
@@ -18,6 +19,7 @@ impl SessionSource {
         match self {
             Self::ClaudeCode => "claude-code-session",
             Self::Codex => "codex-session",
+            Self::Cursor => "cursor-session",
             Self::RememRaw => "remem-raw-session",
         }
     }

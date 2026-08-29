@@ -167,6 +167,9 @@ cat > "${daily_home}/.cargo/bin/refine" <<'EOF'
 if [[ -n "${FAKE_REFINE_LOG:-}" ]]; then
   printf '%s\n' "$*" >> "$FAKE_REFINE_LOG"
 fi
+if [[ "${1:-}" == 'ingest-sessions' ]]; then
+  exit "${FAKE_REFINE_INGEST_EXIT:-0}"
+fi
 exit 0
 EOF
 cat > "${daily_home}/.cargo/bin/mirror" <<'EOF'
@@ -199,6 +202,41 @@ env -i HOME="$daily_home" PATH="/usr/bin:/bin" FAKE_MIRROR_EXIT=0 \
 [[ -f "${daily_home}/.refine/last-refresh-ok" ]] \
   || fail 'daily refresh omitted success marker after complete success'
 
+# Weekly analysis must use the same bounded Remem-only ingest and must not
+# generate derived insights after ingestion fails.
+weekly_refine_log="${TEST_ROOT}/weekly-refine.log"
+env -i HOME="$daily_home" PATH="/usr/bin:/bin" \
+  REFINE_BIN="${daily_home}/.cargo/bin/refine" \
+  REFINE_RUNTIME_LOCK_ACTIVE=1 \
+  FAKE_REFINE_LOG="$weekly_refine_log" \
+  bash "${SCRIPT_DIR}/weekly-insights.sh" >/dev/null 2>&1 \
+  || fail 'weekly insights failed with the default bounded Remem ingestion'
+[[ "$(sed -n '1p' "$weekly_refine_log")" == 'ingest-sessions --latest 80' ]] \
+  || fail 'weekly insights did not default to the bounded latest=80 window'
+
+: > "$weekly_refine_log"
+env -i HOME="$daily_home" PATH="/usr/bin:/bin" \
+  REFINE_BIN="${daily_home}/.cargo/bin/refine" \
+  REFINE_RUNTIME_LOCK_ACTIVE=1 REFINE_INGEST_LATEST=37 \
+  FAKE_REFINE_LOG="$weekly_refine_log" \
+  bash "${SCRIPT_DIR}/weekly-insights.sh" >/dev/null 2>&1 \
+  || fail 'weekly insights failed with healthy bounded Remem ingestion'
+[[ "$(sed -n '1p' "$weekly_refine_log")" == 'ingest-sessions --latest 37' ]] \
+  || fail 'weekly insights did not use bounded Remem-only ingestion'
+[[ "$(sed -n '2p' "$weekly_refine_log")" == 'insights --period 7 --prescription' ]] \
+  || fail 'weekly insights omitted the explicit 7-day derived report'
+
+: > "$weekly_refine_log"
+if env -i HOME="$daily_home" PATH="/usr/bin:/bin" \
+  REFINE_BIN="${daily_home}/.cargo/bin/refine" \
+  REFINE_RUNTIME_LOCK_ACTIVE=1 REFINE_INGEST_LATEST=37 \
+  FAKE_REFINE_LOG="$weekly_refine_log" FAKE_REFINE_INGEST_EXIT=42 \
+  bash "${SCRIPT_DIR}/weekly-insights.sh" >/dev/null 2>&1; then
+  fail 'weekly insights succeeded after Remem ingestion failed'
+fi
+[[ "$(cat "$weekly_refine_log")" == 'ingest-sessions --latest 37' ]] \
+  || fail 'weekly insights ran derived work after Remem ingestion failed'
+
 # Quota markers are written by Rust with optional nanosecond precision. The
 # wrapper must compare both legacy second-only and precise forms correctly.
 quota_refine_log="${TEST_ROOT}/quota-refine.log"
@@ -211,8 +249,8 @@ output=$(env -i HOME="$daily_home" PATH="/usr/bin:/bin" \
   || fail 'daily refresh failed while honoring a precise future quota marker'
 [[ "$output" == *'skipping refresh'* ]] \
   || fail 'daily refresh ignored a precise future quota marker'
-[[ "$(cat "$quota_refine_log")" == 'ingest-sessions --provider local --source codex --backfill-session-metadata' ]] \
-  || fail 'daily refresh did not limit quota-gated work to metadata backfill'
+[[ ! -e "$quota_refine_log" ]] \
+  || fail 'daily refresh invoked refine while the LLM quota marker was active'
 
 printf '%s\n' '2000-01-01T00:00:00Z' \
   > "${daily_home}/.refine/quota_exhausted_until"

@@ -19,6 +19,7 @@ pub trait DocumentRepository: Send + Sync {
         &self,
         doc: &Document,
         items: &[Item],
+        source_document_ids: &[DocumentId],
         obsolete_document_ids: &[DocumentId],
     ) -> InfraResult<()>;
     async fn delete_documents_with_items(&self, document_ids: &[DocumentId]) -> InfraResult<()>;

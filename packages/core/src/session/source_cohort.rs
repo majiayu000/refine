@@ -4,8 +4,12 @@ use crate::knowledge::{Item, ItemType};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
-pub const SUPPORTED_SESSION_DOCUMENT_SOURCES: &[&str] =
-    &["claude-code-session", "codex-session", "remem-raw-session"];
+pub const SUPPORTED_SESSION_DOCUMENT_SOURCES: &[&str] = &[
+    "claude-code-session",
+    "codex-session",
+    "cursor-session",
+    "remem-raw-session",
+];
 
 /// A clustering result plus the exact source-validated input used to build it.
 #[derive(Debug)]
