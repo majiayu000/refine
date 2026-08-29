@@ -164,7 +164,7 @@ fn load_remem_session_summaries_with_runner<R: Runner>(
     runner: &R,
 ) -> Result<Vec<RememSessionSummary>> {
     let args = strings(&["raw", "sessions", "--sample", "0", "--json"]);
-    read_session_summaries(runner, &args)
+    read_session_summaries(runner, &args, None)
 }
 
 #[cfg(test)]
@@ -178,11 +178,31 @@ fn load_remem_sessions_with_runner<R: Runner>(runner: &R) -> Result<Vec<RememSes
 fn read_session_summaries<R: Runner>(
     runner: &R,
     args: &[String],
+    expected_project: Option<&str>,
 ) -> Result<Vec<RememSessionSummary>> {
     let mut envelope: SessionsEnvelope = run_json(runner, args, "raw sessions")?;
-    validate_nullable_i64(&envelope.since_epoch, "raw sessions since_epoch")?;
-    validate_nullable_i64(&envelope.until_epoch, "raw sessions until_epoch")?;
-    validate_nullable_string(&envelope.project, "raw sessions project")?;
+    ensure!(
+        envelope.since_epoch.is_null(),
+        "raw sessions unexpectedly applied since_epoch bound: received {:?}",
+        envelope.since_epoch
+    );
+    ensure!(
+        envelope.until_epoch.is_null(),
+        "raw sessions unexpectedly applied until_epoch bound: received {:?}",
+        envelope.until_epoch
+    );
+    match expected_project {
+        Some(expected) => ensure!(
+            envelope.project.as_str() == Some(expected),
+            "raw sessions project drift: expected {expected:?}, received {:?}",
+            envelope.project
+        ),
+        None => ensure!(
+            envelope.project.is_null(),
+            "raw sessions unexpectedly applied project filter: received {:?}",
+            envelope.project
+        ),
+    }
     let actual_latest = match &envelope.latest {
         Value::Null => None,
         Value::Number(value) => Some(
@@ -523,14 +543,6 @@ fn run_json<T: for<'de> Deserialize<'de>, R: Runner>(
         );
     }
     serde_json::from_slice(&output.stdout).with_context(|| format!("parse {operation} JSON"))
-}
-
-fn validate_nullable_i64(value: &Value, field: &str) -> Result<()> {
-    ensure!(
-        value.is_null() || value.as_i64().is_some(),
-        "{field} has invalid type"
-    );
-    Ok(())
 }
 
 fn validate_nullable_string(value: &Value, field: &str) -> Result<()> {

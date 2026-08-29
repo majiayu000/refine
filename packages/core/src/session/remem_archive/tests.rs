@@ -54,6 +54,12 @@ fn sessions_with_latest(count: usize, summaries: Vec<Value>, latest: Value) -> V
     })
 }
 
+fn project_sessions(count: usize, summaries: Vec<Value>) -> Value {
+    let mut envelope = sessions(count, summaries);
+    envelope["project"] = Value::String("/repo".into());
+    envelope
+}
+
 fn summary(message_count: i64) -> Value {
     serde_json::json!({
         "session_ref": "remem://raw-session/v2/636f6465782d636c69/6c6f63616c/2f7265706f/7331",
@@ -90,7 +96,7 @@ fn page(messages: Vec<Value>, has_more: bool, cursor: Value) -> Value {
 #[test]
 fn document_content_resolves_exact_summary_and_reuses_full_snapshot_validation() {
     let runner = FakeRunner::json(vec![
-        sessions(1, vec![summary(3)]),
+        project_sessions(1, vec![summary(3)]),
         page(
             vec![message(1, 10, "user"), message(2, 10, "assistant")],
             true,
@@ -125,9 +131,26 @@ fn document_content_resolves_exact_summary_and_reuses_full_snapshot_validation()
 }
 
 #[test]
+fn document_content_rejects_mismatched_project_envelope() {
+    let mut envelope = project_sessions(1, vec![summary(1)]);
+    envelope["project"] = Value::String("/other".into());
+    let runner = FakeRunner::json(vec![envelope]);
+    let session_ref = summary(1)["session_ref"].as_str().unwrap().to_string();
+
+    let error = document::load_document_content_with_runner(
+        &runner,
+        &session_ref,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    .expect_err("document hydration must bind the envelope to the decoded project");
+
+    assert!(error.to_string().contains("raw sessions project drift"));
+}
+
+#[test]
 fn document_content_rejects_stored_hash_and_missing_page_drift() {
     let session_ref = summary(3)["session_ref"].as_str().unwrap().to_string();
-    let missing = FakeRunner::json(vec![sessions(0, vec![])]);
+    let missing = FakeRunner::json(vec![project_sessions(0, vec![])]);
     let error = document::load_document_content_with_runner(
         &missing,
         &session_ref,
@@ -136,7 +159,7 @@ fn document_content_rejects_stored_hash_and_missing_page_drift() {
     .expect_err("doc-show must resolve the exact v2 reference");
     assert!(error.to_string().contains("no longer resolves"));
 
-    let stale = FakeRunner::json(vec![sessions(1, vec![summary(3)])]);
+    let stale = FakeRunner::json(vec![project_sessions(1, vec![summary(3)])]);
     let error = document::load_document_content_with_runner(
         &stale,
         &session_ref,
@@ -148,7 +171,7 @@ fn document_content_rejects_stored_hash_and_missing_page_drift() {
         .contains("stored Remem snapshot hash drifted"));
 
     let incomplete = FakeRunner::json(vec![
-        sessions(1, vec![summary(3)]),
+        project_sessions(1, vec![summary(3)]),
         page(
             vec![message(1, 10, "user"), message(2, 20, "assistant")],
             false,
@@ -168,7 +191,7 @@ fn document_content_rejects_stored_hash_and_missing_page_drift() {
 fn document_content_rejects_duplicate_ids_and_cross_page_reordering() {
     let session_ref = summary(3)["session_ref"].as_str().unwrap().to_string();
     let duplicate = FakeRunner::json(vec![
-        sessions(1, vec![summary(3)]),
+        project_sessions(1, vec![summary(3)]),
         page(
             vec![message(1, 10, "user"), message(2, 10, "assistant")],
             true,
@@ -185,7 +208,7 @@ fn document_content_rejects_duplicate_ids_and_cross_page_reordering() {
     assert!(error.to_string().contains("duplicate raw message id"));
 
     let reordered = FakeRunner::json(vec![
-        sessions(1, vec![summary(3)]),
+        project_sessions(1, vec![summary(3)]),
         page(
             vec![message(1, 10, "user"), message(2, 20, "assistant")],
             true,
@@ -206,7 +229,7 @@ fn document_content_rejects_duplicate_ids_and_cross_page_reordering() {
 fn document_content_rejects_summary_role_and_epoch_drift() {
     let session_ref = summary(2)["session_ref"].as_str().unwrap().to_string();
     let role_drift = FakeRunner::json(vec![
-        sessions(1, vec![summary(2)]),
+        project_sessions(1, vec![summary(2)]),
         page(
             vec![message(1, 10, "user"), message(2, 20, "user")],
             false,
@@ -222,7 +245,7 @@ fn document_content_rejects_summary_role_and_epoch_drift() {
     assert!(error.to_string().contains("role counts drifted"));
 
     let epoch_drift = FakeRunner::json(vec![
-        sessions(1, vec![summary(2)]),
+        project_sessions(1, vec![summary(2)]),
         page(
             vec![message(1, 11, "user"), message(2, 20, "assistant")],
             false,
@@ -316,6 +339,31 @@ fn summary_load_always_requests_the_complete_remem_collection() {
     assert!(error
         .to_string()
         .contains("unexpectedly applied latest bound"));
+
+    for (field, value, expected_error) in [
+        (
+            "project",
+            Value::String("/repo".into()),
+            "unexpectedly applied project filter",
+        ),
+        (
+            "since_epoch",
+            Value::from(10),
+            "unexpectedly applied since_epoch bound",
+        ),
+        (
+            "until_epoch",
+            Value::from(20),
+            "unexpectedly applied until_epoch bound",
+        ),
+    ] {
+        let mut filtered = sessions(1, vec![summary(1)]);
+        filtered[field] = value;
+        let runner = FakeRunner::json(vec![filtered]);
+        let error = load_remem_session_summaries_with_runner(&runner)
+            .expect_err("Refine must reject a silently filtered summary collection");
+        assert!(error.to_string().contains(expected_error));
+    }
 }
 
 #[test]
