@@ -325,6 +325,9 @@ for name in "${runtime_scripts[@]}"; do
     || fail "installed runtime script differs from source: ${name}"
 done
 
+grep -Fq 'refine ingest-sessions --latest 80' "${test_home}/.refine/scripts/daily-refresh.sh" \
+  || fail 'installed daily refresh does not cap unattended ingestion at 80 sessions'
+
 launch_agents="${test_home}/Library/LaunchAgents"
 server_plist="${launch_agents}/com.lifcc.refine-server.plist"
 daily_plist="${launch_agents}/com.lifcc.refine-daily-ingest.plist"

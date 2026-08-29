@@ -2,7 +2,9 @@
 //!
 //! 过滤低信号会话，保留值得提取的内容
 
-use super::types::Session;
+use super::types::{MessageRole, Session};
+
+const LOOPER_SCHEDULED_SKILL_MARKER: &str = "You are executing Looper scheduled skill";
 
 /// 过滤阈值配置
 #[derive(Debug, Clone)]
@@ -24,8 +26,19 @@ impl Default for FilterConfig {
 
 /// 判断会话是否通过质量阈值
 pub fn passes_filter(session: &Session, config: &FilterConfig) -> bool {
-    session.user_message_count() >= config.min_user_messages
+    !is_looper_scheduled_skill(session)
+        && session.user_message_count() >= config.min_user_messages
         && session.char_count() >= config.min_char_count
+}
+
+fn is_looper_scheduled_skill(session: &Session) -> bool {
+    session.messages.iter().any(|message| {
+        message.role == MessageRole::User
+            && message
+                .content
+                .trim_start()
+                .starts_with(LOOPER_SCHEDULED_SKILL_MARKER)
+    })
 }
 
 /// 批量过滤会话
@@ -86,5 +99,29 @@ mod tests {
         ];
         let filtered = filter_sessions(sessions, &config);
         assert_eq!(filtered.len(), 1);
+    }
+
+    #[test]
+    fn filter_rejects_looper_scheduled_skill_sessions() {
+        let config = FilterConfig::default();
+        let mut session = make_session(3, 200);
+        session.messages[0].content = format!(
+            "{LOOPER_SCHEDULED_SKILL_MARKER}: knowledge-scout\n{}",
+            "scheduled input ".repeat(40)
+        );
+
+        assert!(!passes_filter(&session, &config));
+    }
+
+    #[test]
+    fn filter_keeps_discussion_that_only_mentions_the_marker() {
+        let config = FilterConfig::default();
+        let mut session = make_session(3, 200);
+        session.messages[0].content = format!(
+            "Why does the log contain '{LOOPER_SCHEDULED_SKILL_MARKER}'? {}",
+            "debug context ".repeat(40)
+        );
+
+        assert!(passes_filter(&session, &config));
     }
 }

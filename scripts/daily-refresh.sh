@@ -65,7 +65,7 @@ echo "Preflight: LLM source=${REFINE_LLM_ENV_SOURCE:-none} $(refine_llm_env_stat
 
 # 1. Ingest new sessions (capture exit code without aborting the script)
 echo "Step 1: ingest-sessions"
-if refine ingest-sessions 2>&1; then
+if refine ingest-sessions --latest 80 2>&1; then
   ingest_ok=1
 else
   ingest_ok=0
