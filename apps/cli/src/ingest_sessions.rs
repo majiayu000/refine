@@ -227,14 +227,8 @@ async fn handle_remem_ingest_sessions_with_summaries(
     let mut skipped_filter = 0usize;
     let mut stale_refresh = 0usize;
     let mut fully_loaded = 0usize;
-    let mut scanned = 0usize;
-    let mut selected = 0usize;
 
     for (idx, summary) in summaries.into_iter().enumerate() {
-        if options.latest.is_some_and(|max| selected >= max) {
-            break;
-        }
-        scanned += 1;
         let url = summary.stable_document_url();
         let existing_document = existing_remem_documents.get(url.as_str()).copied().cloned();
         if summary.user_message_count < filter_config.min_user_messages as i64 {
@@ -319,14 +313,12 @@ async fn handle_remem_ingest_sessions_with_summaries(
         }
 
         if options.dry_run {
-            selected += 1;
             println!(
                 "  [dry-run] {} | {} msgs | {} chars | remem",
                 url,
                 remem_session.session.messages.len(),
                 remem_session.session.char_count(),
             );
-            continue;
         }
 
         let captured_at = DateTime::<Utc>::from_timestamp(remem_session.first_epoch, 0)
@@ -336,7 +328,7 @@ async fn handle_remem_ingest_sessions_with_summaries(
                     remem_session.session_id, remem_session.first_epoch
                 )
             })?;
-        let chunks = if needs_chunking(&remem_session.session) {
+        let chunks = if !options.dry_run && needs_chunking(&remem_session.session) {
             chunk_session(&remem_session.session)
                 .into_iter()
                 .map(|chunk| chunk.content)
@@ -345,7 +337,6 @@ async fn handle_remem_ingest_sessions_with_summaries(
             Vec::new()
         };
 
-        selected += 1;
         pending.push(PendingSession {
             idx,
             total: available_total,
@@ -365,24 +356,18 @@ async fn handle_remem_ingest_sessions_with_summaries(
         });
     }
 
-    let pending_total = pending.len();
-    for (idx, session) in pending.iter_mut().enumerate() {
-        session.idx = idx;
-        session.total = pending_total;
-    }
-
     println!(
-        "摘要预筛选后扫描 {scanned}/{available_total}，拉取 {fully_loaded} 个完整会话，选择 {selected} 个"
+        "摘要预筛选后拉取 {fully_loaded}/{available_total} 个完整会话，候选上限在去重和隔离过滤后应用"
     );
 
     process_pending_sessions(
         pending,
-        scanned,
         skipped_dup,
         skipped_filter,
         stale_refresh,
         options.dry_run,
         options.retry_quarantined,
+        options.latest,
         doc_store,
         llm_client,
     )
@@ -437,10 +422,10 @@ async fn handle_legacy_ingest_sessions(
         println!("发现 {} 个会话文件", discovered.len());
     }
 
-    // --latest: sort by mtime descending, keep N most recent
-    if let Some(n) = options.latest {
+    // --latest: newest-first ordering. The worker applies the bound after
+    // duplicate, content, and quarantine filtering.
+    if options.latest.is_some() {
         discovered.sort_by_key(|d| std::cmp::Reverse(d.modified_at));
-        discovered.truncate(n);
     }
 
     // --limit: path-ordered take (only active when latest is None, enforced by clap)
@@ -609,9 +594,8 @@ async fn handle_legacy_ingest_sessions(
                 session.char_count(),
                 effective_source,
             );
-            continue;
         }
-        let chunks = if needs_chunking(&session) {
+        let chunks = if !options.dry_run && needs_chunking(&session) {
             let cs = chunk_session(&session);
             cs.iter().map(|c| c.content.clone()).collect()
         } else {
@@ -667,12 +651,12 @@ async fn handle_legacy_ingest_sessions(
 
     let process_result = process_pending_sessions(
         pending,
-        total,
         skipped_dup,
         skipped_filter,
         stale_refresh,
         options.dry_run,
         options.retry_quarantined,
+        options.latest,
         doc_store,
         llm_client,
     )

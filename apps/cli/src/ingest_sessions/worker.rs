@@ -48,39 +48,33 @@ pub(super) struct PendingSession {
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn process_pending_sessions(
     mut pending: Vec<PendingSession>,
-    total: usize,
     skipped_dup: usize,
     skipped_filter: usize,
     stale_refresh: usize,
     dry_run: bool,
     retry_quarantined: bool,
+    max_pending: Option<usize>,
     doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
-    if dry_run {
-        let dry_count = total - skipped_dup - skipped_filter;
-        println!(
-            "\n[dry-run] 可处理 {}, 跳过重复 {}, 过滤 {}, 刷新过期 {}",
-            dry_count, skipped_dup, skipped_filter, stale_refresh
-        );
-        return Ok(());
-    }
-
     let mut quarantine = QuarantineStore::load()?;
+    let skipped_quarantined =
+        select_pending_sessions(&mut pending, &quarantine, retry_quarantined, max_pending);
     let selected_identities: HashSet<String> = pending
         .iter()
         .map(|session| quarantine_key(&session.url, session.source_version.as_deref()))
         .collect();
-    let mut skipped_quarantined = 0usize;
-    if !retry_quarantined {
-        pending.retain(|session| {
-            if quarantine.contains(&session.url, session.source_version.as_deref()) {
-                skipped_quarantined += 1;
-                false
-            } else {
-                true
-            }
-        });
+
+    if dry_run {
+        println!(
+            "\n[dry-run] 可处理 {}, 跳过重复 {}, 过滤 {}, 刷新过期 {}, 隔离跳过 {}",
+            pending.len(),
+            skipped_dup,
+            skipped_filter,
+            stale_refresh,
+            skipped_quarantined
+        );
+        return Ok(());
     }
 
     let concurrency = concurrency();
@@ -257,6 +251,34 @@ pub(super) async fn process_pending_sessions(
         );
     }
     Ok(())
+}
+
+fn select_pending_sessions(
+    pending: &mut Vec<PendingSession>,
+    quarantine: &QuarantineStore,
+    retry_quarantined: bool,
+    max_pending: Option<usize>,
+) -> usize {
+    let mut skipped_quarantined = 0usize;
+    if !retry_quarantined {
+        pending.retain(|session| {
+            if quarantine.contains(&session.url, session.source_version.as_deref()) {
+                skipped_quarantined += 1;
+                false
+            } else {
+                true
+            }
+        });
+    }
+    if let Some(max) = max_pending {
+        pending.truncate(max);
+    }
+    let selected_total = pending.len();
+    for (idx, session) in pending.iter_mut().enumerate() {
+        session.idx = idx;
+        session.total = selected_total;
+    }
+    skipped_quarantined
 }
 
 pub(super) async fn process_single_session(
@@ -459,4 +481,50 @@ pub(super) fn log_preview(message: &str, max_chars: usize) -> String {
         preview.push_str("...");
     }
     preview
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pending(url: &str) -> PendingSession {
+        PendingSession {
+            idx: usize::MAX,
+            total: usize::MAX,
+            url: url.to_string(),
+            source: SessionSource::RememRaw,
+            project: None,
+            project_identity: None,
+            mode: SessionMode::Unknown,
+            captured_at: Utc::now(),
+            has_embedded_timestamp: true,
+            raw_content: String::new(),
+            source_version: None,
+            needs_chunk: false,
+            chunks: Vec::new(),
+            existing_document: None,
+            legacy_documents_to_delete: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn quarantine_is_filtered_before_pending_limit() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut quarantine =
+            QuarantineStore::load_from(temporary.path().join("quarantine.jsonl")).unwrap();
+        quarantine.record("newest-quarantined", None, "blocked", "blocked");
+        let mut sessions = vec![
+            pending("newest-quarantined"),
+            pending("older-eligible"),
+            pending("oldest-eligible"),
+        ];
+
+        let skipped = select_pending_sessions(&mut sessions, &quarantine, false, Some(1));
+
+        assert_eq!(skipped, 1);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].url, "older-eligible");
+        assert_eq!(sessions[0].idx, 0);
+        assert_eq!(sessions[0].total, 1);
+    }
 }
