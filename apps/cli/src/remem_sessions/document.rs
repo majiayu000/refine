@@ -61,7 +61,9 @@ fn decode_hex(value: &str) -> Result<String> {
         bail!("Remem session reference has invalid hex encoding");
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
-    for pair in value.as_bytes().chunks_exact(2) {
+    let encoded = value.as_bytes();
+    for pair_start in (0..encoded.len()).step_by(2) {
+        let pair = &encoded[pair_start..pair_start + 2];
         let text = std::str::from_utf8(pair).context("session reference hex is not UTF-8")?;
         bytes.push(u8::from_str_radix(text, 16).context("session reference hex is invalid")?);
     }
