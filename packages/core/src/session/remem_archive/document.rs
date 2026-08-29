@@ -20,7 +20,7 @@ pub(super) fn load_document_content_with_runner<R: Runner>(
         "0",
         "--json",
     ]);
-    let summaries = read_session_summaries(runner, &args)?;
+    let summaries = read_session_summaries(runner, &args, Some(&project))?;
     let summary = summaries
         .into_iter()
         .find(|summary| {
