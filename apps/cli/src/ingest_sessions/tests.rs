@@ -4,6 +4,7 @@ use chrono::TimeZone;
 use refine_core::error::{InfraError, InfraResult};
 use refine_core::infra::SqliteStore;
 use refine_core::knowledge::{DocumentId, DocumentRepository, Item, ItemRepository, ItemType, Tag};
+use refine_core::session::SessionMode;
 use refine_core::session::{discover_sessions_in, parse_session_content};
 use std::collections::VecDeque;
 use std::fs;
@@ -1044,7 +1045,7 @@ fn content_rejection_survives_anyhow_context() {
 }
 
 #[tokio::test]
-async fn unchanged_remem_summary_skips_full_content_and_removes_duplicate_body() {
+async fn unchanged_remem_summary_skips_full_content_and_llm() {
     let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
     let doc_store: Arc<dyn DocumentRepository> = store.clone();
     let summary = RememSessionSummary {
@@ -1054,6 +1055,7 @@ async fn unchanged_remem_summary_skips_full_content_and_removes_duplicate_body()
         )
         .to_string(),
         host: "codex-cli".to_string(),
+        session_mode: "interactive".to_string(),
         source_root: "local".to_string(),
         project: "/repo".to_string(),
         session_id: "s1".to_string(),
@@ -1068,14 +1070,15 @@ async fn unchanged_remem_summary_skips_full_content_and_removes_duplicate_body()
     };
     let mut existing = Document::new("codex-session", "duplicated transcript body");
     existing.set_url(&summary.stable_document_url());
-    existing.set_source_version(Some(&summary.content_hash));
+    existing.set_source_version(Some(&summary.projection_version()));
     doc_store
         .save(&existing)
         .await
         .expect("seed existing document");
     let temp = tempfile::tempdir().expect("temporary lock directory");
 
-    handle_remem_ingest_sessions_with_summaries(
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    handle_remem_ingest_sessions_with_loader(
         IngestOptions {
             source: None,
             provider: IngestProvider::Remem,
@@ -1087,6 +1090,13 @@ async fn unchanged_remem_summary_skips_full_content_and_removes_duplicate_body()
         },
         &temp.path().join("refine.db"),
         vec![summary],
+        Some(quarantine),
+        |summary| {
+            Ok(loaded_remem_session(
+                &summary,
+                "ordinary user question with enough useful detail",
+            ))
+        },
         doc_store.clone(),
         None,
     )
@@ -1107,6 +1117,7 @@ fn remem_summary(session_id: &str, last_epoch: i64, hash_byte: char) -> RememSes
     RememSessionSummary {
         session_ref: format!("remem://raw-session/v2/codex/local/repo/{session_id}"),
         host: "codex-cli".to_string(),
+        session_mode: "interactive".to_string(),
         source_root: "local".to_string(),
         project: "/repo".to_string(),
         session_id: session_id.to_string(),
@@ -1116,7 +1127,7 @@ fn remem_summary(session_id: &str, last_epoch: i64, hash_byte: char) -> RememSes
         user_message_count: 1,
         assistant_message_count: 1,
         content_hash: format!("sha256:{}", hash_byte.to_string().repeat(64)),
-        user_message_samples: Vec::new(),
+        user_message_samples: vec!["ordinary user question".to_string()],
         legacy_identity_is_unique: true,
     }
 }
@@ -1141,7 +1152,16 @@ fn loaded_remem_session(summary: &RememSessionSummary, first_user_message: &str)
                     content: "answer ".repeat(100),
                 },
             ],
-            meta: refine_core::session::SessionMeta::default(),
+            meta: refine_core::session::SessionMeta {
+                mode: match summary.session_mode.as_str() {
+                    "interactive" => SessionMode::Interactive,
+                    "unattended" => SessionMode::Unattended,
+                    "subagent" => SessionMode::Subagent,
+                    "unknown" => SessionMode::Unknown,
+                    other => panic!("unsupported test session mode {other:?}"),
+                },
+                ..Default::default()
+            },
         },
     }
 }
@@ -1151,21 +1171,23 @@ async fn latest_counts_only_eligible_pending_sessions_and_stops_loading_older_bo
     let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
     let doc_store: Arc<dyn DocumentRepository> = store.clone();
     let duplicate = remem_summary("duplicate", 500, 'a');
-    let looper = remem_summary("looper", 400, 'b');
+    let mut looper = remem_summary("looper", 400, 'b');
+    looper.user_message_samples =
+        vec!["You are executing Looper scheduled skill \"daily\". Follow the spec.".to_string()];
     let quarantined = remem_summary("quarantined", 300, 'c');
     let eligible = remem_summary("eligible", 200, 'd');
     let older = remem_summary("older", 100, 'e');
 
     let mut existing = Document::new("codex-session", "");
     existing.set_url(&duplicate.stable_document_url());
-    existing.set_source_version(Some(&duplicate.content_hash));
+    existing.set_source_version(Some(&duplicate.projection_version()));
     doc_store.save(&existing).await.expect("seed duplicate");
 
     let temp = tempfile::tempdir().expect("temporary ingest paths");
     let mut quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
     quarantine.record(
         &quarantined.stable_document_url(),
-        Some(&quarantined.content_hash),
+        Some(&quarantined.projection_version()),
         "provider_rejected",
         "fixture",
     );
@@ -1206,14 +1228,167 @@ async fn latest_counts_only_eligible_pending_sessions_and_stops_loading_older_bo
 
     assert_eq!(
         *loaded_ids.lock().expect("loaded id lock"),
-        vec!["looper".to_string(), "eligible".to_string()],
-        "duplicate and quarantine rows must not consume the bound; older bodies must not load after it is full"
+        vec![
+            "looper".to_string(),
+            "eligible".to_string()
+        ],
+        "unchanged rows skip full loading, while Looper and quarantine do not consume the bound and older bodies stop after it is full"
     );
     assert_eq!(
         doc_store.count().await.unwrap(),
         1,
         "dry-run must not mutate"
     );
+}
+
+#[tokio::test]
+async fn unchanged_looper_clears_stable_and_legacy_items_without_consuming_latest() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store.clone();
+    let mut looper = remem_summary("looper", 300, 'c');
+    looper.user_message_samples =
+        vec!["You are executing Looper scheduled skill \"daily\". Follow the spec.".to_string()];
+    let mut eligible = remem_summary("eligible", 200, 'd');
+    eligible.session_mode = "unattended".to_string();
+    let eligible_url = eligible.stable_document_url();
+
+    let mut stable = Document::new("codex-session", "");
+    stable.set_url(&looper.stable_document_url());
+    stable.set_source_version(Some(&looper.projection_version()));
+    doc_store.save(&stable).await.unwrap();
+    let mut stable_item = Item::new_observation("stale stable", "stale stable");
+    stable_item.set_document_id(stable.id().clone());
+    item_store.save(&stable_item).await.unwrap();
+
+    let mut legacy = Document::new("codex-session", "old Looper body");
+    legacy.set_url(&looper.legacy_document_url());
+    doc_store.save(&legacy).await.unwrap();
+    let mut legacy_item = Item::new_observation("stale legacy", "stale legacy");
+    legacy_item.set_document_id(legacy.id().clone());
+    item_store.save(&legacy_item).await.unwrap();
+
+    let mut unrelated = Document::new("codex-session", "unrelated");
+    unrelated.set_url("remem://raw-session/v2/unrelated");
+    doc_store.save(&unrelated).await.unwrap();
+    let mut unrelated_item = Item::new_observation("keep", "keep");
+    unrelated_item.set_document_id(unrelated.id().clone());
+    item_store.save(&unrelated_item).await.unwrap();
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+    let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+        response: r#"{
+            "session_summary": "eligible replacement",
+            "cognitive_level": "competent", "collaboration_mode": "review",
+            "decisions": [], "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+        .to_string(),
+    });
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: Some(1),
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![eligible, looper],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            let first_user = if summary.session_id == "looper" {
+                "You are executing Looper scheduled skill \"daily\".\nFollow the spec."
+            } else {
+                "ordinary user question with enough useful detail"
+            };
+            Ok(loaded_remem_session(&summary, first_user))
+        },
+        doc_store.clone(),
+        Some(client),
+    )
+    .await
+    .expect("Looper exclusion must still allow the next eligible session to complete");
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["looper".to_string(), "eligible".to_string()]
+    );
+    assert!(item_store
+        .find_by_document_id(stable.id())
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(doc_store.find_by_id(legacy.id()).await.unwrap().is_none());
+    assert!(!item_store.exists(legacy_item.id()).await.unwrap());
+    assert!(item_store.exists(unrelated_item.id()).await.unwrap());
+    let eligible_document = doc_store
+        .find_by_url(&eligible_url)
+        .await
+        .unwrap()
+        .expect("eligible Remem document");
+    let eligible_items = item_store
+        .find_by_document_id(eligible_document.id())
+        .await
+        .unwrap();
+    assert!(!eligible_items.is_empty());
+    assert!(eligible_items.iter().all(|item| item
+        .tags()
+        .iter()
+        .any(|tag| tag.as_str() == "session_mode_unattended")));
+}
+
+#[tokio::test]
+async fn looper_cleanup_rolls_back_stable_and_legacy_item_changes_together() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store;
+    let mut summary = remem_summary("looper", 300, 'c');
+    summary.user_message_samples =
+        vec!["You are executing Looper scheduled skill \"daily\". Follow the spec.".to_string()];
+    let mut stable = Document::new("codex-session", "");
+    stable.set_url(&summary.stable_document_url());
+    stable.set_source_version(Some(&summary.projection_version()));
+    doc_store.save(&stable).await.unwrap();
+    let mut stable_item = Item::new_observation("stable", "stable");
+    stable_item.set_document_id(stable.id().clone());
+    item_store.save(&stable_item).await.unwrap();
+    let mut legacy = Document::new("codex-session", "legacy");
+    legacy.set_url(&summary.legacy_document_url());
+    doc_store.save(&legacy).await.unwrap();
+    let mut legacy_item = Item::new_observation("legacy", "legacy");
+    legacy_item.set_document_id(legacy.id().clone());
+    item_store.save(&legacy_item).await.unwrap();
+
+    let error = legacy_convergence::exclude_scheduled_session_documents(
+        &doc_store,
+        Some(&stable),
+        SessionSource::Codex,
+        &summary.stable_document_url(),
+        &summary.content_hash,
+        &[
+            legacy.id().clone(),
+            DocumentId::from("missing-legacy-document"),
+        ],
+    )
+    .await
+    .expect_err("a failed obsolete delete must roll back the whole Looper cleanup");
+
+    assert!(error.to_string().contains("does not exist"));
+    assert!(item_store.exists(stable_item.id()).await.unwrap());
+    assert!(item_store.exists(legacy_item.id()).await.unwrap());
+    assert!(doc_store.find_by_id(legacy.id()).await.unwrap().is_some());
 }
 
 #[tokio::test]
@@ -1227,7 +1402,7 @@ async fn quarantined_latest_does_not_consume_quota_but_keeps_ingest_incomplete()
     let mut quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
     quarantine.record(
         &quarantined.stable_document_url(),
-        Some(&quarantined.content_hash),
+        Some(&quarantined.projection_version()),
         "provider_rejected",
         "fixture",
     );

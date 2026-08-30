@@ -50,13 +50,17 @@ fn sessions(count: usize, summaries: Vec<Value>) -> Value {
 fn sessions_with_latest(count: usize, summaries: Vec<Value>, latest: Value) -> Value {
     serde_json::json!({
         "since_epoch": null, "until_epoch": null, "project": null,
-        "sample": 0, "latest": latest, "count": count, "sessions": summaries
+        "sample": 1, "latest": latest, "count": count, "sessions": summaries
     })
 }
 
 fn project_sessions(count: usize, summaries: Vec<Value>) -> Value {
     let mut envelope = sessions(count, summaries);
     envelope["project"] = Value::String("/repo".into());
+    envelope["sample"] = Value::from(0);
+    for summary in envelope["sessions"].as_array_mut().unwrap() {
+        summary["user_message_samples"] = Value::Array(Vec::new());
+    }
     envelope
 }
 
@@ -64,12 +68,13 @@ fn summary(message_count: i64) -> Value {
     serde_json::json!({
         "session_ref": "remem://raw-session/v2/636f6465782d636c69/6c6f63616c/2f7265706f/7331",
         "host": "codex-cli",
+        "session_mode": "interactive",
         "source_root": "local", "project": "/repo", "session_id": "s1",
         "first_epoch": 10, "last_epoch": 20, "message_count": message_count,
         "user_message_count": (message_count + 1) / 2,
         "assistant_message_count": message_count / 2,
         "content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "user_message_samples": []
+        "user_message_samples": ["m1"]
     })
 }
 
@@ -276,6 +281,7 @@ fn loads_multiple_pages_and_builds_stable_identity() {
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].session.messages.len(), 3);
     assert_eq!(loaded[0].session.source, SessionSource::Codex);
+    assert_eq!(loaded[0].session.meta.mode, SessionMode::Interactive);
     assert_eq!(loaded[0].first_epoch, 10);
     assert_eq!(
         loaded[0].stable_document_url(),
@@ -296,6 +302,30 @@ fn summary_load_does_not_fetch_messages() {
         "remem://raw-session/v2/636f6465782d636c69/6c6f63616c/2f7265706f/7331"
     );
     assert_eq!(runner.calls.borrow().len(), 1);
+}
+
+#[test]
+fn maps_every_trusted_remem_session_mode() {
+    for (wire_mode, expected) in [
+        ("interactive", SessionMode::Interactive),
+        ("unattended", SessionMode::Unattended),
+        ("subagent", SessionMode::Subagent),
+        ("unknown", SessionMode::Unknown),
+    ] {
+        let mut wire_summary = summary(2);
+        wire_summary["session_mode"] = Value::String(wire_mode.into());
+        let runner = FakeRunner::json(vec![
+            sessions(1, vec![wire_summary]),
+            page(
+                vec![message(1, 10, "user"), message(2, 20, "assistant")],
+                false,
+                Value::Null,
+            ),
+        ]);
+
+        let loaded = load_remem_sessions_with_runner(&runner).unwrap();
+        assert_eq!(loaded[0].session.meta.mode, expected);
+    }
 }
 
 #[test]
@@ -326,7 +356,7 @@ fn summary_load_always_requests_the_complete_remem_collection() {
     assert!(loaded[0].legacy_identity_is_unique);
     assert_eq!(
         runner.calls.borrow()[0],
-        strings(&["raw", "sessions", "--sample", "0", "--json"])
+        strings(&["raw", "sessions", "--sample", "1", "--json"])
     );
 
     let bounded = FakeRunner::json(vec![sessions_with_latest(
@@ -397,6 +427,30 @@ fn rejects_session_ref_that_does_not_encode_declared_selector() {
     assert!(error
         .to_string()
         .contains("does not encode its declared selector"));
+}
+
+#[test]
+fn rejects_unsupported_session_mode() {
+    let mut mismatched = summary(1);
+    mismatched["session_mode"] = Value::String("guessed".into());
+    let runner = FakeRunner::json(vec![sessions(1, vec![mismatched])]);
+
+    let error = load_remem_session_summaries_with_runner(&runner)
+        .expect_err("session mode drift must fail closed");
+
+    assert!(error.to_string().contains("session mode is unsupported"));
+}
+
+#[test]
+fn rejects_non_hex_content_hash() {
+    let mut malformed = summary(1);
+    malformed["content_hash"] = Value::String(format!("sha256:{}", "g".repeat(64)));
+    let runner = FakeRunner::json(vec![sessions(1, vec![malformed])]);
+
+    let error = load_remem_session_summaries_with_runner(&runner)
+        .expect_err("non-hex summary hash must fail at the ingestion boundary");
+
+    assert!(error.to_string().contains("content_hash is invalid"));
 }
 
 #[test]

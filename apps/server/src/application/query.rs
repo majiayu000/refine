@@ -234,10 +234,11 @@ pub async fn get_document(
         && doc.url().starts_with("remem://raw-session/v2/")
     {
         let session_ref = doc.url().to_string();
-        let expected_hash = doc
+        let projection_version = doc
             .source_version()
             .ok_or_else(|| QueryError::Internal("Remem document is missing snapshot hash".into()))?
             .to_string();
+        let expected_hash = remem_snapshot_hash(&projection_version)?.to_string();
         tokio::task::spawn_blocking(move || {
             refine_core::session::load_remem_document_content(&session_ref, &expected_hash)
         })
@@ -258,6 +259,22 @@ pub async fn get_document(
         created_at: doc.created_at().to_rfc3339(),
         items: items.iter().map(ItemDto::from).collect(),
     })
+}
+
+fn remem_snapshot_hash(projection_version: &str) -> Result<&str, QueryError> {
+    let (hash, mode) = projection_version.rsplit_once(':').ok_or_else(|| {
+        QueryError::Internal("Remem document has an invalid projection version".into())
+    })?;
+    if !matches!(mode, "interactive" | "unattended" | "subagent" | "unknown")
+        || !hash.starts_with("sha256:")
+        || hash.len() != 71
+        || !hash[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(QueryError::Internal(
+            "Remem document has an invalid projection version".into(),
+        ));
+    }
+    Ok(hash)
 }
 
 async fn count_items_per_document(
@@ -363,7 +380,7 @@ mod tests {
                 "#!/bin/sh\n",
                 "case \"$2\" in\n",
                 "sessions) printf '%s\\n' '",
-                r#"{"since_epoch":null,"until_epoch":null,"project":"/repo","sample":0,"latest":null,"count":1,"sessions":[{"session_ref":"remem://raw-session/v2/636f6465782d636c69/6c6f63616c/2f7265706f/7331","host":"codex-cli","source_root":"local","project":"/repo","session_id":"s1","first_epoch":10,"last_epoch":20,"message_count":2,"user_message_count":1,"assistant_message_count":1,"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","user_message_samples":[]}]}"#,
+                r#"{"since_epoch":null,"until_epoch":null,"project":"/repo","sample":0,"latest":null,"count":1,"sessions":[{"session_ref":"remem://raw-session/v2/636f6465782d636c69/6c6f63616c/2f7265706f/7331","host":"codex-cli","session_mode":"interactive","source_root":"local","project":"/repo","session_id":"s1","first_epoch":10,"last_epoch":20,"message_count":2,"user_message_count":1,"assistant_message_count":1,"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","user_message_samples":[]}]}"#,
                 "' ;;\n",
                 "messages) printf '%s\\n' '",
                 r#"{"source_type":"raw_archive","host":"codex-cli","source_root":"local","project":"/repo","session_id":"s1","order":"created_at_epoch_asc_id_asc","limit":2000,"count":2,"has_more":false,"next_cursor":null,"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","messages":[{"id":1,"role":"user","content":"question","source":"codex","branch":null,"cwd":"/repo","created_at_epoch":10},{"id":2,"role":"assistant","content":"answer","source":"codex","branch":null,"cwd":"/repo","created_at_epoch":20}]}"#,
@@ -392,7 +409,7 @@ mod tests {
         let mut document = Document::new("codex-session", "");
         document.set_url("remem://raw-session/v2/636f6465782d636c69/6c6f63616c/2f7265706f/7331");
         document.set_source_version(Some(
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:interactive",
         ));
         state
             .doc_store

@@ -1,8 +1,9 @@
 use super::legacy_migration::legacy_document_might_match_summary;
+use super::provenance::replace_session_mode_tags;
 use crate::remem_sessions::RememSessionSummary;
 use anyhow::{bail, Result};
 use refine_core::knowledge::{Document, DocumentId, DocumentRepository, RestoreDocumentParams};
-use refine_core::session::SessionSource;
+use refine_core::session::{SessionMode, SessionSource};
 use std::sync::Arc;
 
 pub(super) fn referenced_session_document(
@@ -29,7 +30,8 @@ pub(super) async fn save_referenced_session_and_delete_legacy(
     existing: &Document,
     referenced: &Document,
     legacy_document_ids: &[DocumentId],
-) -> refine_core::error::InfraResult<()> {
+    mode: SessionMode,
+) -> Result<()> {
     let mut obsolete: Vec<DocumentId> = legacy_document_ids
         .iter()
         .filter(|id| *id != referenced.id())
@@ -45,14 +47,82 @@ pub(super) async fn save_referenced_session_and_delete_legacy(
             source_document_ids.push(document_id.clone());
         }
     }
+    let mut replacement_items = Vec::new();
+    for document_id in &source_document_ids {
+        replacement_items.extend(doc_store.find_items_by_document_id(document_id).await?);
+    }
+    replace_session_mode_tags(&mut replacement_items, mode)?;
+    for item in &mut replacement_items {
+        item.set_document_id(referenced.id().clone());
+    }
     doc_store
         .save_with_replaced_items_and_delete_documents(
             referenced,
-            &[],
+            &replacement_items,
             &source_document_ids,
             &obsolete,
         )
+        .await?;
+    Ok(())
+}
+
+pub(super) async fn exclude_scheduled_session_documents(
+    doc_store: &Arc<dyn DocumentRepository>,
+    existing: Option<&Document>,
+    source: SessionSource,
+    url: &str,
+    source_version: &str,
+    legacy_document_ids: &[DocumentId],
+) -> refine_core::error::InfraResult<()> {
+    let Some(existing) = existing else {
+        return doc_store
+            .delete_documents_with_items(legacy_document_ids)
+            .await;
+    };
+    let referenced = referenced_session_document(existing, source, url, source_version);
+    let obsolete = legacy_document_ids
+        .iter()
+        .filter(|id| *id != referenced.id())
+        .cloned()
+        .collect::<Vec<_>>();
+    doc_store
+        .save_with_replaced_items_and_delete_documents(&referenced, &[], &[], &obsolete)
         .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn skip_unchanged_session(
+    doc_store: &Arc<dyn DocumentRepository>,
+    existing: Option<&Document>,
+    existing_uses_legacy_identity: bool,
+    might_have_legacy_documents: bool,
+    dry_run: bool,
+    source: SessionSource,
+    url: &str,
+    source_version: &str,
+) -> refine_core::error::InfraResult<bool> {
+    let Some(existing) = existing.filter(|document| {
+        !existing_uses_legacy_identity
+            && !might_have_legacy_documents
+            && document.source_version() == Some(source_version)
+    }) else {
+        return Ok(false);
+    };
+    if !dry_run
+        && (!existing.raw_content().is_empty()
+            || existing.url() != url
+            || existing.source() != source.as_str())
+    {
+        doc_store
+            .save(&referenced_session_document(
+                existing,
+                source,
+                url,
+                source_version,
+            ))
+            .await?;
+    }
+    Ok(true)
 }
 
 pub(super) fn might_have_legacy_documents(

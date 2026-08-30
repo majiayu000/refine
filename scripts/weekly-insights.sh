@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${HOME}/.cargo/bin:${PATH:-}"
 REFINE_BIN="${REFINE_BIN:-${HOME}/.cargo/bin/refine}"
 LOG_PREFIX="[refine-weekly]"
 FAILED_STEPS=()

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use refine_core::knowledge::{Document, DocumentRepository, Tag};
+use refine_core::knowledge::{Document, DocumentRepository, Item, Tag};
 use refine_core::session::SessionMode;
 use std::sync::Arc;
 
@@ -7,22 +7,11 @@ fn is_session_mode_tag(tag: &str) -> bool {
     tag.starts_with("session_mode_")
 }
 
-/// Replace only Refine-owned provenance tags, preserving every other tag and
-/// the document payload. No LLM extraction is involved.
-pub(super) async fn backfill_session_metadata(
-    doc_store: &Arc<dyn DocumentRepository>,
-    document: &Document,
-    mode: SessionMode,
-    persist: bool,
-) -> Result<bool> {
+pub(super) fn replace_session_mode_tags(items: &mut [Item], mode: SessionMode) -> Result<bool> {
     let mode_tag = Tag::new(mode.as_tag()).context("build session provenance tag")?;
-    let mut items = doc_store
-        .find_items_by_document_id(document.id())
-        .await
-        .context("load observations for session provenance backfill")?;
     let mut changed = false;
 
-    for item in &mut items {
+    for item in items {
         let existing_modes: Vec<&str> = item
             .tags()
             .iter()
@@ -52,6 +41,23 @@ pub(super) async fn backfill_session_metadata(
             .context("replace session provenance tag on observation")?;
         changed = true;
     }
+
+    Ok(changed)
+}
+
+/// Replace only Refine-owned provenance tags, preserving every other tag and
+/// the document payload. No LLM extraction is involved.
+pub(super) async fn backfill_session_metadata(
+    doc_store: &Arc<dyn DocumentRepository>,
+    document: &Document,
+    mode: SessionMode,
+    persist: bool,
+) -> Result<bool> {
+    let mut items = doc_store
+        .find_items_by_document_id(document.id())
+        .await
+        .context("load observations for session provenance backfill")?;
+    let changed = replace_session_mode_tags(&mut items, mode)?;
 
     if changed && persist {
         doc_store

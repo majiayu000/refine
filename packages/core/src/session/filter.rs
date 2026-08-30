@@ -38,7 +38,11 @@ pub fn is_looper_scheduled_skill_session(session: &Session) -> bool {
         .messages
         .iter()
         .find(|message| message.role == MessageRole::User)
-        .is_some_and(|message| message.content.starts_with(LOOPER_SCHEDULED_SKILL_MARKER))
+        .is_some_and(|message| is_looper_scheduled_skill_first_user_message(&message.content))
+}
+
+pub fn is_looper_scheduled_skill_first_user_message(message: &str) -> bool {
+    message.starts_with(LOOPER_SCHEDULED_SKILL_MARKER)
 }
 
 /// 批量过滤会话

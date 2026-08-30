@@ -11,7 +11,7 @@ use refine_core::infra::LlmClient;
 use refine_core::knowledge::{Document, DocumentRepository};
 use refine_core::session::{
     chunk_session, discover_sessions, needs_chunking, parse_session_file, FilterConfig,
-    SessionMode, SessionSource,
+    SessionSource,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -269,47 +269,35 @@ where
         };
         let existing_document_uses_legacy_identity =
             stable_document.is_none() && existing_document.is_some();
-        let session_source = match summary.host.as_str() {
-            "claude-code" => SessionSource::ClaudeCode,
-            "codex-cli" => SessionSource::Codex,
-            "cursor" => SessionSource::Cursor,
-            other => anyhow::bail!("unsupported Remem session host {other:?}"),
-        };
-        let source_version = summary.content_hash.clone();
+        let session_source = summary.session_source()?;
+        let source_version = summary.projection_version();
         let might_have_legacy_documents =
             might_have_legacy_documents(&summary, legacy_document, &existing_documents);
+        let summary_is_looper = summary.is_looper_scheduled();
         if summary.user_message_count < filter_config.min_user_messages as i64 {
             skipped_filter += 1;
             continue;
         }
 
-        if let Some(existing_doc) = existing_document
-            .as_ref()
-            .filter(|_| !existing_document_uses_legacy_identity && !might_have_legacy_documents)
-        {
-            if existing_doc.source_version() == Some(source_version.as_str()) {
-                if !options.dry_run
-                    && (!existing_doc.raw_content().is_empty()
-                        || existing_doc.url() != url
-                        || existing_doc.source() != session_source.as_str())
-                {
-                    doc_store
-                        .save(&referenced_session_document(
-                            existing_doc,
-                            session_source.clone(),
-                            &url,
-                            &source_version,
-                        ))
-                        .await
-                        .context("save referenced Remem session metadata")?;
-                }
-                skipped_dup += 1;
-                continue;
-            }
-        }
-
         if !options.retry_quarantined && quarantine.contains(&url, Some(&source_version)) {
             selected_quarantined_identities.insert(quarantine_key(&url, Some(&source_version)));
+            continue;
+        }
+
+        if !summary_is_looper
+            && legacy_convergence::skip_unchanged_session(
+                &doc_store,
+                existing_document.as_ref(),
+                existing_document_uses_legacy_identity,
+                might_have_legacy_documents,
+                options.dry_run,
+                session_source.clone(),
+                &url,
+                &source_version,
+            )
+            .await?
+        {
+            skipped_dup += 1;
             continue;
         }
 
@@ -355,6 +343,22 @@ where
             &remem_session.source_root,
             &remem_session.session_id,
         )?;
+        if summary_is_looper {
+            if !options.dry_run {
+                legacy_convergence::exclude_scheduled_session_documents(
+                    &doc_store,
+                    existing_document.as_ref(),
+                    session_source.clone(),
+                    &url,
+                    &source_version,
+                    &legacy_documents_to_delete,
+                )
+                .await
+                .context("exclude Looper scheduled session documents and facets")?;
+            }
+            skipped_filter += 1;
+            continue;
+        }
         if existing_document.is_none() && legacy_documents_to_delete.len() == 1 {
             let legacy_id = &legacy_documents_to_delete[0];
             let legacy_document = existing_documents
@@ -376,6 +380,7 @@ where
                         legacy_document,
                         &referenced,
                         &legacy_documents_to_delete,
+                        remem_session.session.meta.mode,
                     )
                     .await
                     .context("migrate exact legacy session without LLM")?;
@@ -401,6 +406,7 @@ where
                         existing_doc,
                         &referenced,
                         &legacy_documents_to_delete,
+                        remem_session.session.meta.mode,
                     )
                     .await
                     .context("migrate Remem session and clean legacy documents/facets")?;
@@ -439,7 +445,7 @@ where
             source: remem_session.session.source,
             project_identity: Some(remem_session.project.clone()),
             project: Some(remem_session.project),
-            mode: SessionMode::Unknown,
+            mode: remem_session.session.meta.mode,
             captured_at,
             has_embedded_timestamp: true,
             raw_content,

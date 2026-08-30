@@ -31,7 +31,10 @@ pub use facets::{
     facets_to_items_with_mode_and_identity, parse_facet_response, FacetResponse,
     FACET_SYSTEM_PROMPT,
 };
-pub use filter::{filter_sessions, is_looper_scheduled_skill_session, passes_filter, FilterConfig};
+pub use filter::{
+    filter_sessions, is_looper_scheduled_skill_first_user_message,
+    is_looper_scheduled_skill_session, passes_filter, FilterConfig,
+};
 pub use parser::{parse_session_content, parse_session_file};
 pub use prescription::{build_prescription_prompt, PRESCRIPTION_SYSTEM_PROMPT};
 pub use project_identity::ProjectIdentityResolver;
