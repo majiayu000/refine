@@ -174,6 +174,11 @@ where
                 request_timeout.as_millis()
             ))),
         };
+        if let Err(InfraError::RateLimited { retry_after_secs }) = &result {
+            if behavior.record_persistent_quota {
+                set_quota_exhausted(*retry_after_secs);
+            }
+        }
         if let Some(path) = ledger_path.as_deref() {
             let record = LlmUsageRecord::from_attempt(
                 operation,
@@ -189,12 +194,7 @@ where
 
         match result {
             Ok(response) => return Ok(response.content),
-            Err(err @ InfraError::RateLimited { retry_after_secs }) => {
-                if behavior.record_persistent_quota {
-                    set_quota_exhausted(retry_after_secs);
-                }
-                return Err(err);
-            }
+            Err(err @ InfraError::RateLimited { .. }) => return Err(err),
             Err(err) => {
                 if !is_retryable_error(&err, behavior.retry_http_429) || attempt == max_retries - 1
                 {
