@@ -26,9 +26,10 @@ if [[ "${FAKE_ASSERT_ISOLATION:-0}" == "1" ]]; then
   for secret in ANTHROPIC_API_KEY ANTHROPIC_BASE_URL GOOGLE_API_KEY GEMINI_API_KEY XAI_API_KEY GROK_API_KEY BASE_API_KEY BASE_URL OPENAI_BASE_URL OPENAI_API_BASE; do
     [[ -z "${!secret:-}" ]] || exit 88
   done
-  for required in --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check; do
+  for required in --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --disable; do
     [[ " $* " == *" ${required} "* ]] || exit 89
   done
+  [[ " $* " == *" --disable multi_agent "* ]] || exit 89
 fi
 case "${FAKE_AGENT_MODE:-normal}" in
   normal) printf '# candidate\n' > "$REFINE_COGNITIVE_PORTRAIT_OUTPUT" ;;
@@ -49,6 +50,10 @@ case "${FAKE_AGENT_MODE:-normal}" in
     exit 7
     ;;
   candidate-symlink) ln -s "$FAKE_VICTIM" "$REFINE_COGNITIVE_PORTRAIT_OUTPUT" ;;
+  layer-artifact)
+    printf '# discarded layer\n' > "$(dirname "$REFINE_COGNITIVE_PORTRAIT_OUTPUT")/layer-l1.md"
+    printf '# candidate\n' > "$REFINE_COGNITIVE_PORTRAIT_OUTPUT"
+    ;;
   oversized-sparse) truncate -s 1048577 "$REFINE_COGNITIVE_PORTRAIT_OUTPUT" ;;
   tamper-validator)
     printf '#!/usr/bin/env bash\nprintf exploited > "%s"\n' "$FAKE_VALIDATOR_MARKER" > "$FAKE_VALIDATOR_TARGET"
@@ -131,6 +136,10 @@ grep -q "$REPORT_BASE" "$TEST_ROOT/success/portraits/INDEX.md" || fail 'index no
 
 run_case nonzero exit && fail 'nonzero agent accepted'
 [[ ! -e "$TEST_ROOT/nonzero/portraits/${REPORT_BASE}.md" ]] || fail 'failed candidate entered archive'
+
+run_case layer-artifact layer-artifact && fail 'intermediate layer artifact accepted'
+[[ ! -e "$TEST_ROOT/layer-artifact/portraits/${REPORT_BASE}.md" ]] \
+  || fail 'layer-producing candidate entered archive'
 
 run_case validator-fail normal 9 && fail 'validator failure accepted'
 [[ ! -e "$TEST_ROOT/validator-fail/portraits/${REPORT_BASE}.md" ]] || fail 'failed validation published report'

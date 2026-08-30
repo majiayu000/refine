@@ -79,7 +79,7 @@ auto/remem: remem raw archive；local: filesystem scan
 
 ┌─────────────────────────────────────────────────────────────┐
 │ 链路 9: cognitive-portrait skill (外部)                     │
-│   deterministic bundle + 4 agents + evidence quality gate  │
+│   deterministic bundle + 1 agent + evidence quality gate   │
 │   → v4 report + bundle.json + quality.json                 │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -234,8 +234,8 @@ auto/remem: remem raw archive；local: filesystem scan
 | 代码位置 | `skills/cognitive-portrait/SKILL.md` + `prompts/`（在 refine 代码库中；`~/.claude/skills/cognitive-portrait` 为符号链接，见 `docs/setup-skills.md`）|
 | 触发方式 | `scripts/cognitive-portrait.sh` 双周调度或用户交互触发 |
 | 数据来源 | `refine cognitive-portrait collect` 复用 Session Insights 的同一 SQLite read snapshot、source allowlist、strict eligible cohort 和 manifest builder；默认 current/previous 90d event time |
-| 处理步骤 | 1) 无 LLM collector 输出 deterministic JSON bundle；2) 4 个 agent 只读同一 bundle 并行写 L1-L4；3) 合并 v4 candidate；4) validator 检查证据、数字、可比性、novelty 和 action；5) 通过后才写 INDEX，失败隔离 |
-| LLM 调用 | collector/validator **0 次**；L1-L4 生成 **4 路并行**，不经过 Refine `LlmClient` |
+| 处理步骤 | 1) 无 LLM collector 输出 deterministic JSON bundle；2) 1 个 agent 在同一上下文内顺序分析 L1-L4 并写一个 v4 candidate；3) validator 检查证据、数字、可比性、novelty 和 action；4) 通过后才写 INDEX，失败隔离 |
+| LLM 调用 | collector/validator **0 次**；L1-L4 由 **1 个 Codex agent** 顺序生成，运行时禁用 `multi_agent`，不经过 Refine `LlmClient` |
 | 输出目标 | `cognitive-portrait-<date>-v4.md` + `evidence/*.bundle.json` + `evidence/*.quality.json` |
 | 输出 schema | 4 层 Markdown；事实绑定 evidence ID/JSON pointer；处方绑定 owner/due/verify；不设行数门槛 |
 | 依赖 | 依赖链路 1 的 first-class session Observation；不依赖链路 2 的叙事输出或链路 3 的 score 文本 |

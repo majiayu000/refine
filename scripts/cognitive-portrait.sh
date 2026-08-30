@@ -296,7 +296,7 @@ if [[ "$(basename "$AGENT_BIN")" == "codex" ]]; then
     log "ERROR: cannot inspect Codex automation flags"
     exit 1
   }
-  for required_flag in --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check; do
+  for required_flag in --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --disable; do
     grep -q -- "$required_flag" <<<"$agent_help" || {
       log "ERROR: Codex lacks required isolation flag ${required_flag}"
       exit 1
@@ -491,7 +491,7 @@ fi
 export REFINE_COGNITIVE_PORTRAIT_BUNDLE="$agent_bundle"
 export REFINE_COGNITIVE_PORTRAIT_PREVIOUS="${agent_previous:-}"
 export REFINE_COGNITIVE_PORTRAIT_OUTPUT="$agent_candidate"
-prompt="Read ${SKILL_FILE} and generate one cognitive portrait from the supplied bundle. Write only ${agent_candidate}; do not edit the repository, archive, evidence, input bundle, validator, or history."
+prompt="Read ${SKILL_FILE} and generate one cognitive portrait from the supplied bundle as one agent. Do not delegate or spawn subagents. Analyze L1 through L4 sequentially in this context. Write only ${agent_candidate}; do not edit the repository, archive, evidence, input bundle, validator, or history."
 agent_env=(
   "HOME=${HOME}"
   "PATH=${PATH}"
@@ -509,7 +509,7 @@ log "running untrusted agent in isolated staging directory"
 rc=0
 (cd "$staging_dir" && exec /usr/bin/perl -MPOSIX=setsid -e 'setsid() or die "setsid failed: $!"; exec @ARGV or die "exec failed: $!"' -- \
   env -i "${agent_env[@]}" \
-    "$AGENT_BIN" exec --ephemeral --ignore-user-config --ignore-rules \
+    "$AGENT_BIN" exec --ephemeral --ignore-user-config --ignore-rules --disable multi_agent \
       --skip-git-repo-check --sandbox "$AGENT_SANDBOX" "$prompt") 2>&1 &
 agent_pid=$!
 wait "$agent_pid" || rc=$?
@@ -535,7 +535,7 @@ if [[ "$archive_after" != "$archive_before" ]]; then
   exit 1
 fi
 if [[ $(find "$staging_dir" -maxdepth 1 -type f ! -name bundle.json ! -name previous.md \
-  ! -name candidate.md ! -name 'layer-l[1-4].md' | wc -l | tr -d ' ') != 0 ]]; then
+  ! -name candidate.md | wc -l | tr -d ' ') != 0 ]]; then
   log "ERROR: agent produced unexpected staging artifacts"
   exit 1
 fi

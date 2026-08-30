@@ -1,12 +1,12 @@
 # Authoritative spec: docs/cognitive-portraits/SPEC.md
 
-# Cognitive Portrait v4 — evidence-bundle dispatcher
+# Cognitive Portrait v4 — single-agent evidence analysis
 
 Trigger keywords: 认知画像 / cognitive portrait / 认知分析 / 分析我的成长
 
-This skill turns one deterministic, versioned Refine bundle into four parallel
-analysis layers. It never invents SQL, never queries `refine.db` directly, and
-never treats output length as evidence quality.
+This skill turns one deterministic, versioned Refine bundle into one four-part
+portrait in a single agent context. It never invents SQL, never queries
+`refine.db` directly, and never treats output length as evidence quality.
 
 ## Stage 0 — preflight
 
@@ -50,18 +50,21 @@ while the scheduled archive stays unchanged.
 If collection reports `NO_CORE_DATA` or `SCHEMA_INVALID`, stop with a specific
 error as well.
 
-## Stage 2 — four parallel layers
+## Stage 2 — one sequential analysis pass
 
-Dispatch four independent agents in parallel. Each receives:
+Do not delegate, spawn subagents, or split the work into parallel tasks. In the
+primary agent context, read the four trusted prompt templates in L1-L4 order and
+use them as section guides. Each section uses:
 
 - the same read-only bundle path;
 - the optional previous portrait path;
-- exactly one prompt under `skills/cognitive-portrait/prompts/`;
-- exactly one owned layer file beside `REFINE_COGNITIVE_PORTRAIT_OUTPUT`, named
-  `layer-l{1..4}.md`.
+- its matching prompt under `skills/cognitive-portrait/prompts/`;
+- the same closed claim catalog and evidence boundaries.
 
-No layer may write another layer, the final report, `INDEX.md`, the bundle, or
-the database.
+Keep intermediate reasoning in the current context. Do not create layer files
+or any other staging artifact. After all four sections are planned, write only
+`REFINE_COGNITIVE_PORTRAIT_OUTPUT`. Do not write `INDEX.md`, the bundle, the
+database, or any repository file.
 
 ### Closed claim catalog
 
@@ -94,8 +97,8 @@ retained qualitative slice as exhaustive. Only retained `evidence[]` IDs and
 their catalog claims may be cited. Do not infer facts about omitted rows from a
 selection digest.
 
-A layer may cite interpretations and recommendations with these machine-readable
-forms:
+Each section may cite interpretations and recommendations with these
+machine-readable forms:
 
 - `[evidence:obs:<item-id>]` for an observation in the bundle;
 - `[bundle:/json/pointer]` for a non-numeric aggregate or manifest field;
@@ -115,10 +118,10 @@ condition. Valid examples are `[verify:metric|/comparison/status|eq|"OK"]`,
 `[verify:check|weekly-reflection|pass]`. Metric targets are typed JSON values;
 artifact/check states are fixed enums. Free-form verification text is invalid.
 
-## Stage 3 — merge only; wrapper validates and archives
+## Stage 3 — write once; wrapper validates and archives
 
-1. Confirm all four layer files exist and keep their L1-L4 boundaries.
-2. Merge them only into `REFINE_COGNITIVE_PORTRAIT_OUTPUT` with a
+1. Confirm the planned report contains all four L1-L4 sections in order.
+2. Write them once into `REFINE_COGNITIVE_PORTRAIT_OUTPUT` with a
    header that records bundle schema, collector version, cutoff, window, cohort
    status, source revision, and binary identity.
 3. Do not use line count, table count, or prose volume as a pass condition.
@@ -128,8 +131,8 @@ artifact/check states are fixed enums. Free-form verification text is invalid.
 The scheduled wrapper owns the trusted bundle, validator, fixed report name,
 kernel-backed lock, archive, and index. It hash-checks trusted inputs after the
 agent exits, validates the staged candidate, rejects collisions/symlinks/hard
-links, and publishes the report, evidence, and index transactionally. No agent
-or layer may overwrite a prior artifact.
+links, and publishes the report, evidence, and index transactionally. The agent
+may not overwrite a prior artifact.
 
 The validator requires complete factual traceability, zero unsupported numeric
 claims, complete inference evidence traceability, canonical catalog usage,

@@ -1,7 +1,9 @@
-# L4 Agent — 成长处方
+# L4 section guide — 成长处方
 
-You own only `layer-l4.md` beside `REFINE_COGNITIVE_PORTRAIT_OUTPUT`. Read only the deterministic bundle and optional
-previous portrait. Do not query SQLite or edit the final archive.
+In the single-agent run, use this guide for the L4 section of
+`REFINE_COGNITIVE_PORTRAIT_OUTPUT`. Read only the deterministic bundle and
+optional previous portrait. Do not query SQLite, create an intermediate layer
+file, or edit the final archive.
 
 Write `## L4：成长处方` with:
 

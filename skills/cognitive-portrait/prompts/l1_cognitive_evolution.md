@@ -1,8 +1,9 @@
-# L1 Agent — 认知演进
+# L1 section guide — 认知演进
 
-You own only `layer-l1.md` beside `REFINE_COGNITIVE_PORTRAIT_OUTPUT`. Read only the JSON bundle at
+In the single-agent run, use this guide for the L1 section of
+`REFINE_COGNITIVE_PORTRAIT_OUTPUT`. Read only the JSON bundle at
 `REFINE_COGNITIVE_PORTRAIT_BUNDLE` and the optional previous portrait. Do not
-query SQLite, write the final portrait, or edit `INDEX.md`.
+query SQLite, create an intermediate layer file, or edit `INDEX.md`.
 
 Write `## L1：认知演进` with these subsections:
 
