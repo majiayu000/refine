@@ -250,6 +250,7 @@ fn error_kind(error: &InfraError) -> &'static str {
         InfraError::LlmHttp { .. } => "http",
         InfraError::LlmParse(_) => "parse",
         InfraError::UsageLedger(_) => "usage_ledger",
+        InfraError::LlmBudgetExceeded { .. } => "budget_exceeded",
         InfraError::LlmRejected { .. } => "rejected",
         InfraError::Http(_) => "transport",
         InfraError::RateLimited { .. } => "rate_limited",

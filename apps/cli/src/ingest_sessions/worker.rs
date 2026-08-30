@@ -388,7 +388,7 @@ pub(super) async fn llm_call_with_retry(
     quota_hit: &Arc<AtomicBool>,
 ) -> Result<String> {
     if quota_hit.load(Ordering::Relaxed) {
-        return Err(anyhow::anyhow!("LLM 配额已耗尽，跳过"));
+        return Err(anyhow::anyhow!("LLM 配额已耗尽或本次运行预算已耗尽，跳过"));
     }
 
     let prompt = build_facet_prompt(content);
@@ -423,6 +423,10 @@ pub(super) fn finish_llm_call(
                 "LLM 配额已耗尽 (retry_after: {:?}s)",
                 retry_after_secs
             ))
+        }
+        Err(error @ InfraError::LlmBudgetExceeded { .. }) => {
+            quota_hit.store(true, Ordering::Relaxed);
+            Err(anyhow::Error::new(error))
         }
         Err(error) => Err(anyhow::Error::new(error)),
     }

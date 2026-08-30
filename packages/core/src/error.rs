@@ -44,6 +44,14 @@ pub enum InfraError {
     #[error("LLM 用量账本写入失败: {0}")]
     UsageLedger(String),
 
+    #[error("LLM 运行预算已耗尽 ({resource}: used {used}, requested {requested}, limit {limit})")]
+    LlmBudgetExceeded {
+        resource: &'static str,
+        limit: u64,
+        used: u64,
+        requested: u64,
+    },
+
     /// The provider rejected the prompt for a deterministic policy reason.
     /// Retrying the same input cannot succeed, so callers must quarantine it.
     #[error("LLM 内容被拒绝 ({code}): {message}")]
