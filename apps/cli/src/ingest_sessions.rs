@@ -220,19 +220,16 @@ where
     } else {
         Some(lock_session_mutations(db_path)?)
     };
-    let quarantine = match quarantine {
+    let mut quarantine = match quarantine {
         Some(quarantine) => quarantine,
         None => QuarantineStore::load()?,
     };
-
     println!("remem 返回 {} 个会话摘要", summaries.len());
-
     // `sort_by` is stable, so equal timestamps preserve Remem's declared order.
     summaries.sort_by_key(|summary| std::cmp::Reverse(summary.last_epoch));
     if let Some(limit) = options.limit {
         summaries.truncate(limit);
     }
-
     let total = summaries.len();
     let filter_config = FilterConfig::default();
     let document_count = doc_store.count().await?;
@@ -278,12 +275,13 @@ where
             skipped_filter += 1;
             continue;
         }
-
-        if !options.retry_quarantined && quarantine.contains(&url, Some(&source_version)) {
+        if !options.retry_quarantined
+            && quarantine.contains(&url, Some(&source_version))
+            && !summary_is_looper
+        {
             selected_quarantined_identities.insert(quarantine_key(&url, Some(&source_version)));
             continue;
         }
-
         if !summary_is_looper
             && legacy_convergence::skip_unchanged_session(
                 &doc_store,
@@ -355,6 +353,8 @@ where
                 )
                 .await
                 .context("exclude Looper scheduled session documents and facets")?;
+                quarantine.resolve(&url);
+                quarantine.save_if_dirty()?;
             }
             skipped_filter += 1;
             continue;
