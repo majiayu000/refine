@@ -104,6 +104,7 @@ struct SessionsEnvelope {
 pub struct RememSessionSummary {
     pub session_ref: String,
     pub host: String,
+    pub session_mode: String,
     pub source_root: String,
     pub project: String,
     pub session_id: String,
@@ -121,6 +122,25 @@ pub struct RememSessionSummary {
 impl RememSessionSummary {
     pub fn stable_document_url(&self) -> String {
         self.session_ref.clone()
+    }
+
+    pub fn projection_version(&self) -> String {
+        format!("{}:{}", self.content_hash, self.session_mode)
+    }
+
+    pub fn session_source(&self) -> Result<SessionSource> {
+        match self.host.as_str() {
+            "claude-code" => Ok(SessionSource::ClaudeCode),
+            "codex-cli" => Ok(SessionSource::Codex),
+            "cursor" => Ok(SessionSource::Cursor),
+            other => bail!("unsupported Remem session host {other:?}"),
+        }
+    }
+
+    pub fn is_looper_scheduled(&self) -> bool {
+        self.user_message_samples
+            .first()
+            .is_some_and(|message| super::is_looper_scheduled_skill_first_user_message(message))
     }
 
     pub fn legacy_document_url(&self) -> String {
@@ -163,8 +183,8 @@ struct RawMessage {
 fn load_remem_session_summaries_with_runner<R: Runner>(
     runner: &R,
 ) -> Result<Vec<RememSessionSummary>> {
-    let args = strings(&["raw", "sessions", "--sample", "0", "--json"]);
-    read_session_summaries(runner, &args, None)
+    let args = strings(&["raw", "sessions", "--sample", "1", "--json"]);
+    read_session_summaries(runner, &args, None, 1)
 }
 
 #[cfg(test)]
@@ -179,6 +199,7 @@ fn read_session_summaries<R: Runner>(
     runner: &R,
     args: &[String],
     expected_project: Option<&str>,
+    expected_sample: i64,
 ) -> Result<Vec<RememSessionSummary>> {
     let mut envelope: SessionsEnvelope = run_json(runner, args, "raw sessions")?;
     ensure!(
@@ -217,7 +238,10 @@ fn read_session_summaries<R: Runner>(
         "raw sessions unexpectedly applied latest bound: received {:?}",
         envelope.latest,
     );
-    ensure!(envelope.sample == 0, "raw sessions sample drifted from 0");
+    ensure!(
+        envelope.sample == expected_sample,
+        "raw sessions sample drifted from {expected_sample}"
+    );
     ensure!(
         envelope.count == envelope.sessions.len(),
         "raw sessions count mismatch: declared {}, received {}",
@@ -237,6 +261,13 @@ fn read_session_summaries<R: Runner>(
                 "claude-code" | "codex-cli" | "cursor"
             ),
             "raw session host is unsupported"
+        );
+        ensure!(
+            matches!(
+                summary.session_mode.as_str(),
+                "interactive" | "unattended" | "subagent" | "unknown"
+            ),
+            "raw session mode is unsupported"
         );
         ensure!(
             !summary.source_root.is_empty(),
@@ -268,11 +299,16 @@ fn read_session_summaries<R: Runner>(
             "raw session role counts do not match message_count"
         );
         ensure!(
-            summary.user_message_samples.is_empty(),
-            "raw sessions returned samples for sample=0"
+            summary.user_message_samples.len()
+                == usize::try_from(summary.user_message_count.min(expected_sample)).unwrap_or(0),
+            "raw sessions returned an unexpected user sample count"
         );
         ensure!(
-            summary.content_hash.starts_with("sha256:") && summary.content_hash.len() == 71,
+            summary.content_hash.starts_with("sha256:")
+                && summary.content_hash.len() == 71
+                && summary.content_hash[7..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit()),
             "raw session content_hash is invalid"
         );
         ensure!(
@@ -401,6 +437,7 @@ fn load_one_session<R: Runner>(runner: &R, summary: RememSessionSummary) -> Resu
     );
     let started_at = DateTime::<Utc>::from_timestamp(summary.first_epoch, 0)
         .context("raw session first_epoch is outside chrono range")?;
+    let session_source = summary.session_source()?;
     let mut result = RememSession {
         session_ref: summary.session_ref.clone(),
         source_root: summary.source_root,
@@ -408,12 +445,7 @@ fn load_one_session<R: Runner>(runner: &R, summary: RememSessionSummary) -> Resu
         session_id: summary.session_id,
         first_epoch: summary.first_epoch,
         session: Session {
-            source: match summary.host.as_str() {
-                "claude-code" => SessionSource::ClaudeCode,
-                "codex-cli" => SessionSource::Codex,
-                "cursor" => SessionSource::Cursor,
-                _ => unreachable!("host validated in summary contract"),
-            },
+            source: session_source,
             file_path: PathBuf::new(),
             messages,
             meta: SessionMeta {
@@ -421,7 +453,13 @@ fn load_one_session<R: Runner>(runner: &R, summary: RememSessionSummary) -> Resu
                 project_identity: None,
                 model: None,
                 started_at: Some(started_at),
-                mode: SessionMode::Unknown,
+                mode: match summary.session_mode.as_str() {
+                    "interactive" => SessionMode::Interactive,
+                    "unattended" => SessionMode::Unattended,
+                    "subagent" => SessionMode::Subagent,
+                    "unknown" => SessionMode::Unknown,
+                    _ => unreachable!("session mode validated in summary contract"),
+                },
                 truncated_tail: false,
             },
         },

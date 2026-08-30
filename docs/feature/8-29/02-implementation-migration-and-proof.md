@@ -17,8 +17,10 @@
 
 ### P0 Remem 合同
 
-- 输出可信 host、稳定 session_ref、content_hash，并让分页消息返回冻结快照 hash；
+- 输出可信 host、session_mode、稳定 session_ref、content_hash，并让分页消息返回冻结快照 hash；
 - 会话身份隔离相同 ID 的不同 host；
+- Codex 的 TUI/Desktop、codex_exec/Symphony、subagent 分别映射 interactive、
+  unattended、subagent；未知来源保持 unknown，已知模式冲突时写入前失败；
 - Refine 枚举时读取完整摘要集合，不把 `--latest` 下推给 Remem，以完整判定 legacy
   identity uniqueness；
 - provenance 缺失或冲突时 fail closed。
@@ -26,7 +28,11 @@
 ### P0 Refine 引用投影
 
 - 正常 `ingest-sessions` 只读 Remem，摘要与消息快照不一致时中止；
-- 摘要未变化直接跳过；
+- 摘要以 `content_hash + session_mode` 判断投影是否变化，模式修正不会被旧 hash
+  快路径吞掉；
+- 新抽取与无 LLM 的 legacy 收敛都会把可信 mode 原子写入 Observation 标签；
+- 完整摘要只携带首条用户消息的有界 sample，用于在全文拉取前识别 Looper；普通
+  unchanged 会话仍不下载全文；
 - 抽取时原文只存在内存；
 - 保存空会话正文、Remem 引用、host、hash 和 Observation；
 - `doc-show` 按引用即时取原文。
@@ -54,6 +60,10 @@ missing 需要正常的新会话抽取；ambiguous 明确报错，二者都不�
 - `last-refresh-ok` 只代表整条链路成功；
 - 定时运行默认传 `--latest 80`；该上限约束最终 eligible pending 集合，重复、低信号、
   显式 Looper 定时任务和隔离记录不占额度，选满后不再读取更旧正文；
+- 命中的 Looper 会话原子清空 stable Document 的旧 Items，并删除匹配的 legacy
+  Document/Items；失败时整组回滚，无关文档不受影响；
+- weekly LaunchAgent wrapper 显式提供 Homebrew、系统和 Cargo bin PATH，launchd
+  极简环境下仍能解析 Remem；
 - 同一时刻只有一个 runtime job。
 
 ## 五层真实性门禁

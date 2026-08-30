@@ -1,6 +1,7 @@
 use super::*;
 use refine_core::infra::SqliteStore;
 use refine_core::knowledge::{DocumentId, Item, ItemRepository, Tag};
+use refine_core::session::SessionMode;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
@@ -112,6 +113,17 @@ async fn item_payloads(
         .collect()
 }
 
+fn with_session_mode(
+    mut payloads: HashMap<String, (String, String, String, Vec<String>)>,
+    mode: &str,
+) -> HashMap<String, (String, String, String, Vec<String>)> {
+    for (_, _, _, tags) in payloads.values_mut() {
+        tags.retain(|tag| !tag.starts_with("session_mode_"));
+        tags.push(mode.to_string());
+    }
+    payloads
+}
+
 async fn item_document_ids(
     item_store: &Arc<dyn ItemRepository>,
 ) -> HashMap<String, Option<String>> {
@@ -145,6 +157,11 @@ fn test_summary(
     RememSessionSummary {
         session_ref: session_ref.to_string(),
         host: host.to_string(),
+        session_mode: if host == "codex-cli" {
+            "interactive".to_string()
+        } else {
+            "unknown".to_string()
+        },
         source_root: "local".to_string(),
         project: "/repo".to_string(),
         session_id: "s1".to_string(),
@@ -171,6 +188,24 @@ fn remem_options() -> IngestOptions {
     }
 }
 
+async fn handle_test_summaries(
+    temp: &tempfile::TempDir,
+    summaries: Vec<RememSessionSummary>,
+    doc_store: Arc<dyn DocumentRepository>,
+) -> Result<()> {
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl"))?;
+    handle_remem_ingest_sessions_with_loader(
+        remem_options(),
+        &temp.path().join("refine.db"),
+        summaries,
+        Some(quarantine),
+        load_remem_session,
+        doc_store,
+        None,
+    )
+    .await
+}
+
 #[tokio::test]
 async fn two_hosts_cannot_reuse_the_same_hostless_v1_document() {
     let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
@@ -187,22 +222,16 @@ async fn two_hosts_cannot_reuse_the_same_hostless_v1_document() {
     );
     let mut v1 = Document::new("remem-raw-session", "same transcript");
     v1.set_url(&codex.legacy_document_url());
-    v1.set_source_version(Some(&codex.content_hash));
+    v1.set_source_version(Some(&codex.projection_version()));
     doc_store
         .save(&v1)
         .await
         .expect("seed hostless v1 document");
     let temp = tempfile::tempdir().expect("temporary lock directory");
 
-    let error = handle_remem_ingest_sessions_with_summaries(
-        remem_options(),
-        &temp.path().join("refine.db"),
-        vec![codex, claude],
-        doc_store.clone(),
-        None,
-    )
-    .await
-    .expect_err("two hosts must not claim one hostless document in summary order");
+    let error = handle_test_summaries(&temp, vec![codex, claude], doc_store.clone())
+        .await
+        .expect_err("two hosts must not claim one hostless document in summary order");
 
     assert!(error
         .to_string()
@@ -281,6 +310,7 @@ async fn v1_reference_update_and_matching_local_cleanup_share_one_transaction() 
         &v1,
         &referenced,
         &[local_one.id().clone(), local_two.id().clone()],
+        SessionMode::Interactive,
     )
     .await
     .expect("reference migration and proven legacy cleanup");
@@ -310,7 +340,17 @@ async fn v1_reference_update_and_matching_local_cleanup_share_one_transaction() 
         HashSet::from([v1.id().to_string()])
     );
     assert_eq!(item_ids(&item_store).await, before_item_ids);
-    assert_eq!(item_payloads(&item_store).await, before_item_payloads);
+    assert_eq!(
+        item_payloads(&item_store).await,
+        with_session_mode(before_item_payloads, "session_mode_interactive")
+    );
+    assert!(canonical_facets.iter().all(|item| {
+        item.tags()
+            .iter()
+            .filter(|tag| tag.as_str().starts_with("session_mode_"))
+            .map(|tag| tag.as_str())
+            .eq(["session_mode_interactive"])
+    }));
     assert!(item_document_ids(&item_store)
         .await
         .values()
@@ -345,9 +385,15 @@ async fn convergence_reads_items_inside_transaction_after_late_injection() {
         "remem://raw-session/v2/636f6465782d636c69/6c6f63616c/2f7265706f/7331",
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     );
-    save_referenced_session_and_delete_legacy(&doc_store, &legacy, &referenced, &[])
-        .await
-        .expect("transaction must load both source items itself");
+    save_referenced_session_and_delete_legacy(
+        &doc_store,
+        &legacy,
+        &referenced,
+        &[],
+        SessionMode::Interactive,
+    )
+    .await
+    .expect("transaction must load both source items itself");
 
     let saved_ids = item_store
         .find_by_document_id(referenced.id())
@@ -373,7 +419,7 @@ async fn unrelated_legacy_document_does_not_pull_unchanged_v2_body() {
     );
     let mut stable = Document::new("codex-session", "");
     stable.set_url(&summary.stable_document_url());
-    stable.set_source_version(Some(&summary.content_hash));
+    stable.set_source_version(Some(&summary.projection_version()));
     doc_store.save(&stable).await.expect("seed stable document");
     let mut unrelated = Document::new("claude-code-session", "unrelated transcript");
     unrelated.set_url("/tmp/unrelated-session.jsonl");
@@ -384,15 +430,9 @@ async fn unrelated_legacy_document_does_not_pull_unchanged_v2_body() {
 
     let temp = tempfile::tempdir().expect("temporary remem and lock directory");
     let (_remem_bin, marker) = install_forbidden_remem(&temp);
-    handle_remem_ingest_sessions_with_summaries(
-        remem_options(),
-        &temp.path().join("refine.db"),
-        vec![summary],
-        doc_store,
-        None,
-    )
-    .await
-    .expect("unrelated legacy document must keep the unchanged-summary fast path");
+    handle_test_summaries(&temp, vec![summary], doc_store)
+        .await
+        .expect("unrelated legacy document must keep the unchanged-summary fast path");
 
     assert!(!marker.exists(), "full Remem body command was invoked");
 }
@@ -411,7 +451,7 @@ async fn unchanged_stable_v2_converges_coexisting_v1_and_local_copies() {
 
     let mut stable = Document::new("codex-session", "");
     stable.set_url(&summary.stable_document_url());
-    stable.set_source_version(Some(&summary.content_hash));
+    stable.set_source_version(Some(&summary.projection_version()));
     doc_store
         .save(&stable)
         .await
@@ -444,25 +484,23 @@ async fn unchanged_stable_v2_converges_coexisting_v1_and_local_copies() {
         .expect("seed local facet");
     let before_item_ids = item_ids(&item_store).await;
     let before_item_payloads = item_payloads(&item_store).await;
+    let expected_version = summary.projection_version();
 
     let temp = tempfile::tempdir().expect("temporary remem and lock directory");
     let _remem_bin = install_remem_messages(&temp);
-    handle_remem_ingest_sessions_with_summaries(
-        remem_options(),
-        &temp.path().join("refine.db"),
-        vec![summary],
-        doc_store.clone(),
-        None,
-    )
-    .await
-    .expect("unchanged stable v2 must converge legacy copies without an LLM");
+    handle_test_summaries(&temp, vec![summary], doc_store.clone())
+        .await
+        .expect("unchanged stable v2 must converge legacy copies without an LLM");
 
     assert_eq!(
         document_ids(&doc_store).await,
         HashSet::from([stable.id().to_string()])
     );
     assert_eq!(item_ids(&item_store).await, before_item_ids);
-    assert_eq!(item_payloads(&item_store).await, before_item_payloads);
+    assert_eq!(
+        item_payloads(&item_store).await,
+        with_session_mode(before_item_payloads, "session_mode_interactive")
+    );
     assert!(item_document_ids(&item_store)
         .await
         .values()
@@ -472,7 +510,7 @@ async fn unchanged_stable_v2_converges_coexisting_v1_and_local_copies() {
         .await
         .unwrap()
         .expect("stable v2 document remains canonical");
-    assert_eq!(saved.source_version(), Some(summary_hash().as_str()));
+    assert_eq!(saved.source_version(), Some(expected_version.as_str()));
     assert!(saved.raw_content().is_empty());
 }
 
@@ -512,6 +550,7 @@ async fn failed_legacy_cleanup_rolls_back_document_and_item_reparenting() {
         &v1,
         &referenced,
         &[local.id().clone(), missing],
+        SessionMode::Interactive,
     )
     .await
     .expect_err("missing obsolete document must roll back the whole convergence transaction");
@@ -531,8 +570,4 @@ async fn failed_legacy_cleanup_rolls_back_document_and_item_reparenting() {
     assert!(doc_store.find_by_id(local.id()).await.unwrap().is_some());
     assert_eq!(item_payloads(&item_store).await, before_item_payloads);
     assert_eq!(item_document_ids(&item_store).await, before_item_documents);
-}
-
-fn summary_hash() -> String {
-    format!("sha256:{}", "a".repeat(64))
 }

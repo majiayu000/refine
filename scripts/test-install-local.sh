@@ -329,6 +329,9 @@ expected_daily_ingest_latest=80
 grep -Fq "REFINE_INGEST_LATEST=\${REFINE_INGEST_LATEST:-${expected_daily_ingest_latest}}" \
   "${test_home}/.refine/scripts/daily-refresh.sh" \
   || fail "installed daily refresh does not default to --latest ${expected_daily_ingest_latest}"
+grep -Fq "export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:\${HOME}/.cargo/bin:\${PATH:-}\"" \
+  "${test_home}/.refine/scripts/weekly-insights.sh" \
+  || fail 'installed weekly insights does not expose the trusted Homebrew/Cargo PATH'
 
 launch_agents="${test_home}/Library/LaunchAgents"
 server_plist="${launch_agents}/com.lifcc.refine-server.plist"

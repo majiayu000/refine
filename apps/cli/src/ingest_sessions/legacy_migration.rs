@@ -292,6 +292,7 @@ mod tests {
         RememSessionSummary {
             session_ref: format!("remem://raw-session/v2/test/{source_root}/repo/{session_id}"),
             host: "codex-cli".to_string(),
+            session_mode: "interactive".to_string(),
             source_root: source_root.to_string(),
             project: "/repo".to_string(),
             session_id: session_id.to_string(),
