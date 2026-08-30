@@ -73,7 +73,10 @@ pub(super) fn matching_legacy_document_ids(
 
     let legacy: Vec<&Document> = documents
         .iter()
-        .filter(|document| LEGACY_SOURCES.contains(&document.source()))
+        .filter(|document| {
+            LEGACY_SOURCES.contains(&document.source())
+                && !document.url().starts_with("remem://raw-session/v2/")
+        })
         .collect();
 
     let filename_and_content: Vec<&Document> = legacy
