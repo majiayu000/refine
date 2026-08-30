@@ -1369,7 +1369,7 @@ async fn latest_counts_only_eligible_pending_sessions_and_stops_loading_older_bo
 }
 
 #[tokio::test]
-async fn unchanged_looper_clears_stable_and_legacy_items_without_consuming_latest() {
+async fn quarantined_looper_clears_stable_and_legacy_items_without_consuming_latest() {
     let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
     let doc_store: Arc<dyn DocumentRepository> = store.clone();
     let item_store: Arc<dyn ItemRepository> = store.clone();
@@ -1403,7 +1403,17 @@ async fn unchanged_looper_clears_stable_and_legacy_items_without_consuming_lates
     item_store.save(&unrelated_item).await.unwrap();
 
     let temp = tempfile::tempdir().expect("temporary ingest paths");
-    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let quarantine_path = temp.path().join("quarantine.jsonl");
+    let mut quarantine = QuarantineStore::load_from(quarantine_path.clone()).unwrap();
+    quarantine.record(
+        &looper.stable_document_url(),
+        Some(&looper.projection_version()),
+        "provider_rejected",
+        "fixture",
+    );
+    quarantine.save_if_dirty().unwrap();
+    drop(quarantine);
+    let quarantine = QuarantineStore::load_from(quarantine_path.clone()).unwrap();
     let loaded_ids = Arc::new(Mutex::new(Vec::new()));
     let observed_ids = loaded_ids.clone();
     let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
@@ -1446,7 +1456,7 @@ async fn unchanged_looper_clears_stable_and_legacy_items_without_consuming_lates
         Some(client),
     )
     .await
-    .expect("Looper exclusion must still allow the next eligible session to complete");
+    .expect("a quarantined Looper cleanup must resolve its obsolete rejection");
 
     assert_eq!(
         *loaded_ids.lock().expect("loaded id lock"),
@@ -1474,6 +1484,9 @@ async fn unchanged_looper_clears_stable_and_legacy_items_without_consuming_lates
         .tags()
         .iter()
         .any(|tag| tag.as_str() == "session_mode_unattended")));
+    let quarantine = QuarantineStore::load_from(quarantine_path).unwrap();
+    assert!(!quarantine.contains(stable.url(), stable.source_version()));
+    assert_eq!(quarantine.len(), 0);
 }
 
 #[tokio::test]
