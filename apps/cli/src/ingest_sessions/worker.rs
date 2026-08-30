@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use refine_core::error::InfraError;
 use refine_core::infra::{
-    llm_with_retry_policy, LlmClient, LlmRetryPolicy, DEFAULT_MAX_RETRIES,
+    llm_with_retry_policy_for, LlmClient, LlmRetryPolicy, DEFAULT_MAX_RETRIES,
     DEFAULT_RETRY_BASE_DELAY_SECS,
 };
 use refine_core::knowledge::{Document, DocumentRepository, RestoreDocumentParams};
@@ -392,8 +392,9 @@ pub(super) async fn llm_call_with_retry(
     }
 
     let prompt = build_facet_prompt(content);
-    let result = llm_with_retry_policy(
+    let result = llm_with_retry_policy_for(
         client,
+        "ingest.session.facets",
         &prompt,
         FACET_SYSTEM_PROMPT,
         LlmRetryPolicy::default(),

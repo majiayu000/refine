@@ -3,7 +3,7 @@ use crate::lang::t;
 use crate::score::{self, layer_display, Signal};
 use anyhow::Result;
 use chrono::{Duration, Utc};
-use refine_core::infra::{llm_with_retry, LlmClient};
+use refine_core::infra::{llm_with_retry_for, LlmClient};
 use refine_core::knowledge::{DocumentRepository, Item, ItemRepository, ItemType};
 use refine_core::session::{cluster_observations, format_data_quality_stats, ClusterResult};
 use std::collections::{HashMap, HashSet};
@@ -373,7 +373,7 @@ pub async fn handle_profile(
         t!("Generating cognitive profile...", "正在生成认知画像...")
     );
 
-    let narrative = llm_with_retry(&llm, &prompt, system_prompt())
+    let narrative = llm_with_retry_for(&llm, "mirror.profile", &prompt, system_prompt())
         .await
         .map_err(|e| anyhow::anyhow!("LLM profile generation failed: {}", e))?;
 
