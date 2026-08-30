@@ -32,7 +32,7 @@ use cursor::{
 };
 use legacy_convergence::{
     include_hostless_v1_document, might_have_legacy_documents, referenced_session_document,
-    save_referenced_session_and_delete_legacy,
+    same_projection_or_snapshot, save_referenced_session_and_delete_legacy,
 };
 
 pub(crate) fn lock_session_mutations_for_repair(db_path: &Path) -> Result<std::fs::File> {
@@ -392,7 +392,7 @@ where
         if let Some(existing_doc) = existing_document.as_ref() {
             if existing_doc.raw_content() == raw_content
                 || (!existing_document_uses_legacy_identity
-                    && existing_doc.source_version() == Some(source_version.as_str()))
+                    && same_projection_or_snapshot(existing_doc, &source_version))
             {
                 if !options.dry_run {
                     let referenced = referenced_session_document(
