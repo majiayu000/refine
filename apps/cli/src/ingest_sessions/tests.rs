@@ -1072,9 +1072,10 @@ fn content_rejection_survives_anyhow_context() {
 }
 
 #[tokio::test]
-async fn unchanged_remem_summary_skips_full_content_and_llm() {
+async fn same_snapshot_mode_change_retags_without_llm() {
     let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
     let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store;
     let summary = RememSessionSummary {
         session_ref: concat!(
             "remem://raw-session/v2/",
@@ -1082,7 +1083,7 @@ async fn unchanged_remem_summary_skips_full_content_and_llm() {
         )
         .to_string(),
         host: "codex-cli".to_string(),
-        session_mode: "interactive".to_string(),
+        session_mode: "unattended".to_string(),
         source_root: "local".to_string(),
         project: "/repo".to_string(),
         session_id: "s1".to_string(),
@@ -1097,11 +1098,21 @@ async fn unchanged_remem_summary_skips_full_content_and_llm() {
     };
     let mut existing = Document::new("codex-session", "duplicated transcript body");
     existing.set_url(&summary.stable_document_url());
-    existing.set_source_version(Some(&summary.projection_version()));
+    existing.set_source_version(Some(&format!("{}:interactive", summary.content_hash)));
     doc_store
         .save(&existing)
         .await
         .expect("seed existing document");
+    let mut existing_item = Item::new_observation("existing", "existing");
+    existing_item.set_document_id(existing.id().clone());
+    existing_item
+        .set_tags(vec![
+            Tag::new("custom-user-tag").unwrap(),
+            Tag::new("session_mode_interactive").unwrap(),
+        ])
+        .unwrap();
+    item_store.save(&existing_item).await.unwrap();
+    let expected_version = summary.projection_version();
     let temp = tempfile::tempdir().expect("temporary lock directory");
 
     let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
@@ -1128,7 +1139,7 @@ async fn unchanged_remem_summary_skips_full_content_and_llm() {
         None,
     )
     .await
-    .expect("unchanged summary must not require Remem messages or an LLM");
+    .expect("mode-only change must not require an LLM");
 
     let saved = doc_store
         .find_by_url(existing.url())
@@ -1138,6 +1149,27 @@ async fn unchanged_remem_summary_skips_full_content_and_llm() {
     assert_eq!(saved.id(), existing.id());
     assert!(saved.raw_content().is_empty());
     assert_eq!(saved.source(), "codex-session");
+    assert_eq!(saved.source_version(), Some(expected_version.as_str()));
+    let saved_item = item_store
+        .find_by_document_id(saved.id())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.id() == existing_item.id())
+        .expect("existing observation should survive mode retagging");
+    assert!(saved_item
+        .tags()
+        .iter()
+        .any(|tag| tag.as_str() == "custom-user-tag"));
+    assert_eq!(
+        saved_item
+            .tags()
+            .iter()
+            .filter(|tag| tag.as_str().starts_with("session_mode_"))
+            .map(|tag| tag.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session_mode_unattended"]
+    );
 }
 
 #[tokio::test]

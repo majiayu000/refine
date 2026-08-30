@@ -3,7 +3,7 @@ use super::provenance::replace_session_mode_tags;
 use crate::remem_sessions::RememSessionSummary;
 use anyhow::{bail, Result};
 use refine_core::knowledge::{Document, DocumentId, DocumentRepository, RestoreDocumentParams};
-use refine_core::session::{SessionMode, SessionSource};
+use refine_core::session::{remem_snapshot_hash, SessionMode, SessionSource};
 use std::sync::Arc;
 
 pub(super) fn referenced_session_document(
@@ -22,6 +22,19 @@ pub(super) fn referenced_session_document(
         captured_at: document.captured_at(),
         created_at: document.created_at(),
         updated_at: document.updated_at(),
+    })
+}
+
+pub(super) fn same_projection_or_snapshot(document: &Document, projection_version: &str) -> bool {
+    document.source_version().is_some_and(|stored| {
+        stored == projection_version
+            || match (
+                remem_snapshot_hash(stored).ok(),
+                remem_snapshot_hash(projection_version).ok(),
+            ) {
+                (Some(stored_hash), Some(current_hash)) => stored_hash == current_hash,
+                _ => false,
+            }
     })
 }
 
