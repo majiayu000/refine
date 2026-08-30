@@ -1140,6 +1140,74 @@ async fn unchanged_remem_summary_skips_full_content_and_llm() {
     assert_eq!(saved.source(), "codex-session");
 }
 
+#[tokio::test]
+async fn changed_remem_projection_does_not_delete_its_canonical_document() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store;
+    let summary = remem_summary("refresh", 20, 'b');
+    let expected_url = summary.stable_document_url();
+    let expected_version = summary.projection_version();
+    let mut existing = Document::new("codex-session", "");
+    existing.set_url(&expected_url);
+    existing.set_source_version(Some(&format!("sha256:{}:interactive", "a".repeat(64))));
+    existing.set_captured_at(Utc.timestamp_opt(summary.first_epoch, 0).unwrap());
+    doc_store.save(&existing).await.unwrap();
+
+    let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+        response: r#"{
+            "session_summary": "refreshed projection",
+            "cognitive_level": "proficient",
+            "collaboration_mode": "pair_programming",
+            "decisions": ["keep canonical document"],
+            "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+        .to_string(),
+    });
+    let temp = tempfile::tempdir().expect("temporary quarantine directory");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: Some(1),
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![summary],
+        Some(quarantine),
+        |summary| {
+            Ok(loaded_remem_session(
+                &summary,
+                "ordinary user question with enough useful detail",
+            ))
+        },
+        doc_store.clone(),
+        Some(client),
+    )
+    .await
+    .expect("changed projection should refresh in place");
+
+    let refreshed = doc_store
+        .find_by_url(existing.url())
+        .await
+        .unwrap()
+        .expect("canonical Remem document must remain present");
+    assert_eq!(refreshed.id(), existing.id());
+    assert_eq!(refreshed.source_version(), Some(expected_version.as_str()));
+    assert!(!item_store
+        .find_by_document_id(refreshed.id())
+        .await
+        .unwrap()
+        .is_empty());
+}
+
 fn remem_summary(session_id: &str, last_epoch: i64, hash_byte: char) -> RememSessionSummary {
     RememSessionSummary {
         session_ref: format!("remem://raw-session/v2/codex/local/repo/{session_id}"),
