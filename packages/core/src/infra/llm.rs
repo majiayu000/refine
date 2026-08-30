@@ -1,6 +1,7 @@
 //! LLM 客户端，支持 Claude 和 OpenAI。
 
 use crate::error::{InfraError, InfraResult};
+use crate::infra::llm_budget::{LlmRunBudget, PROVIDER_MAX_OUTPUT_TOKENS};
 use crate::infra::llm_usage::{
     default_usage_ledger_path, ClaudeResponse, LlmCompletion, OpenAIResponse,
 };
@@ -31,6 +32,11 @@ pub trait LlmClient: Send + Sync {
     /// and external implementations remain side-effect free unless they override it.
     fn usage_ledger_path(&self) -> InfraResult<Option<PathBuf>> {
         Ok(None)
+    }
+
+    /// A process-scoped budget shared by every clone of a concrete provider client.
+    fn run_budget(&self) -> Option<&LlmRunBudget> {
+        None
     }
 
     /// Stable identity for cache invalidation. Implementations should include
@@ -89,6 +95,7 @@ pub struct ClaudeClient {
     api_key: String,
     model: String,
     base_url: String,
+    budget: LlmRunBudget,
 }
 
 impl ClaudeClient {
@@ -98,6 +105,7 @@ impl ClaudeClient {
             api_key: api_key.to_string(),
             model: "claude-opus-4-6".to_string(),
             base_url: "https://api.anthropic.com".to_string(),
+            budget: LlmRunBudget::default(),
         }
     }
 
@@ -118,7 +126,7 @@ impl ClaudeClient {
     ) -> InfraResult<LlmCompletion> {
         let mut body = serde_json::json!({
             "model": self.model,
-            "max_tokens": 4096,
+            "max_tokens": PROVIDER_MAX_OUTPUT_TOKENS,
             "messages": [{"role": "user", "content": prompt}]
         });
 
@@ -179,6 +187,10 @@ impl LlmClient for ClaudeClient {
     fn usage_ledger_path(&self) -> InfraResult<Option<PathBuf>> {
         default_usage_ledger_path().map(Some)
     }
+
+    fn run_budget(&self) -> Option<&LlmRunBudget> {
+        Some(&self.budget)
+    }
 }
 /// OpenAI 客户端
 pub struct OpenAIClient {
@@ -186,6 +198,7 @@ pub struct OpenAIClient {
     api_key: String,
     model: String,
     base_url: String,
+    budget: LlmRunBudget,
 }
 
 impl OpenAIClient {
@@ -195,6 +208,7 @@ impl OpenAIClient {
             api_key: api_key.to_string(),
             model: "gpt-4o".to_string(),
             base_url: "https://api.openai.com".to_string(),
+            budget: LlmRunBudget::default(),
         }
     }
 
@@ -223,7 +237,7 @@ impl OpenAIClient {
         let body = serde_json::json!({
             "model": self.model,
             "messages": messages,
-            "max_tokens": 4096
+            "max_tokens": PROVIDER_MAX_OUTPUT_TOKENS
         });
 
         let resp = self
@@ -277,6 +291,10 @@ impl LlmClient for OpenAIClient {
 
     fn usage_ledger_path(&self) -> InfraResult<Option<PathBuf>> {
         default_usage_ledger_path().map(Some)
+    }
+
+    fn run_budget(&self) -> Option<&LlmRunBudget> {
+        Some(&self.budget)
     }
 }
 fn env_var(keys: &[&str]) -> Option<String> {

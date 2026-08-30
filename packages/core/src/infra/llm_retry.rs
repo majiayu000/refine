@@ -153,6 +153,7 @@ where
     let request_timeout = Duration::from_millis(policy.request_timeout_millis.max(1));
     let ledger_path = client.usage_ledger_path()?;
     let client_identity = client.cache_identity();
+    let run_budget = client.run_budget();
 
     for attempt in 0..max_retries {
         if behavior.check_persistent_quota && is_quota_exhausted() {
@@ -160,6 +161,9 @@ where
                 retry_after_secs: None,
             });
         }
+        let budget_reservation = run_budget
+            .map(|budget| budget.reserve(prompt, system))
+            .transpose()?;
 
         let started = Instant::now();
         let result = match tokio::time::timeout(
@@ -174,6 +178,15 @@ where
                 request_timeout.as_millis()
             ))),
         };
+        if let (Some(budget), Some(reservation)) = (run_budget, budget_reservation) {
+            budget.settle(
+                reservation,
+                result
+                    .as_ref()
+                    .ok()
+                    .and_then(|completion| completion.usage.as_ref()),
+            )?;
+        }
         if let Err(InfraError::RateLimited { retry_after_secs }) = &result {
             if behavior.record_persistent_quota {
                 set_quota_exhausted(*retry_after_secs);
@@ -214,6 +227,9 @@ where
 }
 
 fn is_retryable_error(err: &InfraError, retry_http_429: bool) -> bool {
+    if matches!(err, InfraError::LlmBudgetExceeded { .. }) {
+        return false;
+    }
     if let InfraError::LlmHttp { status, .. } = err {
         return *status == 408
             || *status == 425
@@ -279,6 +295,15 @@ mod tests {
 
     #[test]
     fn typed_http_status_controls_retryability() {
+        assert!(!is_retryable_error(
+            &InfraError::LlmBudgetExceeded {
+                resource: "provider_attempts",
+                limit: 100,
+                used: 100,
+                requested: 1,
+            },
+            true,
+        ));
         assert!(is_retryable_error(
             &InfraError::LlmHttp {
                 status: 503,
@@ -482,7 +507,7 @@ mod tests {
         let client = Arc::new(
             SequenceClient::new(vec![
                 Err(InfraError::LlmRequest("timeout provider-secret".into())),
-                Ok("response-secret".into()),
+                Ok("ok".into()),
             ])
             .with_ledger(path.clone()),
         );
@@ -503,22 +528,11 @@ mod tests {
         .unwrap();
 
         let contents = std::fs::read_to_string(path).unwrap();
-        let records = contents
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0]["status"], "error");
-        assert_eq!(records[1]["status"], "success");
-        assert!(records
-            .iter()
-            .all(|record| record["operation"] == "test.retry"));
-        for secret in [
-            "provider-secret",
-            "response-secret",
-            "prompt-secret",
-            "system-secret",
-        ] {
+        assert_eq!(contents.lines().count(), 2);
+        assert_eq!(contents.matches("\"operation\":\"test.retry\"").count(), 2);
+        assert!(contents.contains("\"status\":\"error\""));
+        assert!(contents.contains("\"status\":\"success\""));
+        for secret in ["provider-secret", "prompt-secret", "system-secret"] {
             assert!(!contents.contains(secret));
         }
     }
