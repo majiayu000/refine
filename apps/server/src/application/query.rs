@@ -238,7 +238,9 @@ pub async fn get_document(
             .source_version()
             .ok_or_else(|| QueryError::Internal("Remem document is missing snapshot hash".into()))?
             .to_string();
-        let expected_hash = remem_snapshot_hash(&projection_version)?.to_string();
+        let expected_hash = refine_core::session::remem_snapshot_hash(&projection_version)
+            .map_err(|error| QueryError::Internal(error.to_string()))?
+            .to_string();
         tokio::task::spawn_blocking(move || {
             refine_core::session::load_remem_document_content(&session_ref, &expected_hash)
         })
@@ -259,22 +261,6 @@ pub async fn get_document(
         created_at: doc.created_at().to_rfc3339(),
         items: items.iter().map(ItemDto::from).collect(),
     })
-}
-
-fn remem_snapshot_hash(projection_version: &str) -> Result<&str, QueryError> {
-    let (hash, mode) = projection_version.rsplit_once(':').ok_or_else(|| {
-        QueryError::Internal("Remem document has an invalid projection version".into())
-    })?;
-    if !matches!(mode, "interactive" | "unattended" | "subagent" | "unknown")
-        || !hash.starts_with("sha256:")
-        || hash.len() != 71
-        || !hash[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(QueryError::Internal(
-            "Remem document has an invalid projection version".into(),
-        ));
-    }
-    Ok(hash)
 }
 
 async fn count_items_per_document(

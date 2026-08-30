@@ -893,6 +893,12 @@ async fn remem_save_reparents_superseded_legacy_facets() {
     doc_store.save(&legacy_doc).await.unwrap();
     let mut legacy_item = Item::new_observation("legacy", "legacy");
     legacy_item.set_document_id(legacy_doc.id().clone());
+    legacy_item
+        .set_tags(vec![
+            Tag::new("custom-user-tag").unwrap(),
+            Tag::new("session_mode_unknown").unwrap(),
+        ])
+        .unwrap();
     item_store.save(&legacy_item).await.unwrap();
     let legacy_item_id = legacy_item.id().clone();
 
@@ -915,7 +921,7 @@ async fn remem_save_reparents_superseded_legacy_facets() {
         source: SessionSource::RememRaw,
         project: Some("refine".to_string()),
         project_identity: Some("refine".to_string()),
-        mode: SessionMode::Unknown,
+        mode: SessionMode::Unattended,
         captured_at: Utc.with_ymd_and_hms(2026, 7, 20, 0, 0, 0).unwrap(),
         has_embedded_timestamp: true,
         raw_content: "User: old\nAssistant: new\n".to_string(),
@@ -958,6 +964,27 @@ async fn remem_save_reparents_superseded_legacy_facets() {
     assert!(replacement_items
         .iter()
         .any(|item| item.id() == &legacy_item_id));
+    let migrated_legacy_item = replacement_items
+        .iter()
+        .find(|item| item.id() == &legacy_item_id)
+        .expect("legacy item should be reparented");
+    assert!(migrated_legacy_item
+        .tags()
+        .iter()
+        .any(|tag| tag.as_str() == "custom-user-tag"));
+    assert_eq!(
+        migrated_legacy_item
+            .tags()
+            .iter()
+            .filter(|tag| tag.as_str().starts_with("session_mode_"))
+            .map(|tag| tag.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session_mode_unattended"]
+    );
+    assert!(replacement_items.iter().all(|item| item
+        .tags()
+        .iter()
+        .any(|tag| tag.as_str() == "session_mode_unattended")));
     let observations = item_store
         .find_by_type(ItemType::Observation)
         .await

@@ -39,6 +39,20 @@ pub fn load_remem_session(summary: RememSessionSummary) -> Result<RememSession> 
     load_one_session(&ProcessRunner, summary)
 }
 
+pub fn remem_snapshot_hash(projection_version: &str) -> Result<&str> {
+    let (hash, mode) = projection_version
+        .rsplit_once(':')
+        .context("Remem document has an invalid projection version")?;
+    ensure!(
+        matches!(mode, "interactive" | "unattended" | "subagent" | "unknown")
+            && hash.starts_with("sha256:")
+            && hash.len() == 71
+            && hash[7..].bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "Remem document has an invalid projection version"
+    );
+    Ok(hash)
+}
+
 fn hex_component(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(value.len() * 2);

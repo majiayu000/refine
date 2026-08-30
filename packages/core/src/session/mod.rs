@@ -40,7 +40,7 @@ pub use prescription::{build_prescription_prompt, PRESCRIPTION_SYSTEM_PROMPT};
 pub use project_identity::ProjectIdentityResolver;
 pub use remem_archive::{
     is_missing_remem_executable, load_remem_document_content, load_remem_session,
-    load_remem_session_summaries, RememSession, RememSessionSummary,
+    load_remem_session_summaries, remem_snapshot_hash, RememSession, RememSessionSummary,
 };
 pub use report::{
     build_final_prompt, build_final_prompt_with_delta, build_final_prompt_with_delta_and_budget,

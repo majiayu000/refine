@@ -33,6 +33,23 @@ impl FakeRunner {
     }
 }
 
+#[test]
+fn projection_version_exposes_only_a_valid_snapshot_hash() {
+    let hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    assert_eq!(
+        remem_snapshot_hash(&format!("{hash}:interactive")).unwrap(),
+        hash
+    );
+    for invalid in [
+        hash.to_string(),
+        format!("{hash}:scheduled"),
+        "sha256:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg:interactive"
+            .to_string(),
+    ] {
+        assert!(remem_snapshot_hash(&invalid).is_err());
+    }
+}
+
 impl Runner for FakeRunner {
     fn run(&self, args: &[String]) -> Result<CommandResult> {
         self.calls.borrow_mut().push(args.to_vec());
