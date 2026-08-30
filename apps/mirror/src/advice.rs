@@ -6,7 +6,7 @@ use crate::lang::t;
 use crate::score::{indicator_display, layer_display, ScoreResult};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use refine_core::infra::{llm_with_retry, LlmClient};
+use refine_core::infra::{llm_with_retry_for, LlmClient};
 use std::sync::Arc;
 
 pub(crate) use cache::{cache_current_deterministic, invalidate_cached, load_cached_for_score};
@@ -140,7 +140,7 @@ pub async fn generate_and_cache(
         Err(error) => tracing::warn!("failed to load advice cache: {}", error),
     }
 
-    let response = llm_with_retry(llm, &prompt, system_prompt())
+    let response = llm_with_retry_for(llm, "mirror.advice", &prompt, system_prompt())
         .await
         .map_err(|error| anyhow::anyhow!("LLM advice policy acknowledgement failed: {error}"))?;
     let (_, _, acknowledged) = render_policy_output(&policy, response.trim());

@@ -1,9 +1,12 @@
 //! LLM 客户端，支持 Claude 和 OpenAI。
 
 use crate::error::{InfraError, InfraResult};
+use crate::infra::llm_usage::{
+    default_usage_ledger_path, ClaudeResponse, LlmCompletion, OpenAIResponse,
+};
 use async_trait::async_trait;
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -12,6 +15,23 @@ use std::time::SystemTime;
 pub trait LlmClient: Send + Sync {
     /// 发送补全请求
     async fn complete(&self, prompt: &str, system: Option<&str>) -> InfraResult<String>;
+
+    /// Return provider-reported token usage when the concrete client supports it.
+    async fn complete_with_usage(
+        &self,
+        prompt: &str,
+        system: Option<&str>,
+    ) -> InfraResult<LlmCompletion> {
+        self.complete(prompt, system)
+            .await
+            .map(LlmCompletion::text_only)
+    }
+
+    /// Real provider clients opt into the persistent attempt ledger. Test doubles
+    /// and external implementations remain side-effect free unless they override it.
+    fn usage_ledger_path(&self) -> InfraResult<Option<PathBuf>> {
+        Ok(None)
+    }
 
     /// Stable identity for cache invalidation. Implementations should include
     /// provider, model, and compatible endpoint identity, but never secrets.
@@ -90,18 +110,12 @@ impl ClaudeClient {
         self.base_url = url.trim_end_matches('/').to_string();
         self
     }
-}
-#[async_trait]
-impl LlmClient for ClaudeClient {
-    fn cache_identity(&self) -> String {
-        format!(
-            "anthropic:{}:{}",
-            self.model,
-            endpoint_identity(&self.base_url)
-        )
-    }
 
-    async fn complete(&self, prompt: &str, system: Option<&str>) -> InfraResult<String> {
+    async fn request_completion(
+        &self,
+        prompt: &str,
+        system: Option<&str>,
+    ) -> InfraResult<LlmCompletion> {
         let mut body = serde_json::json!({
             "model": self.model,
             "max_tokens": 4096,
@@ -135,21 +149,36 @@ impl LlmClient for ClaudeClient {
             .json()
             .await
             .map_err(|e| InfraError::LlmParse(e.to_string()))?;
-
-        data.content
-            .first()
-            .and_then(|c| c.text.clone())
-            .ok_or_else(|| InfraError::LlmParse("空响应".into()))
+        data.into_completion()
     }
 }
-#[derive(Deserialize)]
-struct ClaudeResponse {
-    content: Vec<ClaudeContent>,
-}
+#[async_trait]
+impl LlmClient for ClaudeClient {
+    fn cache_identity(&self) -> String {
+        format!(
+            "anthropic:{}:{}",
+            self.model,
+            endpoint_identity(&self.base_url)
+        )
+    }
 
-#[derive(Deserialize)]
-struct ClaudeContent {
-    text: Option<String>,
+    async fn complete(&self, prompt: &str, system: Option<&str>) -> InfraResult<String> {
+        self.request_completion(prompt, system)
+            .await
+            .map(|completion| completion.content)
+    }
+
+    async fn complete_with_usage(
+        &self,
+        prompt: &str,
+        system: Option<&str>,
+    ) -> InfraResult<LlmCompletion> {
+        self.request_completion(prompt, system).await
+    }
+
+    fn usage_ledger_path(&self) -> InfraResult<Option<PathBuf>> {
+        default_usage_ledger_path().map(Some)
+    }
 }
 /// OpenAI 客户端
 pub struct OpenAIClient {
@@ -178,18 +207,12 @@ impl OpenAIClient {
         self.base_url = normalize_openai_base_url(url);
         self
     }
-}
-#[async_trait]
-impl LlmClient for OpenAIClient {
-    fn cache_identity(&self) -> String {
-        format!(
-            "openai:{}:{}",
-            self.model,
-            endpoint_identity(&self.base_url)
-        )
-    }
 
-    async fn complete(&self, prompt: &str, system: Option<&str>) -> InfraResult<String> {
+    async fn request_completion(
+        &self,
+        prompt: &str,
+        system: Option<&str>,
+    ) -> InfraResult<LlmCompletion> {
         let mut messages = Vec::new();
 
         if let Some(sys) = system {
@@ -225,28 +248,37 @@ impl LlmClient for OpenAIClient {
             .json()
             .await
             .map_err(|e| InfraError::LlmParse(e.to_string()))?;
-
-        data.choices
-            .first()
-            .and_then(|c| c.message.content.clone())
-            .ok_or_else(|| InfraError::LlmParse("空响应".into()))
+        data.into_completion()
     }
 }
-#[derive(Deserialize)]
-struct OpenAIResponse {
-    choices: Vec<OpenAIChoice>,
-}
+#[async_trait]
+impl LlmClient for OpenAIClient {
+    fn cache_identity(&self) -> String {
+        format!(
+            "openai:{}:{}",
+            self.model,
+            endpoint_identity(&self.base_url)
+        )
+    }
 
-#[derive(Deserialize)]
-struct OpenAIChoice {
-    message: OpenAIMessage,
-}
+    async fn complete(&self, prompt: &str, system: Option<&str>) -> InfraResult<String> {
+        self.request_completion(prompt, system)
+            .await
+            .map(|completion| completion.content)
+    }
 
-#[derive(Deserialize)]
-struct OpenAIMessage {
-    content: Option<String>,
-}
+    async fn complete_with_usage(
+        &self,
+        prompt: &str,
+        system: Option<&str>,
+    ) -> InfraResult<LlmCompletion> {
+        self.request_completion(prompt, system).await
+    }
 
+    fn usage_ledger_path(&self) -> InfraResult<Option<PathBuf>> {
+        default_usage_ledger_path().map(Some)
+    }
+}
 fn env_var(keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| {
         std::env::var(key)

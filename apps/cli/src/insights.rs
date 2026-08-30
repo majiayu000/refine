@@ -7,7 +7,7 @@ use crate::insights_manifest::{
 };
 use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
-use refine_core::infra::{llm_with_retry_policy, LlmClient, LlmRetryPolicy};
+use refine_core::infra::{llm_with_retry_policy_for, LlmClient, LlmRetryPolicy};
 use refine_core::knowledge::{Document, DocumentRepository, ItemRepository};
 use refine_core::session::{
     build_final_prompt_with_delta, cluster_session_observation_windows, format_data_quality_stats,
@@ -337,8 +337,9 @@ pub async fn handle_insights(
         let client = client.clone();
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.expect("semaphore closed");
-            let content = llm_with_retry_policy(
+            let content = llm_with_retry_policy_for(
                 &client,
+                "insights.route",
                 &route.prompt,
                 ROUTE_SYSTEM_PROMPT,
                 LlmRetryPolicy::default(),
@@ -423,8 +424,9 @@ pub async fn handle_insights(
         options.with_prescription,
     );
 
-    let report = llm_with_retry_policy(
+    let report = llm_with_retry_policy_for(
         &client,
+        "insights.final",
         &final_prompt,
         INSIGHTS_SYSTEM_PROMPT,
         final_report_retry_policy(),

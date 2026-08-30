@@ -41,6 +41,9 @@ pub enum InfraError {
     #[error("LLM 响应解析失败: {0}")]
     LlmParse(String),
 
+    #[error("LLM 用量账本写入失败: {0}")]
+    UsageLedger(String),
+
     /// The provider rejected the prompt for a deterministic policy reason.
     /// Retrying the same input cannot succeed, so callers must quarantine it.
     #[error("LLM 内容被拒绝 ({code}): {message}")]

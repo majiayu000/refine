@@ -15,6 +15,7 @@ mod document_fk_migration;
 pub mod item_link_repair;
 mod llm;
 mod llm_retry;
+mod llm_usage;
 mod observation_integrity;
 mod paths;
 pub mod quota_state;
@@ -774,10 +775,11 @@ pub use llm::{
     OpenAIClient,
 };
 pub use llm_retry::{
-    llm_with_retry, llm_with_retry_policy, LlmRetryPolicy, DEFAULT_MAX_RETRIES,
-    DEFAULT_RETRY_BASE_DELAY_SECS,
+    llm_with_retry, llm_with_retry_for, llm_with_retry_policy, llm_with_retry_policy_for,
+    LlmRetryPolicy, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BASE_DELAY_SECS,
 };
 pub(crate) use llm_retry::{llm_with_retry_policy_ref, LlmRetryBehavior};
+pub use llm_usage::{LlmCompletion, LlmTokenUsage};
 pub use paths::{default_db_path, ensure_db_dir, resolve_db_path, stale_db_candidates};
 pub use quota_state::{is_exhausted as is_quota_exhausted, set_exhausted as set_quota_exhausted};
 pub use sqlite::SqliteStore;

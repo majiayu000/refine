@@ -1,10 +1,11 @@
 use super::llm::LlmClient;
+use super::llm_usage::{append_usage_record, LlmUsageRecord};
 use super::quota_state::{
     is_exhausted as is_quota_exhausted, set_exhausted as set_quota_exhausted,
 };
 use crate::error::{InfraError, InfraResult};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const DEFAULT_MAX_RETRIES: usize = 5;
 pub const DEFAULT_RETRY_BASE_DELAY_SECS: u64 = 10;
@@ -53,8 +54,18 @@ pub async fn llm_with_retry(
     prompt: &str,
     system: &str,
 ) -> InfraResult<String> {
-    llm_with_retry_policy(
+    llm_with_retry_for(client, "llm.shared", prompt, system).await
+}
+
+pub async fn llm_with_retry_for(
+    client: &Arc<dyn LlmClient>,
+    operation: &str,
+    prompt: &str,
+    system: &str,
+) -> InfraResult<String> {
+    llm_with_retry_policy_for(
         client,
+        operation,
         prompt,
         system,
         LlmRetryPolicy::default(),
@@ -73,8 +84,23 @@ pub async fn llm_with_retry_policy<F>(
 where
     F: FnMut(usize, usize, u64, &InfraError),
 {
-    llm_with_retry_policy_ref(
+    llm_with_retry_policy_for(client, "llm.shared", prompt, system, policy, on_retry).await
+}
+
+pub async fn llm_with_retry_policy_for<F>(
+    client: &Arc<dyn LlmClient>,
+    operation: &str,
+    prompt: &str,
+    system: &str,
+    policy: LlmRetryPolicy,
+    on_retry: F,
+) -> InfraResult<String>
+where
+    F: FnMut(usize, usize, u64, &InfraError),
+{
+    llm_with_retry_policy_ref_for(
         client.as_ref(),
+        operation,
         prompt,
         system,
         policy,
@@ -94,6 +120,30 @@ pub(crate) async fn llm_with_retry_policy_ref<F>(
     system: &str,
     policy: LlmRetryPolicy,
     behavior: LlmRetryBehavior,
+    on_retry: F,
+) -> InfraResult<String>
+where
+    F: FnMut(usize, usize, u64, &InfraError),
+{
+    llm_with_retry_policy_ref_for(
+        client,
+        "extraction.document",
+        prompt,
+        system,
+        policy,
+        behavior,
+        on_retry,
+    )
+    .await
+}
+
+async fn llm_with_retry_policy_ref_for<F>(
+    client: &dyn LlmClient,
+    operation: &str,
+    prompt: &str,
+    system: &str,
+    policy: LlmRetryPolicy,
+    behavior: LlmRetryBehavior,
     mut on_retry: F,
 ) -> InfraResult<String>
 where
@@ -101,6 +151,8 @@ where
 {
     let max_retries = policy.max_retries.max(1);
     let request_timeout = Duration::from_millis(policy.request_timeout_millis.max(1));
+    let ledger_path = client.usage_ledger_path()?;
+    let client_identity = client.cache_identity();
 
     for attempt in 0..max_retries {
         if behavior.check_persistent_quota && is_quota_exhausted() {
@@ -109,9 +161,10 @@ where
             });
         }
 
+        let started = Instant::now();
         let result = match tokio::time::timeout(
             request_timeout,
-            client.complete(prompt, Some(system)),
+            client.complete_with_usage(prompt, Some(system)),
         )
         .await
         {
@@ -121,9 +174,21 @@ where
                 request_timeout.as_millis()
             ))),
         };
+        if let Some(path) = ledger_path.as_deref() {
+            let record = LlmUsageRecord::from_attempt(
+                operation,
+                attempt + 1,
+                &client_identity,
+                prompt,
+                system,
+                started.elapsed(),
+                result.as_ref(),
+            );
+            append_usage_record(path, &record)?;
+        }
 
         match result {
-            Ok(response) => return Ok(response),
+            Ok(response) => return Ok(response.content),
             Err(err @ InfraError::RateLimited { retry_after_secs }) => {
                 if behavior.record_persistent_quota {
                     set_quota_exhausted(retry_after_secs);
@@ -287,6 +352,7 @@ mod tests {
     struct SequenceClient {
         calls: AtomicUsize,
         responses: Mutex<VecDeque<InfraResult<String>>>,
+        ledger_path: Option<PathBuf>,
     }
 
     impl SequenceClient {
@@ -294,7 +360,13 @@ mod tests {
             Self {
                 calls: AtomicUsize::new(0),
                 responses: Mutex::new(VecDeque::from(responses)),
+                ledger_path: None,
             }
+        }
+
+        fn with_ledger(mut self, path: PathBuf) -> Self {
+            self.ledger_path = Some(path);
+            self
         }
 
         fn calls(&self) -> usize {
@@ -311,6 +383,10 @@ mod tests {
                 .expect("lock poisoned")
                 .pop_front()
                 .unwrap_or_else(|| Err(InfraError::LlmRequest("no queued response".into())))
+        }
+
+        fn usage_ledger_path(&self) -> InfraResult<Option<PathBuf>> {
+            Ok(self.ledger_path.clone())
         }
     }
 
@@ -395,6 +471,56 @@ mod tests {
 
         assert_eq!(result, "ok");
         assert_eq!(client.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn ledger_records_each_retry_attempt_without_error_bodies() {
+        let _env_guard = QUOTA_TEST_LOCK.lock().await;
+        let _quota_guard = QuotaTestGuard::new();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("llm-usage.jsonl");
+        let client = Arc::new(
+            SequenceClient::new(vec![
+                Err(InfraError::LlmRequest("timeout provider-secret".into())),
+                Ok("response-secret".into()),
+            ])
+            .with_ledger(path.clone()),
+        );
+
+        llm_with_retry_policy_for(
+            &(client as Arc<dyn LlmClient>),
+            "test.retry",
+            "prompt-secret",
+            "system-secret",
+            LlmRetryPolicy {
+                max_retries: 2,
+                base_delay_secs: 0,
+                ..LlmRetryPolicy::default()
+            },
+            |_attempt, _max_retries, _delay_secs, _err| {},
+        )
+        .await
+        .unwrap();
+
+        let contents = std::fs::read_to_string(path).unwrap();
+        let records = contents
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["status"], "error");
+        assert_eq!(records[1]["status"], "success");
+        assert!(records
+            .iter()
+            .all(|record| record["operation"] == "test.retry"));
+        for secret in [
+            "provider-secret",
+            "response-secret",
+            "prompt-secret",
+            "system-secret",
+        ] {
+            assert!(!contents.contains(secret));
+        }
     }
 
     #[tokio::test]
