@@ -296,6 +296,8 @@ async fn handle_doc_show(id: &str, store: Arc<SqliteStore>) -> Result<()> {
         let expected_hash = doc
             .source_version()
             .context("Remem 会话文档缺少快照 hash")?;
+        let expected_hash = refine_core::session::remem_snapshot_hash(expected_hash)
+            .context("Remem 会话文档快照版本无效")?;
         let content = crate::remem_sessions::load_document_content(doc.url(), expected_hash)
             .context("无法从 Remem 读取会话原文")?;
         println!("{}", content);

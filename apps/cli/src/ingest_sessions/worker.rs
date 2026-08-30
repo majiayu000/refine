@@ -1,3 +1,4 @@
+use super::provenance::replace_session_mode_tags;
 use super::quarantine::{record_key as quarantine_key, QuarantineStore};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -302,7 +303,7 @@ pub(super) async fn process_single_session(
 
     let facet_response = extract_and_parse_facets_with_retry(&content, client, quota_hit).await?;
     let document = build_session_document(session, &facet_response.session_summary);
-    let items = facets_to_items_with_mode_and_identity(
+    let mut items = facets_to_items_with_mode_and_identity(
         &facet_response,
         document.id(),
         session.project.as_deref(),
@@ -310,6 +311,17 @@ pub(super) async fn process_single_session(
         session.mode,
     );
     let item_count = items.len();
+    for legacy_document_id in &session.legacy_documents_to_delete {
+        let mut legacy_items = doc_store
+            .find_items_by_document_id(legacy_document_id)
+            .await
+            .context("加载待迁移旧会话 Items 失败")?;
+        replace_session_mode_tags(&mut legacy_items, session.mode)?;
+        for item in &mut legacy_items {
+            item.set_document_id(document.id().clone());
+        }
+        items.extend(legacy_items);
+    }
     doc_store
         .save_with_replaced_items_and_delete_documents(
             &document,
