@@ -40,7 +40,7 @@
 | v1 | deprecated | 单 agent 单线程 | 419 | 输出衰减，不达 600 行下限 |
 | v2 PoC | archived | 4 sub-agent + 手工 dispatcher | 1364 | 验证 multi-agent 假设 |
 | v3 | archived | 4 sub-agent + ad-hoc SQL | variable | 历史报告保留，停止新增 |
-| v4 | current | deterministic bundle + closed claim catalog + 4 agents + evidence gate | evidence-based | 默认 current/previous 90d；DEGRADED 由 host 阻断 |
+| v4 | current | deterministic bundle + closed claim catalog + 1 agent + evidence gate | evidence-based | 默认 current/previous 90d；DEGRADED 由 host 阻断 |
 | v5 | spec | v4 + 处方追踪 + 自我演进 | evidence-based | Phase 4 |
 
 ## Phase 路线图

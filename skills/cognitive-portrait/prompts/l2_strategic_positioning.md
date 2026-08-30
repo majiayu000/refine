@@ -1,7 +1,9 @@
-# L2 Agent — 战略定位
+# L2 section guide — 战略定位
 
-You own only `layer-l2.md` beside `REFINE_COGNITIVE_PORTRAIT_OUTPUT`. Read only the deterministic bundle and optional
-previous portrait. Do not query SQLite or modify any repository file.
+In the single-agent run, use this guide for the L2 section of
+`REFINE_COGNITIVE_PORTRAIT_OUTPUT`. Read only the deterministic bundle and
+optional previous portrait. Do not query SQLite, create an intermediate layer
+file, or modify any repository file.
 
 Write `## L2：战略定位` with:
 

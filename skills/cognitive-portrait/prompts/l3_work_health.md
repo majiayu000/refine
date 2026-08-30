@@ -1,7 +1,9 @@
-# L3 Agent — 工作方式健康度
+# L3 section guide — 工作方式健康度
 
-You own only `layer-l3.md` beside `REFINE_COGNITIVE_PORTRAIT_OUTPUT`. Read only the bundle and optional prior
-portrait. Do not query SQLite or change the final report/index.
+In the single-agent run, use this guide for the L3 section of
+`REFINE_COGNITIVE_PORTRAIT_OUTPUT`. Read only the bundle and optional prior
+portrait. Do not query SQLite, create an intermediate layer file, or change the
+archive/index.
 
 Write `## L3：工作方式健康度` with:
 
