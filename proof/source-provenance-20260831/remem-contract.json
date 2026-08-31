@@ -1,0 +1,42 @@
+{
+  "binary": {
+    "version": "0.6.84",
+    "schema": 91
+  },
+  "summary_command": "remem raw sessions --json",
+  "summary_snapshot": {
+    "reported_count": 38926,
+    "returned_count": 38926,
+    "host_counts": {
+      "claude-code": 64,
+      "codex-cli": 38862,
+      "cursor": 0
+    },
+    "missing_required_fields": 0,
+    "duplicate_session_refs": 0,
+    "duplicate_selector_tuples": 0,
+    "valid_v2_session_refs": 38926,
+    "valid_sha256_content_hashes": 38926,
+    "samples_requested": 0,
+    "nonempty_samples": 0
+  },
+  "exact_message_selector_checks": [
+    {
+      "host": "codex-cli",
+      "limit": 1,
+      "returned": 1,
+      "selector_echo_matches": true,
+      "content_hash_matches_summary": true,
+      "pagination_cursor_present": true
+    },
+    {
+      "host": "claude-code",
+      "limit": 1,
+      "returned": 1,
+      "selector_echo_matches": true,
+      "content_hash_matches_summary": true,
+      "pagination_cursor_present": true
+    }
+  ],
+  "cursor_live_data_note": "No cursor-host session existed in this Remem snapshot; cursor mapping remains covered by the merged contract tests."
+}

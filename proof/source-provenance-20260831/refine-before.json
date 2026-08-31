@@ -1,0 +1,12 @@
+{
+  "captured_before_command": "refine ingest-sessions --latest 1",
+  "session_documents": 1,
+  "observations": 11,
+  "empty_raw_session_documents": 1,
+  "versioned_session_documents": 1,
+  "orphan_observations": 0,
+  "host_counts": {
+    "codex-cli": 1
+  },
+  "independent_oracle_matches": 1
+}

@@ -1,0 +1,45 @@
+{
+  "source_commit": "e68a239f353963a96c0ced52b197d65c959554eb",
+  "source_dirty": false,
+  "installed_at_utc": "2026-08-31T01:06:55Z",
+  "binaries": {
+    "refine": {
+      "path": "$HOME/.cargo/bin/refine",
+      "version": "0.1.3",
+      "sha256": "9dab71c553c0c3974c6ab0fe9fcdf192e271da2d6fbc0b5985345fd2b3ac90e8"
+    },
+    "mirror": {
+      "path": "$HOME/.cargo/bin/mirror",
+      "version": "0.1.3",
+      "sha256": "0eb8b1dcb72febec84a7a20e45c92a83a70fa4eea0dbb0ce694ecd1c7d70d944"
+    },
+    "refine-server": {
+      "path": "$HOME/.cargo/bin/refine-server",
+      "version": "0.1.3",
+      "sha256": "f9634d780ffa0d5792ac033e7f5cb2d03a0413e76d7d7799af8af5d8f65a2963"
+    },
+    "remem": {
+      "path": "$HOME/.local/bin/remem",
+      "version": "0.6.84",
+      "schema": 91,
+      "sha256": "0e35ccc80b962071458c64de2c222a6e0015b382451d47da18649186e6ae5f4b"
+    }
+  },
+  "runtime": {
+    "refine_server_running": true,
+    "health_endpoint": "pass",
+    "protected_items_endpoint": "pass",
+    "launch_agent_bindings": "pass",
+    "installed_script_hashes": "pass",
+    "doctor_failures": 0,
+    "doctor_warnings": [
+      "refresh success marker was absent before the manual smoke",
+      "weekly insights log did not yet exist"
+    ]
+  },
+  "ci": {
+    "head_sha": "e68a239f353963a96c0ced52b197d65c959554eb",
+    "run": 33346283831,
+    "conclusion": "success"
+  }
+}

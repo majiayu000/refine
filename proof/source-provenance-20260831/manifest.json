@@ -1,0 +1,23 @@
+{
+  "collected_at_utc": "2026-08-31T01:15:32Z",
+  "issue": 203,
+  "source_commit": "e68a239f353963a96c0ced52b197d65c959554eb",
+  "privacy": {
+    "raw_transcript_bodies_saved": false,
+    "message_text_saved": false,
+    "session_references_saved_as_sha256_only": true,
+    "credentials_saved": false
+  },
+  "artifacts": [
+    "oracle.tsv",
+    "remem-contract.json",
+    "refine-before.json",
+    "refine-after.json",
+    "conservation.json",
+    "no-llm-migration.json",
+    "failure-injection.json",
+    "runtime-binaries.json",
+    "live-smoke.json",
+    "verdict.json"
+  ]
+}

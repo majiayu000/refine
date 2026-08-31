@@ -1,0 +1,26 @@
+{
+  "live_runtime": {
+    "legacy_documents": 0,
+    "pre_run_backup_legacy_documents": 0,
+    "status": "not_applicable_zero_legacy_rows",
+    "claim": "No live legacy-row migration is claimed because neither the active database nor its pre-run backup contains a legacy row."
+  },
+  "isolated_real_code_checks": [
+    {
+      "command": "cargo test -p refine-cli legacy_convergence --locked",
+      "passed": 6,
+      "failed": 0
+    },
+    {
+      "command": "cargo test -p refine-cli legacy_migration --locked",
+      "passed": 10,
+      "failed": 0
+    }
+  ],
+  "no_credential_changed_session_check": {
+    "provider_attempts": 0,
+    "ledger_records_added": 0,
+    "database_digests_conserved": true,
+    "result": "explicit_extraction_required"
+  }
+}
