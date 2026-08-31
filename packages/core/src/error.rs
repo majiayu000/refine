@@ -35,6 +35,9 @@ pub enum InfraError {
     #[error("LLM 请求失败: {0}")]
     LlmRequest(String),
 
+    #[error("LLM 传输失败: {0}")]
+    LlmTransport(String),
+
     #[error("LLM HTTP 错误 ({status}): {message}")]
     LlmHttp { status: u16, message: String },
 

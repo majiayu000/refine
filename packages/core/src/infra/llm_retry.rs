@@ -7,7 +7,7 @@ use crate::error::{InfraError, InfraResult};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub const DEFAULT_MAX_RETRIES: usize = 5;
+pub const DEFAULT_MAX_RETRIES: usize = 3;
 pub const DEFAULT_RETRY_BASE_DELAY_SECS: u64 = 10;
 pub const DEFAULT_REQUEST_TIMEOUT_MILLIS: u64 = 90_000;
 
@@ -173,7 +173,7 @@ where
         .await
         {
             Ok(result) => result,
-            Err(_) => Err(InfraError::LlmRequest(format!(
+            Err(_) => Err(InfraError::LlmTransport(format!(
                 "LLM 请求超时: {}ms",
                 request_timeout.as_millis()
             ))),
@@ -227,61 +227,14 @@ where
 }
 
 fn is_retryable_error(err: &InfraError, retry_http_429: bool) -> bool {
-    if matches!(err, InfraError::LlmBudgetExceeded { .. }) {
-        return false;
+    match err {
+        InfraError::LlmTransport(_) => true,
+        InfraError::LlmHttp { status, .. } => {
+            matches!(*status, 408 | 425 | 500 | 502 | 503 | 504 | 529)
+                || (*status == 429 && retry_http_429)
+        }
+        _ => false,
     }
-    if let InfraError::LlmHttp { status, .. } = err {
-        return *status == 408
-            || *status == 425
-            || (*status == 429 && retry_http_429)
-            || (500..=599).contains(status);
-    }
-    if matches!(err, InfraError::LlmRejected { .. }) {
-        return false;
-    }
-    let msg = err.to_string();
-    if !retry_http_429 && is_rate_limit_message(&msg) {
-        return false;
-    }
-    msg.contains("cooldown")
-        || msg.contains("service_busy")
-        || msg.contains("rate")
-        || msg.contains("429")
-        || msg.contains("Upstream")
-        || msg.contains("timeout")
-        || msg.contains("timed out")
-        || msg.contains("请求超时")
-        || msg.contains("empty response")
-        || msg.contains("stream disconnected before completion")
-        || msg.contains("stream closed before")
-        || msg.contains("INTERNAL_ERROR; received from peer")
-        || msg.contains("internal_server_error")
-        || msg.contains("system_cpu_overloaded")
-}
-
-fn is_rate_limit_message(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
-    let tokens = message
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-
-    tokens.contains(&"429")
-        || tokens
-            .iter()
-            .any(|token| *token == "ratelimit" || token.starts_with("ratelimiterror"))
-        || tokens.windows(2).any(|pair| {
-            matches!(
-                pair,
-                ["rate", "limit"]
-                    | ["rate", "limited"]
-                    | ["rate", "exceeded"]
-                    | ["quota", "exceeded"]
-            )
-        })
-        || tokens
-            .windows(3)
-            .any(|triple| matches!(triple, ["too", "many", "requests"]))
 }
 
 fn backoff_delay_secs(base_delay_secs: u64, attempt: usize) -> u64 {
@@ -294,72 +247,69 @@ mod tests {
     use super::*;
 
     #[test]
-    fn typed_http_status_controls_retryability() {
+    fn default_policy_allows_three_total_attempts() {
+        assert_eq!(LlmRetryPolicy::default().max_retries, 3);
+    }
+
+    #[test]
+    fn only_typed_transient_failures_are_retryable() {
+        assert!(is_retryable_error(
+            &InfraError::LlmTransport("connection reset".into()),
+            true,
+        ));
+        for status in [408, 425, 500, 502, 503, 504, 529] {
+            assert!(is_retryable_error(
+                &InfraError::LlmHttp {
+                    status,
+                    message: "transient".into(),
+                },
+                true,
+            ));
+        }
+        assert!(is_retryable_error(
+            &InfraError::LlmHttp {
+                status: 429,
+                message: "rate limited".into(),
+            },
+            true,
+        ));
         assert!(!is_retryable_error(
-            &InfraError::LlmBudgetExceeded {
+            &InfraError::LlmHttp {
+                status: 429,
+                message: "rate limited".into(),
+            },
+            false,
+        ));
+        for status in [400, 401, 403, 404, 422, 501, 505] {
+            assert!(!is_retryable_error(
+                &InfraError::LlmHttp {
+                    status,
+                    message: "deterministic".into(),
+                },
+                true,
+            ));
+        }
+        for error in [
+            InfraError::LlmRequest("timeout in local validation".into()),
+            InfraError::LlmRequest("provider rate table unavailable".into()),
+            InfraError::LlmRequest("Upstream configuration missing".into()),
+            InfraError::LlmParse("empty response".into()),
+            InfraError::UsageLedger("timed out".into()),
+            InfraError::LlmBudgetExceeded {
                 resource: "provider_attempts",
                 limit: 100,
                 used: 100,
                 requested: 1,
             },
-            true,
-        ));
-        assert!(is_retryable_error(
-            &InfraError::LlmHttp {
-                status: 503,
-                message: "moderation service unavailable".into(),
+            InfraError::LlmRejected {
+                code: "content_filter".into(),
+                message: "blocked".into(),
             },
-            true,
-        ));
-        assert!(is_retryable_error(
-            &InfraError::LlmHttp {
-                status: 429,
-                message: "rate limited".into(),
+            InfraError::RateLimited {
+                retry_after_secs: Some(60),
             },
-            true,
-        ));
-        assert!(!is_retryable_error(
-            &InfraError::LlmHttp {
-                status: 429,
-                message: "rate limited".into(),
-            },
-            false,
-        ));
-        assert!(!is_retryable_error(
-            &InfraError::LlmHttp {
-                status: 400,
-                message: "bad request".into(),
-            },
-            true,
-        ));
-        assert!(is_retryable_error(
-            &InfraError::LlmRequest("system_cpu_overloaded".into()),
-            true,
-        ));
-        assert!(is_retryable_error(
-            &InfraError::LlmRequest("provider rate table unavailable".into()),
-            false,
-        ));
-        assert!(!is_retryable_error(
-            &InfraError::LlmRequest("429 rate limit".into()),
-            false,
-        ));
-        assert!(is_retryable_error(
-            &InfraError::LlmRequest("request to http://127.0.0.1:4290/v1 timed out".into(),),
-            false,
-        ));
-        for message in [
-            "HTTP 429",
-            "RateLimitError",
-            "rate_limit",
-            "rate exceeded",
-            "too many requests",
-            "quota exceeded",
         ] {
-            assert!(!is_retryable_error(
-                &InfraError::LlmRequest(message.into()),
-                false,
-            ));
+            assert!(!is_retryable_error(&error, true));
         }
     }
     use crate::infra::quota_state::{is_exhausted as is_quota_exhausted, set_quota_file_override};
@@ -476,7 +426,7 @@ mod tests {
         let _quota_guard = QuotaTestGuard::new();
 
         let client = Arc::new(SequenceClient::new(vec![
-            Err(InfraError::LlmRequest("429 rate limit".into())),
+            Err(InfraError::LlmTransport("connection reset".into())),
             Ok("ok".into()),
         ]));
 
@@ -506,7 +456,7 @@ mod tests {
         let path = dir.path().join("llm-usage.jsonl");
         let client = Arc::new(
             SequenceClient::new(vec![
-                Err(InfraError::LlmRequest("timeout provider-secret".into())),
+                Err(InfraError::LlmTransport("timeout provider-secret".into())),
                 Ok("ok".into()),
             ])
             .with_ledger(path.clone()),
@@ -676,7 +626,7 @@ mod tests {
         let _quota_guard = QuotaTestGuard::new();
 
         let client = Arc::new(SequenceClient::new(vec![
-            Err(InfraError::LlmRequest(
+            Err(InfraError::LlmTransport(
                 "stream error: stream disconnected before completion".into(),
             )),
             Ok("ok".into()),
@@ -708,7 +658,7 @@ mod tests {
         let _quota_guard = QuotaTestGuard::new();
 
         let client = Arc::new(SequenceClient::new(vec![
-            Err(InfraError::LlmRequest(
+            Err(InfraError::LlmTransport(
                 r#"API 错误: {"error":{"message":"stream error: stream ID 3953; INTERNAL_ERROR; received from peer","type":"server_error","param":"","code":"internal_server_error"}}"#.into(),
             )),
             Ok("ok".into()),

@@ -4,8 +4,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use refine_core::error::InfraError;
 use refine_core::infra::{
-    llm_with_retry_policy_for, LlmClient, LlmRetryPolicy, DEFAULT_MAX_RETRIES,
-    DEFAULT_RETRY_BASE_DELAY_SECS,
+    llm_with_retry_policy_for, LlmClient, LlmRetryPolicy, DEFAULT_RETRY_BASE_DELAY_SECS,
 };
 use refine_core::knowledge::{Document, DocumentRepository, RestoreDocumentParams};
 use refine_core::session::{
@@ -19,6 +18,7 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 
 const DEFAULT_CONCURRENCY: usize = 1;
+const DEFAULT_FACET_PARSE_ATTEMPTS: usize = 2;
 
 fn concurrency() -> usize {
     std::env::var("REFINE_INGEST_CONCURRENCY")
@@ -441,7 +441,7 @@ async fn extract_and_parse_facets_with_retry(
         content,
         client,
         quota_hit,
-        DEFAULT_MAX_RETRIES,
+        DEFAULT_FACET_PARSE_ATTEMPTS,
         DEFAULT_RETRY_BASE_DELAY_SECS,
     )
     .await
@@ -483,6 +483,16 @@ pub(super) async fn extract_and_parse_facets_with_retry_policy(
 fn ingest_retry_delay_secs(base_delay_secs: u64, attempt: usize) -> u64 {
     let backoff_factor = 1u64.checked_shl(attempt as u32).unwrap_or(u64::MAX);
     base_delay_secs.saturating_mul(backoff_factor)
+}
+
+#[cfg(test)]
+mod retry_default_tests {
+    use super::DEFAULT_FACET_PARSE_ATTEMPTS;
+
+    #[test]
+    fn facet_parse_allows_one_regeneration() {
+        assert_eq!(DEFAULT_FACET_PARSE_ATTEMPTS, 2);
+    }
 }
 
 pub(super) fn log_preview(message: &str, max_chars: usize) -> String {
