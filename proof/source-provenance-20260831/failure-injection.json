@@ -1,0 +1,14 @@
+{
+  "remem_subprocess_failure": {
+    "command": "REFINE_DB_PATH=<isolated-db> REFINE_REMEM_BIN=/usr/bin/false refine ingest-sessions --latest 1",
+    "exit_code": 1,
+    "error_boundary": "failed to load session summaries from remem",
+    "provider_calls": 0
+  },
+  "daily_pipeline_failure_contract": {
+    "command": "bash scripts/test-daily-refresh-remem-failure.sh",
+    "result": "pass",
+    "downstream_refine_outputs_ran": false,
+    "success_marker_written": false
+  }
+}

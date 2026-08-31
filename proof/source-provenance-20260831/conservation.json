@@ -1,0 +1,24 @@
+{
+  "live_smoke_delta": {
+    "session_documents_before": 1,
+    "session_documents_after": 2,
+    "observations_before": 11,
+    "observations_after": 22,
+    "processed_sessions": 1,
+    "failed_sessions": 0,
+    "new_observations": 11,
+    "preexisting_document_present_after": true
+  },
+  "changed_session_without_credentials": {
+    "isolated_database_snapshot": true,
+    "documents_before": 2,
+    "documents_after": 2,
+    "items_before": 22,
+    "items_after": 22,
+    "document_digest_conserved": true,
+    "item_digest_conserved": true,
+    "ledger_records_added": 0,
+    "result": "failed_closed_before_extraction"
+  },
+  "identity_note": "The pre-smoke document reference is present in oracle.tsv. Item-ID-set conservation across the additive smoke was not sampled before the run and is therefore not claimed."
+}

@@ -1,0 +1,41 @@
+{
+  "command": "refine ingest-sessions --latest 1",
+  "installed_source_commit": "e68a239f353963a96c0ced52b197d65c959554eb",
+  "remem_summary_count": 38927,
+  "full_sessions_loaded": 1,
+  "eligible_limit": 1,
+  "processed_sessions": 1,
+  "failed_sessions": 0,
+  "new_observations": 11,
+  "database": {
+    "session_documents_before": 1,
+    "session_documents_after": 2,
+    "observations_before": 11,
+    "observations_after": 22,
+    "new_document_raw_length": 0,
+    "new_document_observations": 11
+  },
+  "projection": {
+    "independent_oracle_host": "codex-cli",
+    "remem_host": "codex-cli",
+    "refine_source": "codex-session",
+    "host_matches": true,
+    "source_matches": true,
+    "content_hash_and_mode_match": true
+  },
+  "usage_ledger": {
+    "schema_versions": [2],
+    "records": 4,
+    "logical_calls": 4,
+    "unique_attempt_ids": 4,
+    "attempts": [1, 1, 1, 1],
+    "successful_records": 4,
+    "raw_error_prompt_or_system_fields_present": false
+  },
+  "subsequent_change_check": {
+    "summary_changed_after_smoke": true,
+    "without_credentials_result": "explicit_extraction_required",
+    "database_unchanged": true,
+    "ledger_records_added": 0
+  }
+}

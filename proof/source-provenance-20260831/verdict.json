@@ -1,0 +1,23 @@
+{
+  "overall": "pass",
+  "source_commit": "e68a239f353963a96c0ced52b197d65c959554eb",
+  "checks": {
+    "public_cli_is_remem_only": "pass",
+    "authoritative_host_mapping": "pass",
+    "unchanged_summary_short_circuit": "pass_by_merged_tests",
+    "exact_message_selectors": "pass_live_codex_and_claude",
+    "empty_raw_document_projection": "pass_live",
+    "validated_reference_hash_and_mode": "pass_live",
+    "legacy_convergence": "pass_isolated_16_tests_live_not_applicable_zero_rows",
+    "changed_session_requires_explicit_extraction": "pass_live",
+    "daily_refresh_stops_on_remem_failure": "pass_failure_injection",
+    "installed_runtime_matches_source": "pass",
+    "workspace_ci": "pass",
+    "new_real_codex_smoke": "pass"
+  },
+  "limitations": [
+    "The live Remem snapshot contained no cursor-host sessions, so cursor mapping is covered by merged contract tests rather than a live row.",
+    "The active database and its pre-run backup contained zero legacy documents, so no live legacy-row conservation claim is made; 16 isolated migration and convergence tests passed."
+  ],
+  "privacy": "Only identities hashed with SHA-256, hashes, counts, versions, command results, and non-secret runtime metadata are retained."
+}
