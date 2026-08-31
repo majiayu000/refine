@@ -143,7 +143,7 @@ impl ClaudeClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| InfraError::LlmRequest(e.to_string()))?;
+            .map_err(classify_send_error)?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -248,7 +248,7 @@ impl OpenAIClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| InfraError::LlmRequest(e.to_string()))?;
+            .map_err(classify_send_error)?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -343,6 +343,16 @@ fn classify_provider_error(
     InfraError::LlmHttp {
         status: status.as_u16(),
         message: body.to_string(),
+    }
+}
+
+fn classify_send_error(error: reqwest::Error) -> InfraError {
+    let deterministic = error.is_builder() || error.is_redirect();
+    let message = error.without_url().to_string();
+    if deterministic {
+        InfraError::LlmRequest(message)
+    } else {
+        InfraError::LlmTransport(message)
     }
 }
 
@@ -473,6 +483,19 @@ mod tests {
         let client = MockLlmClient::new("test response");
         let result = client.complete("hello", None).await.unwrap();
         assert_eq!(result, "test response");
+    }
+
+    #[test]
+    fn invalid_request_builder_is_not_retryable_transport() {
+        let error = reqwest::Client::new()
+            .get("://invalid-endpoint")
+            .build()
+            .expect_err("invalid URL must fail request construction");
+
+        assert!(matches!(
+            classify_send_error(error),
+            InfraError::LlmRequest(_)
+        ));
     }
 
     #[test]

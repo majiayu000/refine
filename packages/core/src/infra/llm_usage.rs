@@ -247,6 +247,7 @@ fn error_kind(error: &InfraError) -> &'static str {
         InfraError::NotFound(_) => "not_found",
         InfraError::Serialization(_) => "serialization",
         InfraError::LlmRequest(_) => "request",
+        InfraError::LlmTransport(_) => "transport",
         InfraError::LlmHttp { .. } => "http",
         InfraError::LlmParse(_) => "parse",
         InfraError::UsageLedger(_) => "usage_ledger",
