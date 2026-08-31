@@ -6,6 +6,7 @@ use super::quota_state::{
 use crate::error::{InfraError, InfraResult};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 pub const DEFAULT_MAX_RETRIES: usize = 3;
 pub const DEFAULT_RETRY_BASE_DELAY_SECS: u64 = 10;
@@ -154,6 +155,7 @@ where
     let ledger_path = client.usage_ledger_path()?;
     let client_identity = client.cache_identity();
     let run_budget = client.run_budget();
+    let call_id = Uuid::new_v4().to_string();
 
     for attempt in 0..max_retries {
         if behavior.check_persistent_quota && is_quota_exhausted() {
@@ -194,6 +196,7 @@ where
         }
         if let Some(path) = ledger_path.as_deref() {
             let record = LlmUsageRecord::from_attempt(
+                &call_id,
                 operation,
                 attempt + 1,
                 &client_identity,
@@ -449,7 +452,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ledger_records_each_retry_attempt_without_error_bodies() {
+    async fn ledger_correlates_retries_and_separates_logical_calls() {
         let _env_guard = QUOTA_TEST_LOCK.lock().await;
         let _quota_guard = QuotaTestGuard::new();
         let dir = TempDir::new().unwrap();
@@ -458,10 +461,25 @@ mod tests {
             SequenceClient::new(vec![
                 Err(InfraError::LlmTransport("timeout provider-secret".into())),
                 Ok("ok".into()),
+                Ok("other logical call".into()),
             ])
             .with_ledger(path.clone()),
         );
 
+        llm_with_retry_policy_for(
+            &(client.clone() as Arc<dyn LlmClient>),
+            "test.retry",
+            "prompt-secret",
+            "system-secret",
+            LlmRetryPolicy {
+                max_retries: 2,
+                base_delay_secs: 0,
+                ..LlmRetryPolicy::default()
+            },
+            |_attempt, _max_retries, _delay_secs, _err| {},
+        )
+        .await
+        .unwrap();
         llm_with_retry_policy_for(
             &(client as Arc<dyn LlmClient>),
             "test.retry",
@@ -478,8 +496,19 @@ mod tests {
         .unwrap();
 
         let contents = std::fs::read_to_string(path).unwrap();
-        assert_eq!(contents.lines().count(), 2);
-        assert_eq!(contents.matches("\"operation\":\"test.retry\"").count(), 2);
+        let records = contents
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 3);
+        assert!(records.iter().all(|record| record["schema_version"] == 2));
+        assert_eq!(records[0]["attempt"], 1);
+        assert_eq!(records[1]["attempt"], 2);
+        assert_eq!(records[2]["attempt"], 1);
+        assert_eq!(records[0]["call_id"], records[1]["call_id"]);
+        assert_ne!(records[0]["call_id"], records[2]["call_id"]);
+        assert_ne!(records[0]["attempt_id"], records[1]["attempt_id"]);
+        assert_ne!(records[1]["attempt_id"], records[2]["attempt_id"]);
         assert!(contents.contains("\"status\":\"error\""));
         assert!(contents.contains("\"status\":\"success\""));
         for secret in ["provider-secret", "prompt-secret", "system-secret"] {

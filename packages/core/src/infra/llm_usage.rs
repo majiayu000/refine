@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use uuid::Uuid;
 
-const LEDGER_SCHEMA_VERSION: u8 = 1;
+const LEDGER_SCHEMA_VERSION: u8 = 2;
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LlmTokenUsage {
@@ -146,6 +146,7 @@ pub(crate) struct LlmUsageRecord {
     recorded_at: String,
     run_id: String,
     call_id: String,
+    attempt_id: String,
     operation: String,
     attempt: usize,
     client_identity: String,
@@ -160,7 +161,10 @@ pub(crate) struct LlmUsageRecord {
 }
 
 impl LlmUsageRecord {
+    // Keep every redacted ledger field explicit at this serialization boundary.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_attempt(
+        call_id: &str,
         operation: &str,
         attempt: usize,
         client_identity: &str,
@@ -181,7 +185,8 @@ impl LlmUsageRecord {
             schema_version: LEDGER_SCHEMA_VERSION,
             recorded_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
             run_id: run_id().to_string(),
-            call_id: Uuid::new_v4().to_string(),
+            call_id: call_id.to_string(),
+            attempt_id: Uuid::new_v4().to_string(),
             operation: operation.to_string(),
             attempt,
             client_identity: client_identity.to_string(),
@@ -308,7 +313,9 @@ mod tests {
                             ..LlmTokenUsage::default()
                         }),
                     };
+                    let call_id = Uuid::new_v4().to_string();
                     let record = LlmUsageRecord::from_attempt(
+                        &call_id,
                         "test.operation",
                         attempt + 1,
                         "openai:model:endpoint-sha256:safe",
