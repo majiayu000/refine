@@ -43,12 +43,11 @@ already uses one SQLite read snapshot, event time, the Session Insights source
 allowlist, and the strict eligible cohort for current rolling 90 days and the
 previous 90 days.
 
-`DEGRADED` is a host-level stop condition. The wrapper must not launch the
-agent, create a candidate, publish a report, or update `INDEX.md` when the
-collector reports `DEGRADED`; the collector output remains a diagnostic bundle,
-while the scheduled archive stays unchanged.
-If collection reports `NO_CORE_DATA` or `SCHEMA_INVALID`, stop with a specific
-error as well.
+`DEGRADED` keeps a real quality status. The wrapper still launches the
+agent and may publish a four-part portrait when core data exists, but it must
+disclose the detached-observation gap and must not emit cross-period trends.
+Do not relabel `DEGRADED` as `OK`. If collection reports `NO_CORE_DATA` or
+`SCHEMA_INVALID`, stop with a specific error.
 
 ## Stage 2 — one sequential analysis pass
 
@@ -101,14 +100,22 @@ Each section may cite interpretations and recommendations with these
 machine-readable forms:
 
 - `[evidence:obs:<item-id>]` for an observation in the bundle;
-- `[bundle:/json/pointer]` for a non-numeric aggregate or manifest field;
+- `[bundle:/json/pointer]` for a non-numeric aggregate or manifest field.
+  Allowed prefixes are `/current/`, `/previous/`, `/comparison/`,
+  `/manifest/current_window/`, and `/manifest/previous_window/`. Window roots
+  such as `[bundle:/comparison]` or `[bundle:/current]` are invalid; point at a
+  field, for example `[bundle:/comparison/status]`.
 
 Every `[事实]` line, including a non-numeric evidence fact, must be an exact,
 unique catalog `rendered_line`. The collector emits opaque evidence-record
 claims for this purpose, so the model never invents a factual label. Free-prose
 facts, numbers, and self-written trend lines fail closed. `[推断]` prose must
-carry a valid evidence ID or bundle pointer. If `comparison.comparable=false`, no trend, direction,
-increase/decrease, or current-versus-previous claim is allowed. Do not cite
+carry a valid evidence ID or field-level bundle pointer. Visible `[推断]` and
+`[建议]` prose may use ordinary Chinese classifiers such as「一个」or「两个窗口」; it must not
+contain ASCII digits, fullwidth digits,「百分之」quantities, or magnitude numerals such as「一百万」. Copy every
+scalar only as an untouched catalog `[事实]` line. If `comparison.comparable=false`, no trend, direction,
+increase/decrease, or current-versus-previous claim is allowed, including unmarked prose such as
+「相比上一期…提升」. A missing `[趋势]` tag does not make a comparison claim valid. Do not cite
 knowledge-only Grok/Gemini sources as sessions.
 
 Every `[建议]` must carry allowlisted evidence, a meaningful owner, a due date

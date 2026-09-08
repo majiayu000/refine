@@ -398,18 +398,30 @@ validate_portrait_root() {
   [[ ! -L "$root" && -d "$root" ]] || return 1
   [[ ! -L "${root}/skills/cognitive-portrait" \
     && -f "${root}/skills/cognitive-portrait/SKILL.md" ]] || return 1
-  [[ ! -L "${root}/docs/cognitive-portraits" \
-    && -d "${root}/docs/cognitive-portraits" \
-    && -f "${root}/docs/cognitive-portraits/INDEX.md" ]] || return 1
+}
+
+validate_portrait_archive() {
+  local dir="$1"
+  [[ -n "$dir" && "$dir" == /* ]] || return 1
+  [[ "$dir" != *$'\n'* && "$dir" != *$'\r'* && "$dir" != *$'\t'* ]] || return 1
+  [[ ! -L "$dir" && -d "$dir" && -f "${dir}/INDEX.md" && ! -L "${dir}/INDEX.md" ]] || return 1
+}
+
+portrait_binary_supports_collect() {
+  local bin="$1"
+  [[ -n "$bin" && "$bin" == /* && ! -L "$bin" && -f "$bin" && -x "$bin" ]] || return 1
+  "$bin" cognitive-portrait --help 2>/dev/null | grep -q collect
 }
 
 check_cognitive_portrait() {
   local manifest="$1"
   local plist="${HOME}/Library/LaunchAgents/com.lifcc.refine-cognitive-portrait.plist"
-  local root portrait_dir agent log_path latest
+  local root portrait_dir agent log_path latest portrait_bin expected_portrait_hash actual_portrait_hash
   root="$(manifest_value cognitive_portrait_root "$manifest")"
   portrait_dir="$(manifest_value cognitive_portrait_dir "$manifest")"
   agent="$(manifest_value cognitive_portrait_agent "$manifest")"
+  portrait_bin="$(manifest_value cognitive_portrait_refine_bin "$manifest")"
+  expected_portrait_hash="$(manifest_value cognitive_portrait_refine_sha256 "$manifest")"
   log_path="${HOME}/Library/Logs/refine-portrait.log"
 
   if validate_portrait_root "$root"; then
@@ -434,7 +446,7 @@ check_cognitive_portrait() {
   else
     fail "cognitive portrait skill tree hash mismatch"
   fi
-  if [[ "$portrait_dir" == "${root}/docs/cognitive-portraits" && -d "$portrait_dir" ]]; then
+  if validate_portrait_archive "$portrait_dir"; then
     pass "cognitive portrait output directory valid: ${portrait_dir}"
   else
     fail "cognitive portrait output directory mismatch: ${portrait_dir:-missing}"
@@ -443,6 +455,20 @@ check_cognitive_portrait() {
     pass "cognitive portrait agent executable valid"
   else
     fail "cognitive portrait agent executable invalid: ${agent:-missing}"
+  fi
+  actual_portrait_hash="$(file_sha256 "$portrait_bin" 2>/dev/null || true)"
+  if portrait_binary_supports_collect "$portrait_bin" \
+    && [[ -n "$expected_portrait_hash" && "$actual_portrait_hash" == "$expected_portrait_hash" ]]; then
+    pass "cognitive portrait dedicated binary valid: ${portrait_bin}"
+  else
+    fail "cognitive portrait dedicated binary missing or lacks collect: ${portrait_bin:-missing}"
+  fi
+  local global_refine
+  global_refine="$(manifest_value refine_bin "$manifest")"
+  if [[ -n "$global_refine" && -n "$portrait_bin" && "$global_refine" != "$portrait_bin" ]]; then
+    pass "cognitive portrait dedicated binary is distinct from global refine CLI"
+  else
+    fail "cognitive portrait dedicated binary is not distinct from global refine CLI"
   fi
 
   local dependency key expected_path expected_hash actual_hash required_path
@@ -485,6 +511,11 @@ check_cognitive_portrait() {
       pass "cognitive portrait REFINE_PORTRAIT_DIR matches manifest"
     else
       fail "cognitive portrait REFINE_PORTRAIT_DIR mismatches manifest"
+    fi
+    if [[ "$(plist_value "$plist" 'EnvironmentVariables:REFINE_COGNITIVE_PORTRAIT_REFINE_BIN')" == "$portrait_bin" ]]; then
+      pass "cognitive portrait refine binary matches manifest"
+    else
+      fail "cognitive portrait refine binary mismatches manifest"
     fi
     if [[ "$(plist_value "$plist" 'EnvironmentVariables:REFINE_PORTRAIT_AGENT')" == "$agent" ]]; then
       pass "cognitive portrait agent matches manifest"

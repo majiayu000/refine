@@ -97,11 +97,14 @@ pub(crate) fn validate_portrait(
     {
         errors.push("claim catalog schema or claim IDs are invalid".to_string());
     }
-    if !bundle.comparison.comparable {
-        errors.push(format!(
-            "comparison is DEGRADED; portrait generation is disabled: {}",
-            bundle.comparison.reasons.join(",")
-        ));
+    if !bundle.comparison.comparable
+        && bundle
+            .claim_catalog
+            .claims
+            .iter()
+            .any(|claim| claim.kind == "trend")
+    {
+        errors.push("DEGRADED claim catalog must not contain trend claims".to_string());
     }
 
     for block in paragraph_blocks(&blocks) {
@@ -110,10 +113,14 @@ pub(crate) fn validate_portrait(
         let catalog_claim = claim_id.and_then(|id| catalog.get(id).copied());
         let is_catalog_line = catalog_claim
             .is_some_and(|claim| claim.rendered_line == line && claim.rendered_line == block.raw);
-        let has_numeric = contains_numeric_token(line);
         let is_factual = line.contains("[事实]");
         let is_inference = line.contains("[推断");
         let is_action = line.contains("[建议]");
+        // [事实] treats every ideographic numeral as a number so paraphrases
+        // like「一百」cannot replace a catalog scalar. [推断]/[建议] still allow
+        // classifiers such as「一个」/「两个窗口」, but magnitude quantities
+        // such as「一百万」are unsupported numbers.
+        let has_numeric = contains_numeric_token(line, is_factual);
         let unique_claim = claim_id.is_some_and(|id| used_claims.insert(id.to_string()));
 
         if is_factual {
@@ -124,7 +131,7 @@ pub(crate) fn validate_portrait(
         }
 
         let catalog_is_numeric = catalog_claim.is_some_and(|claim| !claim.values.is_empty());
-        if catalog_is_numeric || ((is_factual || is_inference || is_action) && has_numeric) {
+        if catalog_is_numeric || (!is_catalog_line && has_numeric) {
             numeric_claims += 1;
             if !is_catalog_line || !unique_claim {
                 unsupported_numeric_claims += 1;
@@ -134,10 +141,16 @@ pub(crate) fn validate_portrait(
         if claim_id.is_some() && (!is_catalog_line || !unique_claim) && !catalog_is_numeric {
             errors.push("claim is not a unique canonical catalog line".to_string());
         }
-        if line.contains("[趋势]")
-            && !catalog_claim.is_some_and(|claim| claim.kind == "trend" && is_catalog_line)
-        {
-            errors.push("trend line is not a canonical trend catalog claim".to_string());
+        let canonical_trend =
+            catalog_claim.is_some_and(|claim| claim.kind == "trend" && is_catalog_line);
+        let tagged_trend = line.contains("[趋势]");
+        let prose_trend = !is_catalog_line && contains_period_comparison_claim(line);
+        if (tagged_trend || prose_trend) && (!bundle.comparison.comparable || !canonical_trend) {
+            errors.push(if bundle.comparison.comparable {
+                "trend line is not a canonical trend catalog claim".to_string()
+            } else {
+                "trend claim is forbidden when comparison is DEGRADED".to_string()
+            });
         }
         if is_inference {
             inference_claims += 1;
@@ -220,7 +233,7 @@ pub(crate) fn validate_portrait(
         traceable_inference_claims,
         inference_traceability_rate,
         comparable_cohort_rate: f64::from(bundle.comparison.comparable),
-        comparison_claims_suppressed: bundle.comparison.comparable && errors.is_empty(),
+        comparison_claims_suppressed: !bundle.comparison.comparable,
         action_claims,
         verifiable_actions,
         action_verifiability_rate,
@@ -450,7 +463,7 @@ fn valid_verification_name(name: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || "_-./".contains(character))
 }
 
-fn contains_numeric_token(line: &str) -> bool {
+fn visible_prose(line: &str) -> String {
     let characters: Vec<char> = line.chars().collect();
     let mut rendered = String::with_capacity(line.len());
     let mut index = 0usize;
@@ -470,10 +483,103 @@ fn contains_numeric_token(line: &str) -> bool {
         rendered.push(characters[index]);
         index += 1;
     }
+    rendered
+}
+
+fn contains_numeric_token(line: &str, include_cjk_ideographic_numerals: bool) -> bool {
+    let rendered = visible_prose(line);
     rendered.chars().any(|character| {
         character.is_numeric()
-            || "零〇一二三四五六七八九十百千万亿两壹贰叁肆伍陆柒捌玖拾佰仟".contains(character)
+            || (include_cjk_ideographic_numerals
+                && "零〇一二三四五六七八九十百千万亿两壹贰叁肆伍陆柒捌玖拾佰仟".contains(character))
     }) || rendered.contains("百分之")
+        || (!include_cjk_ideographic_numerals && contains_cjk_magnitude_quantity(&rendered))
+}
+
+fn contains_cjk_magnitude_quantity(text: &str) -> bool {
+    const SMALL_DIGITS: &str = "零〇一二三四五六七八九两壹贰叁肆伍陆柒捌玖";
+    const UNITS: &str = "十百千万亿拾佰仟";
+    let characters: Vec<char> = text.chars().collect();
+    characters.windows(2).any(|pair| {
+        let first = pair[0];
+        let second = pair[1];
+        (SMALL_DIGITS.contains(first) && UNITS.contains(second))
+            || (UNITS.contains(first) && SMALL_DIGITS.contains(second))
+    })
+}
+
+fn contains_period_comparison_claim(line: &str) -> bool {
+    let text = visible_prose(line);
+    has_previous_period_marker(&text) && has_comparison_or_direction_marker(&text)
+}
+
+fn has_previous_period_marker(text: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "上一期",
+        "上期",
+        "前一期",
+        "上一窗口",
+        "前一窗口",
+        "上个窗口",
+        "上一周期",
+        "前一周期",
+        "前一等长",
+        "上一个窗口",
+        "previous period",
+        "last period",
+        "prior period",
+        "previous window",
+        "last window",
+        "prior window",
+    ];
+    MARKERS.iter().any(|marker| text.contains(marker))
+}
+
+fn has_comparison_or_direction_marker(text: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "相比",
+        "对比",
+        "比起",
+        "较上",
+        "好于",
+        "差于",
+        "高于",
+        "低于",
+        "强于",
+        "弱于",
+        "更好",
+        "更差",
+        "更强",
+        "更弱",
+        "更高",
+        "更低",
+        "提升",
+        "提高",
+        "上升",
+        "下降",
+        "降低",
+        "增加",
+        "减少",
+        "回升",
+        "恶化",
+        "改善",
+        "增长",
+        "下滑",
+        "持平",
+        "变好",
+        "变差",
+        "变强",
+        "变弱",
+        "compared",
+        "versus",
+        "increased",
+        "decreased",
+        "improved",
+        "declined",
+        "higher than",
+        "lower than",
+    ];
+    MARKERS.iter().any(|marker| text.contains(marker))
 }
 
 fn is_machine_field(value: &str) -> bool {

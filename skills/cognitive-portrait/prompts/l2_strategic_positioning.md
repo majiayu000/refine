@@ -37,6 +37,6 @@ previous portrait. There is no line-count target.
 
 Each catalog line must remain an exact copy of its rendered line. A comparable
 trend must use the catalog's canonical trend line and `[趋势]`. A `DEGRADED`
-bundle is blocked by the host and must not produce a layer. Due dates must be
+bundle may produce this layer only without trends; disclose the gap. Due dates must be
 within 90 days after cutoff and verification must use typed JSON metric targets
 or the artifact/check enum forms.

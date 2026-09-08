@@ -147,16 +147,58 @@ run_case validator-fail normal 9 && fail 'validator failure accepted'
 
 prepare_case degraded
 root="$TEST_ROOT/degraded"
-if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
+env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
   REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state" \
   REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector" \
   REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
   FAKE_COLLECTOR_STATUS=DEGRADED FAKE_AGENT_MODE=normal FAKE_AGENT_LOG="$root/agent.log" \
+  bash "$SCRIPT_DIR/cognitive-portrait.sh" \
+  || fail 'DEGRADED comparison blocked a gap-disclosed portrait'
+[[ -f "$root/agent.log" && -f "$root/portraits/${REPORT_BASE}.md" ]] \
+  || fail 'DEGRADED comparison did not publish a gap-disclosed portrait'
+
+prepare_case no-core
+root="$TEST_ROOT/no-core"
+if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
+  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state" \
+  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector" \
+  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+  FAKE_COLLECTOR_STATUS=NO_CORE_DATA FAKE_AGENT_MODE=normal FAKE_AGENT_LOG="$root/agent.log" \
   bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
-  fail 'DEGRADED comparison launched publication workflow'
+  fail 'NO_CORE_DATA launched publication workflow'
 fi
 [[ ! -e "$root/agent.log" && ! -e "$root/portraits/${REPORT_BASE}.md" ]] \
-  || fail 'DEGRADED comparison launched agent or published report'
+  || fail 'NO_CORE_DATA launched agent or published report'
+
+prepare_case schema-invalid
+root="$TEST_ROOT/schema-invalid"
+if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
+  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state" \
+  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" REFINE_PORTRAIT_COLLECTOR="$root/bin/fake-collector" \
+  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+  FAKE_COLLECTOR_STATUS=SCHEMA_INVALID FAKE_AGENT_MODE=normal FAKE_AGENT_LOG="$root/agent.log" \
+  bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
+  fail 'SCHEMA_INVALID launched publication workflow'
+fi
+[[ ! -e "$root/agent.log" && ! -e "$root/portraits/${REPORT_BASE}.md" ]] \
+  || fail 'SCHEMA_INVALID launched agent or published report'
+
+prepare_case wrong-bin
+root="$TEST_ROOT/wrong-bin"
+printf '#!/usr/bin/env bash\nprintf "Usage: refine\\n" >&2\nexit 2\n' > "$root/bin/old-refine"
+chmod 700 "$root/bin/old-refine"
+if env -i HOME="$root/home" PATH="$root/bin:/usr/bin:/bin" REFINE_ROOT="$root/project" \
+  REFINE_PORTRAIT_DIR="$root/portraits" REFINE_PORTRAIT_STATE_ROOT="$root/state" \
+  REFINE_PORTRAIT_AGENT="$root/bin/fake-agent" \
+  REFINE_PORTRAIT_COLLECTOR="$SCRIPT_DIR/collect-cognitive-portrait.sh" \
+  REFINE_PORTRAIT_VALIDATOR="$root/bin/fake-validator" REFINE_PORTRAIT_MIN_INTERVAL_DAYS=0 \
+  REFINE_COGNITIVE_PORTRAIT_REFINE_BIN="$root/bin/old-refine" \
+  FAKE_AGENT_MODE=normal FAKE_AGENT_LOG="$root/agent.log" \
+  bash "$SCRIPT_DIR/cognitive-portrait.sh"; then
+  fail 'binary without cognitive-portrait collect reached publication'
+fi
+[[ ! -e "$root/agent.log" && ! -e "$root/portraits/${REPORT_BASE}.md" ]] \
+  || fail 'binary without cognitive-portrait collect launched the agent'
 
 prepare_case unsafe-sandbox
 root="$TEST_ROOT/unsafe-sandbox"

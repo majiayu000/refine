@@ -15,7 +15,8 @@ Options:
   --cognitive-portrait
                     Install the opt-in biweekly cognitive portrait LaunchAgent.
   --cognitive-portrait-root PATH
-                    Use PATH as the stable portrait workspace and output root.
+                    Use PATH as the portrait archive parent (PATH/docs/cognitive-portraits).
+                    Runtime files stay in ~/.refine; this does not point REFINE_ROOT at a git worktree.
   --no-cognitive-portrait
                     Disable and remove the cognitive portrait LaunchAgent.
   -h, --help        Show this help.
@@ -45,6 +46,9 @@ auth_mode="dev-anon"
 cognitive_portrait_enabled="auto"
 cognitive_portrait_root=""
 cognitive_portrait_root_explicit=0
+cognitive_portrait_dir=""
+portrait_refine_bin=""
+portrait_refine_sha256=""
 cognitive_portrait_contract_version=2
 cognitive_portrait_bundle_schema=2
 cognitive_portrait_catalog_schema=2
@@ -191,6 +195,43 @@ install_runtime_scripts() {
     chmod 700 "${installed_scripts}/${name}" || die "cannot secure runtime script: ${installed_scripts}/${name}"
   done
   log "installed unattended runtime scripts in ${installed_scripts}"
+}
+
+install_portrait_skill_tree() {
+  local src="${repo_root}/skills/cognitive-portrait"
+  local dest="${refine_dir}/skills/cognitive-portrait"
+  [[ -f "${src}/SKILL.md" ]] || die "missing source cognitive portrait skill: ${src}/SKILL.md"
+  [[ ! -L "${refine_dir}/skills" && ! -L "$dest" ]] \
+    || die "cognitive portrait skill destination must not be a symlink"
+  mkdir -p "${refine_dir}/skills"
+  chmod 700 "${refine_dir}/skills" || die "cannot secure skills directory: ${refine_dir}/skills"
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  cp -R "${src}/." "$dest/"
+  if find "$dest" \( -type l -o -type f -links +1 \) -print -quit | grep -q .; then
+    die "installed cognitive portrait skill tree contains a symlink or hard link: ${dest}"
+  fi
+  chmod 700 "$dest"
+  log "installed cognitive portrait skill tree in ${dest}"
+}
+
+install_portrait_binary() {
+  local src="${cargo_bin}/refine"
+  local dest="${refine_dir}/bin/refine-portrait"
+  [[ -f "$src" && -x "$src" && ! -L "$src" ]] \
+    || die "installed refine CLI is missing or unsafe: ${src}"
+  [[ ! -L "${refine_dir}/bin" ]] || die "portrait binary directory is a symlink: ${refine_dir}/bin"
+  mkdir -p "${refine_dir}/bin"
+  chmod 700 "${refine_dir}/bin" || die "cannot secure portrait binary directory: ${refine_dir}/bin"
+  rm -f "$dest"
+  cp -p "$src" "$dest" || die "cannot install dedicated portrait binary: ${dest}"
+  chmod 700 "$dest" || die "cannot secure dedicated portrait binary: ${dest}"
+  if ! "$dest" cognitive-portrait --help 2>/dev/null | grep -q collect; then
+    die "dedicated portrait binary lacks cognitive-portrait collect: ${dest}"
+  fi
+  portrait_refine_bin="$dest"
+  portrait_refine_sha256="$(file_sha256 "$dest")"
+  log "installed dedicated portrait binary ${dest}"
 }
 
 write_server_token_file() {
@@ -375,13 +416,14 @@ write_portrait_plist() {
   local agent_bin="$2"
   local path_env="$3"
   local script_path="${installed_scripts}/cognitive-portrait.sh"
-  local portrait_dir="${cognitive_portrait_root}/docs/cognitive-portraits"
-  local repo_xml portrait_dir_xml script_xml agent_xml path_xml
-  repo_xml="$(printf '%s' "$cognitive_portrait_root" | xml_escape)"
-  portrait_dir_xml="$(printf '%s' "$portrait_dir" | xml_escape)"
+  local runtime_root="${refine_dir}"
+  local repo_xml portrait_dir_xml script_xml agent_xml path_xml refine_bin_xml
+  repo_xml="$(printf '%s' "$runtime_root" | xml_escape)"
+  portrait_dir_xml="$(printf '%s' "$cognitive_portrait_dir" | xml_escape)"
   script_xml="$(printf '%s' "$script_path" | xml_escape)"
   agent_xml="$(printf '%s' "$agent_bin" | xml_escape)"
   path_xml="$(printf '%s' "$path_env" | xml_escape)"
+  refine_bin_xml="$(printf '%s' "$portrait_refine_bin" | xml_escape)"
 
   write_file "$path" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -409,6 +451,8 @@ write_portrait_plist() {
     <string>${repo_xml}</string>
     <key>REFINE_PORTRAIT_DIR</key>
     <string>${portrait_dir_xml}</string>
+    <key>REFINE_COGNITIVE_PORTRAIT_REFINE_BIN</key>
+    <string>${refine_bin_xml}</string>
   </dict>
   <key>StartCalendarInterval</key>
   <dict>
@@ -556,55 +600,70 @@ PY
   fi
 }
 
-validate_cognitive_portrait_root() {
-  local root="$1" expected_skill_hash actual_skill_hash
-  [[ -n "$root" ]] || die "cognitive portrait root is empty"
-  [[ "$root" == /* ]] || die "cognitive portrait root must be absolute: ${root}"
-  [[ "$root" != *$'\n'* && "$root" != *$'\r'* && "$root" != *$'\t'* ]] \
-    || die "cognitive portrait root must not contain control characters"
-  [[ ! -L "$root" && -d "$root" ]] \
-    || die "cognitive portrait root must be an existing non-symlink directory: ${root}"
-  [[ ! -L "${root}/skills/cognitive-portrait" \
-    && -f "${root}/skills/cognitive-portrait/SKILL.md" ]] \
-    || die "cognitive portrait root is missing skills/cognitive-portrait/SKILL.md: ${root}"
-  expected_skill_hash="$(portrait_skill_tree_sha256 "${repo_root}/skills/cognitive-portrait")" \
-    || die "source cognitive portrait skill tree is incomplete"
-  actual_skill_hash="$(portrait_skill_tree_sha256 "${root}/skills/cognitive-portrait")" \
-    || die "cognitive portrait root has an incomplete or unsafe v2 skill tree: ${root}"
-  [[ "$actual_skill_hash" == "$expected_skill_hash" ]] \
-    || die "cognitive portrait root skill contract is legacy or mismatched; migrate skills/cognitive-portrait to v2 before installing: ${root}"
-  [[ ! -L "${root}/docs/cognitive-portraits" \
-    && -d "${root}/docs/cognitive-portraits" \
-    && -f "${root}/docs/cognitive-portraits/INDEX.md" ]] \
-    || die "cognitive portrait root is missing docs/cognitive-portraits/INDEX.md: ${root}"
+validate_cognitive_portrait_archive() {
+  local dir="$1"
+  [[ -n "$dir" ]] || die "cognitive portrait archive directory is empty"
+  [[ "$dir" == /* ]] || die "cognitive portrait archive directory must be absolute: ${dir}"
+  [[ "$dir" != *$'\n'* && "$dir" != *$'\r'* && "$dir" != *$'\t'* ]] \
+    || die "cognitive portrait archive directory must not contain control characters"
+  [[ ! -L "$dir" && -d "$dir" && -f "${dir}/INDEX.md" && ! -L "${dir}/INDEX.md" ]] \
+    || die "cognitive portrait archive is missing INDEX.md: ${dir}"
+}
+
+manifest_field() {
+  local path="$1"
+  local key="$2"
+  [[ -f "$path" ]] || return 0
+  awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$path"
 }
 
 resolve_cognitive_portrait_root() {
   [[ "$cognitive_portrait_enabled" == "1" ]] || {
     cognitive_portrait_root=""
+    cognitive_portrait_dir=""
     return
   }
 
-  if [[ "$cognitive_portrait_root_explicit" != "1" ]]; then
-    local install_manifest="${HOME}/.refine/install-manifest"
-    local portrait_plist="${HOME}/Library/LaunchAgents/com.lifcc.refine-cognitive-portrait.plist"
-    [[ ! -L "$install_manifest" ]] \
-      || die "install manifest is a symlink and cannot preserve a portrait root: ${install_manifest}"
-    [[ ! -L "$portrait_plist" ]] \
-      || die "legacy cognitive portrait plist is a symlink and cannot be preserved: ${portrait_plist}"
-    if [[ -f "$install_manifest" ]]; then
-      cognitive_portrait_root="$(awk -F= '$1 == "cognitive_portrait_root" {sub(/^[^=]*=/, ""); print; exit}' "$install_manifest")"
-    fi
-    if [[ -z "$cognitive_portrait_root" && -f "$portrait_plist" ]]; then
+  local install_manifest="${HOME}/.refine/install-manifest"
+  local portrait_plist="${HOME}/Library/LaunchAgents/com.lifcc.refine-cognitive-portrait.plist"
+  local preserved_dir=""
+  [[ ! -L "$install_manifest" ]] \
+    || die "install manifest is a symlink and cannot preserve a portrait archive: ${install_manifest}"
+  [[ ! -L "$portrait_plist" ]] \
+    || die "legacy cognitive portrait plist is a symlink and cannot be preserved: ${portrait_plist}"
+
+  if [[ "$cognitive_portrait_root_explicit" == "1" ]]; then
+    [[ ! -L "$cognitive_portrait_root" && -d "$cognitive_portrait_root" ]] \
+      || die "cognitive portrait archive parent must be an existing non-symlink directory: ${cognitive_portrait_root}"
+    cognitive_portrait_dir="${cognitive_portrait_root}/docs/cognitive-portraits"
+  else
+    preserved_dir="$(manifest_field "$install_manifest" cognitive_portrait_dir)"
+    if [[ -z "$preserved_dir" && -f "$portrait_plist" ]]; then
       plutil -lint "$portrait_plist" >/dev/null 2>&1 \
         || die "legacy cognitive portrait plist is invalid and cannot be preserved: ${portrait_plist}"
-      cognitive_portrait_root="$(plist_value "$portrait_plist" 'EnvironmentVariables:REFINE_ROOT')"
+      preserved_dir="$(plist_value "$portrait_plist" 'EnvironmentVariables:REFINE_PORTRAIT_DIR')"
+      if [[ -z "$preserved_dir" ]]; then
+        local plist_root
+        plist_root="$(plist_value "$portrait_plist" 'EnvironmentVariables:REFINE_ROOT')"
+        if [[ -n "$plist_root" && -f "${plist_root}/docs/cognitive-portraits/INDEX.md" ]]; then
+          preserved_dir="${plist_root}/docs/cognitive-portraits"
+        fi
+      fi
     fi
-    if [[ -z "$cognitive_portrait_root" ]]; then
-      cognitive_portrait_root="$repo_root"
+    if [[ -z "$preserved_dir" ]]; then
+      local legacy_root
+      legacy_root="$(manifest_field "$install_manifest" cognitive_portrait_root)"
+      if [[ -n "$legacy_root" && -f "${legacy_root}/docs/cognitive-portraits/INDEX.md" ]]; then
+        preserved_dir="${legacy_root}/docs/cognitive-portraits"
+      fi
     fi
+    if [[ -z "$preserved_dir" ]]; then
+      die "cognitive portrait archive is unknown; pass --cognitive-portrait-root pointing at the archive parent"
+    fi
+    cognitive_portrait_dir="$preserved_dir"
   fi
-  validate_cognitive_portrait_root "$cognitive_portrait_root"
+  validate_cognitive_portrait_archive "$cognitive_portrait_dir"
+  cognitive_portrait_root="$refine_dir"
 }
 
 if [[ "$launchd_enabled" == "1" && "$(uname -s)" == "Darwin" ]]; then
@@ -613,6 +672,7 @@ if [[ "$launchd_enabled" == "1" && "$(uname -s)" == "Darwin" ]]; then
 else
   cognitive_portrait_enabled=0
   cognitive_portrait_root=""
+  cognitive_portrait_dir=""
 fi
 
 log "installing Rust binaries"
@@ -639,8 +699,10 @@ write_install_manifest() {
     portrait_validator_sha256="$(file_sha256 "$portrait_validator")"
   fi
   if [[ "$cognitive_portrait_enabled" == "1" ]]; then
-    portrait_skill_tree_sha256="$(portrait_skill_tree_sha256 "${cognitive_portrait_root}/skills/cognitive-portrait")" \
+    portrait_skill_tree_sha256="$(portrait_skill_tree_sha256 "${refine_dir}/skills/cognitive-portrait")" \
       || die "cannot hash cognitive portrait v2 skill tree"
+    [[ -n "$portrait_refine_bin" && -n "$portrait_refine_sha256" ]] \
+      || die "dedicated portrait binary was not installed"
   fi
   write_file "$install_manifest" <<EOF
 source_root=${repo_root}
@@ -655,7 +717,7 @@ refine_server_bin=${cargo_bin}/refine-server
 installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 cognitive_portrait_enabled=${cognitive_portrait_enabled}
 cognitive_portrait_root=${cognitive_portrait_root}
-cognitive_portrait_dir=${cognitive_portrait_root:+${cognitive_portrait_root}/docs/cognitive-portraits}
+cognitive_portrait_dir=${cognitive_portrait_dir}
 cognitive_portrait_agent=${portrait_agent_bin:-}
 cognitive_portrait_collector=${portrait_collector}
 cognitive_portrait_collector_sha256=${portrait_collector_sha256}
@@ -665,6 +727,9 @@ cognitive_portrait_contract_version=${cognitive_portrait_contract_version}
 cognitive_portrait_bundle_schema=${cognitive_portrait_bundle_schema}
 cognitive_portrait_catalog_schema=${cognitive_portrait_catalog_schema}
 cognitive_portrait_skill_tree_sha256=${portrait_skill_tree_sha256}
+cognitive_portrait_refine_bin=${portrait_refine_bin}
+cognitive_portrait_refine_sha256=${portrait_refine_sha256}
+cognitive_portrait_refine_source_commit=${source_commit}
 EOF
 }
 
@@ -697,6 +762,10 @@ need_cmd launchctl
 need_cmd plutil
 
 install_runtime_scripts
+if [[ "$cognitive_portrait_enabled" == "1" ]]; then
+  install_portrait_skill_tree
+  install_portrait_binary
+fi
 
 launch_agents="${HOME}/Library/LaunchAgents"
 mkdir -p "$launch_agents" "${HOME}/Library/Logs"

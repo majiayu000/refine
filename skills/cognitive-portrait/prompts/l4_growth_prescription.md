@@ -23,8 +23,8 @@ must use a typed metric comparator, `[verify:artifact|<name>|present]` (or
 `[verify:metric|/comparison/status|eq|"OK"]`.
 
 Do not recommend expanding project breadth when the evidence supports
-fragmentation or one-off work. A `DEGRADED` bundle is blocked by the host and
-must not reach this prompt.
+fragmentation or one-off work. A `DEGRADED` bundle may produce this
+prescription; disclose the gap and do not write cross-period trends.
 The 2026-03-21 portrait is optional context, not a mandatory comparison.
 
 All facts, including non-numeric evidence facts, must be copied byte-for-byte
@@ -39,6 +39,6 @@ There is no line-count target.
 
 Every catalog line must remain an exact copy of its rendered line. Comparable
 trends use `[趋势]` with the canonical catalog trend line. A `DEGRADED` bundle
-is blocked by the host and must not produce a layer or prescription. Typed
+must not produce a trend line or cross-period prescription. Typed
 verification targets must use the allowed metric pointer or artifact/check
 enum forms.

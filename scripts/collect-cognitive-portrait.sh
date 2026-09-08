@@ -28,6 +28,10 @@ command -v "$REFINE_BIN" >/dev/null 2>&1 || {
   echo "refine binary not found: $REFINE_BIN" >&2
   exit 1
 }
+if ! "$REFINE_BIN" cognitive-portrait collect --help >/dev/null 2>&1; then
+  echo "refine binary lacks cognitive-portrait collect: $REFINE_BIN" >&2
+  exit 1
+fi
 
 args=()
 [[ -n "$db" ]] && args+=(--db "$db")
