@@ -732,10 +732,7 @@ fn bundle_root_pointer_is_not_allowlisted() {
 #[test]
 fn degraded_comparison_rejects_trend_lines() {
     let bundle = fixture(true);
-    let candidate = portrait(&format!(
-        "[趋势] 会话较上期增加。\n\n{}",
-        valid_action()
-    ));
+    let candidate = portrait(&format!("[趋势] 会话较上期增加。\n\n{}", valid_action()));
     let report = validate_portrait(&bundle, &candidate, None);
     assert!(!report.passed);
     assert!(report
