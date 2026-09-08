@@ -43,14 +43,26 @@ describe('extension API token storage', () => {
   })
 
   test('discovery health probes never attach Authorization', async () => {
+    const previousBase = process.env.PLASMO_PUBLIC_REFINE_API_BASE
+    delete process.env.PLASMO_PUBLIC_REFINE_API_BASE
+    const previousFetch = globalThis.fetch
     const calls: Array<RequestInit | undefined> = []
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
       calls.push(init)
       return new Response('Refine cloud API', { status: 200 })
     }) as typeof fetch
 
-    await expect(discoverCloudApiBase()).resolves.toBe('http://localhost:21567')
-    expect(calls).toHaveLength(1)
-    expect(new Headers(calls[0]?.headers).has('Authorization')).toBe(false)
+    try {
+      await expect(discoverCloudApiBase()).resolves.toBe('http://localhost:21567')
+      expect(calls).toHaveLength(1)
+      expect(new Headers(calls[0]?.headers).has('Authorization')).toBe(false)
+    } finally {
+      globalThis.fetch = previousFetch
+      if (previousBase === undefined) {
+        delete process.env.PLASMO_PUBLIC_REFINE_API_BASE
+      } else {
+        process.env.PLASMO_PUBLIC_REFINE_API_BASE = previousBase
+      }
+    }
   })
 })
