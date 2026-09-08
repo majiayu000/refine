@@ -154,10 +154,12 @@ Artifact states are `present` or `absent`; check states are `pass` or `fail`.
 Pointers and names are allowlisted by the validator. Free-form verification
 text is invalid.
 
-When `comparison.comparable=false`, the host wrapper records the diagnostic
-bundle and does not launch the agent, create a candidate, publish a report, or
-update `INDEX.md`. Therefore no degraded portrait or trend-suppression prose
-is generated. A comparable trend must use the catalog's canonical trend line
+When `comparison.comparable=false`, the status remains `DEGRADED`. The host
+wrapper still launches the agent and may publish a four-part portrait when
+core data exists. The report must disclose the gap and must not contain
+trends, directional claims, or current-versus-previous comparisons. Do not
+relabel `DEGRADED` as `OK`. `NO_CORE_DATA` and `SCHEMA_INVALID` still stop
+the run. A comparable trend must use the catalog's canonical trend line
 and `[趋势]`. A pointer that merely exists does not support an unrelated
 number.
 

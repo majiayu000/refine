@@ -14,8 +14,8 @@ Write `## L3：工作方式健康度` with:
 
 Use the same eligible cohort for sessions, decisions, bugfixes, knowledge, and
 friction. Never combine detached/unsupported numerators with linked-session
-denominators. A `DEGRADED` bundle is blocked by the host and must not reach this
-prompt; do not generate a layer for it.
+denominators. A `DEGRADED` bundle may reach this prompt; disclose the gap and
+do not write cross-period trends.
 
 All facts, including non-numeric evidence facts, must be copied byte-for-byte
 from the matching catalog line. Interpretations use `[推断]` plus a valid
@@ -30,7 +30,7 @@ line-count target.
 
 Each catalog line must remain an exact copy of its rendered line. Comparable
 trends require `[趋势]` plus the canonical catalog trend line; a `DEGRADED`
-bundle is blocked by the host and must not produce a layer. Due dates must be
+bundle must not produce a trend line. Due dates must be
 valid and no later than 90 days after cutoff. Verification must use typed JSON
 metric targets or the artifact/check enum forms, for example
 `[verify:metric|/comparison/status|eq|"OK"]`.

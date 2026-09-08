@@ -654,10 +654,70 @@ fn quality_gate_requires_evidence_numbers_novelty_and_verifiable_actions() {
 }
 
 #[test]
-fn degraded_comparison_disables_portrait_validation_entirely() {
+fn degraded_comparison_allows_gap_disclosed_portrait_without_trends() {
     let bundle = fixture(true);
     let candidate = portrait(&format!(
         "{}\n\n{}",
+        claim_line(&bundle, "fact.current.total_sessions"),
+        valid_action()
+    ));
+    let report = validate_portrait(&bundle, &candidate, None);
+    assert!(report.passed, "{:?}", report.errors);
+    assert!(report.comparison_claims_suppressed);
+}
+
+#[test]
+fn chinese_inference_classifier_is_not_an_unsupported_number() {
+    let bundle = fixture(true);
+    let candidate = portrait(&format!(
+        "{}\n\n[推断，置信度：中] 这是一个需要披露的缺口，而不是完整行为史。[bundle:/comparison/status]\n\n{}",
+        claim_line(&bundle, "fact.current.total_sessions"),
+        valid_action()
+    ));
+    let report = validate_portrait(&bundle, &candidate, None);
+    assert!(report.passed, "{:?}", report.errors);
+    assert_eq!(report.unsupported_number_rate, 0.0);
+}
+
+#[test]
+fn chinese_inference_must_not_embed_ascii_or_percent_numbers() {
+    let bundle = fixture(true);
+    let with_digit = portrait(&format!(
+        "{}\n\n[推断，置信度：中] 当前窗口有 9 个 session。[bundle:/comparison/status]\n\n{}",
+        claim_line(&bundle, "fact.current.total_sessions"),
+        valid_action()
+    ));
+    let digit_report = validate_portrait(&bundle, &with_digit, None);
+    assert!(!digit_report.passed);
+    assert!(digit_report.unsupported_number_rate > 0.0);
+
+    let with_percent = portrait(&format!(
+        "{}\n\n[推断，置信度：中] 完成率百分之五十。[bundle:/comparison/status]\n\n{}",
+        claim_line(&bundle, "fact.current.total_sessions"),
+        valid_action()
+    ));
+    let percent_report = validate_portrait(&bundle, &with_percent, None);
+    assert!(!percent_report.passed);
+    assert!(percent_report.unsupported_number_rate > 0.0);
+}
+
+#[test]
+fn chinese_paraphrased_fact_still_fails_closed() {
+    let bundle = fixture(true);
+    let candidate = portrait(&format!(
+        "[事实] 当前窗口有一百个 session。[bundle:/current/metrics/total_sessions]\n\n{}",
+        valid_action()
+    ));
+    let report = validate_portrait(&bundle, &candidate, None);
+    assert!(!report.passed);
+    assert!(report.unsupported_number_rate > 0.0);
+}
+
+#[test]
+fn bundle_root_pointer_is_not_allowlisted() {
+    let bundle = fixture(true);
+    let candidate = portrait(&format!(
+        "{}\n\n[推断，置信度：中] 比较状态降级，不能建立跨期曲线。[bundle:/comparison]\n\n{}",
         claim_line(&bundle, "fact.current.total_sessions"),
         valid_action()
     ));
@@ -666,7 +726,22 @@ fn degraded_comparison_disables_portrait_validation_entirely() {
     assert!(report
         .errors
         .iter()
-        .any(|error| error.contains("generation is disabled")));
+        .any(|error| error.contains("inference is missing valid allowlisted evidence")));
+}
+
+#[test]
+fn degraded_comparison_rejects_trend_lines() {
+    let bundle = fixture(true);
+    let candidate = portrait(&format!(
+        "[趋势] 会话较上期增加。\n\n{}",
+        valid_action()
+    ));
+    let report = validate_portrait(&bundle, &candidate, None);
+    assert!(!report.passed);
+    assert!(report
+        .errors
+        .iter()
+        .any(|error| error.contains("trend claim is forbidden") || error.contains("trend")));
 }
 
 #[test]

@@ -97,11 +97,14 @@ pub(crate) fn validate_portrait(
     {
         errors.push("claim catalog schema or claim IDs are invalid".to_string());
     }
-    if !bundle.comparison.comparable {
-        errors.push(format!(
-            "comparison is DEGRADED; portrait generation is disabled: {}",
-            bundle.comparison.reasons.join(",")
-        ));
+    if !bundle.comparison.comparable
+        && bundle
+            .claim_catalog
+            .claims
+            .iter()
+            .any(|claim| claim.kind == "trend")
+    {
+        errors.push("DEGRADED claim catalog must not contain trend claims".to_string());
     }
 
     for block in paragraph_blocks(&blocks) {
@@ -110,10 +113,14 @@ pub(crate) fn validate_portrait(
         let catalog_claim = claim_id.and_then(|id| catalog.get(id).copied());
         let is_catalog_line = catalog_claim
             .is_some_and(|claim| claim.rendered_line == line && claim.rendered_line == block.raw);
-        let has_numeric = contains_numeric_token(line);
         let is_factual = line.contains("[事实]");
         let is_inference = line.contains("[推断");
         let is_action = line.contains("[建议]");
+        // [事实] still treats ideographic numerals as numbers so paraphrases
+        // like「一百」cannot replace a catalog scalar. [推断]/[建议] only flag
+        // ASCII/unicode digits and「百分之」; otherwise ordinary Chinese
+        // classifiers such as「一个」make a Chinese portrait unpublishable.
+        let has_numeric = contains_numeric_token(line, is_factual);
         let unique_claim = claim_id.is_some_and(|id| used_claims.insert(id.to_string()));
 
         if is_factual {
@@ -135,9 +142,14 @@ pub(crate) fn validate_portrait(
             errors.push("claim is not a unique canonical catalog line".to_string());
         }
         if line.contains("[趋势]")
-            && !catalog_claim.is_some_and(|claim| claim.kind == "trend" && is_catalog_line)
+            && (!bundle.comparison.comparable
+                || !catalog_claim.is_some_and(|claim| claim.kind == "trend" && is_catalog_line))
         {
-            errors.push("trend line is not a canonical trend catalog claim".to_string());
+            errors.push(if bundle.comparison.comparable {
+                "trend line is not a canonical trend catalog claim".to_string()
+            } else {
+                "trend claim is forbidden when comparison is DEGRADED".to_string()
+            });
         }
         if is_inference {
             inference_claims += 1;
@@ -220,7 +232,7 @@ pub(crate) fn validate_portrait(
         traceable_inference_claims,
         inference_traceability_rate,
         comparable_cohort_rate: f64::from(bundle.comparison.comparable),
-        comparison_claims_suppressed: bundle.comparison.comparable && errors.is_empty(),
+        comparison_claims_suppressed: !bundle.comparison.comparable,
         action_claims,
         verifiable_actions,
         action_verifiability_rate,
@@ -450,7 +462,7 @@ fn valid_verification_name(name: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || "_-./".contains(character))
 }
 
-fn contains_numeric_token(line: &str) -> bool {
+fn contains_numeric_token(line: &str, include_cjk_ideographic_numerals: bool) -> bool {
     let characters: Vec<char> = line.chars().collect();
     let mut rendered = String::with_capacity(line.len());
     let mut index = 0usize;
@@ -472,7 +484,8 @@ fn contains_numeric_token(line: &str) -> bool {
     }
     rendered.chars().any(|character| {
         character.is_numeric()
-            || "零〇一二三四五六七八九十百千万亿两壹贰叁肆伍陆柒捌玖拾佰仟".contains(character)
+            || (include_cjk_ideographic_numerals
+                && "零〇一二三四五六七八九十百千万亿两壹贰叁肆伍陆柒捌玖拾佰仟".contains(character))
     }) || rendered.contains("百分之")
 }
 

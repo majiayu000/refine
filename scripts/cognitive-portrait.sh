@@ -467,11 +467,17 @@ if ! collector_result=$("$COLLECTOR_SCRIPT" --period 90 --cutoff "$cutoff" --out
   exit 1
 fi
 log "collector result: ${collector_result}"
-if [[ "$collector_result" == *'"comparison_status":"DEGRADED"'* ]]; then
-  log "ERROR: comparison is DEGRADED; agent generation and publication are disabled"
+if [[ "$collector_result" == *'"comparison_status":"NO_CORE_DATA"'* ]]; then
+  log "ERROR: collector reported NO_CORE_DATA"
   exit 1
 fi
-if [[ "$collector_result" != *'"comparison_status":"OK"'* ]]; then
+if [[ "$collector_result" == *'"comparison_status":"SCHEMA_INVALID"'* ]]; then
+  log "ERROR: collector reported SCHEMA_INVALID"
+  exit 1
+fi
+if [[ "$collector_result" == *'"comparison_status":"DEGRADED"'* ]]; then
+  log "comparison is DEGRADED; generating a gap-disclosed portrait without cross-period trends"
+elif [[ "$collector_result" != *'"comparison_status":"OK"'* ]]; then
   log "ERROR: collector did not return a recognized comparison status"
   exit 1
 fi
@@ -491,7 +497,7 @@ fi
 export REFINE_COGNITIVE_PORTRAIT_BUNDLE="$agent_bundle"
 export REFINE_COGNITIVE_PORTRAIT_PREVIOUS="${agent_previous:-}"
 export REFINE_COGNITIVE_PORTRAIT_OUTPUT="$agent_candidate"
-prompt="Read ${SKILL_FILE} and generate one cognitive portrait from the supplied bundle as one agent. Do not delegate or spawn subagents. Analyze L1 through L4 sequentially in this context. Write only ${agent_candidate}; do not edit the repository, archive, evidence, input bundle, validator, or history."
+prompt="Read ${SKILL_FILE} and generate one cognitive portrait from the supplied bundle as one agent. Do not delegate or spawn subagents. Analyze L1 through L4 sequentially in this context. Copy every numeric fact only as an untouched catalog [事实] line. In [推断] and [建议] visible prose, do not write ASCII digits, percent quantities, or paraphrased scalars; Chinese classifiers such as 一个 are allowed. Bundle pointers must be field paths under /current/, /previous/, /comparison/, or /manifest/current_window/ and /manifest/previous_window/; do not use window roots such as [bundle:/comparison]. Write only ${agent_candidate}; do not edit the repository, archive, evidence, input bundle, validator, or history."
 agent_env=(
   "HOME=${HOME}"
   "PATH=${PATH}"
@@ -510,7 +516,8 @@ rc=0
 (cd "$staging_dir" && exec /usr/bin/perl -MPOSIX=setsid -e 'setsid() or die "setsid failed: $!"; exec @ARGV or die "exec failed: $!"' -- \
   env -i "${agent_env[@]}" \
     "$AGENT_BIN" exec --ephemeral --ignore-user-config --ignore-rules --disable multi_agent \
-      --skip-git-repo-check --sandbox "$AGENT_SANDBOX" "$prompt") 2>&1 &
+      --skip-git-repo-check --sandbox "$AGENT_SANDBOX" \
+      -c model_reasoning_effort="medium" "$prompt") 2>&1 &
 agent_pid=$!
 wait "$agent_pid" || rc=$?
 agent_pid=""
