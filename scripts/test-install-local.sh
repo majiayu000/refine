@@ -112,7 +112,19 @@ case "$(basename "$source_path")" in
   *) exit 2 ;;
 esac
 mkdir -p "${CARGO_HOME}/bin"
-printf '#!/usr/bin/env bash\nexit 0\n' > "${CARGO_HOME}/bin/${binary}"
+if [[ "$binary" == refine ]]; then
+  cat > "${CARGO_HOME}/bin/${binary}" <<'REFINE'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "cognitive-portrait" ]]; then
+  printf '%s\n' 'Deterministic cognitive portrait data and quality operations' 'Commands:' '  collect' '  validate'
+  exit 0
+fi
+printf '%s\n' 'Usage: refine <COMMAND>'
+exit 0
+REFINE
+else
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${CARGO_HOME}/bin/${binary}"
+fi
 chmod 700 "${CARGO_HOME}/bin/${binary}"
 EOF
 cat > "${fake_bin}/uname" <<'EOF'
@@ -351,12 +363,22 @@ grep -Fq "${test_home}/.refine/scripts/cognitive-portrait.sh" "$portrait_plist" 
   || fail 'cognitive portrait LaunchAgent does not use the installed script'
 grep -Fq '<key>REFINE_ROOT</key>' "$portrait_plist" \
   || fail 'cognitive portrait LaunchAgent lost its repository workspace'
-grep -Fq "$portrait_root" "$portrait_plist" \
-  || fail 'cognitive portrait LaunchAgent lost its repository output root'
+grep -Fq "${test_home}/.refine" "$portrait_plist" \
+  || fail 'cognitive portrait LaunchAgent did not use the stable ~/.refine runtime'
+grep -Fq "$portrait_dir" "$portrait_plist" \
+  || fail 'cognitive portrait LaunchAgent lost its independent archive directory'
 grep -Fq '<key>REFINE_PORTRAIT_DIR</key>' "$portrait_plist" \
   || fail 'cognitive portrait LaunchAgent does not declare its output directory'
-grep -Fxq "cognitive_portrait_root=${portrait_root}" "${test_home}/.refine/install-manifest" \
-  || fail 'install manifest did not separate the portrait root from install source'
+grep -Fq '<key>REFINE_COGNITIVE_PORTRAIT_REFINE_BIN</key>' "$portrait_plist" \
+  || fail 'cognitive portrait LaunchAgent does not pin a dedicated refine binary'
+grep -Fq "${test_home}/.refine/bin/refine-portrait" "$portrait_plist" \
+  || fail 'cognitive portrait LaunchAgent does not use the dedicated portrait binary'
+grep -Fxq "cognitive_portrait_root=${test_home}/.refine" "${test_home}/.refine/install-manifest" \
+  || fail 'install manifest did not keep the portrait runtime in ~/.refine'
+grep -Fxq "cognitive_portrait_dir=${portrait_dir}" "${test_home}/.refine/install-manifest" \
+  || fail 'install manifest did not preserve the independent portrait archive'
+grep -Fxq "cognitive_portrait_refine_bin=${test_home}/.refine/bin/refine-portrait" "${test_home}/.refine/install-manifest" \
+  || fail 'install manifest lost the dedicated portrait binary'
 grep -Fxq "source_root=${REPO_ROOT}" "${test_home}/.refine/install-manifest" \
   || fail 'install manifest lost its source checkout'
 grep -Fxq "cognitive_portrait_collector=${test_home}/.refine/scripts/collect-cognitive-portrait.sh" "${test_home}/.refine/install-manifest" \
@@ -495,8 +517,10 @@ env -i \
   PATH="${fake_bin}:/usr/bin:/bin" \
   /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start >/dev/null
 [[ ! -e "$token_file" && ! -L "$token_file" ]] || fail 'dev-anon reinstall did not remove the token file'
-grep -Fxq "cognitive_portrait_root=${portrait_root}" "${test_home}/.refine/install-manifest" \
-  || fail 'repeated install switched the configured portrait root'
+grep -Fxq "cognitive_portrait_root=${test_home}/.refine" "${test_home}/.refine/install-manifest" \
+  || fail 'repeated install switched the configured portrait runtime'
+grep -Fxq "cognitive_portrait_dir=${portrait_dir}" "${test_home}/.refine/install-manifest" \
+  || fail 'repeated install switched the configured portrait archive'
 
 healthy_doctor_output="$(env -i \
   HOME="$test_home" \
@@ -525,7 +549,41 @@ assert_contains "$healthy_doctor_output" 'PASS cognitive portrait v2 schema cont
 assert_contains "$healthy_doctor_output" 'PASS cognitive portrait skill tree hash matches v2 contract' \
   'Doctor did not validate the portrait skill tree hash'
 
-printf '\nlegacy mutation\n' >> "${portrait_root}/skills/cognitive-portrait/SKILL.md"
+assert_contains "$healthy_doctor_output" 'PASS cognitive portrait dedicated binary valid:' \
+  'Doctor did not validate the dedicated portrait binary'
+assert_contains "$healthy_doctor_output" 'PASS cognitive portrait dedicated binary is distinct from global refine CLI' \
+  'Doctor did not prove the portrait binary is distinct from the global CLI'
+assert_contains "$healthy_doctor_output" 'PASS cognitive portrait refine binary matches manifest' \
+  'Doctor did not validate the LaunchAgent portrait binary binding'
+
+manifest="${test_home}/.refine/install-manifest"
+preserved_portrait_bin="$(awk -F= '$1 == "cognitive_portrait_refine_bin" {sub(/^[^=]*=/, ""); print; exit}' "$manifest")"
+[[ -n "$preserved_portrait_bin" ]] || fail 'install manifest lost the dedicated portrait binary before alias check'
+awk -v replacement="${test_cargo_home}/bin/refine" '
+  BEGIN { FS = OFS = "=" }
+  $1 == "cognitive_portrait_refine_bin" { $2 = replacement }
+  { print }
+' "$manifest" > "${manifest}.aliased"
+mv "${manifest}.aliased" "$manifest"
+fixture_plist_edit "$portrait_plist" set 'EnvironmentVariables:REFINE_COGNITIVE_PORTRAIT_REFINE_BIN' \
+  "${test_cargo_home}/bin/refine"
+aliased_portrait_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$aliased_portrait_output" \
+  'cognitive portrait dedicated binary is not distinct from global refine CLI' \
+  'Doctor accepted the global refine CLI as the dedicated portrait program'
+awk -v replacement="$preserved_portrait_bin" '
+  BEGIN { FS = OFS = "=" }
+  $1 == "cognitive_portrait_refine_bin" { $2 = replacement }
+  { print }
+' "$manifest" > "${manifest}.restored"
+mv "${manifest}.restored" "$manifest"
+fixture_plist_edit "$portrait_plist" set 'EnvironmentVariables:REFINE_COGNITIVE_PORTRAIT_REFINE_BIN' \
+  "$preserved_portrait_bin"
+
+printf '\nlegacy mutation\n' >> "${test_home}/.refine/skills/cognitive-portrait/SKILL.md"
 stale_skill_output="$(env -i \
   HOME="$test_home" CARGO_HOME="$test_cargo_home" \
   PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
@@ -533,7 +591,33 @@ stale_skill_output="$(env -i \
 assert_contains "$stale_skill_output" 'cognitive portrait skill tree hash mismatch' \
   'Doctor accepted a modified or legacy cognitive portrait skill tree'
 cp "${REPO_ROOT}/skills/cognitive-portrait/SKILL.md" \
-  "${portrait_root}/skills/cognitive-portrait/SKILL.md"
+  "${test_home}/.refine/skills/cognitive-portrait/SKILL.md"
+
+printf '#!/usr/bin/env bash\nprintf "Usage: refine\\n"\nexit 2\n' \
+  > "${test_cargo_home}/bin/refine"
+chmod 700 "${test_cargo_home}/bin/refine"
+stale_global_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$stale_global_output" 'PASS cognitive portrait dedicated binary valid:' \
+  'Doctor treated a stale global refine CLI as the portrait program'
+assert_contains "$stale_global_output" 'PASS cognitive portrait refine binary matches manifest' \
+  'Doctor lost the dedicated portrait binary after the global CLI changed'
+
+printf '#!/usr/bin/env bash\nprintf "Usage: refine\\n"\nexit 2\n' \
+  > "${test_home}/.refine/bin/refine-portrait"
+chmod 700 "${test_home}/.refine/bin/refine-portrait"
+wrong_portrait_bin_output="$(env -i \
+  HOME="$test_home" CARGO_HOME="$test_cargo_home" \
+  PATH="${fake_bin}:${test_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  /bin/bash "${SCRIPT_DIR}/doctor-local.sh" --no-ui-dev 2>&1 || true)"
+assert_contains "$wrong_portrait_bin_output" 'cognitive portrait dedicated binary missing or lacks collect' \
+  'Doctor accepted a dedicated portrait binary without collect'
+env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
+  /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start >/dev/null
+"${test_home}/.refine/bin/refine-portrait" cognitive-portrait --help >/dev/null \
+  || fail 'reinstall did not restore a portrait binary that supports collect'
 
 installed_collector="${test_home}/.refine/scripts/collect-cognitive-portrait.sh"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 99' > "$installed_collector"
@@ -685,24 +769,21 @@ rm -f "${test_home}/.refine/install-manifest"
 fixture_plist_edit "$portrait_plist" set WorkingDirectory "$legacy_portrait_root"
 fixture_plist_edit "$portrait_plist" set 'EnvironmentVariables:REFINE_ROOT' "$legacy_portrait_root"
 fixture_plist_edit "$portrait_plist" delete 'EnvironmentVariables:REFINE_PORTRAIT_DIR'
-legacy_upgrade_output=''
-if legacy_upgrade_output="$(env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
-  /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start 2>&1)"; then
-  fail 'legacy v1 skill root was silently mixed with the v2 runtime'
-fi
-assert_contains "$legacy_upgrade_output" 'skill contract is legacy or mismatched' \
-  'legacy v1 skill root failure was not actionable'
-mv "${legacy_portrait_root}/skills/cognitive-portrait" \
-  "${legacy_portrait_root}/skills/cognitive-portrait-v1"
-mkdir -p "${legacy_portrait_root}/skills/cognitive-portrait"
-cp -R "${REPO_ROOT}/skills/cognitive-portrait/." \
-  "${legacy_portrait_root}/skills/cognitive-portrait/"
 env -i HOME="$test_home" CARGO_HOME="$test_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
   /bin/bash "${SCRIPT_DIR}/install-local.sh" --no-ui-dev --no-start >/dev/null
-grep -Fxq "cognitive_portrait_root=${legacy_portrait_root}" "${test_home}/.refine/install-manifest" \
-  || fail 'legacy upgrade did not preserve valid REFINE_ROOT'
+grep -Fxq "cognitive_portrait_root=${test_home}/.refine" "${test_home}/.refine/install-manifest" \
+  || fail 'legacy upgrade did not move the portrait runtime out of the git workspace'
+grep -Fxq "cognitive_portrait_dir=${legacy_portrait_dir}" "${test_home}/.refine/install-manifest" \
+  || fail 'legacy upgrade did not preserve the existing portrait archive'
+[[ "$(fixture_plist_value "$portrait_plist" 'EnvironmentVariables:REFINE_ROOT')" \
+  == "${test_home}/.refine" ]] || fail 'legacy upgrade left REFINE_ROOT on the old workspace'
 [[ "$(fixture_plist_value "$portrait_plist" 'EnvironmentVariables:REFINE_PORTRAIT_DIR')" \
   == "${legacy_portrait_dir}" ]] || fail 'legacy upgrade did not add the explicit portrait output directory'
+[[ -f "${test_home}/.refine/skills/cognitive-portrait/SKILL.md" ]] \
+  || fail 'legacy upgrade did not install the stable skill tree'
+if grep -Fq 'Legacy skill' "${test_home}/.refine/skills/cognitive-portrait/SKILL.md"; then
+  fail 'legacy upgrade copied the v1 skill tree into the stable runtime'
+fi
 
 leaf_name='daily-refresh.sh'
 leaf_installed="${test_home}/.refine/scripts/${leaf_name}"

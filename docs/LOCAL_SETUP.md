@@ -154,34 +154,33 @@ scripts/doctor-local.sh --no-ui-dev
 The disabled-mode check is strict: the plist must be absent, the launchd label
 must be unloaded, and TCP port `8987` must not have a listener.
 
-Enable the biweekly cognitive portrait with an explicit stable workspace:
+Enable the biweekly cognitive portrait with an explicit archive parent:
 
 ```bash
 scripts/install-local.sh --cognitive-portrait \
-  --cognitive-portrait-root /absolute/path/to/refine-portrait-workspace
+  --cognitive-portrait-root /absolute/path/to/portrait-archive-parent
 ```
 
-The workspace must already exist, must not be a symlink, and must contain the
-complete v2 `skills/cognitive-portrait` tree from the installing checkout plus
-`docs/cognitive-portraits/INDEX.md`. The installer pins the skill-tree SHA-256,
-bundle schema, claim-catalog schema, and contract version in the manifest;
-legacy or mixed v1/v2 roots fail before binaries are changed. Paths containing
+`--cognitive-portrait-root` is the parent of `docs/cognitive-portraits`. That
+directory must already exist, must not be a symlink, and must contain
+`INDEX.md`. Runtime files stay in `~/.refine`: the installer copies the v2
+`skills/cognitive-portrait` tree there, copies a dedicated
+`~/.refine/bin/refine-portrait` binary, and binds `REFINE_ROOT` and
+`WorkingDirectory` to `~/.refine`. `REFINE_PORTRAIT_DIR` stays on the chosen
+archive. `REFINE_COGNITIVE_PORTRAIT_REFINE_BIN` points at the dedicated binary
+so PATH's global `refine` CLI is not the portrait collector. Paths containing
 spaces are supported.
-The installer binds `WorkingDirectory` and `REFINE_ROOT` to that workspace and
-binds `REFINE_PORTRAIT_DIR` to its `docs/cognitive-portraits` archive.
-It also installs the deterministic `collect-cognitive-portrait.sh` and
-`validate-cognitive-portrait.sh` dependencies beside the scheduler wrapper,
-records their paths and SHA-256 hashes in the install manifest, and preserves
-the generated v4 bundle/quality artifacts under the portrait archive.
+
+The installer also installs the deterministic `collect-cognitive-portrait.sh`
+and `validate-cognitive-portrait.sh` dependencies beside the scheduler wrapper,
+records their paths and SHA-256 hashes in the install manifest, and records the
+dedicated portrait binary hash separately from the global `refine` hash.
 
 On later installs, omit `--cognitive-portrait-root`: the installer preserves the
-root recorded in the manifest. When upgrading a legacy plist that has no
-manifest root, a valid `REFINE_ROOT` is preserved and promoted into the new
-manifest. An invalid, missing, relative, symlinked, or legacy-skill root stops
-the upgrade before binaries or LaunchAgents are changed. Migrate the skill tree
-to the checkout's v2 contract explicitly; existing report and evidence archives
-remain untouched. To move the archive,
-create and verify the new workspace first, then pass the explicit option once.
+archive recorded in the manifest or `REFINE_PORTRAIT_DIR`. A legacy plist that
+only has `REFINE_ROOT` keeps that path's `docs/cognitive-portraits` archive and
+moves the runtime to `~/.refine`. To move the archive,
+create and verify the new parent first, then pass the explicit option once.
 
 Disable the portrait job with:
 
@@ -190,10 +189,12 @@ scripts/install-local.sh --no-cognitive-portrait
 ```
 
 Doctor treats a remaining portrait plist or loaded label as an orphan. When the
-job is enabled, Doctor verifies the manifest/plist root, output directory,
-agent executable, collector/validator path and hash bindings, v2 schema and
-skill-tree hash bindings, log binding, and latest archived portrait without
-reading or printing credential values.
+job is enabled, Doctor verifies the manifest/plist root, independent archive,
+dedicated portrait binary (`cognitive-portrait collect`), agent executable,
+collector/validator path and hash bindings, v2 schema and skill-tree hash
+bindings, log binding, and latest archived portrait without reading or printing
+credential values. It does not treat the global `refine` CLI hash as the
+portrait program.
 
 Write LaunchAgents without starting them:
 
