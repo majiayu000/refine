@@ -111,10 +111,11 @@ unique catalog `rendered_line`. The collector emits opaque evidence-record
 claims for this purpose, so the model never invents a factual label. Free-prose
 facts, numbers, and self-written trend lines fail closed. `[推断]` prose must
 carry a valid evidence ID or field-level bundle pointer. Visible `[推断]` and
-`[建议]` prose may use ordinary Chinese classifiers such as「一个」; it must not
-contain ASCII digits, fullwidth digits, or「百分之」quantities. Copy every
+`[建议]` prose may use ordinary Chinese classifiers such as「一个」or「两个窗口」; it must not
+contain ASCII digits, fullwidth digits,「百分之」quantities, or magnitude numerals such as「一百万」. Copy every
 scalar only as an untouched catalog `[事实]` line. If `comparison.comparable=false`, no trend, direction,
-increase/decrease, or current-versus-previous claim is allowed. Do not cite
+increase/decrease, or current-versus-previous claim is allowed, including unmarked prose such as
+「相比上一期…提升」. A missing `[趋势]` tag does not make a comparison claim valid. Do not cite
 knowledge-only Grok/Gemini sources as sessions.
 
 Every `[建议]` must carry allowlisted evidence, a meaningful owner, a due date

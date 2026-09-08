@@ -680,6 +680,19 @@ fn chinese_inference_classifier_is_not_an_unsupported_number() {
 }
 
 #[test]
+fn chinese_inference_magnitude_quantity_is_unsupported() {
+    let bundle = fixture(true);
+    let candidate = portrait(&format!(
+        "{}\n\n[推断，置信度：中] 当前窗口可用观察有一百万条。[bundle:/comparison/status]\n\n{}",
+        claim_line(&bundle, "fact.current.total_sessions"),
+        valid_action()
+    ));
+    let report = validate_portrait(&bundle, &candidate, None);
+    assert!(!report.passed, "{:?}", report.errors);
+    assert!(report.unsupported_number_rate > 0.0);
+}
+
+#[test]
 fn chinese_inference_must_not_embed_ascii_or_percent_numbers() {
     let bundle = fixture(true);
     let with_digit = portrait(&format!(
@@ -739,6 +752,35 @@ fn degraded_comparison_rejects_trend_lines() {
         .errors
         .iter()
         .any(|error| error.contains("trend claim is forbidden") || error.contains("trend")));
+}
+
+#[test]
+fn degraded_comparison_rejects_unmarked_period_comparison_prose() {
+    let bundle = fixture(true);
+    let candidate = portrait(&format!(
+        "{}\n\n[推断，置信度：高] 相比上一期，你的认知深度明显提升。[bundle:/comparison/status]\n\n{}",
+        claim_line(&bundle, "fact.current.total_sessions"),
+        valid_action()
+    ));
+    let report = validate_portrait(&bundle, &candidate, None);
+    assert!(!report.passed, "{:?}", report.errors);
+    assert!(report
+        .errors
+        .iter()
+        .any(|error| error.contains("trend claim is forbidden")));
+}
+
+#[test]
+fn degraded_comparison_allows_gap_disclosure_without_period_direction() {
+    let bundle = fixture(true);
+    let candidate = portrait(&format!(
+        "{}\n\n[推断，置信度：高] 两个窗口都存在脱离观察缺口，比较资格被明确标为降级；因此本节只并列披露各自证据边界，不生成任何跨期判断。[bundle:/comparison/status]\n\n{}",
+        claim_line(&bundle, "fact.current.total_sessions"),
+        valid_action()
+    ));
+    let report = validate_portrait(&bundle, &candidate, None);
+    assert!(report.passed, "{:?}", report.errors);
+    assert!(report.comparison_claims_suppressed);
 }
 
 #[test]

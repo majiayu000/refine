@@ -18,14 +18,15 @@ claim ID; never write, recalculate, round, or paraphrase a number or trend. The
 2026-03-21 portrait may appear once as an explicitly optional long-term anchor,
 never as required padding. A `DEGRADED` bundle remains analyzable: disclose the
 gap, copy catalog facts, and do not write trends, arrows, or
-increase/decrease claims. If `comparison.comparable=false`, no trend, arrow,
+increase/decrease claims, including unmarked prose such as「相比上一期…提升」。
+If `comparison.comparable=false`, no trend, arrow,
 increase/decrease, or directional claim is allowed.
 
 Every `[事实]`, including a non-numeric evidence fact, must be copied from the
 catalog byte-for-byte. Write interpretations as `[推断，置信度：高/中/低]` and
 end them with a valid `[evidence:obs:<id>]` or field-level `[bundle:/json/pointer]`
 such as `[bundle:/comparison/status]`, never a window root. Visible `[推断]` /
-`[建议]` prose may use「一个」but must not embed ASCII digits or「百分之」.
+`[建议]` prose may use「一个」but must not embed ASCII digits,「百分之」, or magnitude numerals such as「一百万」.
 Numeric
 facts, evidence facts, and trends must be copied catalog lines only, including
 `[claim:<claim_id>]`; unknown or duplicate IDs and edits to `rendered_line`

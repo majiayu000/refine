@@ -157,11 +157,13 @@ text is invalid.
 When `comparison.comparable=false`, the status remains `DEGRADED`. The host
 wrapper still launches the agent and may publish a four-part portrait when
 core data exists. The report must disclose the gap and must not contain
-trends, directional claims, or current-versus-previous comparisons. Do not
+trends, directional claims, or current-versus-previous comparisons, even when
+the prose omits a `[趋势]` tag. Do not
 relabel `DEGRADED` as `OK`. `NO_CORE_DATA` and `SCHEMA_INVALID` still stop
 the run. A comparable trend must use the catalog's canonical trend line
 and `[趋势]`. A pointer that merely exists does not support an unrelated
-number.
+number. Chinese classifiers such as「一个」are allowed in inferences;
+magnitude numerals such as「一百万」are not.
 
 ## Quality gate
 
