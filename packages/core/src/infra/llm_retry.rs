@@ -152,7 +152,18 @@ where
 {
     let max_retries = policy.max_retries.max(1);
     let request_timeout = Duration::from_millis(policy.request_timeout_millis.max(1));
-    let ledger_path = client.usage_ledger_path()?;
+    let ledger_path = match client.usage_ledger_path() {
+        Ok(path) => path,
+        Err(error @ InfraError::UsageLedger(_)) => {
+            tracing::warn!(
+                operation = operation,
+                error = %error,
+                "LLM usage ledger path is unavailable; continuing with provider request"
+            );
+            None
+        }
+        Err(error) => return Err(error),
+    };
     let client_identity = client.cache_identity();
     let run_budget = client.run_budget();
     let call_id = Uuid::new_v4().to_string();
@@ -205,7 +216,14 @@ where
                 started.elapsed(),
                 result.as_ref(),
             );
-            append_usage_record(path, &record)?;
+            if let Err(error) = append_usage_record(path, &record) {
+                tracing::warn!(
+                    operation = operation,
+                    path = %path.display(),
+                    error = %error,
+                    "LLM usage ledger append failed; continuing with provider result"
+                );
+            }
         }
 
         match result {
@@ -331,6 +349,7 @@ mod tests {
         calls: AtomicUsize,
         responses: Mutex<VecDeque<InfraResult<String>>>,
         ledger_path: Option<PathBuf>,
+        ledger_path_error: bool,
     }
 
     impl SequenceClient {
@@ -339,11 +358,17 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 responses: Mutex::new(VecDeque::from(responses)),
                 ledger_path: None,
+                ledger_path_error: false,
             }
         }
 
         fn with_ledger(mut self, path: PathBuf) -> Self {
             self.ledger_path = Some(path);
+            self
+        }
+
+        fn with_ledger_path_error(mut self) -> Self {
+            self.ledger_path_error = true;
             self
         }
 
@@ -364,6 +389,11 @@ mod tests {
         }
 
         fn usage_ledger_path(&self) -> InfraResult<Option<PathBuf>> {
+            if self.ledger_path_error {
+                return Err(InfraError::UsageLedger(
+                    "home directory is unavailable".into(),
+                ));
+            }
             Ok(self.ledger_path.clone())
         }
     }
@@ -514,6 +544,59 @@ mod tests {
         for secret in ["provider-secret", "prompt-secret", "system-secret"] {
             assert!(!contents.contains(secret));
         }
+    }
+
+    #[tokio::test]
+    async fn ledger_path_failure_does_not_discard_successful_completion() {
+        let _env_guard = QUOTA_TEST_LOCK.lock().await;
+        let _quota_guard = QuotaTestGuard::new();
+        let client = Arc::new(SequenceClient::new(vec![Ok("ok".into())]).with_ledger_path_error());
+
+        let result = llm_with_retry_policy_for(
+            &(client.clone() as Arc<dyn LlmClient>),
+            "test.ledger",
+            "prompt",
+            "system",
+            LlmRetryPolicy {
+                max_retries: 1,
+                base_delay_secs: 0,
+                ..LlmRetryPolicy::default()
+            },
+            |_attempt, _max_retries, _delay_secs, _err| {},
+        )
+        .await
+        .expect("ledger path errors must not hide a successful completion");
+
+        assert_eq!(result, "ok");
+        assert_eq!(client.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn ledger_append_failure_does_not_discard_successful_completion() {
+        let _env_guard = QUOTA_TEST_LOCK.lock().await;
+        let _quota_guard = QuotaTestGuard::new();
+        let dir = TempDir::new().unwrap();
+        let client = Arc::new(
+            SequenceClient::new(vec![Ok("ok".into())]).with_ledger(dir.path().to_path_buf()),
+        );
+
+        let result = llm_with_retry_policy_for(
+            &(client.clone() as Arc<dyn LlmClient>),
+            "test.ledger",
+            "prompt",
+            "system",
+            LlmRetryPolicy {
+                max_retries: 1,
+                base_delay_secs: 0,
+                ..LlmRetryPolicy::default()
+            },
+            |_attempt, _max_retries, _delay_secs, _err| {},
+        )
+        .await
+        .expect("ledger append errors must not hide a successful completion");
+
+        assert_eq!(result, "ok");
+        assert_eq!(client.calls(), 1);
     }
 
     #[tokio::test]
