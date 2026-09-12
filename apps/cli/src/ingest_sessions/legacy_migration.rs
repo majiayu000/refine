@@ -62,8 +62,8 @@ pub(super) fn matching_legacy_document_for_summary<'doc>(
     }
 }
 
-pub(super) fn matching_legacy_document_ids(
-    documents: &[Document],
+pub(super) fn matching_legacy_document_ids<'a>(
+    documents: impl IntoIterator<Item = &'a Document>,
     remem_session: &RememSession,
     raw_content: &str,
 ) -> Result<Vec<DocumentId>> {
@@ -72,7 +72,7 @@ pub(super) fn matching_legacy_document_ids(
     }
 
     let legacy: Vec<&Document> = documents
-        .iter()
+        .into_iter()
         .filter(|document| {
             LEGACY_SOURCES.contains(&document.source())
                 && !document.url().starts_with("remem://raw-session/v2/")
@@ -106,14 +106,14 @@ pub(super) fn matching_legacy_document_ids(
     Ok(Vec::new())
 }
 
-pub(super) fn legacy_document_covering_nonunique_summary(
-    documents: &[Document],
+pub(super) fn legacy_document_covering_nonunique_summary<'a>(
+    documents: impl IntoIterator<Item = &'a Document>,
     remem_session: &RememSession,
     raw_content: &str,
 ) -> Option<DocumentId> {
     (remem_session.source_root == LOCAL_SOURCE_ROOT)
         .then(|| {
-            documents.iter().find(|document| {
+            documents.into_iter().find(|document| {
                 LEGACY_SOURCES.contains(&document.source())
                     && url_matches_session_id(document.url(), &remem_session.session_id)
                     && document.raw_content() == raw_content
@@ -200,6 +200,22 @@ pub(super) fn claim_remem_document_once(
         document.id(),
         legacy_path
     )
+}
+
+/// Claim the final legacy-delete set only when a Remem session commits to migrate
+/// or pending ingest. Matching alone must not claim, or non-destructive filter
+/// abandons leak claims and block later legitimate sessions. Destructive Looper
+/// cleanup records deleted IDs separately so later delete sets stay consistent.
+pub(super) fn claim_legacy_documents(
+    claimed: &mut HashSet<DocumentId>,
+    document_ids: &[DocumentId],
+) -> Result<()> {
+    for document_id in document_ids {
+        if !claimed.insert(document_id.clone()) {
+            bail!("legacy document {document_id} ambiguously matches multiple remem sessions");
+        }
+    }
+    Ok(())
 }
 
 fn unique_remem_match(matches: Vec<&Document>, legacy_path: &Path) -> Result<Option<Document>> {
@@ -535,5 +551,16 @@ mod tests {
                 .to_string()
                 .contains("more than one legacy path")
         );
+    }
+
+    #[test]
+    fn claim_legacy_documents_rejects_a_second_session_claim() {
+        let legacy = document("codex-session", "/tmp/shared.jsonl", "body", 10);
+        let mut claimed = HashSet::new();
+        claim_legacy_documents(&mut claimed, &[legacy.id().clone()]).unwrap();
+        assert!(claim_legacy_documents(&mut claimed, &[legacy.id().clone()])
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguously matches multiple remem sessions"));
     }
 }

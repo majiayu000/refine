@@ -138,14 +138,14 @@ pub(super) async fn skip_unchanged_session(
     Ok(true)
 }
 
-pub(super) fn might_have_legacy_documents(
+pub(super) fn might_have_legacy_documents<'a>(
     summary: &RememSessionSummary,
     legacy_v1: Option<&Document>,
-    documents: &[Document],
+    documents: impl IntoIterator<Item = &'a Document>,
 ) -> bool {
     legacy_v1.is_some()
         || documents
-            .iter()
+            .into_iter()
             .any(|document| legacy_document_might_match_summary(document, summary))
 }
 

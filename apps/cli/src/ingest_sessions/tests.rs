@@ -1777,3 +1777,757 @@ async fn omitting_latest_scans_every_eligible_session_body() {
         vec!["newer".to_string(), "older".to_string()]
     );
 }
+
+#[tokio::test]
+async fn filter_abandon_does_not_leak_legacy_document_claims() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store;
+    let shared_epoch = 1_700_000_000i64;
+    // Newer reject is processed first; ordinary samples avoid the summary-Looper path so
+    // the body-level passes_filter abandon is the one that must not retain a claim.
+    let mut reject = remem_summary("reject-a", shared_epoch + 20, 'r');
+    reject.first_epoch = shared_epoch;
+    reject.user_message_samples = vec!["ordinary user question".to_string()];
+    let mut accept = remem_summary("accept-b", shared_epoch + 10, 'a');
+    accept.first_epoch = shared_epoch;
+
+    // Filename matches neither session id; epoch+content matching ties both to this row.
+    let mut legacy = Document::new("codex-session", "");
+    legacy.set_url("/tmp/shared-legacy-body.jsonl");
+    legacy.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store
+        .save(&legacy)
+        .await
+        .expect("seed shared legacy document");
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: None,
+            dry_run: true,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![reject, accept],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            if summary.session_id == "reject-a" {
+                // Body-detected Looper: fails passes_filter after matching the legacy id.
+                Ok(loaded_remem_session(
+                    &summary,
+                    "You are executing Looper scheduled skill \"daily\".\nFollow the spec.",
+                ))
+            } else {
+                Ok(loaded_remem_session(
+                    &summary,
+                    "ordinary user question with enough useful detail",
+                ))
+            }
+        },
+        doc_store,
+        None,
+    )
+    .await
+    .expect("a later Remem session must still claim a legacy id after an earlier filter abandon");
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["reject-a".to_string(), "accept-b".to_string()],
+        "both sessions must load so the abandon-then-reclaim path is exercised"
+    );
+}
+
+#[tokio::test]
+async fn two_proceeding_sessions_still_detect_ambiguous_legacy_claims() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store;
+    let shared_epoch = 1_700_000_100i64;
+    let mut first = remem_summary("first", shared_epoch + 20, 'f');
+    first.first_epoch = shared_epoch;
+    let mut second = remem_summary("second", shared_epoch + 10, 's');
+    second.first_epoch = shared_epoch;
+
+    let mut legacy = Document::new("codex-session", "");
+    legacy.set_url("/tmp/shared-legacy-ambiguous.jsonl");
+    legacy.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store
+        .save(&legacy)
+        .await
+        .expect("seed shared legacy document");
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+
+    let error = handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: None,
+            dry_run: true,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![first, second],
+        Some(quarantine),
+        |summary| {
+            Ok(loaded_remem_session(
+                &summary,
+                "ordinary user question with enough useful detail",
+            ))
+        },
+        doc_store,
+        None,
+    )
+    .await
+    .expect_err("two sessions that both proceed must still hard-bail on shared legacy ids");
+
+    assert!(
+        error
+            .to_string()
+            .contains("ambiguously matches multiple remem sessions"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[tokio::test]
+async fn summary_looper_cleanup_does_not_poison_later_legacy_deletes() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store;
+    let shared_epoch = 1_700_000_200i64;
+    let mut looper = remem_summary("looper-a", shared_epoch + 20, 'l');
+    looper.first_epoch = shared_epoch;
+    looper.user_message_samples =
+        vec!["You are executing Looper scheduled skill \"daily\". Follow the spec.".to_string()];
+    let mut accept = remem_summary("accept-b", shared_epoch + 10, 'a');
+    accept.first_epoch = shared_epoch;
+    let accept_url = accept.stable_document_url();
+
+    let mut legacy = Document::new("codex-session", "");
+    legacy.set_url("/tmp/shared-looper-legacy.jsonl");
+    legacy.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store
+        .save(&legacy)
+        .await
+        .expect("seed shared legacy document");
+    let mut legacy_item = Item::new_observation("stale shared", "stale shared");
+    legacy_item.set_document_id(legacy.id().clone());
+    item_store.save(&legacy_item).await.unwrap();
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+    let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+        response: r#"{
+            "session_summary": "accepted after looper cleanup",
+            "cognitive_level": "competent", "collaboration_mode": "review",
+            "decisions": [], "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+        .to_string(),
+    });
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: None,
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![looper, accept],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            if summary.session_id == "looper-a" {
+                Ok(loaded_remem_session(
+                    &summary,
+                    "You are executing Looper scheduled skill \"daily\".\nFollow the spec.",
+                ))
+            } else {
+                Ok(loaded_remem_session(
+                    &summary,
+                    "ordinary user question with enough useful detail",
+                ))
+            }
+        },
+        doc_store.clone(),
+        Some(client),
+    )
+    .await
+    .expect("later session must survive after summary Looper deleted a shared matched legacy id");
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["looper-a".to_string(), "accept-b".to_string()],
+        "both sessions must load so the destructive-cleanup-then-ingest path is exercised"
+    );
+    assert!(
+        doc_store.find_by_id(legacy.id()).await.unwrap().is_none(),
+        "Looper cleanup must delete the shared legacy document"
+    );
+    assert!(!item_store.exists(legacy_item.id()).await.unwrap());
+    assert!(
+        doc_store.find_by_url(&accept_url).await.unwrap().is_some(),
+        "later Remem session must still ingest after Looper deleted the shared legacy id"
+    );
+}
+
+#[tokio::test]
+async fn looper_cleanup_does_not_delete_earlier_claimed_legacy_ids() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store;
+    let shared_epoch = 1_700_000_300i64;
+    // Newer valid session claims first; older summary Looper must not delete that claim.
+    let mut accept = remem_summary("accept-first", shared_epoch + 20, 'a');
+    accept.first_epoch = shared_epoch;
+    let accept_url = accept.stable_document_url();
+    let mut looper = remem_summary("looper-later", shared_epoch + 10, 'l');
+    looper.first_epoch = shared_epoch;
+    looper.user_message_samples =
+        vec!["You are executing Looper scheduled skill \"daily\". Follow the spec.".to_string()];
+
+    let mut legacy = Document::new("codex-session", "");
+    legacy.set_url("/tmp/shared-claimed-before-looper.jsonl");
+    legacy.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store
+        .save(&legacy)
+        .await
+        .expect("seed shared legacy document");
+    let mut legacy_item = Item::new_observation("keep for pending claim", "keep for pending claim");
+    legacy_item.set_document_id(legacy.id().clone());
+    item_store.save(&legacy_item).await.unwrap();
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+    let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+        response: r#"{
+            "session_summary": "accepted before looper cleanup",
+            "cognitive_level": "competent", "collaboration_mode": "review",
+            "decisions": [], "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+        .to_string(),
+    });
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: None,
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![accept, looper],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            Ok(loaded_remem_session(
+                &summary,
+                "ordinary user question with enough useful detail",
+            ))
+        },
+        doc_store.clone(),
+        Some(client),
+    )
+    .await
+    .expect("Looper must not delete a legacy id already claimed by an earlier valid session");
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["accept-first".to_string(), "looper-later".to_string()],
+        "claim-then-looper order must load both sessions"
+    );
+    assert!(
+        doc_store.find_by_url(&accept_url).await.unwrap().is_some(),
+        "claimed session must finish ingest after Looper runs"
+    );
+    assert!(
+        doc_store.find_by_id(legacy.id()).await.unwrap().is_none(),
+        "pending worker still deletes the claimed legacy id once"
+    );
+    let accepted = doc_store
+        .find_by_url(&accept_url)
+        .await
+        .unwrap()
+        .expect("accepted document");
+    let reparented = item_store
+        .find_by_id(legacy_item.id())
+        .await
+        .unwrap()
+        .expect("legacy items are reparented onto the claimed session, not deleted early");
+    assert_eq!(reparented.document_id(), Some(accepted.id()));
+}
+
+#[tokio::test]
+async fn looper_deleted_hostless_identity_is_dropped_from_existing_lookup() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store;
+    let shared_epoch = 1_700_000_400i64;
+    let mut looper = remem_summary("looper-hostless", shared_epoch + 20, 'l');
+    looper.first_epoch = shared_epoch;
+    looper.user_message_samples =
+        vec!["You are executing Looper scheduled skill \"daily\". Follow the spec.".to_string()];
+    let mut accept = remem_summary("accept-hostless", shared_epoch + 10, 'a');
+    accept.first_epoch = shared_epoch;
+    let accept_url = accept.stable_document_url();
+    let accept_body = "ordinary user question with enough useful detail";
+    let accept_content = loaded_remem_session(&accept, accept_body)
+        .session
+        .to_document_content();
+
+    // Hostless-v1 identity for the later accept session; Looper matches it by epoch+content.
+    let mut legacy = Document::new("codex-session", &accept_content);
+    legacy.set_url(&accept.legacy_document_url());
+    legacy.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store
+        .save(&legacy)
+        .await
+        .expect("seed hostless legacy document");
+    let mut legacy_item = Item::new_observation("stale hostless", "stale hostless");
+    legacy_item.set_document_id(legacy.id().clone());
+    item_store.save(&legacy_item).await.unwrap();
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+    let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+        response: r#"{
+            "session_summary": "accepted after hostless looper cleanup",
+            "cognitive_level": "competent", "collaboration_mode": "review",
+            "decisions": [], "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+        .to_string(),
+    });
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: None,
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![looper, accept],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            Ok(loaded_remem_session(&summary, accept_body))
+        },
+        doc_store.clone(),
+        Some(client),
+    )
+    .await
+    .expect("later session must not reuse a Looper-deleted hostless identity as existing_document");
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["looper-hostless".to_string(), "accept-hostless".to_string()],
+        "both sessions must load so hostless-poison path is exercised"
+    );
+    assert!(
+        doc_store.find_by_id(legacy.id()).await.unwrap().is_none(),
+        "Looper cleanup must delete the hostless legacy document"
+    );
+    assert!(!item_store.exists(legacy_item.id()).await.unwrap());
+    let accepted = doc_store
+        .find_by_url(&accept_url)
+        .await
+        .unwrap()
+        .expect("later Remem session must ingest on its stable URL");
+    assert_ne!(
+        accepted.id(),
+        legacy.id(),
+        "must not recreate the deleted hostless document as a silent duplicate"
+    );
+    let accepted_items = item_store.find_by_document_id(accepted.id()).await.unwrap();
+    assert!(
+        !accepted_items.is_empty(),
+        "LLM extraction must run after hostless identity invalidation"
+    );
+}
+
+#[tokio::test]
+async fn looper_deleted_ids_are_excluded_from_legacy_matching_snapshot() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store;
+    let shared_epoch = 1_700_000_500i64;
+
+    // Newer Looper runs first and uniquely deletes one frozen candidate by filename.
+    let mut looper = remem_summary("looper-match-filter", shared_epoch + 20, 'l');
+    looper.first_epoch = shared_epoch;
+    looper.user_message_samples =
+        vec!["You are executing Looper scheduled skill \"daily\". Follow the spec.".to_string()];
+    // Later valid session shares epoch with both candidates; empty legacy content matches any
+    // body via starts_with, so without filtering the deleted ID out of the matching snapshot,
+    // epoch/content matching bails on ambiguity before the post-match retain can drop it.
+    let mut accept = remem_summary("accept-match-filter", shared_epoch + 10, 'a');
+    accept.first_epoch = shared_epoch;
+    let accept_url = accept.stable_document_url();
+
+    let mut deleted_candidate = Document::new("codex-session", "");
+    deleted_candidate.set_url("/tmp/prefix-looper-match-filter.jsonl");
+    deleted_candidate.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store
+        .save(&deleted_candidate)
+        .await
+        .expect("seed Looper-matched legacy candidate");
+    let mut deleted_item = Item::new_observation("deleted by looper", "deleted by looper");
+    deleted_item.set_document_id(deleted_candidate.id().clone());
+    item_store.save(&deleted_item).await.unwrap();
+
+    let mut live_candidate = Document::new("codex-session", "");
+    live_candidate.set_url("/tmp/unrelated-live-legacy.jsonl");
+    live_candidate.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store
+        .save(&live_candidate)
+        .await
+        .expect("seed live legacy candidate");
+    let mut live_item = Item::new_observation("kept until accept", "kept until accept");
+    live_item.set_document_id(live_candidate.id().clone());
+    item_store.save(&live_item).await.unwrap();
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+    let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+        response: r#"{
+            "session_summary": "accepted after filtered matching snapshot",
+            "cognitive_level": "competent", "collaboration_mode": "review",
+            "decisions": [], "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+        .to_string(),
+    });
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: None,
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![looper, accept],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            Ok(loaded_remem_session(
+                &summary,
+                "ordinary user question with enough useful detail",
+            ))
+        },
+        doc_store.clone(),
+        Some(client),
+    )
+    .await
+    .expect(
+        "later session must not abort on ambiguity when a Looper-deleted candidate remains in the frozen matching snapshot",
+    );
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec![
+            "looper-match-filter".to_string(),
+            "accept-match-filter".to_string()
+        ],
+        "both sessions must load so pre-retain matching ambiguity is exercised"
+    );
+    assert!(
+        doc_store
+            .find_by_id(deleted_candidate.id())
+            .await
+            .unwrap()
+            .is_none(),
+        "Looper cleanup must delete its uniquely matched candidate"
+    );
+    assert!(
+        doc_store.find_by_url(&accept_url).await.unwrap().is_some(),
+        "later Remem session must finish ingest after filtered matching"
+    );
+    let live_still_legacy = doc_store
+        .find_by_id(live_candidate.id())
+        .await
+        .unwrap()
+        .is_some_and(|document| document.url() == live_candidate.url());
+    assert!(
+        !live_still_legacy,
+        "remaining live legacy candidate must be consumed by the later session"
+    );
+}
+
+#[tokio::test]
+async fn looper_rewritten_existing_id_is_invalidated_for_later_matching() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store;
+    let shared_epoch = 1_700_000_600i64;
+
+    // Looper owns the hostless-v1 row as existing_document; cleanup rewrites that same ID
+    // to the stable Looper URL and clears items instead of deleting the row.
+    let mut looper = remem_summary("looper-rewrite", shared_epoch + 20, 'r');
+    looper.first_epoch = shared_epoch;
+    looper.user_message_samples =
+        vec!["You are executing Looper scheduled skill \"daily\". Follow the spec.".to_string()];
+    let mut accept = remem_summary("accept-rewrite", shared_epoch + 10, 'a');
+    accept.first_epoch = shared_epoch;
+    let accept_url = accept.stable_document_url();
+    let accept_body = "ordinary user question with enough useful detail";
+    let accept_content = loaded_remem_session(&accept, accept_body)
+        .session
+        .to_document_content();
+
+    let mut hostless = Document::new("codex-session", &accept_content);
+    hostless.set_url(&looper.legacy_document_url());
+    hostless.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store
+        .save(&hostless)
+        .await
+        .expect("seed Looper hostless existing_document");
+    let mut hostless_item = Item::new_observation("stale rewritten", "stale rewritten");
+    hostless_item.set_document_id(hostless.id().clone());
+    item_store.save(&hostless_item).await.unwrap();
+
+    let looper_stable_url = looper.stable_document_url();
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+    let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+        response: r#"{
+            "session_summary": "accepted after rewritten looper identity invalidation",
+            "cognitive_level": "competent", "collaboration_mode": "review",
+            "decisions": [], "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+        .to_string(),
+    });
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: None,
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![looper, accept],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            let first_user = if summary.session_id == "looper-rewrite" {
+                "You are executing Looper scheduled skill \"daily\".\nFollow the spec."
+            } else {
+                accept_body
+            };
+            Ok(loaded_remem_session(&summary, first_user))
+        },
+        doc_store.clone(),
+        Some(client),
+    )
+    .await
+    .expect(
+        "later session must not reuse a Looper-rewritten hostless identity via frozen matching",
+    );
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["looper-rewrite".to_string(), "accept-rewrite".to_string()],
+        "both sessions must load so rewritten-identity poison path is exercised"
+    );
+    let rewritten = doc_store
+        .find_by_id(hostless.id())
+        .await
+        .unwrap()
+        .expect("Looper rewrite keeps the document row");
+    assert_eq!(
+        rewritten.url(),
+        looper_stable_url,
+        "Looper cleanup must rewrite the hostless row onto the stable Looper URL"
+    );
+    assert!(
+        item_store
+            .find_by_document_id(hostless.id())
+            .await
+            .unwrap()
+            .is_empty(),
+        "Looper rewrite must clear items on the reused document id"
+    );
+    let accepted = doc_store
+        .find_by_url(&accept_url)
+        .await
+        .unwrap()
+        .expect("later Remem session must ingest on its stable URL");
+    assert_ne!(
+        accepted.id(),
+        hostless.id(),
+        "must not reuse the emptied Looper-rewritten row as a silent exact migration"
+    );
+    let accepted_items = item_store.find_by_document_id(accepted.id()).await.unwrap();
+    assert!(
+        !accepted_items.is_empty(),
+        "LLM extraction must run after rewritten identity invalidation"
+    );
+}
+
+#[tokio::test]
+async fn looper_deleted_ids_are_excluded_from_unchanged_session_probe() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store;
+    let shared_epoch = 1_700_000_700i64;
+
+    // Newer Looper uniquely deletes a legacy row by filename. That row's timestamp also
+    // matches a later already-current stable session, so an unfiltered might_have probe
+    // would disable skip_unchanged_session and force a fragile full load.
+    let mut looper = remem_summary("looper-unchanged-probe", shared_epoch + 20, 'l');
+    looper.first_epoch = shared_epoch;
+    looper.user_message_samples =
+        vec!["You are executing Looper scheduled skill \"daily\". Follow the spec.".to_string()];
+    let mut accept = remem_summary("accept-unchanged-probe", shared_epoch + 10, 'a');
+    accept.first_epoch = shared_epoch;
+    let accept_url = accept.stable_document_url();
+    let accept_version = accept.projection_version();
+
+    let mut deleted_candidate = Document::new("codex-session", "");
+    deleted_candidate.set_url("/tmp/prefix-looper-unchanged-probe.jsonl");
+    deleted_candidate.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store
+        .save(&deleted_candidate)
+        .await
+        .expect("seed Looper-matched legacy candidate");
+    let mut deleted_item = Item::new_observation("deleted by looper", "deleted by looper");
+    deleted_item.set_document_id(deleted_candidate.id().clone());
+    item_store.save(&deleted_item).await.unwrap();
+
+    let mut stable = Document::new("codex-session", "");
+    stable.set_url(&accept_url);
+    stable.set_source_version(Some(&accept_version));
+    doc_store
+        .save(&stable)
+        .await
+        .expect("seed already-current stable session");
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: None,
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![looper, accept],
+        Some(quarantine),
+        move |summary| {
+            if summary.session_id == "accept-unchanged-probe" {
+                anyhow::bail!(
+                    "accept body unavailable; skip_unchanged should have prevented this load"
+                );
+            }
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            Ok(loaded_remem_session(
+                &summary,
+                "You are executing Looper scheduled skill \"daily\".\nFollow the spec.",
+            ))
+        },
+        doc_store.clone(),
+        None,
+    )
+    .await
+    .expect(
+        "later already-current session must skip unchanged after Looper invalidates the stale legacy match",
+    );
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["looper-unchanged-probe".to_string()],
+        "only the Looper body should load; accept must keep the unchanged fast path"
+    );
+    assert!(
+        doc_store
+            .find_by_id(deleted_candidate.id())
+            .await
+            .unwrap()
+            .is_none(),
+        "Looper cleanup must delete its uniquely matched candidate"
+    );
+    let still_current = doc_store
+        .find_by_url(&accept_url)
+        .await
+        .unwrap()
+        .expect("stable accept document must remain");
+    assert_eq!(
+        still_current.source_version(),
+        Some(accept_version.as_str()),
+        "unchanged accept session must keep its current projection version"
+    );
+}

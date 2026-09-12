@@ -34,6 +34,7 @@ use legacy_convergence::{
     include_hostless_v1_document, might_have_legacy_documents, referenced_session_document,
     same_projection_or_snapshot, save_referenced_session_and_delete_legacy,
 };
+use legacy_migration::claim_legacy_documents;
 
 pub(crate) fn lock_session_mutations_for_repair(db_path: &Path) -> Result<std::fs::File> {
     cursor::try_lock_session_mutations(db_path)
@@ -239,6 +240,13 @@ where
         .map(|document| (document.url(), document))
         .collect();
     let mut claimed_legacy_documents = HashSet::new();
+    // Looper cleanup deletes matched legacy rows or rewrites existing_document IDs.
+    // Remember those invalidated IDs so later sessions neither rematch nor retry
+    // deletes against the frozen pre-cleanup snapshot.
+    let mut looper_deleted_legacy_ids = HashSet::new();
+    // Incremental filtered view for matching helpers: retain refs after Looper
+    // invalidation instead of deep-cloning Documents for every remaining summary.
+    let mut matching_documents: Vec<&Document> = existing_documents.iter().collect();
     let mut pending = Vec::new();
     let mut skipped_dup = 0usize;
     let mut skipped_filter = 0usize;
@@ -252,8 +260,16 @@ where
         }
         let url = summary.stable_document_url();
         let legacy_url = summary.legacy_document_url();
-        let stable_document = existing_documents_by_url.get(url.as_str()).copied();
-        let legacy_document = existing_documents_by_url.get(legacy_url.as_str()).copied();
+        // Looper cleanup mutates the live store while this loop still reads the frozen
+        // snapshot; treat already-deleted IDs as absent so later sessions do not reuse them.
+        let stable_document = existing_documents_by_url
+            .get(url.as_str())
+            .copied()
+            .filter(|document| !looper_deleted_legacy_ids.contains(document.id()));
+        let legacy_document = existing_documents_by_url
+            .get(legacy_url.as_str())
+            .copied()
+            .filter(|document| !looper_deleted_legacy_ids.contains(document.id()));
         let existing_document = match (stable_document, legacy_document) {
             (Some(document), _) => Some(document.clone()),
             (None, Some(document)) if summary.legacy_identity_is_unique => Some(document.clone()),
@@ -268,8 +284,14 @@ where
             stable_document.is_none() && existing_document.is_some();
         let session_source = summary.session_source()?;
         let source_version = summary.projection_version();
-        let might_have_legacy_documents =
-            might_have_legacy_documents(&summary, legacy_document, &existing_documents);
+        // Matching helpers and the unchanged-session probe can both react to stale
+        // frozen rows. Use the incremental filtered refs so a deleted candidate cannot
+        // force a full load or abort ingest.
+        let might_have_legacy_documents = might_have_legacy_documents(
+            &summary,
+            legacy_document,
+            matching_documents.iter().copied(),
+        );
         let summary_is_looper = summary.is_looper_scheduled();
         if summary.user_message_count < filter_config.min_user_messages as i64 {
             skipped_filter += 1;
@@ -309,22 +331,16 @@ where
         fully_loaded += 1;
         let raw_content = remem_session.session.to_document_content();
         let mut legacy_documents_to_delete = if legacy_identity_is_unique {
-            let document_ids = legacy_migration::matching_legacy_document_ids(
-                &existing_documents,
+            // Match only here; claim the final delete set after hostless IDs are
+            // included and only on migrate-success / pending commit paths.
+            legacy_migration::matching_legacy_document_ids(
+                matching_documents.iter().copied(),
                 &remem_session,
                 &raw_content,
-            )?;
-            for document_id in &document_ids {
-                if !claimed_legacy_documents.insert(document_id.clone()) {
-                    anyhow::bail!(
-                        "legacy document {document_id} ambiguously matches multiple remem sessions"
-                    );
-                }
-            }
-            document_ids
+            )?
         } else if let Some(document_id) =
             legacy_migration::legacy_document_covering_nonunique_summary(
-                &existing_documents,
+                matching_documents.iter().copied(),
                 &remem_session,
                 &raw_content,
             )
@@ -345,15 +361,22 @@ where
             &remem_session.source_root,
             &remem_session.session_id,
         )?;
+        legacy_documents_to_delete.retain(|id| !looper_deleted_legacy_ids.contains(id));
         // Summary samples can omit/truncate the Looper marker while the loaded
         // first user message still starts with it. Cleanup must follow the body.
         let body_is_looper =
             refine_core::session::is_looper_scheduled_skill_session(&remem_session.session);
         if summary_is_looper || body_is_looper {
             if !options.dry_run {
+                // An earlier valid session may already own these IDs for a deferred write.
+                // Deleting them here would make the pending worker fail with a missing obsolete id.
+                legacy_documents_to_delete.retain(|id| !claimed_legacy_documents.contains(id));
+                let existing_for_cleanup = existing_document
+                    .as_ref()
+                    .filter(|document| !claimed_legacy_documents.contains(document.id()));
                 legacy_convergence::exclude_scheduled_session_documents(
                     &doc_store,
-                    existing_document.as_ref(),
+                    existing_for_cleanup,
                     session_source.clone(),
                     &url,
                     &source_version,
@@ -361,6 +384,15 @@ where
                 )
                 .await
                 .context("exclude Looper scheduled session documents and facets")?;
+                // Deleted legacy rows and rewritten existing_document IDs are both
+                // invalidated: rewrite keeps the row but clears items and retargets the
+                // URL, so later sessions must not rematch the frozen pre-cleanup identity.
+                looper_deleted_legacy_ids.extend(legacy_documents_to_delete.iter().cloned());
+                if let Some(existing) = existing_for_cleanup {
+                    looper_deleted_legacy_ids.insert(existing.id().clone());
+                }
+                matching_documents
+                    .retain(|document| !looper_deleted_legacy_ids.contains(document.id()));
                 quarantine.resolve(&url);
                 quarantine.save_if_dirty()?;
             }
@@ -376,6 +408,7 @@ where
                     "matched legacy session document disappeared from the migration snapshot",
                 )?;
             if legacy_document.raw_content() == raw_content {
+                claim_legacy_documents(&mut claimed_legacy_documents, &legacy_documents_to_delete)?;
                 if !options.dry_run {
                     let referenced = referenced_session_document(
                         legacy_document,
@@ -402,6 +435,7 @@ where
                 || (!existing_document_uses_legacy_identity
                     && same_projection_or_snapshot(existing_doc, &source_version))
             {
+                claim_legacy_documents(&mut claimed_legacy_documents, &legacy_documents_to_delete)?;
                 if !options.dry_run {
                     let referenced = referenced_session_document(
                         existing_doc,
@@ -429,6 +463,8 @@ where
             skipped_filter += 1;
             continue;
         }
+
+        claim_legacy_documents(&mut claimed_legacy_documents, &legacy_documents_to_delete)?;
 
         let captured_at = DateTime::<Utc>::from_timestamp(remem_session.first_epoch, 0)
             .with_context(|| {
