@@ -10,6 +10,16 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# Lock supervisor must re-exec absolute /bin/bash, not a PATH-resolved bare bash
+# (WorkingDirectory is ~/.refine; a planted ./bash would otherwise hijack the job).
+grep -Fq "/bin/bash -c 'source \"\$1\"; shift; run_refine_runtime_job_locked \"\$@\"'" \
+  "$SCRIPT_DIR/cognitive-portrait.sh" \
+  || fail 'lock re-exec must use absolute /bin/bash'
+if grep -E 'perl -MPOSIX=setsid' -A2 "$SCRIPT_DIR/cognitive-portrait.sh" \
+  | grep -Eq '(^|[[:space:]])bash -c'; then
+  fail 'lock re-exec still uses bare bash from PATH'
+fi
+
 prepare_case() {
   local name="$1"
   local root="${TEST_ROOT}/${name}"

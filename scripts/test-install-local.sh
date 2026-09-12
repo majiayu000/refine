@@ -373,6 +373,15 @@ grep -Fq '<key>REFINE_COGNITIVE_PORTRAIT_REFINE_BIN</key>' "$portrait_plist" \
   || fail 'cognitive portrait LaunchAgent does not pin a dedicated refine binary'
 grep -Fq "${test_home}/.refine/bin/refine-portrait" "$portrait_plist" \
   || fail 'cognitive portrait LaunchAgent does not use the dedicated portrait binary'
+portrait_path="$(fixture_plist_value "$portrait_plist" 'EnvironmentVariables:PATH')"
+expected_portrait_path="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${test_cargo_home}/bin"
+[[ "$portrait_path" == "$expected_portrait_path" ]] \
+  || fail "portrait LaunchAgent PATH should omit node dirname when node is absent; got: ${portrait_path}"
+IFS=':' read -r -a portrait_path_parts <<< "$portrait_path"
+for segment in "${portrait_path_parts[@]}"; do
+  [[ -n "$segment" && "$segment" != '.' ]] \
+    || fail "portrait LaunchAgent PATH contains empty or '.' segment: ${portrait_path}"
+done
 grep -Fxq "cognitive_portrait_root=${test_home}/.refine" "${test_home}/.refine/install-manifest" \
   || fail 'install manifest did not keep the portrait runtime in ~/.refine'
 grep -Fxq "cognitive_portrait_dir=${portrait_dir}" "${test_home}/.refine/install-manifest" \
@@ -895,5 +904,38 @@ assert_contains "$legacy_output" 'legacy\ repo/.env' 'legacy migration command d
 assert_not_contains "$legacy_output" 'legacy-repository-secret' 'legacy upgrade failure leaked a credential'
 [[ ! -e "${legacy_cargo_home}/bin/refine" ]] \
   || fail 'legacy upgrade guard ran after binary installation'
+
+# When node resolves to an absolute path, only that dirname may be prepended.
+node_home="${TEST_ROOT}/node-home"
+node_cargo_home="${node_home}/.cargo"
+node_portrait_root="${TEST_ROOT}/node portrait workspace"
+node_portrait_dir="${node_portrait_root}/docs/cognitive-portraits"
+mkdir -p "$node_home" "$node_cargo_home/bin" \
+  "${node_portrait_root}/skills/cognitive-portrait" "$node_portrait_dir"
+cp -R "${REPO_ROOT}/skills/cognitive-portrait/." "${node_portrait_root}/skills/cognitive-portrait/"
+printf '%s\n' '# Portrait archive' > "${node_portrait_dir}/INDEX.md"
+printf '%s\n' '# Fixture portrait' > "${node_portrait_dir}/cognitive-portrait-2026-08-24-v3.md"
+printf '#!/usr/bin/env bash\nexit 0\n' > "${fake_bin}/node"
+chmod 700 "${fake_bin}/node"
+env -i HOME="$node_home" CARGO_HOME="$node_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
+  /bin/bash "${SCRIPT_DIR}/install-local.sh" \
+    --no-ui-dev --no-start --cognitive-portrait \
+    --cognitive-portrait-root "$node_portrait_root" >/dev/null \
+  || fail 'installer failed when absolute node was present'
+node_portrait_plist="${node_home}/Library/LaunchAgents/com.lifcc.refine-cognitive-portrait.plist"
+node_portrait_path="$(fixture_plist_value "$node_portrait_plist" 'EnvironmentVariables:PATH')"
+node_bin_resolved="${fake_bin}/node"
+if command -v realpath >/dev/null 2>&1; then
+  node_bin_resolved="$(realpath "${fake_bin}/node")"
+fi
+expected_node_portrait_path="$(dirname "$node_bin_resolved"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${node_cargo_home}/bin"
+[[ "$node_portrait_path" == "$expected_node_portrait_path" ]] \
+  || fail "portrait LaunchAgent PATH should prepend absolute node dirname only; got: ${node_portrait_path}"
+IFS=':' read -r -a node_portrait_path_parts <<< "$node_portrait_path"
+for segment in "${node_portrait_path_parts[@]}"; do
+  [[ -n "$segment" && "$segment" != '.' ]] \
+    || fail "node-present portrait PATH contains empty or '.' segment: ${node_portrait_path}"
+done
+rm -f "${fake_bin}/node"
 
 printf 'All local installer tests passed\n'

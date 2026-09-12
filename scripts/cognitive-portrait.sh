@@ -16,7 +16,7 @@ if [[ "${REFINE_RUNTIME_LOCK_ACTIVE:-}" != "1" ]]; then
     exit "$status"
   }
   /usr/bin/perl -MPOSIX=setsid -e 'setsid() or die "setsid failed: $!"; exec @ARGV or die "exec failed: $!"' -- \
-    bash -c 'source "$1"; shift; run_refine_runtime_job_locked "$@"' \
+    /bin/bash -c 'source "$1"; shift; run_refine_runtime_job_locked "$@"' \
     refine-portrait-lock "${SCRIPT_DIR}/runtime-job-lock.sh" "${SCRIPT_DIR}/cognitive-portrait.sh" "$@" &
   supervisor=$!
   trap 'forward_lock_signal HUP 129' HUP
