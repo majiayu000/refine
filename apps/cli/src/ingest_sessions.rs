@@ -240,8 +240,9 @@ where
         .map(|document| (document.url(), document))
         .collect();
     let mut claimed_legacy_documents = HashSet::new();
-    // Looper cleanup deletes matched legacy rows immediately. Remember those IDs so
-    // later sessions neither rematch nor retry deletes against the frozen snapshot.
+    // Looper cleanup deletes matched legacy rows or rewrites existing_document IDs.
+    // Remember those invalidated IDs so later sessions neither rematch nor retry
+    // deletes against the frozen pre-cleanup snapshot.
     let mut looper_deleted_legacy_ids = HashSet::new();
     let mut pending = Vec::new();
     let mut skipped_dup = 0usize;
