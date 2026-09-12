@@ -2164,10 +2164,7 @@ async fn looper_deleted_hostless_identity_is_dropped_from_existing_lookup() {
 
     assert_eq!(
         *loaded_ids.lock().expect("loaded id lock"),
-        vec![
-            "looper-hostless".to_string(),
-            "accept-hostless".to_string()
-        ],
+        vec!["looper-hostless".to_string(), "accept-hostless".to_string()],
         "both sessions must load so hostless-poison path is exercised"
     );
     assert!(
@@ -2185,10 +2182,7 @@ async fn looper_deleted_hostless_identity_is_dropped_from_existing_lookup() {
         legacy.id(),
         "must not recreate the deleted hostless document as a silent duplicate"
     );
-    let accepted_items = item_store
-        .find_by_document_id(accepted.id())
-        .await
-        .unwrap();
+    let accepted_items = item_store.find_by_document_id(accepted.id()).await.unwrap();
     assert!(
         !accepted_items.is_empty(),
         "LLM extraction must run after hostless identity invalidation"

@@ -360,11 +360,10 @@ where
             if !options.dry_run {
                 // An earlier valid session may already own these IDs for a deferred write.
                 // Deleting them here would make the pending worker fail with a missing obsolete id.
-                legacy_documents_to_delete
-                    .retain(|id| !claimed_legacy_documents.contains(id));
-                let existing_for_cleanup = existing_document.as_ref().filter(|document| {
-                    !claimed_legacy_documents.contains(document.id())
-                });
+                legacy_documents_to_delete.retain(|id| !claimed_legacy_documents.contains(id));
+                let existing_for_cleanup = existing_document
+                    .as_ref()
+                    .filter(|document| !claimed_legacy_documents.contains(document.id()));
                 legacy_convergence::exclude_scheduled_session_documents(
                     &doc_store,
                     existing_for_cleanup,
