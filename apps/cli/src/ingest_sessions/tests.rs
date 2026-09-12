@@ -2188,3 +2188,121 @@ async fn looper_deleted_hostless_identity_is_dropped_from_existing_lookup() {
         "LLM extraction must run after hostless identity invalidation"
     );
 }
+
+#[tokio::test]
+async fn looper_deleted_ids_are_excluded_from_legacy_matching_snapshot() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store;
+    let shared_epoch = 1_700_000_500i64;
+
+    // Newer Looper runs first and uniquely deletes one frozen candidate by filename.
+    let mut looper = remem_summary("looper-match-filter", shared_epoch + 20, 'l');
+    looper.first_epoch = shared_epoch;
+    looper.user_message_samples =
+        vec!["You are executing Looper scheduled skill \"daily\". Follow the spec.".to_string()];
+    // Later valid session shares epoch with both candidates; empty legacy content matches any
+    // body via starts_with, so without filtering the deleted ID out of the matching snapshot,
+    // epoch/content matching bails on ambiguity before the post-match retain can drop it.
+    let mut accept = remem_summary("accept-match-filter", shared_epoch + 10, 'a');
+    accept.first_epoch = shared_epoch;
+    let accept_url = accept.stable_document_url();
+
+    let mut deleted_candidate = Document::new("codex-session", "");
+    deleted_candidate.set_url("/tmp/prefix-looper-match-filter.jsonl");
+    deleted_candidate.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store
+        .save(&deleted_candidate)
+        .await
+        .expect("seed Looper-matched legacy candidate");
+    let mut deleted_item = Item::new_observation("deleted by looper", "deleted by looper");
+    deleted_item.set_document_id(deleted_candidate.id().clone());
+    item_store.save(&deleted_item).await.unwrap();
+
+    let mut live_candidate = Document::new("codex-session", "");
+    live_candidate.set_url("/tmp/unrelated-live-legacy.jsonl");
+    live_candidate.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store
+        .save(&live_candidate)
+        .await
+        .expect("seed live legacy candidate");
+    let mut live_item = Item::new_observation("kept until accept", "kept until accept");
+    live_item.set_document_id(live_candidate.id().clone());
+    item_store.save(&live_item).await.unwrap();
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+    let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+        response: r#"{
+            "session_summary": "accepted after filtered matching snapshot",
+            "cognitive_level": "competent", "collaboration_mode": "review",
+            "decisions": [], "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+        .to_string(),
+    });
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: None,
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![looper, accept],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            Ok(loaded_remem_session(
+                &summary,
+                "ordinary user question with enough useful detail",
+            ))
+        },
+        doc_store.clone(),
+        Some(client),
+    )
+    .await
+    .expect(
+        "later session must not abort on ambiguity when a Looper-deleted candidate remains in the frozen matching snapshot",
+    );
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec![
+            "looper-match-filter".to_string(),
+            "accept-match-filter".to_string()
+        ],
+        "both sessions must load so pre-retain matching ambiguity is exercised"
+    );
+    assert!(
+        doc_store
+            .find_by_id(deleted_candidate.id())
+            .await
+            .unwrap()
+            .is_none(),
+        "Looper cleanup must delete its uniquely matched candidate"
+    );
+    assert!(
+        doc_store.find_by_url(&accept_url).await.unwrap().is_some(),
+        "later Remem session must finish ingest after filtered matching"
+    );
+    let live_still_legacy = doc_store
+        .find_by_id(live_candidate.id())
+        .await
+        .unwrap()
+        .is_some_and(|document| document.url() == live_candidate.url());
+    assert!(
+        !live_still_legacy,
+        "remaining live legacy candidate must be consumed by the later session"
+    );
+}
