@@ -275,6 +275,10 @@ where
             skipped_filter += 1;
             continue;
         }
+        // Keep quarantine / skip_unchanged fast paths: eager body probes for every
+        // non-Looper summary would full-load unchanged and quarantined rows and break
+        // latest-quota / unchanged contracts. Body-detected Looper cleanup still runs
+        // after any session that must be loaded for other reasons (issue #225).
         if !options.retry_quarantined
             && quarantine.contains(&url, Some(&source_version))
             && !summary_is_looper
@@ -341,7 +345,11 @@ where
             &remem_session.source_root,
             &remem_session.session_id,
         )?;
-        if summary_is_looper {
+        // Summary samples can omit/truncate the Looper marker while the loaded
+        // first user message still starts with it. Cleanup must follow the body.
+        let body_is_looper =
+            refine_core::session::is_looper_scheduled_skill_session(&remem_session.session);
+        if summary_is_looper || body_is_looper {
             if !options.dry_run {
                 legacy_convergence::exclude_scheduled_session_documents(
                     &doc_store,
