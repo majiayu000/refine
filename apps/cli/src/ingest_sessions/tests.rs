@@ -1615,6 +1615,195 @@ async fn body_detected_looper_clears_stable_and_legacy_when_summary_samples_omit
 }
 
 #[tokio::test]
+async fn body_detected_looper_clears_exact_version_quarantine_before_summary_skip() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store.clone();
+    // Truncated summary samples must not let exact-version quarantine skip the load.
+    let mut looper = remem_summary("looper", 300, 'c');
+    looper.user_message_samples = vec!["Follow the daily checklist and report status.".to_string()];
+    let mut eligible = remem_summary("eligible", 200, 'd');
+    eligible.session_mode = "unattended".to_string();
+    let eligible_url = eligible.stable_document_url();
+
+    let mut stable = Document::new("codex-session", "");
+    stable.set_url(&looper.stable_document_url());
+    stable.set_source_version(Some(&looper.projection_version()));
+    doc_store.save(&stable).await.unwrap();
+    let mut stable_item = Item::new_observation("stale stable", "stale stable");
+    stable_item.set_document_id(stable.id().clone());
+    item_store.save(&stable_item).await.unwrap();
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine_path = temp.path().join("quarantine.jsonl");
+    let mut quarantine = QuarantineStore::load_from(quarantine_path.clone()).unwrap();
+    quarantine.record(
+        &looper.stable_document_url(),
+        Some(&looper.projection_version()),
+        "provider_rejected",
+        "fixture",
+    );
+    quarantine.save_if_dirty().unwrap();
+    drop(quarantine);
+    let quarantine = QuarantineStore::load_from(quarantine_path.clone()).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+    let client = Arc::new(SequenceLlmClient::new(vec![r#"{
+            "session_summary": "eligible replacement",
+            "cognitive_level": "competent", "collaboration_mode": "review",
+            "decisions": [], "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+    .to_string()]));
+    let llm_client: Arc<dyn LlmClient> = client.clone();
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: Some(1),
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![eligible, looper],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            let first_user = if summary.session_id == "looper" {
+                "You are executing Looper scheduled skill \"daily\".\nFollow the spec."
+            } else {
+                "ordinary user question with enough useful detail"
+            };
+            Ok(loaded_remem_session(&summary, first_user))
+        },
+        doc_store.clone(),
+        Some(llm_client),
+    )
+    .await
+    .expect("body-detected Looper must clear exact-version quarantine before summary skip");
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["looper".to_string(), "eligible".to_string()]
+    );
+    assert_eq!(client.calls(), 1);
+    assert!(item_store
+        .find_by_document_id(stable.id())
+        .await
+        .unwrap()
+        .is_empty());
+    let eligible_document = doc_store
+        .find_by_url(&eligible_url)
+        .await
+        .unwrap()
+        .expect("eligible Remem document");
+    assert!(!item_store
+        .find_by_document_id(eligible_document.id())
+        .await
+        .unwrap()
+        .is_empty());
+    let quarantine = QuarantineStore::load_from(quarantine_path).unwrap();
+    assert!(!quarantine.contains(stable.url(), Some(stable.source_version().unwrap())));
+    assert_eq!(quarantine.len(), 0);
+}
+
+#[tokio::test]
+async fn body_detected_looper_clears_skip_unchanged_stable_before_summary_skip() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store.clone();
+    // No legacy candidate: skip_unchanged would return true on summary alone.
+    let mut looper = remem_summary("looper", 300, 'c');
+    looper.user_message_samples = vec!["Follow the daily checklist and report status.".to_string()];
+    let mut eligible = remem_summary("eligible", 200, 'd');
+    eligible.session_mode = "unattended".to_string();
+    let eligible_url = eligible.stable_document_url();
+
+    let mut stable = Document::new("codex-session", "");
+    stable.set_url(&looper.stable_document_url());
+    stable.set_source_version(Some(&looper.projection_version()));
+    doc_store.save(&stable).await.unwrap();
+    let mut stable_item = Item::new_observation("stale stable", "stale stable");
+    stable_item.set_document_id(stable.id().clone());
+    item_store.save(&stable_item).await.unwrap();
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine_path = temp.path().join("quarantine.jsonl");
+    let quarantine = QuarantineStore::load_from(quarantine_path.clone()).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+    let client = Arc::new(SequenceLlmClient::new(vec![r#"{
+            "session_summary": "eligible replacement",
+            "cognitive_level": "competent", "collaboration_mode": "review",
+            "decisions": [], "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+    .to_string()]));
+    let llm_client: Arc<dyn LlmClient> = client.clone();
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: Some(1),
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![eligible, looper],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            let first_user = if summary.session_id == "looper" {
+                "You are executing Looper scheduled skill \"daily\".\nFollow the spec."
+            } else {
+                "ordinary user question with enough useful detail"
+            };
+            Ok(loaded_remem_session(&summary, first_user))
+        },
+        doc_store.clone(),
+        Some(llm_client),
+    )
+    .await
+    .expect("body-detected Looper must clear skip_unchanged stable before summary skip");
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["looper".to_string(), "eligible".to_string()]
+    );
+    assert_eq!(client.calls(), 1);
+    assert!(item_store
+        .find_by_document_id(stable.id())
+        .await
+        .unwrap()
+        .is_empty());
+    let eligible_document = doc_store
+        .find_by_url(&eligible_url)
+        .await
+        .unwrap()
+        .expect("eligible Remem document");
+    assert!(!item_store
+        .find_by_document_id(eligible_document.id())
+        .await
+        .unwrap()
+        .is_empty());
+    let _ = QuarantineStore::load_from(quarantine_path).unwrap();
+}
+
+#[tokio::test]
 async fn looper_cleanup_rolls_back_stable_and_legacy_item_changes_together() {
     let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
     let doc_store: Arc<dyn DocumentRepository> = store.clone();

@@ -275,34 +275,51 @@ where
             skipped_filter += 1;
             continue;
         }
-        if !options.retry_quarantined
-            && quarantine.contains(&url, Some(&source_version))
-            && !summary_is_looper
-        {
-            selected_quarantined_identities.insert(quarantine_key(&url, Some(&source_version)));
-            continue;
-        }
-        if !summary_is_looper
-            && legacy_convergence::skip_unchanged_session(
-                &doc_store,
-                existing_document.as_ref(),
-                existing_document_uses_legacy_identity,
-                might_have_legacy_documents,
-                options.dry_run,
-                session_source.clone(),
-                &url,
-                &source_version,
-            )
-            .await?
-        {
-            skipped_dup += 1;
-            continue;
-        }
-
+        let exact_quarantined =
+            !options.retry_quarantined && quarantine.contains(&url, Some(&source_version));
+        // Pure predicate mirroring skip_unchanged_session's eligibility filter so we
+        // can probe the body before that helper's store side effects run.
+        let would_skip_unchanged = existing_document.as_ref().is_some_and(|document| {
+            !existing_document_uses_legacy_identity
+                && !might_have_legacy_documents
+                && document.source_version() == Some(source_version.as_str())
+        });
         let legacy_identity_is_unique = summary.legacy_identity_is_unique;
-        let remem_session = load_session(summary)
-            .with_context(|| format!("failed to load full remem session for {url}"))?;
-        fully_loaded += 1;
+
+        // Summary samples can omit/truncate the Looper marker. Quarantine and
+        // skip_unchanged must not early-exit until body detection runs.
+        let remem_session = if !summary_is_looper && (exact_quarantined || would_skip_unchanged) {
+            let remem_session = load_session(summary)
+                .with_context(|| format!("failed to load full remem session for {url}"))?;
+            fully_loaded += 1;
+            if !refine_core::session::is_looper_scheduled_skill_session(&remem_session.session) {
+                if exact_quarantined {
+                    selected_quarantined_identities
+                        .insert(quarantine_key(&url, Some(&source_version)));
+                    continue;
+                }
+                let skipped = legacy_convergence::skip_unchanged_session(
+                    &doc_store,
+                    existing_document.as_ref(),
+                    existing_document_uses_legacy_identity,
+                    might_have_legacy_documents,
+                    options.dry_run,
+                    session_source.clone(),
+                    &url,
+                    &source_version,
+                )
+                .await?;
+                debug_assert!(skipped);
+                skipped_dup += 1;
+                continue;
+            }
+            remem_session
+        } else {
+            let remem_session = load_session(summary)
+                .with_context(|| format!("failed to load full remem session for {url}"))?;
+            fully_loaded += 1;
+            remem_session
+        };
         let raw_content = remem_session.session.to_document_content();
         let mut legacy_documents_to_delete = if legacy_identity_is_unique {
             let document_ids = legacy_migration::matching_legacy_document_ids(
@@ -343,9 +360,8 @@ where
         )?;
         // Summary samples can omit/truncate the Looper marker while the loaded
         // first user message still starts with it. Cleanup must follow the body.
-        let body_is_looper = refine_core::session::is_looper_scheduled_skill_session(
-            &remem_session.session,
-        );
+        let body_is_looper =
+            refine_core::session::is_looper_scheduled_skill_session(&remem_session.session);
         if summary_is_looper || body_is_looper {
             if !options.dry_run {
                 legacy_convergence::exclude_scheduled_session_documents(
