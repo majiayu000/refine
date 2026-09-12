@@ -203,8 +203,9 @@ pub(super) fn claim_remem_document_once(
 }
 
 /// Claim the final legacy-delete set only when a Remem session commits to migrate
-/// or pending ingest. Matching alone must not claim, or filter/Looper abandons
-/// leak claims and block later legitimate sessions.
+/// or pending ingest. Matching alone must not claim, or non-destructive filter
+/// abandons leak claims and block later legitimate sessions. Destructive Looper
+/// cleanup records deleted IDs separately so later delete sets stay consistent.
 pub(super) fn claim_legacy_documents(
     claimed: &mut HashSet<DocumentId>,
     document_ids: &[DocumentId],
@@ -557,11 +558,9 @@ mod tests {
         let legacy = document("codex-session", "/tmp/shared.jsonl", "body", 10);
         let mut claimed = HashSet::new();
         claim_legacy_documents(&mut claimed, &[legacy.id().clone()]).unwrap();
-        assert!(
-            claim_legacy_documents(&mut claimed, &[legacy.id().clone()])
-                .unwrap_err()
-                .to_string()
-                .contains("ambiguously matches multiple remem sessions")
-        );
+        assert!(claim_legacy_documents(&mut claimed, &[legacy.id().clone()])
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguously matches multiple remem sessions"));
     }
 }

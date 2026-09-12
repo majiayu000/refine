@@ -240,6 +240,9 @@ where
         .map(|document| (document.url(), document))
         .collect();
     let mut claimed_legacy_documents = HashSet::new();
+    // Looper cleanup deletes matched legacy rows immediately. Remember those IDs so
+    // later sessions neither rematch nor retry deletes against the frozen snapshot.
+    let mut looper_deleted_legacy_ids = HashSet::new();
     let mut pending = Vec::new();
     let mut skipped_dup = 0usize;
     let mut skipped_filter = 0usize;
@@ -340,6 +343,7 @@ where
             &remem_session.source_root,
             &remem_session.session_id,
         )?;
+        legacy_documents_to_delete.retain(|id| !looper_deleted_legacy_ids.contains(id));
         // Summary samples can omit/truncate the Looper marker while the loaded
         // first user message still starts with it. Cleanup must follow the body.
         let body_is_looper =
@@ -356,6 +360,15 @@ where
                 )
                 .await
                 .context("exclude Looper scheduled session documents and facets")?;
+                let deleted = match existing_document.as_ref() {
+                    Some(existing) => legacy_documents_to_delete
+                        .iter()
+                        .filter(|id| *id != existing.id())
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    None => legacy_documents_to_delete.clone(),
+                };
+                looper_deleted_legacy_ids.extend(deleted);
                 quarantine.resolve(&url);
                 quarantine.save_if_dirty()?;
             }
@@ -371,10 +384,7 @@ where
                     "matched legacy session document disappeared from the migration snapshot",
                 )?;
             if legacy_document.raw_content() == raw_content {
-                claim_legacy_documents(
-                    &mut claimed_legacy_documents,
-                    &legacy_documents_to_delete,
-                )?;
+                claim_legacy_documents(&mut claimed_legacy_documents, &legacy_documents_to_delete)?;
                 if !options.dry_run {
                     let referenced = referenced_session_document(
                         legacy_document,
@@ -401,10 +411,7 @@ where
                 || (!existing_document_uses_legacy_identity
                     && same_projection_or_snapshot(existing_doc, &source_version))
             {
-                claim_legacy_documents(
-                    &mut claimed_legacy_documents,
-                    &legacy_documents_to_delete,
-                )?;
+                claim_legacy_documents(&mut claimed_legacy_documents, &legacy_documents_to_delete)?;
                 if !options.dry_run {
                     let referenced = referenced_session_document(
                         existing_doc,

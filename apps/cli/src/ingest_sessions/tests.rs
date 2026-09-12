@@ -1795,7 +1795,10 @@ async fn filter_abandon_does_not_leak_legacy_document_claims() {
     let mut legacy = Document::new("codex-session", "");
     legacy.set_url("/tmp/shared-legacy-body.jsonl");
     legacy.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
-    doc_store.save(&legacy).await.expect("seed shared legacy document");
+    doc_store
+        .save(&legacy)
+        .await
+        .expect("seed shared legacy document");
 
     let temp = tempfile::tempdir().expect("temporary ingest paths");
     let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
@@ -1837,9 +1840,7 @@ async fn filter_abandon_does_not_leak_legacy_document_claims() {
         None,
     )
     .await
-    .expect(
-        "a later Remem session must still claim a legacy id after an earlier filter abandon",
-    );
+    .expect("a later Remem session must still claim a legacy id after an earlier filter abandon");
 
     assert_eq!(
         *loaded_ids.lock().expect("loaded id lock"),
@@ -1861,7 +1862,10 @@ async fn two_proceeding_sessions_still_detect_ambiguous_legacy_claims() {
     let mut legacy = Document::new("codex-session", "");
     legacy.set_url("/tmp/shared-legacy-ambiguous.jsonl");
     legacy.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
-    doc_store.save(&legacy).await.expect("seed shared legacy document");
+    doc_store
+        .save(&legacy)
+        .await
+        .expect("seed shared legacy document");
 
     let temp = tempfile::tempdir().expect("temporary ingest paths");
     let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
@@ -1896,5 +1900,97 @@ async fn two_proceeding_sessions_still_detect_ambiguous_legacy_claims() {
             .to_string()
             .contains("ambiguously matches multiple remem sessions"),
         "unexpected error: {error:#}"
+    );
+}
+
+#[tokio::test]
+async fn summary_looper_cleanup_does_not_poison_later_legacy_deletes() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store;
+    let shared_epoch = 1_700_000_200i64;
+    let mut looper = remem_summary("looper-a", shared_epoch + 20, 'l');
+    looper.first_epoch = shared_epoch;
+    looper.user_message_samples =
+        vec!["You are executing Looper scheduled skill \"daily\". Follow the spec.".to_string()];
+    let mut accept = remem_summary("accept-b", shared_epoch + 10, 'a');
+    accept.first_epoch = shared_epoch;
+    let accept_url = accept.stable_document_url();
+
+    let mut legacy = Document::new("codex-session", "");
+    legacy.set_url("/tmp/shared-looper-legacy.jsonl");
+    legacy.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store
+        .save(&legacy)
+        .await
+        .expect("seed shared legacy document");
+    let mut legacy_item = Item::new_observation("stale shared", "stale shared");
+    legacy_item.set_document_id(legacy.id().clone());
+    item_store.save(&legacy_item).await.unwrap();
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+    let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+        response: r#"{
+            "session_summary": "accepted after looper cleanup",
+            "cognitive_level": "competent", "collaboration_mode": "review",
+            "decisions": [], "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+        .to_string(),
+    });
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: None,
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![looper, accept],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            if summary.session_id == "looper-a" {
+                Ok(loaded_remem_session(
+                    &summary,
+                    "You are executing Looper scheduled skill \"daily\".\nFollow the spec.",
+                ))
+            } else {
+                Ok(loaded_remem_session(
+                    &summary,
+                    "ordinary user question with enough useful detail",
+                ))
+            }
+        },
+        doc_store.clone(),
+        Some(client),
+    )
+    .await
+    .expect("later session must survive after summary Looper deleted a shared matched legacy id");
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["looper-a".to_string(), "accept-b".to_string()],
+        "both sessions must load so the destructive-cleanup-then-ingest path is exercised"
+    );
+    assert!(
+        doc_store.find_by_id(legacy.id()).await.unwrap().is_none(),
+        "Looper cleanup must delete the shared legacy document"
+    );
+    assert!(!item_store.exists(legacy_item.id()).await.unwrap());
+    assert!(
+        doc_store.find_by_url(&accept_url).await.unwrap().is_some(),
+        "later Remem session must still ingest after Looper deleted the shared legacy id"
     );
 }
