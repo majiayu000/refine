@@ -39,8 +39,9 @@ pub use parser::{parse_session_content, parse_session_file};
 pub use prescription::{build_prescription_prompt, PRESCRIPTION_SYSTEM_PROMPT};
 pub use project_identity::ProjectIdentityResolver;
 pub use remem_archive::{
-    is_missing_remem_executable, load_remem_document_content, load_remem_session,
-    load_remem_session_summaries, remem_snapshot_hash, RememSession, RememSessionSummary,
+    is_missing_remem_executable, is_remem_process_output_overflow, is_remem_process_timeout,
+    load_remem_document_content, load_remem_session, load_remem_session_summaries,
+    remem_hydration_failure_message, remem_snapshot_hash, RememSession, RememSessionSummary,
 };
 pub use report::{
     build_final_prompt, build_final_prompt_with_delta, build_final_prompt_with_delta_and_budget,

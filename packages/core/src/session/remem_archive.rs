@@ -4,16 +4,20 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::io;
 use std::path::PathBuf;
-use std::process::Command;
 
 const RAW_SOURCE_TYPE: &str = "raw_archive";
 const RAW_MESSAGE_ORDER: &str = "created_at_epoch_asc_id_asc";
 const RAW_MESSAGE_LIMIT: &str = "2000";
 
 mod document;
+mod process;
 pub use document::load_document_content as load_remem_document_content;
+pub use process::{
+    is_missing_remem_executable, is_remem_process_output_overflow, is_remem_process_timeout,
+    remem_hydration_failure_message,
+};
+use process::ProcessRunner;
 
 #[derive(Debug)]
 pub struct RememSession {
@@ -72,35 +76,6 @@ struct CommandResult {
 
 trait Runner {
     fn run(&self, args: &[String]) -> Result<CommandResult>;
-}
-
-struct ProcessRunner;
-
-pub fn is_missing_remem_executable(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<io::Error>()
-            .is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
-    })
-}
-
-impl Runner for ProcessRunner {
-    fn run(&self, args: &[String]) -> Result<CommandResult> {
-        let binary = std::env::var("REFINE_REMEM_BIN")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "remem".to_string());
-        let output = Command::new(&binary)
-            .args(args)
-            .output()
-            .with_context(|| format!("run remem provider binary {binary:?}"))?;
-        Ok(CommandResult {
-            success: output.status.success(),
-            code: output.status.code(),
-            stdout: output.stdout,
-            stderr: output.stderr,
-        })
-    }
 }
 
 #[derive(Debug, Deserialize)]

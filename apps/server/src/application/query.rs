@@ -246,7 +246,9 @@ pub async fn get_document(
         })
         .await
         .map_err(|error| QueryError::Internal(format!("Remem hydration task failed: {error}")))?
-        .map_err(|error| QueryError::Internal(format!("Remem hydration failed: {error}")))?
+        .map_err(|error| {
+            QueryError::Internal(refine_core::session::remem_hydration_failure_message(&error))
+        })?
     } else {
         doc.raw_content().to_string()
     };
@@ -414,5 +416,73 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(persisted.raw_content().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn get_document_fails_closed_when_remem_hydration_times_out() {
+        use crate::application::query::QueryError;
+        use std::time::Instant;
+
+        let temp = tempfile::tempdir().expect("create test directory");
+        let binary = temp.path().join("fake-remem-sleep");
+        std::fs::write(&binary, "#!/bin/sh\nsleep 30\n").expect("write sleeping remem");
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).expect("make sleeping remem executable");
+        let _remem_bin = RememBinGuard::install(&binary);
+        let previous_timeout = std::env::var_os("REFINE_REMEM_TIMEOUT_MS");
+        std::env::set_var("REFINE_REMEM_TIMEOUT_MS", "200");
+        struct TimeoutEnvGuard(Option<OsString>);
+        impl Drop for TimeoutEnvGuard {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(previous) => std::env::set_var("REFINE_REMEM_TIMEOUT_MS", previous),
+                    None => std::env::remove_var("REFINE_REMEM_TIMEOUT_MS"),
+                }
+            }
+        }
+        let _timeout_env = TimeoutEnvGuard(previous_timeout);
+
+        let state = Arc::new(
+            AppState::build_for_test(
+                temp.path().join("refine.sqlite"),
+                AuthConfig {
+                    api_token: None,
+                    dev_anon: true,
+                },
+            )
+            .await
+            .expect("build app state"),
+        );
+        let mut document = Document::new("codex-session", "");
+        document.set_url("remem://raw-session/v2/636f6465782d636c69/6c6f63616c/2f7265706f/7331");
+        document.set_source_version(Some(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:interactive",
+        ));
+        state
+            .doc_store
+            .save(&document)
+            .await
+            .expect("save referenced document");
+
+        let started = Instant::now();
+        let error = get_document(state, document.id().as_str())
+            .await
+            .expect_err("sleeping remem hydration must fail closed");
+        assert!(
+            started.elapsed().as_secs() < 5,
+            "hydration timeout must return promptly, elapsed={:?}",
+            started.elapsed()
+        );
+        match error {
+            QueryError::Internal(message) => {
+                assert!(
+                    message.contains("外部进程超时"),
+                    "expected typed timeout InfraError message, got {message}"
+                );
+            }
+            QueryError::NotFound(message) => panic!("unexpected not found: {message}"),
+        }
     }
 }

@@ -260,6 +260,8 @@ fn error_kind(error: &InfraError) -> &'static str {
         InfraError::LlmRejected { .. } => "rejected",
         InfraError::Http(_) => "transport",
         InfraError::RateLimited { .. } => "rate_limited",
+        InfraError::ProcessTimeout { .. } => "process_timeout",
+        InfraError::ProcessOutputOverflow { .. } => "process_output_overflow",
     }
 }
 

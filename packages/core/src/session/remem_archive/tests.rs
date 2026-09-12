@@ -1,6 +1,7 @@
 use super::*;
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::io;
 
 struct FakeRunner {
     responses: RefCell<VecDeque<CommandResult>>,
@@ -616,3 +617,119 @@ fn empty_selection_is_success_and_unknown_roles_fail() {
         .to_string()
         .contains("unsupported raw message role"));
 }
+
+#[cfg(unix)]
+mod process_runner_guards {
+    use super::super::{
+        is_remem_process_output_overflow, is_remem_process_timeout, load_remem_session_summaries,
+    };
+    use std::ffi::OsString;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::sync::{Mutex, MutexGuard};
+    use std::time::Instant;
+
+    static REMEM_PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct RememProcessEnvGuard {
+        previous_bin: Option<OsString>,
+        previous_timeout: Option<OsString>,
+        previous_max_output: Option<OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl RememProcessEnvGuard {
+        fn install(bin: &Path, timeout_ms: &str, max_output_bytes: Option<&str>) -> Self {
+            let lock = REMEM_PROCESS_ENV_LOCK
+                .lock()
+                .expect("lock remem process env");
+            let previous_bin = std::env::var_os("REFINE_REMEM_BIN");
+            let previous_timeout = std::env::var_os("REFINE_REMEM_TIMEOUT_MS");
+            let previous_max_output = std::env::var_os("REFINE_REMEM_MAX_OUTPUT_BYTES");
+            std::env::set_var("REFINE_REMEM_BIN", bin);
+            std::env::set_var("REFINE_REMEM_TIMEOUT_MS", timeout_ms);
+            match max_output_bytes {
+                Some(value) => std::env::set_var("REFINE_REMEM_MAX_OUTPUT_BYTES", value),
+                None => std::env::remove_var("REFINE_REMEM_MAX_OUTPUT_BYTES"),
+            }
+            Self {
+                previous_bin,
+                previous_timeout,
+                previous_max_output,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for RememProcessEnvGuard {
+        fn drop(&mut self) {
+            restore_env("REFINE_REMEM_BIN", self.previous_bin.take());
+            restore_env("REFINE_REMEM_TIMEOUT_MS", self.previous_timeout.take());
+            restore_env(
+                "REFINE_REMEM_MAX_OUTPUT_BYTES",
+                self.previous_max_output.take(),
+            );
+        }
+    }
+
+    fn restore_env(name: &str, previous: Option<OsString>) {
+        match previous {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+
+    fn write_executable(path: &Path, body: &str) {
+        std::fs::write(path, body).expect("write fake remem");
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("chmod fake remem");
+    }
+
+    #[test]
+    fn process_runner_kills_sleeping_remem_and_returns_typed_timeout() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let binary = temp.path().join("fake-remem-sleep");
+        write_executable(&binary, "#!/bin/sh\nsleep 30\n");
+        let _env = RememProcessEnvGuard::install(&binary, "200", None);
+
+        let started = Instant::now();
+        let error = load_remem_session_summaries().expect_err("sleeping remem must time out");
+        assert!(
+            started.elapsed().as_secs() < 5,
+            "timeout must kill remem promptly, elapsed={:?}",
+            started.elapsed()
+        );
+        assert!(
+            is_remem_process_timeout(&error),
+            "expected typed process timeout, got {error:#}"
+        );
+        assert!(error.to_string().contains("外部进程超时"));
+    }
+
+    #[test]
+    fn process_runner_rejects_oversized_stdout_with_typed_overflow() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let binary = temp.path().join("fake-remem-huge");
+        write_executable(
+            &binary,
+            concat!(
+                "#!/bin/sh\n",
+                "i=0\n",
+                "while [ \"$i\" -lt 400 ]; do\n",
+                "  printf 'xxxxxxxxxxxxxxxxxxxx'\n",
+                "  i=$((i + 1))\n",
+                "done\n",
+            ),
+        );
+        let _env = RememProcessEnvGuard::install(&binary, "5000", Some("1024"));
+
+        let error = load_remem_session_summaries().expect_err("huge stdout must overflow");
+        assert!(
+            is_remem_process_output_overflow(&error),
+            "expected typed output overflow, got {error:#}"
+        );
+        assert!(error.to_string().contains("外部进程输出超限"));
+    }
+}
+
