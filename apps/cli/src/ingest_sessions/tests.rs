@@ -2306,3 +2306,124 @@ async fn looper_deleted_ids_are_excluded_from_legacy_matching_snapshot() {
         "remaining live legacy candidate must be consumed by the later session"
     );
 }
+
+#[tokio::test]
+async fn looper_rewritten_existing_id_is_invalidated_for_later_matching() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store;
+    let shared_epoch = 1_700_000_600i64;
+
+    // Looper owns the hostless-v1 row as existing_document; cleanup rewrites that same ID
+    // to the stable Looper URL and clears items instead of deleting the row.
+    let mut looper = remem_summary("looper-rewrite", shared_epoch + 20, 'r');
+    looper.first_epoch = shared_epoch;
+    looper.user_message_samples =
+        vec!["You are executing Looper scheduled skill \"daily\". Follow the spec.".to_string()];
+    let mut accept = remem_summary("accept-rewrite", shared_epoch + 10, 'a');
+    accept.first_epoch = shared_epoch;
+    let accept_url = accept.stable_document_url();
+    let accept_body = "ordinary user question with enough useful detail";
+    let accept_content = loaded_remem_session(&accept, accept_body)
+        .session
+        .to_document_content();
+
+    let mut hostless = Document::new("codex-session", &accept_content);
+    hostless.set_url(&looper.legacy_document_url());
+    hostless.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store
+        .save(&hostless)
+        .await
+        .expect("seed Looper hostless existing_document");
+    let mut hostless_item = Item::new_observation("stale rewritten", "stale rewritten");
+    hostless_item.set_document_id(hostless.id().clone());
+    item_store.save(&hostless_item).await.unwrap();
+
+    let looper_stable_url = looper.stable_document_url();
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+    let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+        response: r#"{
+            "session_summary": "accepted after rewritten looper identity invalidation",
+            "cognitive_level": "competent", "collaboration_mode": "review",
+            "decisions": [], "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+        .to_string(),
+    });
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: None,
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![looper, accept],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            let first_user = if summary.session_id == "looper-rewrite" {
+                "You are executing Looper scheduled skill \"daily\".\nFollow the spec."
+            } else {
+                accept_body
+            };
+            Ok(loaded_remem_session(&summary, first_user))
+        },
+        doc_store.clone(),
+        Some(client),
+    )
+    .await
+    .expect(
+        "later session must not reuse a Looper-rewritten hostless identity via frozen matching",
+    );
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["looper-rewrite".to_string(), "accept-rewrite".to_string()],
+        "both sessions must load so rewritten-identity poison path is exercised"
+    );
+    let rewritten = doc_store
+        .find_by_id(hostless.id())
+        .await
+        .unwrap()
+        .expect("Looper rewrite keeps the document row");
+    assert_eq!(
+        rewritten.url(),
+        looper_stable_url,
+        "Looper cleanup must rewrite the hostless row onto the stable Looper URL"
+    );
+    assert!(
+        item_store
+            .find_by_document_id(hostless.id())
+            .await
+            .unwrap()
+            .is_empty(),
+        "Looper rewrite must clear items on the reused document id"
+    );
+    let accepted = doc_store
+        .find_by_url(&accept_url)
+        .await
+        .unwrap()
+        .expect("later Remem session must ingest on its stable URL");
+    assert_ne!(
+        accepted.id(),
+        hostless.id(),
+        "must not reuse the emptied Looper-rewritten row as a silent exact migration"
+    );
+    let accepted_items = item_store.find_by_document_id(accepted.id()).await.unwrap();
+    assert!(
+        !accepted_items.is_empty(),
+        "LLM extraction must run after rewritten identity invalidation"
+    );
+}

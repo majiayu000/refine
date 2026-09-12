@@ -388,15 +388,13 @@ where
                 )
                 .await
                 .context("exclude Looper scheduled session documents and facets")?;
-                let deleted = match existing_for_cleanup {
-                    Some(existing) => legacy_documents_to_delete
-                        .iter()
-                        .filter(|id| *id != existing.id())
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                    None => legacy_documents_to_delete.clone(),
-                };
-                looper_deleted_legacy_ids.extend(deleted);
+                // Deleted legacy rows and rewritten existing_document IDs are both
+                // invalidated: rewrite keeps the row but clears items and retargets the
+                // URL, so later sessions must not rematch the frozen pre-cleanup identity.
+                looper_deleted_legacy_ids.extend(legacy_documents_to_delete.iter().cloned());
+                if let Some(existing) = existing_for_cleanup {
+                    looper_deleted_legacy_ids.insert(existing.id().clone());
+                }
                 quarantine.resolve(&url);
                 quarantine.save_if_dirty()?;
             }
