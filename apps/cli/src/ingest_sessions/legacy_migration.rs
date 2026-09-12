@@ -62,8 +62,8 @@ pub(super) fn matching_legacy_document_for_summary<'doc>(
     }
 }
 
-pub(super) fn matching_legacy_document_ids(
-    documents: &[Document],
+pub(super) fn matching_legacy_document_ids<'a>(
+    documents: impl IntoIterator<Item = &'a Document>,
     remem_session: &RememSession,
     raw_content: &str,
 ) -> Result<Vec<DocumentId>> {
@@ -72,7 +72,7 @@ pub(super) fn matching_legacy_document_ids(
     }
 
     let legacy: Vec<&Document> = documents
-        .iter()
+        .into_iter()
         .filter(|document| {
             LEGACY_SOURCES.contains(&document.source())
                 && !document.url().starts_with("remem://raw-session/v2/")
@@ -106,14 +106,14 @@ pub(super) fn matching_legacy_document_ids(
     Ok(Vec::new())
 }
 
-pub(super) fn legacy_document_covering_nonunique_summary(
-    documents: &[Document],
+pub(super) fn legacy_document_covering_nonunique_summary<'a>(
+    documents: impl IntoIterator<Item = &'a Document>,
     remem_session: &RememSession,
     raw_content: &str,
 ) -> Option<DocumentId> {
     (remem_session.source_root == LOCAL_SOURCE_ROOT)
         .then(|| {
-            documents.iter().find(|document| {
+            documents.into_iter().find(|document| {
                 LEGACY_SOURCES.contains(&document.source())
                     && url_matches_session_id(document.url(), &remem_session.session_id)
                     && document.raw_content() == raw_content

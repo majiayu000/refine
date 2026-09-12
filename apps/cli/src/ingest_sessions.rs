@@ -244,6 +244,9 @@ where
     // Remember those invalidated IDs so later sessions neither rematch nor retry
     // deletes against the frozen pre-cleanup snapshot.
     let mut looper_deleted_legacy_ids = HashSet::new();
+    // Incremental filtered view for matching helpers: retain refs after Looper
+    // invalidation instead of deep-cloning Documents for every remaining summary.
+    let mut matching_documents: Vec<&Document> = existing_documents.iter().collect();
     let mut pending = Vec::new();
     let mut skipped_dup = 0usize;
     let mut skipped_filter = 0usize;
@@ -282,21 +285,13 @@ where
         let session_source = summary.session_source()?;
         let source_version = summary.projection_version();
         // Matching helpers and the unchanged-session probe can both react to stale
-        // frozen rows. Exclude Looper-invalidated IDs from the snapshot they see so a
-        // deleted candidate cannot force a full load or abort ingest.
-        let filtered_matching_documents: Vec<Document>;
-        let matching_documents: &[Document] = if looper_deleted_legacy_ids.is_empty() {
-            &existing_documents
-        } else {
-            filtered_matching_documents = existing_documents
-                .iter()
-                .filter(|document| !looper_deleted_legacy_ids.contains(document.id()))
-                .cloned()
-                .collect();
-            &filtered_matching_documents
-        };
-        let might_have_legacy_documents =
-            might_have_legacy_documents(&summary, legacy_document, matching_documents);
+        // frozen rows. Use the incremental filtered refs so a deleted candidate cannot
+        // force a full load or abort ingest.
+        let might_have_legacy_documents = might_have_legacy_documents(
+            &summary,
+            legacy_document,
+            matching_documents.iter().copied(),
+        );
         let summary_is_looper = summary.is_looper_scheduled();
         if summary.user_message_count < filter_config.min_user_messages as i64 {
             skipped_filter += 1;
@@ -339,13 +334,13 @@ where
             // Match only here; claim the final delete set after hostless IDs are
             // included and only on migrate-success / pending commit paths.
             legacy_migration::matching_legacy_document_ids(
-                matching_documents,
+                matching_documents.iter().copied(),
                 &remem_session,
                 &raw_content,
             )?
         } else if let Some(document_id) =
             legacy_migration::legacy_document_covering_nonunique_summary(
-                matching_documents,
+                matching_documents.iter().copied(),
                 &remem_session,
                 &raw_content,
             )
@@ -396,6 +391,8 @@ where
                 if let Some(existing) = existing_for_cleanup {
                     looper_deleted_legacy_ids.insert(existing.id().clone());
                 }
+                matching_documents
+                    .retain(|document| !looper_deleted_legacy_ids.contains(document.id()));
                 quarantine.resolve(&url);
                 quarantine.save_if_dirty()?;
             }
