@@ -2427,3 +2427,107 @@ async fn looper_rewritten_existing_id_is_invalidated_for_later_matching() {
         "LLM extraction must run after rewritten identity invalidation"
     );
 }
+
+#[tokio::test]
+async fn looper_deleted_ids_are_excluded_from_unchanged_session_probe() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store;
+    let shared_epoch = 1_700_000_700i64;
+
+    // Newer Looper uniquely deletes a legacy row by filename. That row's timestamp also
+    // matches a later already-current stable session, so an unfiltered might_have probe
+    // would disable skip_unchanged_session and force a fragile full load.
+    let mut looper = remem_summary("looper-unchanged-probe", shared_epoch + 20, 'l');
+    looper.first_epoch = shared_epoch;
+    looper.user_message_samples =
+        vec!["You are executing Looper scheduled skill \"daily\". Follow the spec.".to_string()];
+    let mut accept = remem_summary("accept-unchanged-probe", shared_epoch + 10, 'a');
+    accept.first_epoch = shared_epoch;
+    let accept_url = accept.stable_document_url();
+    let accept_version = accept.projection_version();
+
+    let mut deleted_candidate = Document::new("codex-session", "");
+    deleted_candidate.set_url("/tmp/prefix-looper-unchanged-probe.jsonl");
+    deleted_candidate.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store
+        .save(&deleted_candidate)
+        .await
+        .expect("seed Looper-matched legacy candidate");
+    let mut deleted_item = Item::new_observation("deleted by looper", "deleted by looper");
+    deleted_item.set_document_id(deleted_candidate.id().clone());
+    item_store.save(&deleted_item).await.unwrap();
+
+    let mut stable = Document::new("codex-session", "");
+    stable.set_url(&accept_url);
+    stable.set_source_version(Some(&accept_version));
+    doc_store
+        .save(&stable)
+        .await
+        .expect("seed already-current stable session");
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: None,
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![looper, accept],
+        Some(quarantine),
+        move |summary| {
+            if summary.session_id == "accept-unchanged-probe" {
+                anyhow::bail!(
+                    "accept body unavailable; skip_unchanged should have prevented this load"
+                );
+            }
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            Ok(loaded_remem_session(
+                &summary,
+                "You are executing Looper scheduled skill \"daily\".\nFollow the spec.",
+            ))
+        },
+        doc_store.clone(),
+        None,
+    )
+    .await
+    .expect(
+        "later already-current session must skip unchanged after Looper invalidates the stale legacy match",
+    );
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["looper-unchanged-probe".to_string()],
+        "only the Looper body should load; accept must keep the unchanged fast path"
+    );
+    assert!(
+        doc_store
+            .find_by_id(deleted_candidate.id())
+            .await
+            .unwrap()
+            .is_none(),
+        "Looper cleanup must delete its uniquely matched candidate"
+    );
+    let still_current = doc_store
+        .find_by_url(&accept_url)
+        .await
+        .unwrap()
+        .expect("stable accept document must remain");
+    assert_eq!(
+        still_current.source_version(),
+        Some(accept_version.as_str()),
+        "unchanged accept session must keep its current projection version"
+    );
+}

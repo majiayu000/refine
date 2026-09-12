@@ -281,8 +281,22 @@ where
             stable_document.is_none() && existing_document.is_some();
         let session_source = summary.session_source()?;
         let source_version = summary.projection_version();
+        // Matching helpers and the unchanged-session probe can both react to stale
+        // frozen rows. Exclude Looper-invalidated IDs from the snapshot they see so a
+        // deleted candidate cannot force a full load or abort ingest.
+        let filtered_matching_documents: Vec<Document>;
+        let matching_documents: &[Document] = if looper_deleted_legacy_ids.is_empty() {
+            &existing_documents
+        } else {
+            filtered_matching_documents = existing_documents
+                .iter()
+                .filter(|document| !looper_deleted_legacy_ids.contains(document.id()))
+                .cloned()
+                .collect();
+            &filtered_matching_documents
+        };
         let might_have_legacy_documents =
-            might_have_legacy_documents(&summary, legacy_document, &existing_documents);
+            might_have_legacy_documents(&summary, legacy_document, matching_documents);
         let summary_is_looper = summary.is_looper_scheduled();
         if summary.user_message_count < filter_config.min_user_messages as i64 {
             skipped_filter += 1;
@@ -321,20 +335,6 @@ where
             .with_context(|| format!("failed to load full remem session for {url}"))?;
         fully_loaded += 1;
         let raw_content = remem_session.session.to_document_content();
-        // Matching helpers can bail on ambiguity before the post-match retain below.
-        // Exclude Looper-deleted IDs from the snapshot they see so a deleted candidate
-        // cannot pair with a live row and abort ingest.
-        let filtered_matching_documents: Vec<Document>;
-        let matching_documents: &[Document] = if looper_deleted_legacy_ids.is_empty() {
-            &existing_documents
-        } else {
-            filtered_matching_documents = existing_documents
-                .iter()
-                .filter(|document| !looper_deleted_legacy_ids.contains(document.id()))
-                .cloned()
-                .collect();
-            &filtered_matching_documents
-        };
         let mut legacy_documents_to_delete = if legacy_identity_is_unique {
             // Match only here; claim the final delete set after hostless IDs are
             // included and only on migrate-success / pending commit paths.
