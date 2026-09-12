@@ -792,7 +792,13 @@ if [[ "$cognitive_portrait_enabled" == "1" ]]; then
   if [[ -n "$portrait_node_bin" ]] && command -v realpath >/dev/null 2>&1; then
     portrait_node_bin="$(realpath "$portrait_node_bin")"
   fi
-  write_portrait_plist "$portrait_plist" "$portrait_agent_bin" "$(dirname "$portrait_node_bin"):${path_env}"
+  # Only prepend node's dirname when it resolves to a non-empty absolute path.
+  # dirname "" is ".", which would put WorkingDirectory (~/.refine) first on PATH.
+  portrait_path_env="$path_env"
+  if [[ -n "$portrait_node_bin" && "$portrait_node_bin" == /* ]]; then
+    portrait_path_env="$(dirname "$portrait_node_bin"):${path_env}"
+  fi
+  write_portrait_plist "$portrait_plist" "$portrait_agent_bin" "$portrait_path_env"
 fi
 
 for plist in "$server_plist" "$daily_plist" "$weekly_plist"; do
