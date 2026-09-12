@@ -1994,3 +1994,203 @@ async fn summary_looper_cleanup_does_not_poison_later_legacy_deletes() {
         "later Remem session must still ingest after Looper deleted the shared legacy id"
     );
 }
+
+#[tokio::test]
+async fn looper_cleanup_does_not_delete_earlier_claimed_legacy_ids() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store;
+    let shared_epoch = 1_700_000_300i64;
+    // Newer valid session claims first; older summary Looper must not delete that claim.
+    let mut accept = remem_summary("accept-first", shared_epoch + 20, 'a');
+    accept.first_epoch = shared_epoch;
+    let accept_url = accept.stable_document_url();
+    let mut looper = remem_summary("looper-later", shared_epoch + 10, 'l');
+    looper.first_epoch = shared_epoch;
+    looper.user_message_samples =
+        vec!["You are executing Looper scheduled skill \"daily\". Follow the spec.".to_string()];
+
+    let mut legacy = Document::new("codex-session", "");
+    legacy.set_url("/tmp/shared-claimed-before-looper.jsonl");
+    legacy.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store
+        .save(&legacy)
+        .await
+        .expect("seed shared legacy document");
+    let mut legacy_item = Item::new_observation("keep for pending claim", "keep for pending claim");
+    legacy_item.set_document_id(legacy.id().clone());
+    item_store.save(&legacy_item).await.unwrap();
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+    let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+        response: r#"{
+            "session_summary": "accepted before looper cleanup",
+            "cognitive_level": "competent", "collaboration_mode": "review",
+            "decisions": [], "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+        .to_string(),
+    });
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: None,
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![accept, looper],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            Ok(loaded_remem_session(
+                &summary,
+                "ordinary user question with enough useful detail",
+            ))
+        },
+        doc_store.clone(),
+        Some(client),
+    )
+    .await
+    .expect("Looper must not delete a legacy id already claimed by an earlier valid session");
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["accept-first".to_string(), "looper-later".to_string()],
+        "claim-then-looper order must load both sessions"
+    );
+    assert!(
+        doc_store.find_by_url(&accept_url).await.unwrap().is_some(),
+        "claimed session must finish ingest after Looper runs"
+    );
+    assert!(
+        doc_store.find_by_id(legacy.id()).await.unwrap().is_none(),
+        "pending worker still deletes the claimed legacy id once"
+    );
+    let accepted = doc_store
+        .find_by_url(&accept_url)
+        .await
+        .unwrap()
+        .expect("accepted document");
+    let reparented = item_store
+        .find_by_id(legacy_item.id())
+        .await
+        .unwrap()
+        .expect("legacy items are reparented onto the claimed session, not deleted early");
+    assert_eq!(reparented.document_id(), Some(accepted.id()));
+}
+
+#[tokio::test]
+async fn looper_deleted_hostless_identity_is_dropped_from_existing_lookup() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store;
+    let shared_epoch = 1_700_000_400i64;
+    let mut looper = remem_summary("looper-hostless", shared_epoch + 20, 'l');
+    looper.first_epoch = shared_epoch;
+    looper.user_message_samples =
+        vec!["You are executing Looper scheduled skill \"daily\". Follow the spec.".to_string()];
+    let mut accept = remem_summary("accept-hostless", shared_epoch + 10, 'a');
+    accept.first_epoch = shared_epoch;
+    let accept_url = accept.stable_document_url();
+    let accept_body = "ordinary user question with enough useful detail";
+    let accept_content = loaded_remem_session(&accept, accept_body)
+        .session
+        .to_document_content();
+
+    // Hostless-v1 identity for the later accept session; Looper matches it by epoch+content.
+    let mut legacy = Document::new("codex-session", &accept_content);
+    legacy.set_url(&accept.legacy_document_url());
+    legacy.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store
+        .save(&legacy)
+        .await
+        .expect("seed hostless legacy document");
+    let mut legacy_item = Item::new_observation("stale hostless", "stale hostless");
+    legacy_item.set_document_id(legacy.id().clone());
+    item_store.save(&legacy_item).await.unwrap();
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+    let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+        response: r#"{
+            "session_summary": "accepted after hostless looper cleanup",
+            "cognitive_level": "competent", "collaboration_mode": "review",
+            "decisions": [], "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+        .to_string(),
+    });
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: None,
+            dry_run: false,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![looper, accept],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            Ok(loaded_remem_session(&summary, accept_body))
+        },
+        doc_store.clone(),
+        Some(client),
+    )
+    .await
+    .expect("later session must not reuse a Looper-deleted hostless identity as existing_document");
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec![
+            "looper-hostless".to_string(),
+            "accept-hostless".to_string()
+        ],
+        "both sessions must load so hostless-poison path is exercised"
+    );
+    assert!(
+        doc_store.find_by_id(legacy.id()).await.unwrap().is_none(),
+        "Looper cleanup must delete the hostless legacy document"
+    );
+    assert!(!item_store.exists(legacy_item.id()).await.unwrap());
+    let accepted = doc_store
+        .find_by_url(&accept_url)
+        .await
+        .unwrap()
+        .expect("later Remem session must ingest on its stable URL");
+    assert_ne!(
+        accepted.id(),
+        legacy.id(),
+        "must not recreate the deleted hostless document as a silent duplicate"
+    );
+    let accepted_items = item_store
+        .find_by_document_id(accepted.id())
+        .await
+        .unwrap();
+    assert!(
+        !accepted_items.is_empty(),
+        "LLM extraction must run after hostless identity invalidation"
+    );
+}

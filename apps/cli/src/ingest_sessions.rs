@@ -256,8 +256,16 @@ where
         }
         let url = summary.stable_document_url();
         let legacy_url = summary.legacy_document_url();
-        let stable_document = existing_documents_by_url.get(url.as_str()).copied();
-        let legacy_document = existing_documents_by_url.get(legacy_url.as_str()).copied();
+        // Looper cleanup mutates the live store while this loop still reads the frozen
+        // snapshot; treat already-deleted IDs as absent so later sessions do not reuse them.
+        let stable_document = existing_documents_by_url
+            .get(url.as_str())
+            .copied()
+            .filter(|document| !looper_deleted_legacy_ids.contains(document.id()));
+        let legacy_document = existing_documents_by_url
+            .get(legacy_url.as_str())
+            .copied()
+            .filter(|document| !looper_deleted_legacy_ids.contains(document.id()));
         let existing_document = match (stable_document, legacy_document) {
             (Some(document), _) => Some(document.clone()),
             (None, Some(document)) if summary.legacy_identity_is_unique => Some(document.clone()),
@@ -350,9 +358,16 @@ where
             refine_core::session::is_looper_scheduled_skill_session(&remem_session.session);
         if summary_is_looper || body_is_looper {
             if !options.dry_run {
+                // An earlier valid session may already own these IDs for a deferred write.
+                // Deleting them here would make the pending worker fail with a missing obsolete id.
+                legacy_documents_to_delete
+                    .retain(|id| !claimed_legacy_documents.contains(id));
+                let existing_for_cleanup = existing_document.as_ref().filter(|document| {
+                    !claimed_legacy_documents.contains(document.id())
+                });
                 legacy_convergence::exclude_scheduled_session_documents(
                     &doc_store,
-                    existing_document.as_ref(),
+                    existing_for_cleanup,
                     session_source.clone(),
                     &url,
                     &source_version,
@@ -360,7 +375,7 @@ where
                 )
                 .await
                 .context("exclude Looper scheduled session documents and facets")?;
-                let deleted = match existing_document.as_ref() {
+                let deleted = match existing_for_cleanup {
                     Some(existing) => legacy_documents_to_delete
                         .iter()
                         .filter(|id| *id != existing.id())
