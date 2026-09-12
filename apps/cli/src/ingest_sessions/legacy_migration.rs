@@ -202,6 +202,21 @@ pub(super) fn claim_remem_document_once(
     )
 }
 
+/// Claim the final legacy-delete set only when a Remem session commits to migrate
+/// or pending ingest. Matching alone must not claim, or filter/Looper abandons
+/// leak claims and block later legitimate sessions.
+pub(super) fn claim_legacy_documents(
+    claimed: &mut HashSet<DocumentId>,
+    document_ids: &[DocumentId],
+) -> Result<()> {
+    for document_id in document_ids {
+        if !claimed.insert(document_id.clone()) {
+            bail!("legacy document {document_id} ambiguously matches multiple remem sessions");
+        }
+    }
+    Ok(())
+}
+
 fn unique_remem_match(matches: Vec<&Document>, legacy_path: &Path) -> Result<Option<Document>> {
     match matches.as_slice() {
         [] => Ok(None),
@@ -534,6 +549,19 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("more than one legacy path")
+        );
+    }
+
+    #[test]
+    fn claim_legacy_documents_rejects_a_second_session_claim() {
+        let legacy = document("codex-session", "/tmp/shared.jsonl", "body", 10);
+        let mut claimed = HashSet::new();
+        claim_legacy_documents(&mut claimed, &[legacy.id().clone()]).unwrap();
+        assert!(
+            claim_legacy_documents(&mut claimed, &[legacy.id().clone()])
+                .unwrap_err()
+                .to_string()
+                .contains("ambiguously matches multiple remem sessions")
         );
     }
 }

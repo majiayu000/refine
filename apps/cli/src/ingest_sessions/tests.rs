@@ -1777,3 +1777,124 @@ async fn omitting_latest_scans_every_eligible_session_body() {
         vec!["newer".to_string(), "older".to_string()]
     );
 }
+
+#[tokio::test]
+async fn filter_abandon_does_not_leak_legacy_document_claims() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store;
+    let shared_epoch = 1_700_000_000i64;
+    // Newer reject is processed first; ordinary samples avoid the summary-Looper path so
+    // the body-level passes_filter abandon is the one that must not retain a claim.
+    let mut reject = remem_summary("reject-a", shared_epoch + 20, 'r');
+    reject.first_epoch = shared_epoch;
+    reject.user_message_samples = vec!["ordinary user question".to_string()];
+    let mut accept = remem_summary("accept-b", shared_epoch + 10, 'a');
+    accept.first_epoch = shared_epoch;
+
+    // Filename matches neither session id; epoch+content matching ties both to this row.
+    let mut legacy = Document::new("codex-session", "");
+    legacy.set_url("/tmp/shared-legacy-body.jsonl");
+    legacy.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store.save(&legacy).await.expect("seed shared legacy document");
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: None,
+            dry_run: true,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![reject, accept],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            if summary.session_id == "reject-a" {
+                // Body-detected Looper: fails passes_filter after matching the legacy id.
+                Ok(loaded_remem_session(
+                    &summary,
+                    "You are executing Looper scheduled skill \"daily\".\nFollow the spec.",
+                ))
+            } else {
+                Ok(loaded_remem_session(
+                    &summary,
+                    "ordinary user question with enough useful detail",
+                ))
+            }
+        },
+        doc_store,
+        None,
+    )
+    .await
+    .expect(
+        "a later Remem session must still claim a legacy id after an earlier filter abandon",
+    );
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["reject-a".to_string(), "accept-b".to_string()],
+        "both sessions must load so the abandon-then-reclaim path is exercised"
+    );
+}
+
+#[tokio::test]
+async fn two_proceeding_sessions_still_detect_ambiguous_legacy_claims() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store;
+    let shared_epoch = 1_700_000_100i64;
+    let mut first = remem_summary("first", shared_epoch + 20, 'f');
+    first.first_epoch = shared_epoch;
+    let mut second = remem_summary("second", shared_epoch + 10, 's');
+    second.first_epoch = shared_epoch;
+
+    let mut legacy = Document::new("codex-session", "");
+    legacy.set_url("/tmp/shared-legacy-ambiguous.jsonl");
+    legacy.set_captured_at(Utc.timestamp_opt(shared_epoch, 0).unwrap());
+    doc_store.save(&legacy).await.expect("seed shared legacy document");
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+
+    let error = handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: None,
+            dry_run: true,
+            retry_quarantined: false,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![first, second],
+        Some(quarantine),
+        |summary| {
+            Ok(loaded_remem_session(
+                &summary,
+                "ordinary user question with enough useful detail",
+            ))
+        },
+        doc_store,
+        None,
+    )
+    .await
+    .expect_err("two sessions that both proceed must still hard-bail on shared legacy ids");
+
+    assert!(
+        error
+            .to_string()
+            .contains("ambiguously matches multiple remem sessions"),
+        "unexpected error: {error:#}"
+    );
+}

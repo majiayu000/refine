@@ -34,6 +34,7 @@ use legacy_convergence::{
     include_hostless_v1_document, might_have_legacy_documents, referenced_session_document,
     same_projection_or_snapshot, save_referenced_session_and_delete_legacy,
 };
+use legacy_migration::claim_legacy_documents;
 
 pub(crate) fn lock_session_mutations_for_repair(db_path: &Path) -> Result<std::fs::File> {
     cursor::try_lock_session_mutations(db_path)
@@ -309,19 +310,13 @@ where
         fully_loaded += 1;
         let raw_content = remem_session.session.to_document_content();
         let mut legacy_documents_to_delete = if legacy_identity_is_unique {
-            let document_ids = legacy_migration::matching_legacy_document_ids(
+            // Match only here; claim the final delete set after hostless IDs are
+            // included and only on migrate-success / pending commit paths.
+            legacy_migration::matching_legacy_document_ids(
                 &existing_documents,
                 &remem_session,
                 &raw_content,
-            )?;
-            for document_id in &document_ids {
-                if !claimed_legacy_documents.insert(document_id.clone()) {
-                    anyhow::bail!(
-                        "legacy document {document_id} ambiguously matches multiple remem sessions"
-                    );
-                }
-            }
-            document_ids
+            )?
         } else if let Some(document_id) =
             legacy_migration::legacy_document_covering_nonunique_summary(
                 &existing_documents,
@@ -376,6 +371,10 @@ where
                     "matched legacy session document disappeared from the migration snapshot",
                 )?;
             if legacy_document.raw_content() == raw_content {
+                claim_legacy_documents(
+                    &mut claimed_legacy_documents,
+                    &legacy_documents_to_delete,
+                )?;
                 if !options.dry_run {
                     let referenced = referenced_session_document(
                         legacy_document,
@@ -402,6 +401,10 @@ where
                 || (!existing_document_uses_legacy_identity
                     && same_projection_or_snapshot(existing_doc, &source_version))
             {
+                claim_legacy_documents(
+                    &mut claimed_legacy_documents,
+                    &legacy_documents_to_delete,
+                )?;
                 if !options.dry_run {
                     let referenced = referenced_session_document(
                         existing_doc,
@@ -429,6 +432,8 @@ where
             skipped_filter += 1;
             continue;
         }
+
+        claim_legacy_documents(&mut claimed_legacy_documents, &legacy_documents_to_delete)?;
 
         let captured_at = DateTime::<Utc>::from_timestamp(remem_session.first_epoch, 0)
             .with_context(|| {
