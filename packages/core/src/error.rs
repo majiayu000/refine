@@ -66,6 +66,17 @@ pub enum InfraError {
     /// Quota/rate-limit exhaustion — not a transient error; callers must not retry.
     #[error("LLM 配额已耗尽 (retry_after: {retry_after_secs:?}s)")]
     RateLimited { retry_after_secs: Option<u64> },
+
+    /// External process exceeded the hard kill timeout and was terminated.
+    #[error("外部进程超时 ({operation}, {timeout_ms}ms)")]
+    ProcessTimeout { operation: String, timeout_ms: u64 },
+
+    /// External process stdout/stderr exceeded the capture budget.
+    #[error("外部进程输出超限 ({stream}, limit {limit_bytes} bytes)")]
+    ProcessOutputOverflow {
+        stream: &'static str,
+        limit_bytes: usize,
+    },
 }
 
 /// Core 顶层错误
