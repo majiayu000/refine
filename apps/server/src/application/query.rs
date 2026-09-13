@@ -247,7 +247,9 @@ pub async fn get_document(
         .await
         .map_err(|error| QueryError::Internal(format!("Remem hydration task failed: {error}")))?
         .map_err(|error| {
-            QueryError::Internal(refine_core::session::remem_hydration_failure_message(&error))
+            QueryError::Internal(refine_core::session::remem_hydration_failure_message(
+                &error,
+            ))
         })?
     } else {
         doc.raw_content().to_string()

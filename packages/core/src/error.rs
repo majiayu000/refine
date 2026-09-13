@@ -69,10 +69,7 @@ pub enum InfraError {
 
     /// External process exceeded the hard kill timeout and was terminated.
     #[error("外部进程超时 ({operation}, {timeout_ms}ms)")]
-    ProcessTimeout {
-        operation: String,
-        timeout_ms: u64,
-    },
+    ProcessTimeout { operation: String, timeout_ms: u64 },
 
     /// External process stdout/stderr exceeded the capture budget.
     #[error("外部进程输出超限 ({stream}, limit {limit_bytes} bytes)")]

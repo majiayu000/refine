@@ -13,11 +13,11 @@ const RAW_MESSAGE_LIMIT: &str = "2000";
 mod document;
 mod process;
 pub use document::load_document_content as load_remem_document_content;
+use process::ProcessRunner;
 pub use process::{
     is_missing_remem_executable, is_remem_process_output_overflow, is_remem_process_timeout,
     remem_hydration_failure_message,
 };
-use process::ProcessRunner;
 
 #[derive(Debug)]
 pub struct RememSession {
