@@ -12,7 +12,7 @@
 //! 弥补先前的 declaration-execution gap（字段定义但从未写入）。
 
 use super::types::{MessageRole, Session, SessionMessage, SessionMeta, SessionMode, SessionSource};
-use chrono::{DateTime, Utc};
+
 use std::path::Path;
 use tracing::warn;
 
@@ -74,47 +74,82 @@ pub fn parse_session_content(
         .map(|(idx, _)| idx)
         .last();
 
-    for (idx, line) in content.lines().enumerate() {
-        let line = line.trim();
+    let agent = match source {
+        SessionSource::ClaudeCode => agent_sessions::Agent::ClaudeCode,
+        SessionSource::Codex => agent_sessions::Agent::Codex,
+        SessionSource::Cursor | SessionSource::RememRaw => unreachable!("checked above"),
+    };
+    let records = agent_sessions::read_raw_from(
+        std::io::Cursor::new(content.as_bytes()),
+        &agent_sessions::RawReadOptions {
+            max_read_bytes: None,
+            max_line_bytes: None,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| format!("读取文件失败: {error}"))?;
+    for record in records {
+        let record = record.map_err(|error| format!("读取文件失败: {error}"))?;
+        let line = std::str::from_utf8(&record.bytes)
+            .map_err(|error| format!("读取文件失败: {error}"))?
+            .trim();
         if line.is_empty() {
             continue;
         }
         let value: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(e) => {
-                let is_truncated_tail =
-                    Some(idx) == last_nonempty_line && !content.ends_with('\n') && e.is_eof();
+            Ok(value) => value,
+            Err(error) => {
+                let is_truncated_tail = last_nonempty_line == Some(record.line_no as usize - 1)
+                    && !content.ends_with('\n')
+                    && error.is_eof();
                 if is_truncated_tail {
                     meta.truncated_tail = true;
-                    warn!(
-                        path = %path.display(),
-                        line = idx + 1,
-                        error = %e,
-                        "session JSONL has a truncated tail; preserving parsed prefix"
-                    );
+                    warn!(path = %path.display(), line = record.line_no, %error,
+                        "session JSONL has a truncated tail; preserving parsed prefix");
                     break;
                 }
                 return Err(format!(
                     "JSONL 解析失败 {}:{}: {}",
                     path.display(),
-                    idx + 1,
-                    e
+                    record.line_no,
+                    error
                 ));
             }
         };
-
-        update_meta_started_at(&value, &mut meta);
-
-        match source {
-            SessionSource::ClaudeCode => {
-                parse_claude_code_line(&value, &mut messages, &mut meta);
-            }
-            SessionSource::Codex => {
-                parse_codex_line(&value, &mut messages, &mut meta);
-            }
-            SessionSource::Cursor | SessionSource::RememRaw => {
-                unreachable!("Remem-backed sources are rejected before JSONL parsing")
-            }
+        let projected = agent_sessions::project_transcript(agent, &value);
+        if meta.started_at.is_none() {
+            meta.started_at = projected.at;
+        }
+        if let Some(cwd) = projected.meta.cwd {
+            update_project_from_cwd(&cwd, &mut meta);
+        }
+        if let Some(model) = projected.meta.model {
+            meta.model = Some(model);
+        }
+        if let Some(origin) = projected.meta.origin {
+            let mode = match origin {
+                agent_sessions::Origin::Subagent => SessionMode::Subagent,
+                agent_sessions::Origin::Exec => SessionMode::Unattended,
+                agent_sessions::Origin::Interactive | agent_sessions::Origin::Ide => {
+                    SessionMode::Interactive
+                }
+                _ => SessionMode::Unknown,
+            };
+            meta.mode = meta.mode.merge(mode);
+        }
+        if let Some(message) = projected
+            .message
+            .filter(|m| !m.is_meta && !m.text.is_empty())
+        {
+            let role = match message.role {
+                agent_sessions::Role::User => MessageRole::User,
+                agent_sessions::Role::Assistant => MessageRole::Assistant,
+                _ => continue,
+            };
+            messages.push(SessionMessage {
+                role,
+                content: message.text,
+            });
         }
     }
 
@@ -124,13 +159,6 @@ pub fn parse_session_content(
         messages,
         meta,
     })
-}
-
-/// 解析 ISO-8601 字符串为 `DateTime<Utc>`。
-fn parse_iso8601_utc(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|dt| dt.with_timezone(&Utc))
 }
 
 fn project_name_from_cwd(cwd: &str) -> Option<String> {
@@ -156,238 +184,6 @@ fn update_project_from_cwd(cwd: &str, meta: &mut SessionMeta) {
     if meta.project.is_none() {
         meta.project = project_name_from_cwd(identity);
     }
-}
-
-fn update_codex_session_mode(value: &serde_json::Value, meta: &mut SessionMeta) {
-    let observed = if value
-        .pointer("/payload/thread_source")
-        .and_then(|source| source.as_str())
-        == Some("subagent")
-    {
-        Some(SessionMode::Subagent)
-    } else {
-        match value
-            .pointer("/payload/originator")
-            .and_then(|originator| originator.as_str())
-        {
-            Some("codex-tui" | "Codex Desktop" | "codex_cli_rs") => Some(SessionMode::Interactive),
-            Some("codex_exec" | "symphony-orchestrator") => Some(SessionMode::Unattended),
-            _ => None,
-        }
-    };
-
-    if let Some(observed) = observed {
-        meta.mode = meta.mode.merge(observed);
-    }
-}
-
-/// 同时覆盖多种格式：Claude Code 行通常在顶层带 `timestamp`，
-/// Codex 新格式也可能把时间放在 `payload.timestamp`。
-/// 取首个能解析成 RFC3339 的时间戳作为 `started_at`，与 JSONL 写入顺序对齐。
-fn update_meta_started_at(value: &serde_json::Value, meta: &mut SessionMeta) {
-    if meta.started_at.is_some() {
-        return;
-    }
-    for pointer in ["/timestamp", "/payload/timestamp"] {
-        let Some(ts_str) = value.pointer(pointer).and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if let Some(ts) = parse_iso8601_utc(ts_str) {
-            meta.started_at = Some(ts);
-            return;
-        }
-    }
-}
-
-/// Claude Code 格式:
-/// - `type: "user"` → `message.content` (字符串)
-/// - `type: "assistant"` → `message.content` (数组, 提取 type=text 的 text)
-/// - `type: "summary"` / `type: "progress"` → 跳过
-fn parse_claude_code_line(
-    value: &serde_json::Value,
-    messages: &mut Vec<SessionMessage>,
-    meta: &mut SessionMeta,
-) {
-    if let Some(cwd) = value.get("cwd").and_then(|value| value.as_str()) {
-        update_project_from_cwd(cwd, meta);
-    }
-    let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-    match msg_type {
-        "user" => {
-            if let Some(text) = extract_claude_code_user_content(value) {
-                if !text.is_empty() {
-                    messages.push(SessionMessage {
-                        role: MessageRole::User,
-                        content: text,
-                    });
-                }
-            }
-        }
-        "assistant" => {
-            if let Some(text) = extract_claude_code_assistant_content(value) {
-                if !text.is_empty() {
-                    messages.push(SessionMessage {
-                        role: MessageRole::Assistant,
-                        content: text,
-                    });
-                }
-            }
-        }
-        "system" => {
-            // 提取模型信息
-            if let Some(model) = value.pointer("/message/model").and_then(|v| v.as_str()) {
-                meta.model = Some(model.to_string());
-            }
-        }
-        _ => {}
-    }
-}
-
-fn extract_claude_code_user_content(value: &serde_json::Value) -> Option<String> {
-    let content = value.pointer("/message/content")?;
-
-    // 字符串形式
-    if let Some(text) = content.as_str() {
-        return Some(text.to_string());
-    }
-
-    // 数组形式
-    if let Some(arr) = content.as_array() {
-        return Some(extract_text_from_content_array(arr));
-    }
-
-    None
-}
-
-fn extract_claude_code_assistant_content(value: &serde_json::Value) -> Option<String> {
-    let content = value.pointer("/message/content")?;
-
-    if let Some(arr) = content.as_array() {
-        return Some(extract_text_from_content_array(arr));
-    }
-
-    if let Some(text) = content.as_str() {
-        return Some(text.to_string());
-    }
-
-    None
-}
-
-/// 从 content 数组中提取所有 type=text 的 text 字段
-fn extract_text_from_content_array(arr: &[serde_json::Value]) -> String {
-    extract_text_from_content_array_by_types(arr, &["text"])
-}
-
-fn extract_text_from_content_array_by_types(
-    arr: &[serde_json::Value],
-    allowed_types: &[&str],
-) -> String {
-    let mut parts = Vec::new();
-    for item in arr {
-        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if allowed_types.contains(&item_type) {
-            if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
-                parts.push(text);
-            }
-        }
-    }
-    parts.join("\n")
-}
-
-/// Codex 格式:
-/// - legacy `type: "user_message"` → 顶层 `content`
-/// - legacy `type: "response_item"` → `payload.content[].text`
-/// - current `type: "response_item"` + `payload.type: "message"`:
-///   `payload.role` 区分 user / assistant，`input_text` / `output_text` 存正文
-/// - `type: "session_meta"` → 元数据
-/// - `type: "turn_context"` → 元数据
-/// - `type: "event_msg"` → 跳过
-fn parse_codex_line(
-    value: &serde_json::Value,
-    messages: &mut Vec<SessionMessage>,
-    meta: &mut SessionMeta,
-) {
-    let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-    match msg_type {
-        "session_meta" => {
-            update_codex_session_mode(value, meta);
-            if let Some(model) = value
-                .pointer("/payload/model")
-                .or_else(|| value.get("model"))
-                .and_then(|v| v.as_str())
-            {
-                meta.model = Some(model.to_string());
-            }
-            if let Some(cwd) = value.pointer("/payload/cwd").and_then(|v| v.as_str()) {
-                update_project_from_cwd(cwd, meta);
-            }
-        }
-        "turn_context" => {
-            update_codex_session_mode(value, meta);
-            if let Some(model) = value.pointer("/payload/model").and_then(|v| v.as_str()) {
-                meta.model = Some(model.to_string());
-            }
-            if let Some(cwd) = value.pointer("/payload/cwd").and_then(|v| v.as_str()) {
-                update_project_from_cwd(cwd, meta);
-            }
-        }
-        "user_message" => {
-            if let Some(text) = value.get("content").and_then(|v| v.as_str()) {
-                if !text.is_empty() {
-                    messages.push(SessionMessage {
-                        role: MessageRole::User,
-                        content: text.to_string(),
-                    });
-                }
-            }
-        }
-        "response_item" => {
-            if let Some(message) = parse_codex_response_item_message(value) {
-                messages.push(message);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn parse_codex_response_item_message(value: &serde_json::Value) -> Option<SessionMessage> {
-    let arr = value
-        .pointer("/payload/content")
-        .and_then(|v| v.as_array())?;
-    let payload_type = value.pointer("/payload/type").and_then(|v| v.as_str());
-
-    if payload_type == Some("message") {
-        let role = value.pointer("/payload/role").and_then(|v| v.as_str())?;
-        let (role, allowed_types): (MessageRole, &[&str]) = match role {
-            "user" => (MessageRole::User, &["input_text", "text"]),
-            "assistant" => (MessageRole::Assistant, &["output_text", "text"]),
-            // developer/system instructions are context, not user intent for Mirror metrics.
-            _ => return None,
-        };
-        let text = extract_text_from_content_array_by_types(arr, allowed_types);
-        if text.is_empty() {
-            return None;
-        }
-        return Some(SessionMessage {
-            role,
-            content: text,
-        });
-    }
-
-    // Legacy Codex response items had no payload.type/role and used content[].type=text.
-    if payload_type.is_none() {
-        let text = extract_text_from_content_array(arr);
-        if !text.is_empty() {
-            return Some(SessionMessage {
-                role: MessageRole::Assistant,
-                content: text,
-            });
-        }
-    }
-
-    None
 }
 
 #[cfg(test)]
@@ -767,5 +563,49 @@ mod tests {
             .expect("should fall through to next valid ts");
         assert_eq!(started.to_rfc3339(), "2026-04-21T05:00:00+00:00");
         assert_eq!(session.messages.len(), 2);
+    }
+    #[test]
+    fn shared_provenance_prioritizes_source_and_subagent() {
+        for (payload, expected) in [
+            (
+                r#"{"source":"exec","originator":"Codex Desktop"}"#,
+                SessionMode::Unattended,
+            ),
+            (
+                r#"{"source":"vscode","originator":"unknown"}"#,
+                SessionMode::Interactive,
+            ),
+            (
+                r#"{"source":{"subagent":{"parent_thread_id":"parent"}},"originator":"codex-tui"}"#,
+                SessionMode::Subagent,
+            ),
+        ] {
+            let content = format!(r#"{{"type":"session_meta","payload":{payload}}}"#);
+            let session =
+                parse_session_content(&content, Path::new("test.jsonl"), SessionSource::Codex)
+                    .unwrap();
+            assert_eq!(session.meta.mode, expected);
+        }
+    }
+
+    #[test]
+    fn meta_messages_do_not_count_as_user_intent() {
+        let content = r#"{"type":"user","isMeta":true,"message":{"content":"internal"}}
+{"type":"user","message":{"content":"real request"}}
+"#;
+        let session =
+            parse_session_content(content, Path::new("test.jsonl"), SessionSource::ClaudeCode)
+                .unwrap();
+        assert_eq!(session.user_message_count(), 1);
+        assert_eq!(session.messages[0].content, "real request");
+    }
+    #[test]
+    fn preserves_unicode_whitespace_and_blank_final_tail_policy() {
+        let content = "\u{2003}{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\u{2003}\n{\"type\":\n ";
+        let session =
+            parse_session_content(content, Path::new("test.jsonl"), SessionSource::ClaudeCode)
+                .unwrap();
+        assert_eq!(session.messages[0].content, "hello");
+        assert!(session.meta.truncated_tail);
     }
 }

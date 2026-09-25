@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+agent-sessions = "0.2.0"
 tokio.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
