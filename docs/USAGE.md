@@ -165,16 +165,13 @@ does not count unchanged, low-signal, explicit Looper scheduled-job, or
 quarantined sessions against N. It stops loading older message bodies as soon
 as N sessions are selected. Omit the option for a manual full-history pass.
 
-`refine ingest-sessions` defaults to `--provider auto`: it prefers a compatible
-`remem` binary on `PATH` (or `REFINE_REMEM_BIN`) and falls back to local
-Claude Code/Codex files only when that executable is absent. Nonzero exits,
-malformed JSON, contract drift, and pagination errors still fail visibly.
-Use `--provider remem` to require Remem, or `--provider local` to scan local
-transcripts explicitly. Local discovery honors `CLAUDE_CONFIG_DIR` and
-`CODEX_HOME`; Codex discovery remains limited to `sessions/` and excludes
-`archived_sessions/`. Local parsing uses
-`agent-sessions`; malformed middle records fail, while incomplete append tails
-cannot advance the incremental cursor or replace complete saved snapshots.
+`refine ingest-sessions` reads exclusively from a compatible `remem` binary on
+`PATH`, or from the binary selected by `REFINE_REMEM_BIN`. Missing executables,
+nonzero exits, malformed JSON, contract drift, and pagination errors fail the
+command visibly. The public CLI has no automatic or explicit local transcript
+fallback and rejects `--provider`, `--source`, and `--legacy-local-scan`.
+The core library's local parser/discovery APIs are separate from this CLI
+contract; see [Local session library APIs](../README.md#local-session-library-apis).
 
 On the first remem-backed run, refine supersedes a matching local path-keyed
 session Document/items and saves the replacement facets in one transaction.
