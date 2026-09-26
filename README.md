@@ -182,8 +182,8 @@ SQLite (observations, documents)    ← Shared data store
 `refine ingest-sessions` reads session summaries and messages exclusively from
 a compatible `remem` binary on `PATH`, or from the binary selected by
 `REFINE_REMEM_BIN`. Missing executables, subprocess failures, malformed JSON,
-contract drift, and pagination errors fail the command visibly; there is no
-automatic or explicit local transcript fallback. Remem-backed replacement
+contract drift, and pagination errors fail the command visibly. There is no
+local transcript fallback or `--provider` switch. Remem-backed replacement
 facets and deletion of matching legacy local path-keyed Documents/items commit
 in one transaction, and ambiguous legacy identity fails closed.
 
@@ -241,6 +241,23 @@ refine/
     ├── daily-refresh.sh    # Daily: ingest + mirror score
     └── weekly-insights.sh  # Weekly: full LLM analysis
 ```
+
+### Local session library APIs
+
+`refine_core::session` retains public `parse_session_file`,
+`parse_session_content`, `discover_sessions`, and `discover_sessions_in` APIs.
+They use `agent-sessions` for JSONL framing, Claude/Codex projections, and
+file discovery. The CLI's retained internal Auto/Local ingestion branches
+are not exposed by its command arguments or dispatch; `refine ingest-sessions`
+always selects Remem.
+
+`discover_sessions` honors `CLAUDE_CONFIG_DIR` and `CODEX_HOME`;
+`discover_sessions_in` uses its explicit home argument. Both preserve the Codex
+`sessions/` scope and exclude `archived_sessions/`. Local parsing
+excludes Claude `isMeta` messages and prioritizes Codex source metadata over
+originator: subagent provenance wins, explicit `exec` stays unattended even
+for Codex Desktop, and IDE sessions are interactive. Malformed middle records
+return an error; an incomplete append tail is marked with `truncated_tail`.
 
 ## Tech Stack
 

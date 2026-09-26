@@ -169,7 +169,9 @@ as N sessions are selected. Omit the option for a manual full-history pass.
 `PATH`, or from the binary selected by `REFINE_REMEM_BIN`. Missing executables,
 nonzero exits, malformed JSON, contract drift, and pagination errors fail the
 command visibly. The public CLI has no automatic or explicit local transcript
-fallback.
+fallback and rejects `--provider`, `--source`, and `--legacy-local-scan`.
+The core library's local parser/discovery APIs are separate from this CLI
+contract; see [Local session library APIs](../README.md#local-session-library-apis).
 
 On the first remem-backed run, refine supersedes a matching local path-keyed
 session Document/items and saves the replacement facets in one transaction.
