@@ -938,4 +938,44 @@ for segment in "${node_portrait_path_parts[@]}"; do
 done
 rm -f "${fake_bin}/node"
 
+# UI logging must remain available outside the source checkout.
+cat > "${fake_bin}/bun" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == install ]]; then
+  mkdir -p node_modules/.bin
+  printf '#!/usr/bin/env bash\nexit 0\n' > node_modules/.bin/vite
+  chmod 700 node_modules/.bin/vite
+fi
+EOF
+chmod 700 "${fake_bin}/bun"
+ui_repo="${TEST_ROOT}/ui repo"
+mkdir -p "${ui_repo}/apps/desktop/ui"
+cp -R "$SCRIPT_DIR" "${ui_repo}/scripts"
+printf 'node_modules/\n' > "${ui_repo}/.gitignore"
+git -C "$ui_repo" init -q
+git -C "$ui_repo" add .
+git -C "$ui_repo" -c user.name='Refine Test' -c user.email='refine-test@example.invalid' \
+  commit -q -m fixture
+ui_home="${TEST_ROOT}/ui home"
+ui_cargo_home="${ui_home}/.cargo"
+mkdir -p "$ui_home" "${ui_cargo_home}/bin"
+env -i HOME="$ui_home" CARGO_HOME="$ui_cargo_home" PATH="${fake_bin}:/usr/bin:/bin" \
+  /bin/bash "${ui_repo}/scripts/install-local.sh" --no-start --no-cognitive-portrait >/dev/null \
+  || fail 'UI-enabled installer failed'
+ui_plist="${ui_home}/Library/LaunchAgents/com.lifcc.refine-ui-dev.plist"
+[[ "$(fixture_plist_value "$ui_plist" StandardOutPath)" == "${ui_home}/Library/Logs/refine-ui-dev.out.log" ]] \
+  || fail 'UI stdout log is not in the user log directory'
+[[ "$(fixture_plist_value "$ui_plist" StandardErrorPath)" == "${ui_home}/Library/Logs/refine-ui-dev.err.log" ]] \
+  || fail 'UI stderr log is not in the user log directory'
+touch "${ui_home}/Library/Logs/refine-ui-dev.err.log"
+ui_doctor_output="$(env -i \
+  HOME="$ui_home" CARGO_HOME="$ui_cargo_home" \
+  PATH="${fake_bin}:${ui_cargo_home}/bin:/usr/bin:/bin" EXPECT_ANON=1 \
+  /bin/bash "${ui_repo}/scripts/doctor-local.sh" 2>&1 || true)"
+assert_contains "$ui_doctor_output" "PASS log exists: ${ui_home}/Library/Logs/refine-ui-dev.err.log" \
+  'Doctor did not find the installed UI log'
+assert_not_contains "$ui_doctor_output" '.run/launchd-refine-ui.err.log' \
+  'Doctor still checked the source checkout for the UI log'
+
 printf 'All local installer tests passed\n'

@@ -371,7 +371,6 @@ write_ui_plist() {
   path_xml="$(printf '%s' "$path_env" | xml_escape)"
   ui_xml="$(printf '%s' "$ui_dir" | xml_escape)"
 
-  mkdir -p "${repo_root}/.run"
   write_file "$path" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -403,9 +402,9 @@ write_ui_plist() {
   <key>ThrottleInterval</key>
   <integer>30</integer>
   <key>StandardOutPath</key>
-  <string>${repo_root}/.run/launchd-refine-ui.out.log</string>
+  <string>${HOME}/Library/Logs/refine-ui-dev.out.log</string>
   <key>StandardErrorPath</key>
-  <string>${repo_root}/.run/launchd-refine-ui.err.log</string>
+  <string>${HOME}/Library/Logs/refine-ui-dev.err.log</string>
 </dict>
 </plist>
 EOF
