@@ -2,7 +2,7 @@
 
 <p align="center"><strong>Re + Fine — 持续精进，每一次对话都更好一点。</strong></p>
 
-<p align="center">把 ChatGPT、Claude、Gemini、Grok、Claude Code、Codex 的对话知识统一同步到一个知识库。</p>
+<p align="center">Refine 是本地优先的 Rust 知识工具：把 AI 对话知识保存到 SQLite 知识库，支持全文搜索、会话分析和 Mirror 认知信号追踪。</p>
 
 <p align="center"><a href="./README.md">English</a></p>
 
@@ -40,27 +40,24 @@ transcript 回退。匹配的历史 Document/items 收敛与 Remem 引用投影�
 
 ## 快速开始
 
-CLI 本地链路（优先）：
+macOS 本地安装需要 Git、Rust 1.88+；UI 开发服务可选使用 Bun。
+会话导入还需要兼容的 [Remem](https://github.com/majiayu000/remem) 二进制。
+LLM 提炼和报告需要配置 API 凭据。安装与配置详情见
+[Local Setup](docs/LOCAL_SETUP.md)。
 
 ```bash
-# 安装
-cargo install --path apps/cli
+git clone https://github.com/majiayu000/refine.git
+cd refine
 
-# 配置 LLM（.env 文件，支持 OpenAI 兼容 API）
-cat > .env << 'EOF'
-REFINE_OPENAI_API_KEY=your_key
-REFINE_OPENAI_BASE_URL=https://api.openai.com
-REFINE_OPENAI_MODEL=gpt-4o
-EOF
+# 安装 CLI、Mirror、本地服务和 LaunchAgent
+scripts/install-local.sh
 
-# 导入会话（从 remem raw archive 读取）
+# 只读检查配置；按 Local Setup 的说明选择配置方式
+bash scripts/configure-llm-env.sh --check
+
+# 配置完成后导入 Remem 会话并查看认知信号
 refine ingest-sessions
-
-# 生成认知报告
-refine insights --prescription
-
-# 查看成长仪表盘
-mirror dashboard
+mirror score
 ```
 
 ## CLI 命令

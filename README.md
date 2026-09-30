@@ -3,12 +3,12 @@
 <p align="center">
   <a href="https://github.com/majiayu000/refine/actions/workflows/ci.yml"><img src="https://github.com/majiayu000/refine/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
-  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.75%2B-orange.svg" alt="Rust"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="Rust"></a>
 </p>
 
 <p align="center"><strong>Re + Fine — improve continuously, conversation by conversation.</strong></p>
 
-<p align="center">Sync knowledge from AI conversations. Track cognitive growth from coding sessions.</p>
+<p align="center">Refine is a local-first Rust toolkit for searching knowledge from AI conversations and analyzing coding sessions. SQLite stores the knowledge base; Mirror tracks cognitive signals over time.</p>
 
 <p align="center"><a href="./README.zh-CN.md">中文文档</a></p>
 
@@ -20,7 +20,14 @@
 
 ## Quick Start
 
+The macOS local stack requires Git and Rust 1.88+. Bun is optional for the UI
+dev service. Session ingestion also requires a compatible
+[Remem](https://github.com/majiayu000/remem) binary. LLM-backed extraction and
+reports require configured API credentials; review [Local Setup](docs/LOCAL_SETUP.md).
+
 ```bash
+git clone https://github.com/majiayu000/refine.git
+cd refine
 # Install the local stack: CLI tools, server, launchd jobs, and optional UI dev service
 scripts/install-local.sh
 
