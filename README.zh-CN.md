@@ -60,6 +60,22 @@ refine ingest-sessions
 mirror score
 ```
 
+## 从会话中找一次决策
+
+完成[本地配置](docs/LOCAL_SETUP.md)后，可以先预览 Remem 会话，再做提炼和检索：
+
+```bash
+refine ingest-sessions --dry-run
+refine ingest-sessions --latest 20
+refine search "部署决策"
+refine doc-search "部署决策"
+```
+
+预览不调用 LLM，也不写入导入结果。第二条命令最多处理 20 个有效待处理会话，可能调用已配置的 LLM。
+`search` 找提炼后的知识，`doc-search` 找文档匹配；拿到 ID 后，用 `refine show <id>` 或
+`refine doc-show <id>` 查看详情与来源引用。没有结果也可能是会话尚未导入或被跳过，不能据此认定
+决策从未发生。Remem 缺失或不兼容会报错，不会自动改读本地 transcript；筛选边界见下方命令说明。
+
 ## CLI 命令
 
 ### Session Insights（认知分析）
