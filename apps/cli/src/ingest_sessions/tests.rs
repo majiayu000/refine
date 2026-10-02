@@ -1073,6 +1073,15 @@ fn content_rejection_survives_anyhow_context() {
 
 #[tokio::test]
 async fn same_snapshot_mode_change_retags_without_llm() {
+    assert_same_snapshot_retags_without_llm(false).await;
+}
+
+#[tokio::test]
+async fn same_snapshot_bare_hash_retags_without_llm() {
+    assert_same_snapshot_retags_without_llm(true).await;
+}
+
+async fn assert_same_snapshot_retags_without_llm(historical_bare_hash: bool) {
     let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
     let doc_store: Arc<dyn DocumentRepository> = store.clone();
     let item_store: Arc<dyn ItemRepository> = store;
@@ -1096,9 +1105,21 @@ async fn same_snapshot_mode_change_retags_without_llm() {
         user_message_samples: vec!["question".to_string()],
         legacy_identity_is_unique: true,
     };
-    let mut existing = Document::new("codex-session", "duplicated transcript body");
+    let mut existing = Document::new(
+        "codex-session",
+        if historical_bare_hash {
+            ""
+        } else {
+            "duplicated transcript body"
+        },
+    );
     existing.set_url(&summary.stable_document_url());
-    existing.set_source_version(Some(&format!("{}:interactive", summary.content_hash)));
+    let stored_version = if historical_bare_hash {
+        summary.content_hash.clone()
+    } else {
+        format!("{}:interactive", summary.content_hash)
+    };
+    existing.set_source_version(Some(&stored_version));
     doc_store
         .save(&existing)
         .await

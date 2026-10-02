@@ -396,28 +396,30 @@ mod tests {
             .await
             .expect("build app state"),
         );
+        let hash = format!("sha256:{}", "a".repeat(64));
         let mut document = Document::new("codex-session", "");
         document.set_url("remem://raw-session/v2/636f6465782d636c69/6c6f63616c/2f7265706f/7331");
-        document.set_source_version(Some(
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:interactive",
-        ));
-        state
-            .doc_store
-            .save(&document)
-            .await
-            .expect("save referenced document");
+        for projection in [format!("{hash}:interactive"), hash] {
+            document.set_source_version(Some(&projection));
+            state
+                .doc_store
+                .save(&document)
+                .await
+                .expect("save referenced document");
 
-        let detail = get_document(state.clone(), document.id().as_str())
-            .await
-            .expect("hydrate document detail");
-        assert_eq!(detail.raw_content, "User: question\nAssistant: answer\n");
-        let persisted = state
-            .doc_store
-            .find_by_id(document.id())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(persisted.raw_content().is_empty());
+            let detail = get_document(state.clone(), document.id().as_str())
+                .await
+                .expect("hydrate document detail");
+            assert_eq!(detail.raw_content, "User: question\nAssistant: answer\n");
+            let persisted = state
+                .doc_store
+                .find_by_id(document.id())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(persisted.raw_content().is_empty());
+            assert_eq!(persisted.source_version(), Some(projection.as_str()));
+        }
     }
 
     #[cfg(unix)]

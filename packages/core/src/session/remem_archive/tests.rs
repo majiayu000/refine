@@ -37,17 +37,30 @@ impl FakeRunner {
 #[test]
 fn projection_version_exposes_only_a_valid_snapshot_hash() {
     let hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    assert_eq!(
-        remem_snapshot_hash(&format!("{hash}:interactive")).unwrap(),
-        hash
-    );
+    assert_eq!(remem_snapshot_hash(hash).unwrap(), hash);
+    for mode in ["interactive", "unattended", "subagent", "unknown"] {
+        assert_eq!(
+            remem_snapshot_hash(&format!("{hash}:{mode}")).unwrap(),
+            hash
+        );
+    }
     for invalid in [
-        hash.to_string(),
+        String::new(),
+        "sha256:".to_string(),
+        format!("sha256:{}", "a".repeat(63)),
+        format!("sha256:{}", "a".repeat(65)),
+        format!("sha256:{}", "g".repeat(64)),
+        format!("sha512:{}", "a".repeat(64)),
+        format!("{hash}:"),
         format!("{hash}:scheduled"),
+        format!("{hash}:interactive:unknown"),
         "sha256:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg:interactive"
             .to_string(),
     ] {
-        assert!(remem_snapshot_hash(&invalid).is_err());
+        assert_eq!(
+            remem_snapshot_hash(&invalid).unwrap_err().to_string(),
+            "Remem document has an invalid projection version"
+        );
     }
 }
 

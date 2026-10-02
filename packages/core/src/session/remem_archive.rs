@@ -44,12 +44,12 @@ pub fn load_remem_session(summary: RememSessionSummary) -> Result<RememSession> 
 }
 
 pub fn remem_snapshot_hash(projection_version: &str) -> Result<&str> {
-    let (hash, mode) = projection_version
-        .rsplit_once(':')
-        .context("Remem document has an invalid projection version")?;
+    let hash = match projection_version.rsplit_once(':') {
+        Some((hash, "interactive" | "unattended" | "subagent" | "unknown")) => hash,
+        _ => projection_version,
+    };
     ensure!(
-        matches!(mode, "interactive" | "unattended" | "subagent" | "unknown")
-            && hash.starts_with("sha256:")
+        hash.starts_with("sha256:")
             && hash.len() == 71
             && hash[7..].bytes().all(|byte| byte.is_ascii_hexdigit()),
         "Remem document has an invalid projection version"
