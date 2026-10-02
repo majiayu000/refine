@@ -688,7 +688,7 @@ check_logs() {
     "${HOME}/Library/Logs/refine-insights.log"
   )
   if [[ "$ui_dev_enabled" == "1" ]]; then
-    log_paths+=("${repo_root}/.run/launchd-refine-ui.err.log")
+    log_paths+=("${HOME}/Library/Logs/refine-ui-dev.err.log")
   fi
 
   for log_path in "${log_paths[@]}"; do
