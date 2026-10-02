@@ -3,12 +3,12 @@
 <p align="center">
   <a href="https://github.com/majiayu000/refine/actions/workflows/ci.yml"><img src="https://github.com/majiayu000/refine/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
-  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.75%2B-orange.svg" alt="Rust"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="Rust"></a>
 </p>
 
 <p align="center"><strong>Re + Fine — improve continuously, conversation by conversation.</strong></p>
 
-<p align="center">Sync knowledge from AI conversations. Track cognitive growth from coding sessions.</p>
+<p align="center">Refine is a local-first Rust toolkit for searching knowledge from AI conversations and analyzing coding sessions. SQLite stores the knowledge base; Mirror tracks cognitive signals over time.</p>
 
 <p align="center"><a href="./README.zh-CN.md">中文文档</a></p>
 
@@ -20,7 +20,14 @@
 
 ## Quick Start
 
+The macOS local stack requires Git and Rust 1.88+. Bun is optional for the UI
+dev service. Session ingestion also requires a compatible
+[Remem](https://github.com/majiayu000/remem) binary. LLM-backed extraction and
+reports require configured API credentials; review [Local Setup](docs/LOCAL_SETUP.md).
+
 ```bash
+git clone https://github.com/majiayu000/refine.git
+cd refine
 # Install the local stack: CLI tools, server, launchd jobs, and optional UI dev service
 scripts/install-local.sh
 
@@ -45,6 +52,27 @@ mirror score
 
 For local install, doctor, and upgrade details, see [Local Setup](docs/LOCAL_SETUP.md)
 and [Local Release Flow](docs/LOCAL_RELEASE.md).
+
+## Find a decision in your AI conversations
+
+After [local setup](docs/LOCAL_SETUP.md), preview which Remem sessions would be
+processed before starting LLM-backed extraction:
+
+```bash
+refine ingest-sessions --dry-run
+refine ingest-sessions --latest 20
+refine search "deployment decision"
+refine doc-search "deployment decision"
+```
+
+The dry run does not call the LLM or write ingestion results. The second command
+processes up to 20 eligible pending sessions and may call your configured LLM.
+`search` looks for extracted knowledge; `doc-search` looks for document matches.
+Use `refine show <id>` or `refine doc-show <id>` to inspect a returned item's
+details and source references. No result can also mean the relevant session was
+not imported or was skipped; it does not establish that the decision never
+occurred. Missing/incompatible Remem is an error, without a local transcript
+fallback. See the [ingestion contract](#refine-cli-commands) for filtering rules.
 
 ## Release Status
 
