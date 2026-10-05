@@ -89,13 +89,13 @@ pub fn parse_facet_response(response: &str) -> Result<FacetResponse, String> {
 
     // 尝试直接解析
     if let Ok(parsed) = serde_json::from_str::<FacetResponse>(trimmed) {
-        return Ok(parsed);
+        return validate_facet_limits(parsed);
     }
 
     // 尝试从 markdown code fence 提取
     if let Some(json_str) = extract_json_from_fence(trimmed) {
         if let Ok(parsed) = serde_json::from_str::<FacetResponse>(&json_str) {
-            return Ok(parsed);
+            return validate_facet_limits(parsed);
         }
     }
 
@@ -103,7 +103,7 @@ pub fn parse_facet_response(response: &str) -> Result<FacetResponse, String> {
     if let Some(start) = trimmed.find('{') {
         let candidate = &trimmed[start..];
         if let Ok(parsed) = serde_json::from_str::<FacetResponse>(candidate) {
-            return Ok(parsed);
+            return validate_facet_limits(parsed);
         }
     }
 
@@ -113,6 +113,30 @@ pub fn parse_facet_response(response: &str) -> Result<FacetResponse, String> {
         .map(|(i, _)| &trimmed[..i])
         .unwrap_or(trimmed);
     Err(format!("无法解析 facet 响应: {}", preview))
+}
+
+/// Enforce the extraction bounds before the ingestion path accepts a response.
+/// Rejection uses the existing bounded parse retry, without discarding entries.
+fn validate_facet_limits(facets: FacetResponse) -> Result<FacetResponse, String> {
+    for (field, count, limit) in [
+        ("decisions", facets.decisions.len(), 5),
+        ("bugs_fixed", facets.bugs_fixed.len(), 5),
+        ("patterns", facets.patterns.len(), 3),
+        ("friction", facets.friction.len(), 3),
+        ("project_progress", facets.project_progress.len(), 3),
+        ("questions", facets.questions.len(), 3),
+        ("knowledge_gained", facets.knowledge_gained.len(), 5),
+        ("tools_discovered", facets.tools_discovered.len(), 3),
+        ("architecture", facets.architecture.len(), 3),
+        ("code_artifacts", facets.code_artifacts.len(), 5),
+    ] {
+        if count > limit {
+            return Err(format!(
+                "facet field {field} has {count} entries; maximum is {limit}"
+            ));
+        }
+    }
+    Ok(facets)
 }
 
 fn extract_json_from_fence(text: &str) -> Option<String> {
@@ -428,5 +452,54 @@ mod tests {
             .tags()
             .iter()
             .any(|tag| tag.as_str() == "session_mode_unattended")));
+    }
+    #[test]
+    fn parse_facet_response_enforces_every_array_cap_in_every_format() {
+        for (field, limit) in [
+            ("decisions", 5),
+            ("bugs_fixed", 5),
+            ("patterns", 3),
+            ("friction", 3),
+            ("project_progress", 3),
+            ("questions", 3),
+            ("knowledge_gained", 5),
+            ("tools_discovered", 3),
+            ("architecture", 3),
+            ("code_artifacts", 5),
+        ] {
+            for count in [0, limit, limit + 1] {
+                let mut value = serde_json::json!({"session_summary": "Synthetic session"});
+                value[field] = serde_json::json!(vec!["Synthetic observation"; count]);
+                let json = value.to_string();
+                for response in [
+                    json.clone(),
+                    format!("```json\n{json}\n```"),
+                    format!("Analysis:\n{json}"),
+                ] {
+                    let result = parse_facet_response(&response);
+                    if count <= limit {
+                        assert!(result.is_ok(), "{field}: {count} should be accepted");
+                    } else {
+                        let error = result.expect_err("an over-limit field must be rejected");
+                        assert!(error.contains(field), "{error}");
+                        assert!(error.contains(&limit.to_string()), "{error}");
+                        assert!(!error.contains("Synthetic observation"), "{error}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parse_facet_response_preserves_all_at_limit_entries() {
+        let response = serde_json::json!({
+            "session_summary": "Synthetic session",
+            "decisions": ["one", "two", "three", "four", "five"],
+            "bugs_fixed": ["a", "b", "c", "d", "e"]
+        });
+        let facets = parse_facet_response(&response.to_string()).unwrap();
+        assert_eq!(facets.decisions, ["one", "two", "three", "four", "five"]);
+        assert_eq!(facets.bugs_fixed, ["a", "b", "c", "d", "e"]);
+        assert_eq!(facets_to_items(&facets, &DocumentId::new(), None).len(), 11);
     }
 }

@@ -311,6 +311,44 @@ async fn facet_parse_error_retries_then_succeeds() {
     assert_eq!(client.calls(), 2);
 }
 
+#[tokio::test]
+async fn facet_array_limit_error_uses_bounded_parse_regeneration() {
+    let oversized = serde_json::json!({
+        "session_summary": "Oversized",
+        "decisions": ["one", "two", "three", "four", "five", "six"]
+    })
+    .to_string();
+    let valid = serde_json::json!({
+        "session_summary": "Regenerated",
+        "decisions": ["one", "two"]
+    })
+    .to_string();
+
+    for (responses, expected_success) in [
+        (vec![oversized.clone(), valid], true),
+        (vec![oversized.clone(), oversized], false),
+    ] {
+        let client = Arc::new(SequenceLlmClient::new(responses));
+        let quota_hit = Arc::new(AtomicBool::new(false));
+        let result = extract_and_parse_facets_with_retry_policy(
+            "Synthetic content",
+            &(client.clone() as Arc<dyn LlmClient>),
+            &quota_hit,
+            2,
+            0,
+        )
+        .await;
+        assert_eq!(client.calls(), 2);
+        assert_eq!(result.is_ok(), expected_success);
+        if let Ok(facets) = result {
+            assert_eq!(facets.session_summary, "Regenerated");
+            assert_eq!(facets.decisions, ["one", "two"]);
+        } else {
+            assert!(result.unwrap_err().to_string().contains("decisions"));
+        }
+    }
+}
+
 #[test]
 fn session_refresh_uses_source_content_instead_of_ingest_timestamp() {
     let old_raw = "User: first message\n";
