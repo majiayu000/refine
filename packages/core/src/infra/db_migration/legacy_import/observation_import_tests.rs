@@ -172,7 +172,9 @@ fn newer_detached_legacy_copy_cannot_clear_an_existing_observation_link() {
     ).unwrap();
     drop(source);
 
-    let error = migrate_stale_dbs(&target).expect_err("existing link must not be erased");
+    let error = migrate_stale_dbs(&target)
+        .err()
+        .expect("existing link must not be erased");
     assert!(
         error.contains("observation requires document_id"),
         "{error}"
