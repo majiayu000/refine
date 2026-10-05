@@ -112,10 +112,12 @@ mirror score --since 2026-03-20     # Filter by date
 ### Periodic Analysis
 
 ```bash
-mirror weekly                       # Weekly delta report (requires LLM)
+mirror weekly                       # local metrics-delta report + deterministic action cards
 mirror profile                      # Cognitive portrait narrative (requires LLM)
 /cognitive-portrait                  # Deep 5-framework analysis (~1000 lines, Claude Code skill)
 ```
+
+Weekly report generation uses existing observations and makes no LLM call. Upstream session extraction can still require an LLM.
 
 ### What Mirror Tracks
 
@@ -200,7 +202,7 @@ SQLite (observations, documents)    ← Shared data store
     │
     ├─ mirror score/dashboard       (local clustering → signal lights)
     ├─ mirror motd                  (reads cached scores + LLM advice)
-    ├─ mirror weekly                (delta analysis via LLM)
+    ├─ mirror weekly                (local metrics delta + deterministic action cards)
     ├─ mirror profile               (cognitive portrait via LLM)
     └─ /cognitive-portrait          (5-framework deep analysis, Claude Code skill)
 ```

@@ -56,21 +56,34 @@ pub(super) fn print_score(result: &ScoreResult, trends: Option<&PersonalTrends>)
     if let Some(ref tension) = result.tension {
         println!("\n  {}{}", t!("Tension: ", "张力: "), tension);
     }
-    if trends.is_some() {
-        println!(
-            "  {}",
-            t!(
-                "✓ = meets the absolute target · arrow = vs your 4-week average",
-                "✓ = 达到绝对目标 · 箭头 = 相对你近 4 周均值"
-            )
-        );
+
+    println!("  {}", trend_legend(trends.is_some()));
+}
+
+fn trend_legend(available: bool) -> &'static str {
+    if available {
+        t!(
+            "✓ = meets the absolute target · arrow = vs your 4-week average",
+            "✓ = 达到绝对目标 · 箭头 = 相对你近 4 周均值"
+        )
     } else {
-        println!(
-            "  {}",
-            t!(
-                "✓ = meets the absolute target · trend unavailable (less than 4 weeks of data)",
-                "✓ = 达到绝对目标 · 趋势不可用(数据不足4周)"
-            )
-        );
+        t!(
+            "✓ = meets the absolute target · trend unavailable (requires 7 distinct eligible scoring dates in the past 28 days)",
+            "✓ = 达到绝对目标 · 趋势不可用(近28天内需有7个不同日期的有效评分)"
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trend_legend;
+
+    #[test]
+    fn unavailable_legend_describes_distinct_dates_in_lookback_window() {
+        let legend = trend_legend(false);
+        assert!(legend.contains("7 distinct"), "{legend}");
+        assert!(legend.contains("28 days"), "{legend}");
+        assert!(!legend.contains("less than 4 weeks"), "{legend}");
+        assert!(trend_legend(true).contains("average"));
     }
 }

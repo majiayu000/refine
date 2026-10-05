@@ -124,9 +124,30 @@ fn test_tension_analysis() {
         green_layer.clone(),
         green_layer.clone(),
     ]);
-    assert!(tension.unwrap_or_default().contains("healthy"));
+    assert!(tension
+        .unwrap_or_default()
+        .contains("all three layers meet configured targets"));
 
     // All red
     let tension = analyze_tension(&[red_layer.clone(), red_layer.clone(), red_layer.clone()]);
     assert!(tension.unwrap_or_default().contains("replan"));
+}
+
+#[test]
+fn snapshot_tension_does_not_claim_personal_growth() {
+    for first in [Signal::Green, Signal::Yellow, Signal::Red] {
+        for second in [Signal::Green, Signal::Yellow, Signal::Red] {
+            for third in [Signal::Green, Signal::Yellow, Signal::Red] {
+                let layers = [first, second, third].map(|signal| LayerScore {
+                    name: "synthetic".into(),
+                    signal,
+                    indicators: Vec::new(),
+                });
+                if let Some(text) = analyze_tension(&layers) {
+                    assert!(!text.contains("growth"), "{text}");
+                    assert!(!text.contains("healthy"), "{text}");
+                }
+            }
+        }
+    }
 }

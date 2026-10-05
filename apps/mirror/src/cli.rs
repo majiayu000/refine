@@ -42,8 +42,40 @@ pub enum Commands {
         #[arg(long)]
         all: bool,
     },
-    /// Weekly delta analysis (requires LLM)
+    /// Weekly local metrics-delta report with deterministic action cards
     Weekly,
     /// Generate cognitive portrait narrative (requires LLM)
     Profile,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::CommandFactory;
+
+    #[test]
+    fn weekly_help_and_readme_describe_local_generation() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("weekly")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("local"), "{help}");
+        assert!(!help.contains("requires LLM"), "{help}");
+
+        let readme = include_str!("../../../README.md");
+        let weekly_lines: Vec<_> = readme
+            .lines()
+            .filter(|line| line.contains("mirror weekly "))
+            .collect();
+        assert_eq!(weekly_lines.len(), 2);
+        for line in weekly_lines {
+            assert!(line.contains("local"), "{line}");
+            assert!(
+                !line.contains("via LLM") && !line.contains("requires LLM"),
+                "{line}"
+            );
+        }
+    }
 }

@@ -285,15 +285,15 @@ pub(super) fn analyze_tension(layers: &[LayerScore; 3]) -> Option<String> {
         ),
         [Signal::Red, _, Signal::Green] => Some(
             t!(
-                "L1+L3 tension: smooth collaboration but no cognitive growth — challenge yourself",
-                "层1红+层3绿 → 协作顺畅但认知没提升，你在舒适区，挑战更难的问题"
+                "L1+L3 targets: depth indicators miss configured targets while collaboration indicators meet them; review the captured-session evidence",
+                "层1红+层3绿 → 当前会话的深度指标未达配置目标，协作指标达标；请结合记录复核"
             )
             .into(),
         ),
         [Signal::Green, Signal::Green, Signal::Green] => Some(
             t!(
-                "All green — healthy growth, consider raising your baseline",
-                "全绿 → 健康成长，考虑提升基线标准"
+                "All green: all three layers meet configured targets in captured sessions; this snapshot does not establish change over time",
+                "全绿 → 当前记录的三层指标均达配置目标；单次快照不能说明随时间的变化"
             )
             .into(),
         ),
