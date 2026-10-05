@@ -389,3 +389,54 @@ fn test_personal_trends_detect_regression_without_recoloring() {
     assert_eq!(trends.indicator("deep_invest"), None);
     assert_eq!(trends.overall(), Some(Trend::Down));
 }
+
+#[test]
+fn future_only_scores_do_not_activate_personal_baseline() {
+    let now = Utc::now();
+    let history = (1..=7)
+        .map(|day| ScoreResult {
+            timestamp: now + Duration::days(day),
+            ..ScoreResult::default()
+        })
+        .collect::<Vec<_>>();
+    assert!(compute_personal_baseline(&history).is_none());
+}
+
+#[test]
+fn future_scores_do_not_change_personal_baseline_or_trend() {
+    let now = Utc::now();
+    let mut past = (1..=7)
+        .map(|day| {
+            let mut score = ScoreResult {
+                timestamp: now - Duration::days(day),
+                ..ScoreResult::default()
+            };
+            score.layers[0].indicators.push(Indicator {
+                name: "dreyfus".into(),
+                actual: 3.0,
+                target: ">3.5".into(),
+                signal: Signal::Yellow,
+            });
+            score
+        })
+        .collect::<Vec<_>>();
+    let mut current = past[0].clone();
+    current.timestamp = now;
+    current.layers[0].indicators[0].actual = 3.3;
+    let future = past
+        .iter()
+        .map(|score| {
+            let mut score = score.clone();
+            score.timestamp = now + (now - score.timestamp);
+            score.layers[0].indicators[0].actual = 5.0;
+            score
+        })
+        .collect::<Vec<_>>();
+    past.extend(future);
+    let baseline = compute_personal_baseline(&past).expect("seven past dates remain eligible");
+    assert_eq!(baseline.average("dreyfus"), Some(3.0));
+    assert_eq!(
+        compute_personal_trends(&current, &baseline).indicator("dreyfus"),
+        Some(Trend::Up)
+    );
+}

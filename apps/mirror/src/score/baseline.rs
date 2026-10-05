@@ -61,9 +61,13 @@ fn avg_from_scores(scores: &[&ScoreResult], indicator_name: &str) -> f64 {
 }
 
 pub fn compute_personal_baseline(history: &[ScoreResult]) -> Option<PersonalBaseline> {
-    let cutoff = Utc::now() - Duration::days(BASELINE_WINDOW_DAYS);
+    let now = Utc::now();
+    let cutoff = now - Duration::days(BASELINE_WINDOW_DAYS);
     let mut by_day: BTreeMap<chrono::NaiveDate, &ScoreResult> = BTreeMap::new();
-    for score in history.iter().filter(|score| score.timestamp >= cutoff) {
+    for score in history
+        .iter()
+        .filter(|score| score.timestamp >= cutoff && score.timestamp <= now)
+    {
         let day = score.timestamp.date_naive();
         match by_day.get(&day) {
             Some(existing) if existing.timestamp >= score.timestamp => {}
