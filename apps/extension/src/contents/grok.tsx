@@ -126,6 +126,9 @@ function extractConversationByKnownSelectors(): string {
 }
 
 function inferBubbleRole(bubble: Element, index: number): 'Human' | 'Assistant' {
+  const knownRole = GROK_TURN_SELECTORS.find(({ selector }) => bubble.matches(selector))?.role
+  if (knownRole) return knownRole
+
   const text = [
     bubble.getAttribute('data-role') || '',
     bubble.getAttribute('data-author') || '',
