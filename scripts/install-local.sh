@@ -223,14 +223,31 @@ install_portrait_binary() {
   [[ ! -L "${refine_dir}/bin" ]] || die "portrait binary directory is a symlink: ${refine_dir}/bin"
   mkdir -p "${refine_dir}/bin"
   chmod 700 "${refine_dir}/bin" || die "cannot secure portrait binary directory: ${refine_dir}/bin"
-  rm -f "$dest"
-  cp -p "$src" "$dest" || die "cannot install dedicated portrait binary: ${dest}"
-  chmod 700 "$dest" || die "cannot secure dedicated portrait binary: ${dest}"
-  if ! "$dest" cognitive-portrait --help 2>/dev/null | grep -q collect; then
+  [[ ! -d "$dest" ]] || die "portrait binary destination is a directory: ${dest}"
+  local candidate candidate_sha256
+  candidate="$(mktemp "${dest}.tmp.XXXXXX")" || die "cannot stage dedicated portrait binary: ${dest}"
+  if ! cp -p "$src" "$candidate"; then
+    rm -f "$candidate"
+    die "cannot copy dedicated portrait binary candidate: ${dest}"
+  fi
+  if ! chmod 700 "$candidate"; then
+    rm -f "$candidate"
+    die "cannot secure dedicated portrait binary candidate: ${dest}"
+  fi
+  if ! "$candidate" cognitive-portrait --help 2>/dev/null | grep -q collect; then
+    rm -f "$candidate"
     die "dedicated portrait binary lacks cognitive-portrait collect: ${dest}"
   fi
+  if ! candidate_sha256="$(file_sha256 "$candidate")"; then
+    rm -f "$candidate"
+    die "cannot hash dedicated portrait binary candidate: ${dest}"
+  fi
+  if ! mv -f "$candidate" "$dest"; then
+    rm -f "$candidate"
+    die "cannot promote dedicated portrait binary candidate: ${dest}"
+  fi
   portrait_refine_bin="$dest"
-  portrait_refine_sha256="$(file_sha256 "$dest")"
+  portrait_refine_sha256="$candidate_sha256"
   log "installed dedicated portrait binary ${dest}"
 }
 
