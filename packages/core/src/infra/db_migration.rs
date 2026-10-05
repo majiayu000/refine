@@ -9,6 +9,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use super::paths::stale_db_candidates;
 
 mod legacy_import;
+#[cfg(test)]
+mod startup_tests;
 
 /// Result of a `migrate_stale_dbs` run.
 pub enum MigrationReport {
@@ -135,7 +137,9 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
 }
 
 fn prepare_migration_state(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("failed to begin legacy migration state upgrade: {e}"))?;
+    tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS refine_legacy_migration_state (
             source_path TEXT PRIMARY KEY,
             signature TEXT NOT NULL,
@@ -144,14 +148,16 @@ fn prepare_migration_state(conn: &Connection) -> Result<(), String> {
         )",
     )
     .map_err(|e| format!("failed to prepare legacy migration state: {e}"))?;
-    let columns = table_columns(conn, "main", "refine_legacy_migration_state")?;
+    let columns = table_columns(&tx, "main", "refine_legacy_migration_state")?;
     if !columns.iter().any(|column| column == "content_hash") {
-        conn.execute_batch(
+        tx.execute_batch(
             "ALTER TABLE refine_legacy_migration_state
              ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
         )
         .map_err(|e| format!("failed to upgrade legacy migration state: {e}"))?;
     }
+    tx.commit()
+        .map_err(|e| format!("failed to commit legacy migration state upgrade: {e}"))?;
     Ok(())
 }
 

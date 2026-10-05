@@ -21,14 +21,15 @@ mod observation_integrity;
 mod paths;
 pub mod quota_state;
 mod sqlite;
+#[cfg(test)]
+mod startup_tests;
 
 const FTS_BOOTSTRAP_USER_VERSION: i64 = 1;
 const ALLOWED_COLUMN_EXISTS_TABLES: &[&str] = &["items", "documents", "extraction_jobs"];
 const ALLOWED_FOREIGN_KEY_TABLES: &[&str] = &["extraction_jobs"];
 
 pub fn prepare_sqlite_db(conn: &Connection) -> InfraResult<()> {
-    let tx = conn
-        .unchecked_transaction()
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     tx.execute_batch(include_str!("schema.sql"))
