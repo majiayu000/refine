@@ -113,7 +113,7 @@ pub(super) fn assert_overlapping_initializers(
         let enabled = unsafe {
             rusqlite::ffi::sqlite3_trace_v2(
                 first.handle(),
-                rusqlite::ffi::SQLITE_TRACE_STMT,
+                rusqlite::ffi::SQLITE_TRACE_STMT as u32,
                 Some(pause_after_first_schema_read),
                 (&mut *context as *mut StartupInterleave).cast(),
             )
