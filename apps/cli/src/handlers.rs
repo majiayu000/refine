@@ -263,7 +263,7 @@ async fn handle_docs(limit: usize, store: Arc<SqliteStore>) -> Result<()> {
             let title = doc.title().unwrap_or("(无标题)");
             println!(
                 "  {} | {} | {} | {}",
-                doc.id().as_str().chars().take(8).collect::<String>(),
+                doc.id().as_str(),
                 title,
                 doc.source(),
                 doc.created_at().format("%Y-%m-%d %H:%M"),
@@ -327,12 +327,7 @@ async fn handle_doc_search(query: &str, limit: usize, store: Arc<SqliteStore>) -
         println!("找到 {} 篇匹配文档:\n", total);
         for doc in &docs {
             let title = doc.title().unwrap_or("(无标题)");
-            println!(
-                "  {} | {} | {}",
-                doc.id().as_str().chars().take(8).collect::<String>(),
-                title,
-                doc.source(),
-            );
+            println!("  {} | {} | {}", doc.id().as_str(), title, doc.source(),);
         }
     }
 
