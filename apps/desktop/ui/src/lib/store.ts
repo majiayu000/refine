@@ -4,6 +4,8 @@ import type { ApiCapabilities, Item } from './api/types'
 
 const PAGE_SIZE = 50
 const api = getApiClient()
+let loadItemsRequest = 0
+let searchRequest = 0
 
 interface AppState {
   // 状态
@@ -41,9 +43,11 @@ export const useStore = create<AppState>((set, get) => ({
   isSpotlightOpen: false,
 
   loadItems: async () => {
+    const request = ++loadItemsRequest
     set({ isLoading: true, isLoadingMore: false })
     try {
       const result = await api.getItems({ cursor: 0, limit: PAGE_SIZE })
+      if (request !== loadItemsRequest) return false
       set({
         items: result.items,
         totalItems: result.total,
@@ -52,6 +56,7 @@ export const useStore = create<AppState>((set, get) => ({
       })
       return true
     } catch (error) {
+      if (request !== loadItemsRequest) return false
       console.error('加载失败:', error)
       set({ isLoading: false, isLoadingMore: false })
       return false
@@ -64,9 +69,11 @@ export const useStore = create<AppState>((set, get) => ({
       return
     }
 
+    const request = loadItemsRequest
     set({ isLoadingMore: true })
     try {
       const result = await api.getItems({ cursor: nextCursor, limit: PAGE_SIZE })
+      if (request !== loadItemsRequest) return
       set((state) => {
         const existingIds = new Set(state.items.map((item) => item.id))
         const appended = result.items.filter((item) => !existingIds.has(item.id))
@@ -78,6 +85,7 @@ export const useStore = create<AppState>((set, get) => ({
         }
       })
     } catch (error) {
+      if (request !== loadItemsRequest) return
       console.error('加载更多失败:', error)
       set({ isLoadingMore: false })
     }
@@ -88,6 +96,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   search: async (query) => {
+    const request = ++searchRequest
     set({ searchQuery: query })
     if (!query.trim()) {
       set({ searchResults: [] })
@@ -95,8 +104,10 @@ export const useStore = create<AppState>((set, get) => ({
     }
     try {
       const result = await api.searchItems(query)
+      if (request !== searchRequest) return
       set({ searchResults: result.items })
     } catch (error) {
+      if (request !== searchRequest) return
       console.error('搜索失败:', error)
     }
   },
@@ -113,7 +124,7 @@ export const useStore = create<AppState>((set, get) => ({
   deleteItem: async (id) => {
     try {
       await api.deleteItem(id)
-      set({ selectedItem: null })
+      set((state) => ({ selectedItem: state.selectedItem?.id === id ? null : state.selectedItem }))
       await get().loadItems()
     } catch (error) {
       console.error('删除失败:', error)
