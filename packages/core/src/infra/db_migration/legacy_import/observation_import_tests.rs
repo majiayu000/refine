@@ -148,3 +148,43 @@ fn assert_new_detached_is_rejected(conn: &Connection) {
         .to_string()
         .contains("observation requires document_id"));
 }
+
+#[test]
+fn newer_detached_legacy_copy_cannot_clear_an_existing_observation_link() {
+    let temp = TempDir::new().unwrap();
+    let target = temp.path().join("refine.db");
+    let legacy = create_legacy_items(temp.path(), true);
+    insert_detached_observation(&legacy, true);
+    assert_migrated_detached_observation(&target);
+
+    let conn = Connection::open(&target).unwrap();
+    conn.execute_batch(
+        "INSERT INTO documents (id, title, raw_content, source, url, captured_at, created_at, updated_at)
+         VALUES ('canonical', 'Synthetic', '', 'fixture', 'fixture://session',
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+         UPDATE items SET document_id='canonical' WHERE id='legacy-observation';",
+    ).unwrap();
+    drop(conn);
+    let source = Connection::open(&legacy).unwrap();
+    source.execute(
+        "UPDATE items SET updated_at='2026-01-02T00:00:00Z', summary='Synthetic newer legacy edit'
+         WHERE id='legacy-observation'", [],
+    ).unwrap();
+    drop(source);
+
+    let error = migrate_stale_dbs(&target).expect_err("existing link must not be erased");
+    assert!(
+        error.contains("observation requires document_id"),
+        "{error}"
+    );
+    let conn = Connection::open(&target).unwrap();
+    let document_id: String = conn
+        .query_row(
+            "SELECT document_id FROM items WHERE id='legacy-observation'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(document_id, "canonical");
+    assert_new_detached_is_rejected(&conn);
+}

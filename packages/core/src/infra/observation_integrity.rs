@@ -101,11 +101,8 @@ fn migrate_ledger_foreign_keys(conn: &Connection) -> InfraResult<()> {
 }
 
 pub(super) fn suspend_for_legacy_import(conn: &Connection) -> InfraResult<()> {
-    conn.execute_batch(
-        "DROP TRIGGER IF EXISTS observations_require_document_insert;
-         DROP TRIGGER IF EXISTS observations_require_document_update;",
-    )
-    .map_err(|e| InfraError::Database(e.to_string()))
+    conn.execute_batch("DROP TRIGGER IF EXISTS observations_require_document_insert;")
+        .map_err(|e| InfraError::Database(e.to_string()))
 }
 
 pub(super) fn verify_triggers(conn: &Connection) -> InfraResult<()> {

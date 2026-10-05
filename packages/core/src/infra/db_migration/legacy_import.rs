@@ -15,9 +15,9 @@ pub(super) fn run(
         .map_err(|error| format!("failed to start migration transaction: {error}"))?;
 
     // Legacy schemas either predate document_id or legitimately contain
-    // historical detached observations. Pause only the two forward-write
-    // guards inside this dedicated import transaction. A rollback restores
-    // them automatically, and no normal application write uses this path.
+    // historical detached observations. Pause only the insert guard inside
+    // this transaction; the update guard must still protect existing links.
+    // A rollback restores the insert guard automatically.
     crate::infra::observation_integrity::suspend_for_legacy_import(&tx)
         .map_err(|error| format!("failed to suspend observation invariant: {error}"))?;
     let rows = super::copy_all_tables(&tx, "refine_migration_src", candidate)?;
