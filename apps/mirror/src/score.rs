@@ -73,6 +73,7 @@ pub async fn handle_score(
     all: bool,
     require_advice: bool,
     db_path: &Path,
+    cache_dir: &Path,
 ) -> Result<()> {
     if all && since.is_some() {
         anyhow::bail!("--all and --since are mutually exclusive");
@@ -97,6 +98,7 @@ pub async fn handle_score(
             .map_err(|e| anyhow::anyhow!("{}", e))?
     };
     if items.is_empty() {
+        invalidate_empty_score_cache(since.as_deref(), cache_dir)?;
         return finish_without_observations(
             require_advice,
             crate::lang::t!(
@@ -110,6 +112,7 @@ pub async fn handle_score(
         .filter(|i| i.item_type() == ItemType::Observation)
         .count();
     if obs_count == 0 {
+        invalidate_empty_score_cache(since.as_deref(), cache_dir)?;
         return finish_without_observations(
             require_advice,
             crate::lang::t!(
@@ -120,6 +123,7 @@ pub async fn handle_score(
     }
     let cluster = cluster_observations(&items);
     if cluster.data_quality.eligible_observations == 0 {
+        invalidate_empty_score_cache(since.as_deref(), cache_dir)?;
         anyhow::bail!(
             "No eligible linked interactive observations in the score window (input {}, detached {}, mode-excluded {}); refusing to persist an empty score or generate advice",
             cluster.data_quality.input_observations,
@@ -302,6 +306,27 @@ async fn compute_portfolio_advice_scores(
         long_cohort_identity: long_term.data_quality.cohort_identity,
         recent_cohort_identity: recent.data_quality.cohort_identity,
     })
+}
+
+fn invalidate_empty_score_cache(since: Option<&str>, cache_dir: &Path) -> Result<()> {
+    // A custom display window says nothing about the full portfolio cohort.
+    if since.is_some() {
+        return Ok(());
+    }
+    for filename in ["advice.json", "statusline.txt"] {
+        let path = cache_dir.join(filename);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "failed to invalidate empty-score cache {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn finish_without_observations(require_advice: bool, message: &str) -> Result<()> {

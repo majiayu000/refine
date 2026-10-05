@@ -42,6 +42,8 @@ async fn score_handler_rejects_detached_only_cohort_before_persist_or_advice() {
         calls: AtomicUsize::new(0),
     });
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("advice.json"), "synthetic stale advice").unwrap();
+    std::fs::write(dir.path().join("statusline.txt"), "synthetic stale status").unwrap();
 
     let error = handle_score(
         store,
@@ -50,6 +52,7 @@ async fn score_handler_rejects_detached_only_cohort_before_persist_or_advice() {
         true,
         true,
         &dir.path().join("refine.db"),
+        dir.path(),
     )
     .await
     .expect_err("detached-only cohort must fail closed");
@@ -57,6 +60,8 @@ async fn score_handler_rejects_detached_only_cohort_before_persist_or_advice() {
     assert!(error.to_string().contains("No eligible linked"));
     assert!(error.to_string().contains("refusing to persist"));
     assert_eq!(llm.calls.load(Ordering::SeqCst), 0);
+    assert!(!dir.path().join("advice.json").exists());
+    assert!(!dir.path().join("statusline.txt").exists());
 }
 
 pub(super) fn make_cluster(
@@ -342,4 +347,14 @@ pub(super) fn make_score_at_date(date: chrono::NaiveDate) -> ScoreResult {
         tension: None,
         timestamp: ts,
     }
+}
+
+#[test]
+fn empty_score_cache_invalidation_keeps_io_failures_visible() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("advice.json")).unwrap();
+    let error = invalidate_empty_score_cache(None, dir.path()).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("failed to invalidate empty-score cache"));
 }

@@ -51,7 +51,16 @@ async fn main() -> Result<()> {
             require_advice,
         } => {
             let llm = build_llm_client_from_env();
-            score::handle_score(store, llm, since, all, require_advice, &db_path).await
+            score::handle_score(
+                store,
+                llm,
+                since,
+                all,
+                require_advice,
+                &db_path,
+                &config::mirror_dir(),
+            )
+            .await
         }
         Commands::Motd => motd::handle_motd(),
         Commands::Dashboard { since, all } => dashboard::handle_dashboard(store, since, all).await,
