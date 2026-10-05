@@ -6,6 +6,10 @@ use std::process::{Command, Output};
 const STALE_POLICY: &str = "SYNTHETIC_STALE_POLICY";
 
 fn command(home: &Path, arguments: &[&str]) -> Output {
+    command_with_language(home, arguments, "en")
+}
+
+fn command_with_language(home: &Path, arguments: &[&str], language: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_mirror"))
         .env_clear()
         .env("HOME", home)
@@ -13,7 +17,7 @@ fn command(home: &Path, arguments: &[&str]) -> Output {
         .current_dir(home)
         .arg("--db")
         .arg(home.join("refine.db"))
-        .args(["--lang", "en"])
+        .args(["--lang", language])
         .args(arguments)
         .output()
         .expect("run isolated mirror")
@@ -39,7 +43,8 @@ fn seed(home: &Path) -> String {
         dir.join("advice.json"),
         json!({
             "cache_version":"advice-score-v5", "cache_key":"fixture", "model_identity":"fixture",
-            "generated_at":now, "score_timestamp":now, "advice":STALE_POLICY, "short":STALE_POLICY
+            "generated_at":now, "score_timestamp":now, "advice":STALE_POLICY, "short":STALE_POLICY,
+            "render_language":"en"
         })
         .to_string(),
     )
@@ -92,4 +97,28 @@ fn empty_custom_window_preserves_the_portfolio_cache() {
         std::fs::read_to_string(dir.join("scores.jsonl")).unwrap(),
         score
     );
+}
+
+#[test]
+fn motd_rejects_other_language_and_untagged_renderings() {
+    let home = tempfile::tempdir().unwrap();
+    seed(home.path());
+    let english = command(home.path(), &["motd"]);
+    assert!(english.status.success());
+    assert!(String::from_utf8_lossy(&english.stdout).contains(STALE_POLICY));
+
+    let chinese = command_with_language(home.path(), &["motd"], "zh");
+    assert!(chinese.status.success());
+    assert!(!String::from_utf8_lossy(&chinese.stdout).contains(STALE_POLICY));
+    let english_again = command(home.path(), &["motd"]);
+    assert!(String::from_utf8_lossy(&english_again.stdout).contains(STALE_POLICY));
+
+    let path = home.path().join(".mirror/advice.json");
+    let mut legacy: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("render_language");
+    std::fs::write(path, legacy.to_string()).unwrap();
+    let untagged = command(home.path(), &["motd"]);
+    assert!(untagged.status.success());
+    assert!(!String::from_utf8_lossy(&untagged.stdout).contains(STALE_POLICY));
 }
