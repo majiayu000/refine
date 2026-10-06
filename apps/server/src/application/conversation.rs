@@ -2,6 +2,7 @@ use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use refine_core::error::InfraError;
 use refine_core::infra::{normalize_conversation_input, trim_required_field};
 
 use crate::application::error::ApplicationErrorCode;
@@ -65,19 +66,8 @@ pub async fn create_conversation(
     let normalized = normalize_conversation_input(content, url, source, title, idempotency_key)
         .map_err(CreateConversationError::BadRequest)?;
 
-    if state.free_quota_items > 0 && !state.is_premium_user(&user_id) {
-        let used = state
-            .store
-            .count_items(None)
-            .await
-            .map_err(|err| CreateConversationError::Internal(err.to_string()))?;
-        if used >= state.free_quota_items {
-            return Err(CreateConversationError::QuotaExceeded {
-                used,
-                limit: state.free_quota_items,
-            });
-        }
-    }
+    let item_limit = (state.free_quota_items > 0 && !state.is_premium_user(&user_id))
+        .then_some(state.free_quota_items);
 
     let now = now_iso();
     let conversation_id = Uuid::new_v4().to_string();
@@ -106,11 +96,11 @@ pub async fn create_conversation(
     };
 
     if ingest_only {
-        let persisted = state
+        let (persisted, _) = state
             .conversation_repo
-            .insert_or_fetch_conversation_by_idempotency(&conversation)
+            .insert_or_fetch_conversation_with_quota(&conversation, None, item_limit)
             .await
-            .map_err(|err| CreateConversationError::Internal(err.to_string()))?;
+            .map_err(admission_error)?;
         let deduplicated = persisted.id != conversation_id;
         return Ok(CreateConversationResult {
             conversation_id: persisted.id,
@@ -134,9 +124,9 @@ pub async fn create_conversation(
     };
     let (persisted, persisted_job) = state
         .conversation_repo
-        .insert_or_fetch_conversation_with_job(&conversation, &job)
+        .insert_or_fetch_conversation_with_quota(&conversation, Some(&job), item_limit)
         .await
-        .map_err(|err| CreateConversationError::Internal(err.to_string()))?;
+        .map_err(admission_error)?;
     let deduplicated = persisted.id != conversation_id;
     if let Some(persisted_job) = persisted_job
         .as_ref()
@@ -156,6 +146,15 @@ pub async fn create_conversation(
         deduplicated,
         job_id: persisted_job.map(|job| job.id),
     })
+}
+
+fn admission_error(error: InfraError) -> CreateConversationError {
+    match error {
+        InfraError::CaptureQuotaExceeded { used, limit } => {
+            CreateConversationError::QuotaExceeded { used, limit }
+        }
+        error => CreateConversationError::Internal(error.to_string()),
+    }
 }
 
 #[derive(Debug, Clone)]

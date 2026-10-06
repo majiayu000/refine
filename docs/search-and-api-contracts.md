@@ -76,6 +76,15 @@ Seed 工具拒绝覆盖已存在的文件。不要把测试语料导入个人数
 `ingest_only` 返回真实持久化的 captured receipt；普通提炼返回持久化 conversation/job ID，
 可使用 `/v1/extraction-jobs/:id` 查询。幂等重放不会创建伪造的 local ID。
 
+配置正数 Items 配额时，配额限制新采集的准入。已持久化的幂等键仍能重放并返回
+原 conversation、当前状态及适用的 job ID，即使首次响应丢失后配额已满。
+新幂等键继续返回配额错误；已完成的采集不会因重放重新提炼。配额仍沿用当前
+单用户、全库 Items 计数合同，不是对尚未完成任务的 Item 数量预留。
+幂等键查询、新采集的 Items 计数、conversation 与初始 job 写入在同一个
+IMMEDIATE 事务中执行；不把事务外曾查到的旧 key 当作准入许可。其他写入者
+删除或修改了该 key 后，新请求须重新满足准入配额。输入校验与现有鉴权不变，
+重放不改写已经持久化的原 payload。
+
 原生 HTTP 接口沿用独立服务的显式访问配置：`REFINE_API_TOKEN`，或开发时
 `REFINE_DEV_ANON=1`。未配置时原生 UI 可使用，HTTP 接口不绑定端口，并记录
 配置错误。打包应用从 Finder 启动时不会自动继承终端环境变量；需要通过带配置

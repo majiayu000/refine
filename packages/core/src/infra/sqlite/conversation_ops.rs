@@ -28,6 +28,21 @@ pub(super) fn find_conversation_by_id(
     .map_err(|e| InfraError::Database(e.to_string()))
 }
 
+pub(super) fn find_conversation_by_idempotency(
+    conn: &Connection,
+    idempotency_key: &str,
+) -> InfraResult<Option<ConversationRecord>> {
+    conn.query_row(
+        "SELECT id, user_id, source, url, title, raw_content, metadata_json,
+                captured_at, created_at, status, idempotency_key, item_ids, last_error
+         FROM conversations WHERE idempotency_key = ?1",
+        [idempotency_key],
+        row_to_conversation,
+    )
+    .optional()
+    .map_err(|e| InfraError::Database(e.to_string()))
+}
+
 pub(super) fn list_conversations(
     conn: &Connection,
     status: Option<&str>,
@@ -229,14 +244,34 @@ pub(super) fn insert_or_fetch_conversation_with_job(
     record: &ConversationRecord,
     job: &ExtractionJobRecord,
 ) -> InfraResult<(ConversationRecord, Option<ExtractionJobRecord>)> {
+    insert_or_fetch_conversation_with_quota(conn, record, Some(job), None)
+}
+
+pub(super) fn insert_or_fetch_conversation_with_quota(
+    conn: &Connection,
+    record: &ConversationRecord,
+    job: Option<&ExtractionJobRecord>,
+    item_limit: Option<usize>,
+) -> InfraResult<(ConversationRecord, Option<ExtractionJobRecord>)> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|e| InfraError::Database(e.to_string()))?;
-    let mut persisted = insert_or_fetch_conversation_by_idempotency(&tx, record)?;
-    if persisted.status == ConversationStatus::Processed {
+    let mut persisted = match find_conversation_by_idempotency(&tx, &record.idempotency_key)? {
+        Some(existing) => existing,
+        None => {
+            if let Some(limit) = item_limit {
+                let used = super::ops::count_items(&tx, None)?;
+                if used >= limit {
+                    return Err(InfraError::CaptureQuotaExceeded { used, limit });
+                }
+            }
+            insert_or_fetch_conversation_by_idempotency(&tx, record)?
+        }
+    };
+    let Some(job) = job.filter(|_| persisted.status != ConversationStatus::Processed) else {
         tx.commit()
             .map_err(|e| InfraError::Database(e.to_string()))?;
         return Ok((persisted, None));
-    }
+    };
 
     let existing = tx
         .query_row(
@@ -890,6 +925,9 @@ fn job_status_from_db(raw: &str) -> Result<JobStatus, String> {
         _ => Err(format!("invalid job status: {}", raw)),
     }
 }
+
+#[cfg(test)]
+mod quota_tests;
 
 #[cfg(test)]
 mod tests {

@@ -12,6 +12,8 @@ use std::sync::Arc;
 use tower::ServiceExt;
 use tower_http::cors::AllowOrigin;
 
+mod quota;
+
 async fn fixture() -> (tempfile::TempDir, Arc<AppState>, Router) {
     let dir = tempfile::tempdir().unwrap();
     let state = Arc::new(

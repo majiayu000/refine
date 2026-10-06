@@ -26,6 +26,9 @@ pub enum InfraError {
     #[error("数据库错误: {0}")]
     Database(String),
 
+    #[error("Configured quota exceeded ({used}/{limit} items).")]
+    CaptureQuotaExceeded { used: usize, limit: usize },
+
     #[error("未找到: {0}")]
     NotFound(String),
 

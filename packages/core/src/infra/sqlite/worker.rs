@@ -179,6 +179,12 @@ pub(super) enum SqliteCommand {
         job: ExtractionJobRecord,
         resp: oneshot::Sender<InfraResult<(ConversationRecord, Option<ExtractionJobRecord>)>>,
     },
+    ConversationInsertOrFetchWithQuota {
+        record: ConversationRecord,
+        job: Option<ExtractionJobRecord>,
+        item_limit: Option<usize>,
+        resp: oneshot::Sender<InfraResult<(ConversationRecord, Option<ExtractionJobRecord>)>>,
+    },
     // Extraction job 操作
     JobFindById {
         id: String,
@@ -569,6 +575,23 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
                 "ConversationInsertOrFetchWithJob",
                 resp,
                 conversation_ops::insert_or_fetch_conversation_with_job(conn, &record, &job),
+            );
+        }
+        SqliteCommand::ConversationInsertOrFetchWithQuota {
+            record,
+            job,
+            item_limit,
+            resp,
+        } => {
+            send_response(
+                "ConversationInsertOrFetchWithQuota",
+                resp,
+                conversation_ops::insert_or_fetch_conversation_with_quota(
+                    conn,
+                    &record,
+                    job.as_ref(),
+                    item_limit,
+                ),
             );
         }
         SqliteCommand::JobFindById { id, resp } => {

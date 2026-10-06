@@ -420,6 +420,23 @@ impl ConversationRepository for SqliteStore {
         self.request(|resp| SqliteCommand::ConversationInsertOrFetchWithJob { record, job, resp })
             .await
     }
+
+    async fn insert_or_fetch_conversation_with_quota(
+        &self,
+        record: &ConversationRecord,
+        job: Option<&ExtractionJobRecord>,
+        item_limit: Option<usize>,
+    ) -> InfraResult<(ConversationRecord, Option<ExtractionJobRecord>)> {
+        let record = record.clone();
+        let job = job.cloned();
+        self.request(|resp| SqliteCommand::ConversationInsertOrFetchWithQuota {
+            record,
+            job,
+            item_limit,
+            resp,
+        })
+        .await
+    }
 }
 
 #[async_trait]

@@ -32,6 +32,16 @@ pub trait ConversationRepository: Send + Sync {
         record: &ConversationRecord,
         job: &ExtractionJobRecord,
     ) -> InfraResult<(ConversationRecord, Option<ExtractionJobRecord>)>;
+    /// In one transaction, replays an existing idempotency key or admits a new
+    /// capture only while the global persisted item count is below `item_limit`.
+    /// An optional initial job uses the same recovery behavior as the job API.
+    /// Existing keys bypass admission quota without changing their payload.
+    async fn insert_or_fetch_conversation_with_quota(
+        &self,
+        record: &ConversationRecord,
+        job: Option<&ExtractionJobRecord>,
+        item_limit: Option<usize>,
+    ) -> InfraResult<(ConversationRecord, Option<ExtractionJobRecord>)>;
 }
 
 #[async_trait]
