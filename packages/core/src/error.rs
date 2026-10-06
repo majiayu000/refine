@@ -23,6 +23,9 @@ pub enum DomainError {
 /// 基础设施错误
 #[derive(Error, Debug)]
 pub enum InfraError {
+    #[error("Idempotency key is already bound to a different request")]
+    IdempotencyConflict,
+
     #[error("数据库错误: {0}")]
     Database(String),
 

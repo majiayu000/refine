@@ -101,7 +101,25 @@ CREATE TABLE IF NOT EXISTS conversations (
     status TEXT NOT NULL,
     idempotency_key TEXT NOT NULL UNIQUE,
     item_ids TEXT NOT NULL,
-    last_error TEXT
+    last_error TEXT,
+    superseded_by TEXT
+);
+
+-- Acceptance order is assigned by SQLite, never by a client timestamp. The
+-- AUTOINCREMENT high-water mark survives deletion and VACUUM.
+CREATE TABLE IF NOT EXISTS capture_revisions (
+    revision INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id) ON DELETE CASCADE
+);
+CREATE TRIGGER IF NOT EXISTS conversations_capture_revision AFTER INSERT ON conversations BEGIN
+    INSERT INTO capture_revisions(conversation_id) VALUES (NEW.id);
+END;
+
+-- Keep the publication fence even if a historical receipt is later removed.
+CREATE TABLE IF NOT EXISTS document_capture_publications (
+    url TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL,
+    conversation_id TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_conversations_status_created
@@ -109,6 +127,9 @@ ON conversations(status, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_conversations_captured_at
 ON conversations(captured_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_url_status
+ON conversations(url, status);
 
 CREATE TABLE IF NOT EXISTS extraction_jobs (
     id TEXT PRIMARY KEY,

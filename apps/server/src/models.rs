@@ -65,6 +65,8 @@ pub struct CreateConversationResponse {
     pub deduplicated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -81,6 +83,8 @@ pub struct CreateEventResponse {
 #[derive(Debug, Serialize)]
 pub struct GetExtractionJobResponse {
     pub job: ExtractionJobRecord,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 pub type ItemDto = refine_core::infra::ItemDto;
@@ -95,6 +99,8 @@ pub struct ConversationDto {
     pub captured_at: String,
     pub created_at: String,
     pub preview: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 impl From<&ConversationRecord> for ConversationDto {
@@ -120,6 +126,7 @@ impl From<&ConversationRecord> for ConversationDto {
             captured_at: record.captured_at.clone(),
             created_at: record.created_at.clone(),
             preview,
+            superseded_by: record.superseded_by.clone(),
         }
     }
 }
@@ -139,6 +146,7 @@ mod tests {
             status: super::ConversationStatus::Queued,
             deduplicated: None,
             job_id: None,
+            superseded_by: None,
         })
         .expect("serialize response");
 
@@ -152,6 +160,7 @@ mod tests {
             status: super::ConversationStatus::Captured,
             deduplicated: Some(true),
             job_id: Some("j1".to_string()),
+            superseded_by: None,
         })
         .expect("serialize response");
 
@@ -187,8 +196,11 @@ mod tests {
             lease_owner: None,
             lease_expires_at: None,
         };
-        let get_value = serde_json::to_value(GetExtractionJobResponse { job: job_record })
-            .expect("serialize get response");
+        let get_value = serde_json::to_value(GetExtractionJobResponse {
+            job: job_record,
+            superseded_by: None,
+        })
+        .expect("serialize get response");
         assert_eq!(get_value["job"]["id"], "j1");
         assert_eq!(get_value["job"]["status"], "running");
         assert!(get_value["job"].get("lease_owner").is_none());

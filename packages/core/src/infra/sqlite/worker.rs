@@ -1,14 +1,16 @@
 use super::rows::{configure_connection, configure_read_only_connection};
 use super::worker_support::{send_init_result, send_response};
 use super::{conversation_ops, doc_ops, insights_snapshot, ops, session_projection};
-use crate::conversation::{ConversationRecord, EventRecord, ExtractionJobRecord};
+use crate::conversation::{
+    ConversationRecord, EventRecord, ExtractionJobRecord, JobPublicationOutcome,
+};
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{
     Document, Item, ItemType, ObservationWindowSnapshot, RestoreDocumentParams,
     SessionProjectionMetadata, SessionProjectionRevision, SessionProjectionVersion,
 };
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use tokio::sync::oneshot;
@@ -67,6 +69,14 @@ pub(super) enum SqliteCommand {
     CountTextHits {
         query: String,
         resp: oneshot::Sender<InfraResult<usize>>,
+    },
+    SearchPage {
+        query: String,
+        item_type: Option<ItemType>,
+        tags: Vec<String>,
+        offset: usize,
+        limit: usize,
+        resp: oneshot::Sender<InfraResult<(Vec<Item>, usize)>>,
     },
     FindByDocumentId {
         document_id: String,
@@ -236,7 +246,7 @@ pub(super) enum SqliteCommand {
         document: Document,
         items: Vec<Item>,
         now: String,
-        resp: oneshot::Sender<InfraResult<bool>>,
+        resp: oneshot::Sender<InfraResult<JobPublicationOutcome>>,
     },
     // Event 操作
     EventInsert {
@@ -396,6 +406,20 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
         }
         SqliteCommand::CountTextHits { query, resp } => {
             send_response("CountTextHits", resp, ops::count_text_hits(conn, &query));
+        }
+        SqliteCommand::SearchPage {
+            query,
+            item_type,
+            tags,
+            offset,
+            limit,
+            resp,
+        } => {
+            send_response(
+                "SearchPage",
+                resp,
+                ops::search_page(conn, &query, item_type, &tags, offset, limit),
+            );
         }
         SqliteCommand::FindByDocumentId { document_id, resp } => {
             send_response(
@@ -730,33 +754,80 @@ fn finish_job_claim_with_results(
     document: &Document,
     items: &[Item],
     now: &str,
-) -> InfraResult<bool> {
+) -> InfraResult<JobPublicationOutcome> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|e| InfraError::Database(e.to_string()))?;
-    let owns_claim: bool = tx
+    let capture: Option<(String, String, i64)> = tx
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM extraction_jobs \
-             WHERE id = ?1 AND status = 'running' AND lease_owner = ?2)",
+            "SELECT c.id, c.url, r.revision FROM extraction_jobs j
+             JOIN conversations c ON c.id = j.conversation_id
+             JOIN capture_revisions r ON r.conversation_id = c.id
+             WHERE j.id = ?1 AND j.status = 'running' AND j.lease_owner = ?2",
             rusqlite::params![id, owner],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let Some((conversation_id, url, revision)) = capture else {
+        return Ok(JobPublicationOutcome::LostClaim);
+    };
+    if document.url() != url {
+        return Err(InfraError::Database(
+            "extraction document URL differs from its accepted capture".to_string(),
+        ));
+    }
+    let newer: Option<String> = tx
+        .query_row(
+            "SELECT conversation_id FROM document_capture_publications
+             WHERE url = ?1 AND revision > ?2",
+            rusqlite::params![url, revision],
             |row| row.get(0),
         )
+        .optional()
         .map_err(|e| InfraError::Database(e.to_string()))?;
-    if !owns_claim {
-        tx.commit()
-            .map_err(|e| InfraError::Database(e.to_string()))?;
-        return Ok(false);
-    }
-
-    let (document, items) = canonicalize_document_items(&tx, document, items)?;
-    doc_ops::save(&tx, &document)?;
-    ops::delete_by_document_id(&tx, document.id().as_str())?;
-    for item in &items {
-        ops::save(&tx, item)?;
-    }
-    let item_ids = items
-        .iter()
-        .map(|item| item.id().to_string())
-        .collect::<Vec<_>>();
+    let (outcome, item_ids) = if let Some(newer_id) = newer {
+        tx.execute(
+            "UPDATE conversations SET superseded_by = ?2 WHERE id = ?1",
+            rusqlite::params![conversation_id, newer_id],
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+        (JobPublicationOutcome::Superseded, Vec::new())
+    } else {
+        let (document, items) = canonicalize_document_items(&tx, document, items)?;
+        doc_ops::save(&tx, &document)?;
+        ops::delete_by_document_id(&tx, document.id().as_str())?;
+        for item in &items {
+            ops::save(&tx, item)?;
+        }
+        // These receipts now describe historical successful work, not current
+        // Item IDs. Keep their terminal status while naming the replacement.
+        tx.execute(
+            "UPDATE conversations SET item_ids = '[]', superseded_by = ?1
+             WHERE url = ?2 AND id != ?1 AND status = 'processed' AND superseded_by IS NULL
+               AND EXISTS (SELECT 1 FROM capture_revisions r
+                           WHERE r.conversation_id = conversations.id AND r.revision < ?3)",
+            rusqlite::params![conversation_id, url, revision],
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+        tx.execute(
+            "INSERT INTO document_capture_publications(url, revision, conversation_id)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(url) DO UPDATE SET revision = excluded.revision,
+                                            conversation_id = excluded.conversation_id
+             WHERE excluded.revision >= document_capture_publications.revision",
+            rusqlite::params![url, revision, conversation_id],
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+        tx.execute(
+            "UPDATE conversations SET superseded_by = NULL WHERE id = ?1",
+            [conversation_id.as_str()],
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+        (
+            JobPublicationOutcome::Published,
+            items.iter().map(|item| item.id().to_string()).collect(),
+        )
+    };
     let finished = conversation_ops::finish_job_claim_in_transaction(
         &tx,
         id,
@@ -773,7 +844,7 @@ fn finish_job_claim_with_results(
     }
     tx.commit()
         .map_err(|e| InfraError::Database(e.to_string()))?;
-    Ok(true)
+    Ok(outcome)
 }
 
 fn save_document_with_replaced_items_and_delete_documents(

@@ -84,6 +84,18 @@ pub struct ConversationRecord {
     pub idempotency_key: String,
     pub item_ids: Vec<String>,
     pub last_error: Option<String>,
+    /// A later accepted capture replaced this result. Following this receipt
+    /// chain leads to the current publication. Superseded jobs still complete
+    /// successfully, but their receipt has no current Item IDs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobPublicationOutcome {
+    LostClaim,
+    Published,
+    Superseded,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -32,6 +32,10 @@ async fn fixture() -> (tempfile::TempDir, Arc<AppState>, Router) {
 }
 
 async fn post(app: &Router, payload: Value) -> Value {
+    post_expect(app, payload, StatusCode::OK).await
+}
+
+async fn post_expect(app: &Router, payload: Value, status: StatusCode) -> Value {
     let response = app
         .clone()
         .oneshot(
@@ -45,8 +49,59 @@ async fn post(app: &Router, payload: Value) -> Value {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), status);
     serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn captured_receipt_replay_succeeds_after_quota_fills_without_admitting_new_payloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = AppState::build_for_test(
+        dir.path().join("quota.sqlite"),
+        AuthConfig {
+            api_token: Some("test-token".into()),
+            dev_anon: false,
+        },
+    )
+    .await
+    .unwrap();
+    state.free_quota_items = 1;
+    state.premium_users.clear();
+    let state = Arc::new(state);
+    let app = build_app(state.clone(), AllowOrigin::list([]));
+    let payload = json!({
+        "content": "A capture whose first response was lost", "source": "browser",
+        "url": "https://example.test/lost-response", "idempotency_key": "lost-response",
+        "ingest_only": true, "metadata": {"capture": 1}
+    });
+    let original = post(&app, payload.clone()).await;
+    state
+        .store
+        .save(&refine_core::knowledge::Item::new_knowledge(
+            "quota", "one item",
+        ))
+        .await
+        .unwrap();
+    let replay = post(&app, payload.clone()).await;
+    assert_eq!(replay["conversation_id"], original["conversation_id"]);
+    assert_eq!(replay["status"], "captured");
+    assert_eq!(replay["deduplicated"], true);
+
+    let mut conflict = payload.clone();
+    conflict["content"] = json!("another payload must use another key");
+    post_expect(&app, conflict, StatusCode::BAD_REQUEST).await;
+    let mut new_request = payload;
+    new_request["idempotency_key"] = json!("genuinely-new");
+    let rejected = post_expect(&app, new_request, StatusCode::FORBIDDEN).await;
+    assert_eq!(rejected["quota"]["used"], 1);
+    assert_eq!(
+        state
+            .conversation_repo
+            .count_conversations(None)
+            .await
+            .unwrap(),
+        1
+    );
 }
 
 #[tokio::test]

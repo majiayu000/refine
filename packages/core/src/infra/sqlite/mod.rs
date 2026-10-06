@@ -4,7 +4,7 @@
 
 use crate::conversation::{
     ConversationRecord, ConversationRepository, EventRecord, EventRepository, ExtractionJobRecord,
-    JobRepository,
+    JobPublicationOutcome, JobRepository,
 };
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{
@@ -152,6 +152,27 @@ impl ItemRepository for SqliteStore {
         let query = query.to_string();
         self.request(|resp| SqliteCommand::CountTextHits { query, resp })
             .await
+    }
+
+    async fn search_page(
+        &self,
+        query: &str,
+        item_type: Option<ItemType>,
+        tags: &[String],
+        offset: usize,
+        limit: usize,
+    ) -> InfraResult<(Vec<Item>, usize)> {
+        let query = query.to_string();
+        let tags = tags.to_vec();
+        self.request(|resp| SqliteCommand::SearchPage {
+            query,
+            item_type,
+            tags,
+            offset,
+            limit,
+            resp,
+        })
+        .await
     }
 
     async fn find_since(&self, since: DateTime<Utc>) -> InfraResult<Vec<Item>> {
@@ -550,7 +571,7 @@ impl JobRepository for SqliteStore {
         document: &Document,
         items: &[Item],
         now: &str,
-    ) -> InfraResult<bool> {
+    ) -> InfraResult<JobPublicationOutcome> {
         let id = id.to_string();
         let owner = owner.to_string();
         let document = document.clone();

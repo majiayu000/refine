@@ -1,3 +1,4 @@
+use refine_core::conversation::JobPublicationOutcome;
 use refine_core::knowledge::{
     Document, DocumentRepository, Item, ItemId, RestoreDocumentParams, Source,
 };
@@ -297,12 +298,25 @@ async fn save_claimed_results_and_index(
             ));
         }
     };
-    if !finished {
-        let cleanup_error = cleanup_indexed_items(state, &indexed_ids).await;
-        return Err(with_cleanup_error(
-            "extraction claim was lost before result persistence".to_string(),
-            cleanup_error,
-        ));
+    match finished {
+        JobPublicationOutcome::LostClaim => {
+            let cleanup_error = cleanup_indexed_items(state, &indexed_ids).await;
+            return Err(with_cleanup_error(
+                "extraction claim was lost before result persistence".to_string(),
+                cleanup_error,
+            ));
+        }
+        JobPublicationOutcome::Superseded => {
+            if let Some(error) = cleanup_indexed_items(state, &indexed_ids).await {
+                tracing::warn!(
+                    job_id,
+                    error,
+                    "failed to clean superseded extraction indexes"
+                );
+            }
+            return Ok(());
+        }
+        JobPublicationOutcome::Published => {}
     }
 
     remove_obsolete_indexes(state, &existing_item_ids, &new_item_ids).await;
@@ -432,6 +446,47 @@ mod tests {
     }
 
     struct FailingVectorSearch;
+
+    struct OrderedLlmClient {
+        old_started: Arc<Semaphore>,
+        release_old: Arc<Semaphore>,
+    }
+
+    #[async_trait]
+    impl LlmClient for OrderedLlmClient {
+        async fn complete(&self, prompt: &str, _system: Option<&str>) -> InfraResult<String> {
+            let old = prompt.contains("old-capture-marker");
+            if old {
+                self.old_started.add_permits(1);
+                self.release_old.acquire().await.unwrap().forget();
+            }
+            Ok(json!({"items": [{
+                "type": "knowledge", "title": if old { "old-result" } else { "new-result" },
+                "summary": "Summary", "content": "Content", "tags": []
+            }]})
+            .to_string())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingVectorSearch(std::sync::Mutex<std::collections::HashSet<String>>);
+
+    #[async_trait]
+    impl VectorSearch for RecordingVectorSearch {
+        async fn search(&self, _query: &str, _limit: usize) -> InfraResult<Vec<(String, f32)>> {
+            Ok(Vec::new())
+        }
+
+        async fn index(&self, id: &str, _text: &str) -> InfraResult<()> {
+            self.0.lock().unwrap().insert(id.into());
+            Ok(())
+        }
+
+        async fn remove(&self, id: &str) -> InfraResult<()> {
+            self.0.lock().unwrap().remove(id);
+            Ok(())
+        }
+    }
 
     #[async_trait]
     impl VectorSearch for FailingVectorSearch {
@@ -650,6 +705,135 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn delayed_older_provider_result_preserves_newer_document_indexes_and_http_receipt() {
+        use axum::{
+            body::{to_bytes, Body},
+            http::Request,
+        };
+        use tower::ServiceExt;
+        let (_tmp, base, persistence, old_id, old_job_id) =
+            build_state_with_failing_index().await.unwrap();
+        let mut old = persistence
+            .find_conversation_by_id(&old_id)
+            .await
+            .unwrap()
+            .unwrap();
+        old.raw_content = "Human: old-capture-marker\nAssistant: old snapshot".into();
+        persistence.upsert_conversation(&old).await.unwrap();
+        let mut new = old.clone();
+        new.id = Uuid::new_v4().to_string();
+        new.idempotency_key = Uuid::new_v4().to_string();
+        new.raw_content = "Human: new-capture-marker\nAssistant: new snapshot".into();
+        new.captured_at = "2000-01-01T00:00:00Z".into();
+        let mut new_job = persistence
+            .find_job_by_id(&old_job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        new_job.id = Uuid::new_v4().to_string();
+        new_job.conversation_id = new.id.clone();
+        persistence
+            .insert_or_fetch_conversation_with_quota(&new, Some(&new_job), None)
+            .await
+            .unwrap();
+
+        let old_started = Arc::new(Semaphore::new(0));
+        let release_old = Arc::new(Semaphore::new(0));
+        let index = Arc::new(RecordingVectorSearch::default());
+        let state = Arc::new(AppState {
+            database_identity: base.database_identity.clone(),
+            store: base.store.clone(),
+            doc_store: base.doc_store.clone(),
+            engine: Arc::new(
+                SearchEngine::new(base.store.clone()).with_vector_search(index.clone()),
+            ),
+            semantic_search_enabled: true,
+            free_quota_items: 0,
+            premium_users: Default::default(),
+            llm_client: Some(Arc::new(OrderedLlmClient {
+                old_started: old_started.clone(),
+                release_old: release_old.clone(),
+            })),
+            api_token: None,
+            dev_anon: true,
+            conversation_repo: base.conversation_repo.clone(),
+            job_repo: base.job_repo.clone(),
+            event_repo: base.event_repo.clone(),
+        });
+        let old_task = {
+            let state = state.clone();
+            let old_id = old_id.clone();
+            let old_job_id = old_job_id.clone();
+            tokio::spawn(async move {
+                run_extraction(state, &old_id, &old_job_id, ExtractionMode::Auto).await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(3), old_started.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            run_extraction(state.clone(), &new.id, &new_job.id, ExtractionMode::Auto),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        release_old.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(3), old_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        let document = state
+            .doc_store
+            .find_by_url(&new.url)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(document.raw_content(), new.raw_content);
+        assert_eq!(
+            document.captured_at(),
+            new.captured_at
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .unwrap()
+        );
+        let items = state.store.find_all().await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title(), "new-result");
+        assert_eq!(
+            *index.0.lock().unwrap(),
+            [items[0].id().to_string()].into_iter().collect()
+        );
+
+        let app = crate::build_app(state, tower_http::cors::AllowOrigin::list([]));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/extraction-jobs/{old_job_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap())
+                .unwrap();
+        assert_eq!(receipt["job"]["status"], "succeeded");
+        assert_eq!(receipt["superseded_by"], new.id);
+        let old = persistence
+            .find_conversation_by_id(&old_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.status, ConversationStatus::Processed);
+        assert!(old.item_ids.is_empty());
+    }
+
     async fn build_state_with_failing_index(
     ) -> Result<(TempDir, Arc<AppState>, Arc<SqliteStore>, String, String), String> {
         let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
@@ -682,6 +866,7 @@ mod tests {
                 idempotency_key: Uuid::new_v4().to_string(),
                 item_ids: Vec::new(),
                 last_error: None,
+                superseded_by: None,
             })
             .await
             .map_err(|e| e.to_string())?;

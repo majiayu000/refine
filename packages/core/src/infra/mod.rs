@@ -26,13 +26,21 @@ mod startup_tests;
 mod substring_index;
 
 const FTS_BOOTSTRAP_USER_VERSION: i64 = 1;
-const ALLOWED_COLUMN_EXISTS_TABLES: &[&str] = &["items", "documents", "extraction_jobs"];
+const ALLOWED_COLUMN_EXISTS_TABLES: &[&str] =
+    &["items", "documents", "extraction_jobs", "conversations"];
 const ALLOWED_FOREIGN_KEY_TABLES: &[&str] = &["extraction_jobs"];
 
 pub fn prepare_sqlite_db(conn: &Connection) -> InfraResult<()> {
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
+    let had_capture_revisions: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'capture_revisions')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
     tx.execute_batch(include_str!("schema.sql"))
         .map_err(|e| InfraError::Database(e.to_string()))?;
     migrate_items_add_document_columns(&tx)?;
@@ -42,11 +50,40 @@ pub fn prepare_sqlite_db(conn: &Connection) -> InfraResult<()> {
     observation_integrity::ensure_triggers(&tx)?;
     migrate_extraction_jobs_add_lease_columns(&tx)?;
     migrate_extraction_jobs_conversation_fk(&tx)?;
+    migrate_capture_publications(&tx, had_capture_revisions)?;
     maybe_rebuild_fts_index(&tx)?;
     substring_index::prepare(&tx)?;
     tx.commit()
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
+    Ok(())
+}
+
+fn migrate_capture_publications(conn: &Connection, had_revisions: bool) -> InfraResult<()> {
+    if !column_exists(conn, "conversations", "superseded_by")? {
+        conn.execute_batch("ALTER TABLE conversations ADD COLUMN superseded_by TEXT")
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+    }
+    if !had_revisions {
+        // A pre-upgrade database did not record a formal acceptance sequence.
+        // Freeze its existing row order once; later inserts use the trigger.
+        // Preserve the current document and seed a fence only when its source
+        // snapshot can be matched to a processed capture without guessing from
+        // timestamps. This migration never republishes historical content.
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO capture_revisions(conversation_id)
+             SELECT id FROM conversations ORDER BY rowid;
+             INSERT OR IGNORE INTO document_capture_publications(url, revision, conversation_id)
+             SELECT c.url, r.revision, c.id
+             FROM conversations c
+             JOIN capture_revisions r ON r.conversation_id = c.id
+             JOIN documents d ON d.url = c.url AND d.raw_content = c.raw_content
+                              AND d.source = c.source
+             WHERE c.status = 'processed'
+             ORDER BY r.revision DESC;",
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    }
     Ok(())
 }
 

@@ -20,6 +20,7 @@ fn capture(id: &str, key: &str) -> ConversationRecord {
         idempotency_key: key.into(),
         item_ids: vec![],
         last_error: None,
+        superseded_by: None,
     }
 }
 
