@@ -87,9 +87,25 @@ retained separately.
 
 Default score and dashboard share one local publisher for history, deterministic
 advice, and statusline output. A publication lock serializes their writers.
-When a newer same-day snapshot has already been retained, an older process can
-render its requested view but cannot replace the retained snapshot's advice or
-statusline. Dashboard reads the recent 7-day cohort together with its 90-day
+An atomically replaced `score-publication.json` records the latest cutoff for
+each database/window/method/targets scope, including empty or ineligible
+snapshots. A publication must have a strictly later cutoff to advance that
+scope; this ordering spans dates and does not depend on changing cohort or
+quality metadata. An older process may render its requested view but cannot
+append history or replace or invalidate newer derived output. Empty snapshots
+advance the watermark without inventing a score, even on the first run.
+
+The same watermark identifies the owner of the single advice/statusline cache.
+A different scope may append its own history, but only a strictly later valid
+publication can take cache ownership; equal cutoffs preserve the current
+owner. An empty result only invalidates its own scope's cache, leaving another
+database's output intact. Cache readers verify owner, scope, and cutoff rather
+than matching a timestamp alone. On upgrade, existing canonical history seeds
+the per-scope cutoffs; a legacy cache is accepted only when its timestamp and
+cohort identify one matching scope. Unowned caches are not displayed and are
+replaced or cleared by the next accepted publication.
+
+Dashboard reads the recent 7-day cohort together with its 90-day
 cohort, so `score → dashboard → motd` preserves a current matching policy cache.
 
 Earlier schemas and v6 records without a canonical scope remain available to
@@ -116,4 +132,6 @@ order-independent rationale deduplication, shared source exclusions and event
 windows, database/target/window isolation, legacy activity compatibility, UTC
 daily retention, concurrent writers, and view-only CLI behavior. CLI fixtures
 run with isolated HOME and no API keys; deterministic score advice must still
-be available without remote calls.
+be available without remote calls. Fixed-cutoff publication tests replay both
+late-valid-after-empty and late-empty-after-valid orderings against real
+watermark/history/cache files, including cross-scope and equal-cutoff cases.

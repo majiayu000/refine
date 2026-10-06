@@ -53,8 +53,19 @@ impl CachedAdvice {
 }
 
 pub fn load_cached_for_score(score: &ScoreResult) -> Result<Option<CachedAdvice>> {
-    let path = crate::config::mirror_dir().join("advice.json");
-    load_cached_matching(&path, None, Some(score.timestamp))
+    load_cached_for_score_in(&crate::config::mirror_dir(), score)
+}
+
+pub(crate) fn load_cached_for_score_in(
+    directory: &Path,
+    score: &ScoreResult,
+) -> Result<Option<CachedAdvice>> {
+    let cached = load_cached_matching(&directory.join("advice.json"), None, Some(score.timestamp))?;
+    if cached.is_some() && crate::score::cache_belongs_to_score(directory, score)? {
+        Ok(cached)
+    } else {
+        Ok(None)
+    }
 }
 
 fn load_cached_matching(
@@ -89,6 +100,7 @@ fn load_cached_matching(
 }
 
 pub(super) fn save_policy_cache(
+    directory: &Path,
     policy: &PortfolioPolicy,
     cache_key: &str,
     model_identity: &str,
@@ -98,7 +110,6 @@ pub(super) fn save_policy_cache(
 ) -> Result<String> {
     validate_cohort_identity(long_cohort_identity, "rolling-90-day")?;
     validate_cohort_identity(recent_cohort_identity, "rolling-7-day")?;
-    let dir = crate::config::ensure_mirror_dir()?;
     let advice = deterministic_advice(policy);
     let cached = CachedAdvice {
         advice: advice.clone(),
@@ -114,11 +125,12 @@ pub(super) fn save_policy_cache(
         recent_cohort_identity: recent_cohort_identity.to_string(),
     };
     let json = serde_json::to_string_pretty(&cached)?;
-    std::fs::write(dir.join("advice.json"), json)?;
+    std::fs::write(directory.join("advice.json"), json)?;
     Ok(advice)
 }
 
 pub(crate) fn cache_current_deterministic(
+    directory: &Path,
     long_term: &ScoreResult,
     recent: &ScoreResult,
     score_timestamp: DateTime<Utc>,
@@ -135,6 +147,7 @@ pub(crate) fn cache_current_deterministic(
         recent_cohort_identity,
     );
     save_policy_cache(
+        directory,
         &policy,
         &cache_key,
         "deterministic",
@@ -144,8 +157,8 @@ pub(crate) fn cache_current_deterministic(
     )
 }
 
-pub(crate) fn invalidate_cached() -> Result<()> {
-    let path = crate::config::mirror_dir().join("advice.json");
+pub(crate) fn invalidate_cached(directory: &Path) -> Result<()> {
+    let path = directory.join("advice.json");
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

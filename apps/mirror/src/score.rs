@@ -3,6 +3,7 @@ mod compute;
 mod display;
 mod indicators;
 mod persistence;
+mod publication;
 mod scope;
 mod statusline;
 pub(crate) mod streak;
@@ -12,7 +13,7 @@ mod types;
 mod tests;
 
 use crate::cohort::{load_cohorts, EventWindow};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, NaiveDate, Utc};
 use refine_core::knowledge::{Item, ItemRepository};
 use refine_core::session::format_data_quality_stats;
@@ -22,16 +23,17 @@ use std::sync::Arc;
 pub use baseline::compute_personal_baseline;
 pub use compute::compute;
 pub use display::{indicator_display, layer_display};
-pub use persistence::{load_recent_scores, persist_score};
+pub use persistence::load_recent_scores;
+pub(crate) use publication::{
+    cache_belongs_to_score, invalidate_empty_score_cache, publish_canonical_score,
+};
 pub use scope::ScoreScope;
-pub use statusline::write_statusline;
 pub use types::{Indicator, LayerScore, ScoreResult, Signal};
 
-use baseline::compute_personal_trends;
 use display::print_score;
 
 #[cfg(test)]
-use baseline::{trend_from_personal, PersonalBaseline};
+use baseline::{compute_personal_trends, trend_from_personal, PersonalBaseline};
 
 #[cfg(test)]
 use types::Trend;
@@ -92,8 +94,12 @@ pub async fn handle_score(
     let selected = cohorts.next().expect("selected score window");
     let cluster = &selected.cluster;
     let items = &selected.cohort_items;
+    let config = crate::config::load();
+    let scope = canonical
+        .then(|| ScoreScope::canonical(db_path, &config.targets, now, &cluster.data_quality))
+        .transpose()?;
     if cluster.data_quality.input_observations == 0 {
-        invalidate_empty_score_cache(canonical, cache_dir)?;
+        invalidate_empty_score_cache(scope.as_ref(), cache_dir)?;
         return finish_without_observations(
             require_advice,
             crate::lang::t!(
@@ -103,29 +109,23 @@ pub async fn handle_score(
         );
     }
     if cluster.data_quality.eligible_observations == 0 {
-        invalidate_empty_score_cache(canonical, cache_dir)?;
+        invalidate_empty_score_cache(scope.as_ref(), cache_dir)?;
         anyhow::bail!(
             "No eligible linked interactive observations in the score window ({}); refusing to persist an empty score or generate advice",
             format_data_quality_stats(&cluster.data_quality),
         );
     }
-    let config = crate::config::load();
     let mut result = compute(cluster, &config.targets);
     result.timestamp = now;
+    result.scope = scope;
     let published = if canonical {
-        result.scope = Some(ScoreScope::canonical(
-            db_path,
-            &config.targets,
-            now,
-            &cluster.data_quality,
-        )?);
         let recent = cohorts.next().expect("canonical recent advice window");
         let recent_score = compute(&recent.cluster, &config.targets);
         Some(publish_canonical_score(
             &result,
             &recent_score,
             &recent.cluster.data_quality.cohort_identity,
-            db_path,
+            cache_dir,
         )?)
     } else {
         None
@@ -219,106 +219,6 @@ pub async fn handle_score(
         Err(_) => {} // The shared publisher already reports the local cache error.
     }
     Ok(())
-}
-
-pub(crate) struct PublishedScore {
-    pub trends: Option<baseline::PersonalTrends>,
-    pub advice: Result<String>,
-}
-
-/// Publish a canonical snapshot and its dependent output together for both
-/// score and dashboard. Serialize writers so an older process cannot overwrite
-/// cache/statusline output after a newer daily snapshot has been retained.
-pub(crate) fn publish_canonical_score(
-    result: &ScoreResult,
-    recent: &ScoreResult,
-    recent_cohort_identity: &str,
-    db_path: &Path,
-) -> Result<PublishedScore> {
-    let scope = result
-        .scope
-        .as_ref()
-        .context("canonical publication requires a score scope")?;
-    let dir = crate::config::ensure_mirror_dir()?;
-    with_publication_lock(&dir, || {
-        let history = load_recent_scores(365, scope)?;
-        let baseline = compute_personal_baseline(&history, scope);
-        let trends = baseline
-            .as_ref()
-            .map(|baseline| compute_personal_trends(result, baseline));
-        let retained = persist_score(result)?;
-        let advice = if retained {
-            match crate::advice::cache_current_deterministic(
-                result,
-                recent,
-                result.timestamp,
-                &scope.cohort_identity,
-                recent_cohort_identity,
-            ) {
-                Ok(advice) => Ok(advice),
-                Err(error) => {
-                    tracing::error!("portfolio advice failed: {}", error);
-                    Err(match crate::advice::invalidate_cached() {
-                        Ok(()) => error,
-                        Err(invalidation) => invalidation.context(format!(
-                            "portfolio advice failed ({error}); stale advice cache also could not be invalidated"
-                        )),
-                    })
-                }
-            }
-        } else {
-            // A newer same-day snapshot is already retained. Render this view
-            // locally while preserving the retained snapshot's derived files.
-            crate::advice::portfolio_policy(result, recent)
-                .map(|policy| crate::advice::deterministic_advice(&policy))
-        };
-        if retained {
-            if let Err(error) = write_statusline(result, db_path, trends.as_ref()) {
-                tracing::warn!("failed to write statusline.txt: {}", error);
-            }
-        }
-        Ok(PublishedScore { trends, advice })
-    })
-}
-
-fn with_publication_lock<T>(directory: &Path, work: impl FnOnce() -> Result<T>) -> Result<T> {
-    let path = directory.join("score-publication.lock");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&path)
-        .with_context(|| format!("open canonical publication lock {}", path.display()))?;
-    fs2::FileExt::lock_exclusive(&lock).context("acquire canonical publication lock")?;
-    let result = work();
-    let unlocked = fs2::FileExt::unlock(&lock).context("release canonical publication lock");
-    let value = result?;
-    unlocked?;
-    Ok(value)
-}
-
-pub(crate) fn invalidate_empty_score_cache(canonical: bool, cache_dir: &Path) -> Result<()> {
-    // A custom display window says nothing about the full portfolio cohort.
-    if !canonical || !cache_dir.exists() {
-        return Ok(());
-    }
-    with_publication_lock(cache_dir, || {
-        for filename in ["advice.json", "statusline.txt"] {
-            let path = cache_dir.join(filename);
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(anyhow::anyhow!(
-                        "failed to invalidate empty-score cache {}: {error}",
-                        path.display()
-                    ));
-                }
-            }
-        }
-        Ok(())
-    })
 }
 
 fn finish_without_observations(require_advice: bool, message: &str) -> Result<()> {

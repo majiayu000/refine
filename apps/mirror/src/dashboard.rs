@@ -49,8 +49,12 @@ pub async fn handle_dashboard(
         .into_iter();
     let cohort = cohorts.next().expect("dashboard score window");
     let cluster = &cohort.cluster;
+    let config = crate::config::load();
+    let scope = canonical
+        .then(|| score::ScoreScope::canonical(db_path, &config.targets, now, &cluster.data_quality))
+        .transpose()?;
     if cluster.data_quality.input_observations == 0 {
-        score::invalidate_empty_score_cache(canonical, &crate::config::mirror_dir())?;
+        score::invalidate_empty_score_cache(scope.as_ref(), &crate::config::mirror_dir())?;
         println!(
             "{}",
             t!(
@@ -61,29 +65,23 @@ pub async fn handle_dashboard(
         return Ok(());
     }
     if cluster.data_quality.eligible_observations == 0 {
-        score::invalidate_empty_score_cache(canonical, &crate::config::mirror_dir())?;
+        score::invalidate_empty_score_cache(scope.as_ref(), &crate::config::mirror_dir())?;
         anyhow::bail!(
             "No eligible linked interactive observations in the dashboard window ({}); refusing to persist an empty score",
             format_data_quality_stats(&cluster.data_quality),
         );
     }
-    let config = crate::config::load();
     let mut result = score::compute(cluster, &config.targets);
     result.timestamp = now;
+    result.scope = scope;
     let published = if canonical {
-        result.scope = Some(score::ScoreScope::canonical(
-            db_path,
-            &config.targets,
-            now,
-            &cluster.data_quality,
-        )?);
         let recent = cohorts.next().expect("dashboard recent advice window");
         let recent_score = score::compute(&recent.cluster, &config.targets);
         Some(score::publish_canonical_score(
             &result,
             &recent_score,
             &recent.cluster.data_quality.cohort_identity,
-            db_path,
+            &crate::config::mirror_dir(),
         )?)
     } else {
         None

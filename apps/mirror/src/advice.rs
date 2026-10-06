@@ -5,7 +5,9 @@ mod cache;
 mod policy;
 mod profile_context;
 
-pub(crate) use cache::{cache_current_deterministic, invalidate_cached, load_cached_for_score};
+pub(crate) use cache::{
+    cache_current_deterministic, invalidate_cached, load_cached_for_score, load_cached_for_score_in,
+};
 pub(crate) use policy::{
     deterministic_advice, portfolio_policy, PortfolioMode, PortfolioPolicy, LONG_TERM_WINDOW_DAYS,
 };

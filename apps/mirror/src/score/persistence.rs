@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::Path;
 
-use crate::config::{ensure_mirror_dir, mirror_dir};
+use crate::config::mirror_dir;
 
 use super::scope::ScoreScope;
 use super::types::ScoreResult;
@@ -41,12 +41,6 @@ struct HistoryLine {
 
 fn legacy_score_timestamp() -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::<chrono::Utc>::UNIX_EPOCH
-}
-
-pub fn persist_score(result: &ScoreResult) -> Result<bool> {
-    let dir = ensure_mirror_dir()?;
-    let path = dir.join("scores.jsonl");
-    persist_score_to_path(&path, result)
 }
 
 pub(super) fn persist_score_to_path(path: &Path, result: &ScoreResult) -> Result<bool> {
@@ -168,7 +162,7 @@ fn persist_score_to_path_locked(path: &Path, result: &ScoreResult) -> Result<boo
     Ok(published)
 }
 
-fn write_lines_atomically(path: &Path, lines: &[String]) -> Result<()> {
+pub(super) fn write_lines_atomically(path: &Path, lines: &[String]) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
         anyhow::anyhow!(
             "score history path has no parent directory: {}",

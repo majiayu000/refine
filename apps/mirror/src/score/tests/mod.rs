@@ -8,6 +8,7 @@ mod baseline;
 mod compute;
 mod paths;
 mod persistence;
+mod publication;
 mod signal;
 mod streak;
 
@@ -346,7 +347,8 @@ pub(super) fn make_score_at_date(date: chrono::NaiveDate) -> ScoreResult {
 fn empty_score_cache_invalidation_keeps_io_failures_visible() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("advice.json")).unwrap();
-    let error = invalidate_empty_score_cache(true, dir.path()).unwrap_err();
+    let error =
+        invalidate_empty_score_cache(Some(&make_scope(Utc::now())), dir.path()).unwrap_err();
     assert!(error
         .to_string()
         .contains("failed to invalidate empty-score cache"));

@@ -254,10 +254,10 @@ where
     let target_recipe = llm_client
         .as_ref()
         .map(|client| refine_core::session::facet_recipe_identity(&client.cache_identity()));
-    if options.reprocess.is_some() {
+    if let Some(mode) = options.reprocess {
         println!(
             "reprocess={:?} target_recipe={}",
-            options.reprocess.unwrap(),
+            mode,
             target_recipe
                 .as_deref()
                 .unwrap_or("unknown (configure an LLM to preview recipe changes exactly)")
