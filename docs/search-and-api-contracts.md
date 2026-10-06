@@ -85,6 +85,35 @@ IMMEDIATE 事务中执行；不把事务外曾查到的旧 key 当作准入许�
 删除或修改了该 key 后，新请求须重新满足准入配额。输入校验与现有鉴权不变，
 重放不改写已经持久化的原 payload。
 
+### 同 URL 采集结果的发布顺序
+
+服务器在首次持久化采集的同一 SQLite 事务内分配递增接收 revision；修改同一
+采集的提炼输入也会获得新 revision。幂等重放及单纯任务状态更新不改变 revision。
+worker 领取任务时绑定该源 revision，发布事务重新核对 lease、源 revision 与
+Document 输入，再与该 URL **已经成功发布**的 revision 比较。较新任务仅排队、
+仍在提炼或失败时，不阻止较旧有效任务发布；较新结果成功发布后，旧任务不能覆盖
+Document、Items 或索引。接收顺序不使用客户端 `captured_at` 或模型完成时间。
+
+旧任务仍可通过原 job ID 查询：保留现有 `failed` 状态，`error` /
+conversation `last_error` 中的 `capture_superseded` 解释较新结果已发布；
+`capture_source_changed` 表示提炼期间原文版本发生变化。自动恢复只处理
+pending/running，不会把这些终态重新排入。HTTP 回执字段和状态枚举保持兼容。
+
+升级前历史采集的真实接收 revision 无法可靠恢复，迁移记录为未知的 `0`，不从
+rowid、`created_at` 或完成时间猜测。已完成历史与现有 Document 保持可读；
+旧任务在该 URL 尚未发布正 revision 时仍可完成，多个历史 `0` 之间保留原行为。
+一旦正 revision 成功发布，晚到的历史 `0` 也必须拒绝。防止发布回退的顺序保证
+从迁移后分配的正 revision 起生效，不宣称恢复了历史发布先后。较新任务仅排队
+或失败不会阻止旧工作。旧 worker 应在升级前停止，再由新版本恢复任务。
+此规则不自动重算历史；新版本领取任务后若源内容发生变化，重新提交采集可明确
+建立新版输入。
+
+历史 `server.db` 等文件的合并同样使用未知 `0`：导入在事务内暂停正 revision
+分配，外部数据库的 job revision 不带入本库时钟。导入不能用文件遍历或源库
+revision 猜测跨库接收顺序。已经发布正 revision 的 URL，其 Document 与附属
+Items 不被未知顺序的历史快照替换；历史原始文件与回执仍按原迁移合同保留。
+尚无正 revision 发布的 URL 继续沿用原历史合并行为。
+
 原生 HTTP 接口沿用独立服务的显式访问配置：`REFINE_API_TOKEN`，或开发时
 `REFINE_DEV_ANON=1`。未配置时原生 UI 可使用，HTTP 接口不绑定端口，并记录
 配置错误。打包应用从 Finder 启动时不会自动继承终端环境变量；需要通过带配置

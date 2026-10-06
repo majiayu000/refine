@@ -562,7 +562,11 @@ pub(super) fn claim_job(
             UPDATE extraction_jobs
             SET status = 'running', updated_at = ?3, error = NULL,
                 attempt_count = attempt_count + 1,
-                lease_owner = ?2, lease_expires_at = ?4
+                lease_owner = ?2, lease_expires_at = ?4,
+                source_revision = (
+                    SELECT revision FROM conversation_source_revisions
+                    WHERE conversation_id = extraction_jobs.conversation_id
+                )
             WHERE id = ?1 AND EXISTS (
                 SELECT 1 FROM conversations
                 WHERE conversations.id = extraction_jobs.conversation_id

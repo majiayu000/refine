@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS extraction_jobs (
     attempt_count INTEGER NOT NULL DEFAULT 0,
     lease_owner TEXT,
     lease_expires_at TEXT,
+    source_revision INTEGER,
     FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );
 

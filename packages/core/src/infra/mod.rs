@@ -9,6 +9,7 @@
 use crate::error::{InfraError, InfraResult};
 use rusqlite::Connection;
 
+mod capture_publication;
 mod contract;
 mod db_migration;
 mod document_fk_migration;
@@ -42,6 +43,7 @@ pub fn prepare_sqlite_db(conn: &Connection) -> InfraResult<()> {
     observation_integrity::ensure_triggers(&tx)?;
     migrate_extraction_jobs_add_lease_columns(&tx)?;
     migrate_extraction_jobs_conversation_fk(&tx)?;
+    capture_publication::prepare(&tx)?;
     maybe_rebuild_fts_index(&tx)?;
     substring_index::prepare(&tx)?;
     tx.commit()

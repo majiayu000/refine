@@ -83,7 +83,10 @@ pub trait JobRepository: Send + Sync {
         now: &str,
     ) -> InfraResult<bool>;
     /// Atomically verifies the active lease, replaces the extracted document
-    /// items, and marks both job and conversation successful.
+    /// items, and marks both job and conversation successful. The claimed
+    /// source revision must still be current and must not precede that URL's
+    /// published revision. Rejected publication leaves results unchanged and
+    /// returns an error for the caller to persist through `finish_job_claim`.
     async fn finish_job_claim_with_results(
         &self,
         id: &str,

@@ -747,6 +747,7 @@ fn finish_job_claim_with_results(
         return Ok(false);
     }
 
+    let publication = crate::infra::capture_publication::authorize(&tx, id, document)?;
     let (document, items) = canonicalize_document_items(&tx, document, items)?;
     doc_ops::save(&tx, &document)?;
     ops::delete_by_document_id(&tx, document.id().as_str())?;
@@ -771,6 +772,7 @@ fn finish_job_claim_with_results(
             "extraction lease changed during result transaction".to_string(),
         ));
     }
+    crate::infra::capture_publication::record(&tx, &document, &publication)?;
     tx.commit()
         .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(true)

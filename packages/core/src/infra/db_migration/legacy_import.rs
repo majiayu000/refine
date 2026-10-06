@@ -20,7 +20,13 @@ pub(super) fn run(
     // A rollback restores the insert guard automatically.
     crate::infra::observation_integrity::suspend_for_legacy_import(&tx)
         .map_err(|error| format!("failed to suspend observation invariant: {error}"))?;
+    // A foreign database's receive clock is not comparable with this one.
+    // Rollback restores normal admission if any import or validation fails.
+    crate::infra::capture_publication::set_legacy_import(&tx, true)
+        .map_err(|error| format!("failed to mark legacy capture import: {error}"))?;
     let rows = super::copy_all_tables(&tx, "refine_migration_src", candidate)?;
+    crate::infra::capture_publication::set_legacy_import(&tx, false)
+        .map_err(|error| format!("failed to restore capture admission: {error}"))?;
     crate::infra::observation_integrity::ensure_triggers(&tx)
         .map_err(|error| format!("failed to restore observation invariant: {error}"))?;
     crate::infra::observation_integrity::verify_triggers(&tx)

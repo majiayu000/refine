@@ -399,6 +399,9 @@ fn mode_to_policy(mode: ExtractionMode) -> ExtractionPolicy {
 }
 
 #[cfg(test)]
+mod publication_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{recover_extraction_jobs, run_extraction, spawn_extraction};
     use crate::models::{

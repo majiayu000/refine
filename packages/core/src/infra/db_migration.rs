@@ -702,6 +702,8 @@ fn copy_table(
             ("extraction_jobs", "conversation_id") => {
                 "COALESCE(conv_map.canonical_id, src.conversation_id)".to_string()
             }
+            // Source revisions belong to the originating database's clock.
+            ("extraction_jobs", "source_revision") => "NULL".to_string(),
             _ => format!("src.{column}"),
         })
         .collect::<Vec<_>>()
@@ -789,6 +791,41 @@ fn copy_table(
         }
         _ => "",
     };
+    let capture_publication_guard = match table {
+        "documents" => {
+            "AND NOT EXISTS (SELECT 1 FROM main.document_capture_publications AS publication \
+             WHERE publication.url=src.url AND publication.revision > 0)"
+        }
+        "items" if common.iter().any(|column| column == "document_id") => {
+            "AND NOT EXISTS ( \
+               SELECT 1 FROM main.documents AS document \
+               JOIN main.document_capture_publications AS publication ON publication.url=document.url \
+               WHERE document.id=COALESCE(doc_map.canonical_id, src.document_id) \
+                 AND publication.revision > 0 \
+             )"
+        }
+        _ => "",
+    };
+    // ON CONFLICT can target a protected row even when the incoming URL or
+    // parent changed, or an old items schema has no document_id column at all.
+    let existing_publication_guard = match table {
+        "documents" => {
+            "AND NOT EXISTS ( \
+               SELECT 1 FROM main.documents AS existing \
+               JOIN main.document_capture_publications AS publication ON publication.url=existing.url \
+               WHERE existing.id=doc_map.canonical_id AND publication.revision > 0 \
+             )"
+        }
+        "items" => {
+            "AND NOT EXISTS ( \
+               SELECT 1 FROM main.items AS existing \
+               JOIN main.documents AS document ON document.id=existing.document_id \
+               JOIN main.document_capture_publications AS publication ON publication.url=document.url \
+               WHERE existing.id=src.id AND publication.revision > 0 \
+             )"
+        }
+        _ => "",
+    };
     let sql = format!(
         "INSERT INTO {table} ({col_list}) \
          SELECT {select_list} FROM {legacy_alias}.{table} AS src {joins} \
@@ -801,7 +838,7 @@ fn copy_table(
                SELECT 1 FROM main.{table} AS current \
                WHERE current.id=imported.canonical_id \
              ) \
-         ) {parent_tombstone_guard} {order_by} {conflict}"
+         ) {parent_tombstone_guard} {capture_publication_guard} {existing_publication_guard} {order_by} {conflict}"
     );
     let source_path = source.to_string_lossy();
     let copied = conn
