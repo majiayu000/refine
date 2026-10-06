@@ -1,4 +1,7 @@
-use super::types::{MessageRole, Session, SessionMessage, SessionMeta, SessionMode, SessionSource};
+use super::types::{
+    MessageProvenance, MessageRole, Session, SessionMessage, SessionMeta, SessionMode,
+    SessionSource,
+};
 use anyhow::{bail, ensure, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -393,6 +396,11 @@ fn load_one_session<R: Runner>(runner: &R, summary: RememSessionSummary) -> Resu
                 other => bail!("unsupported raw message role {other:?}"),
             };
             messages.push(SessionMessage {
+                provenance: Some(MessageProvenance {
+                    id: raw.id,
+                    event_time: DateTime::<Utc>::from_timestamp(raw.created_at_epoch, 0)
+                        .context("raw message epoch is outside chrono range")?,
+                }),
                 role,
                 content: raw.content,
             });

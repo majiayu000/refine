@@ -117,3 +117,35 @@ describe('extension protected request headers', () => {
     expect(calls[0]?.authorization).toBe('Bearer delayed-token')
   })
 })
+
+describe('durable service receipts and deadlines', () => {
+  test('preserves service acceptance and job identity without claiming extraction completion', async () => {
+    globalThis.fetch = (async () => json({ success: true, conversation_id: 'c1', job_id: 'j1', status: 'queued' })) as unknown as typeof fetch
+    await expect(uploadConversation(outboxItem)).resolves.toEqual({
+      success: true, conversationId: 'c1', jobId: 'j1', status: 'queued',
+    })
+    globalThis.fetch = (async () => json({ success: true })) as unknown as typeof fetch
+    const invalid = await uploadConversation(outboxItem)
+    expect(invalid.success).toBe(false)
+    expect(invalid.message).toContain('回执')
+  })
+
+  test('times out a server that never sends headers and aborts the request', async () => {
+    let signal: AbortSignal | undefined
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      signal = init?.signal as AbortSignal
+      return new Promise<Response>(() => {})
+    }) as typeof fetch
+    const result = await uploadConversation(outboxItem, { timeoutMs: 5 })
+    expect(result.success).toBe(false)
+    expect(result.message).toContain('超时')
+    expect(signal?.aborted).toBe(true)
+  })
+
+  test('also bounds response body and credential reads', async () => {
+    globalThis.fetch = (async () => new Response(new ReadableStream({ start() {} }))) as unknown as typeof fetch
+    await expect(fetchQuotaStatus({ timeoutMs: 5 })).resolves.toBeNull()
+    storageGate = new Promise<void>(() => {})
+    await expect(fetchQuotaStatus({ timeoutMs: 5 })).resolves.toBeNull()
+  })
+})

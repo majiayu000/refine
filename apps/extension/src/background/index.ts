@@ -25,6 +25,7 @@ import {
 } from '../lib/config'
 import { OutboxRuntime, type OutboxSnapshot } from '../lib/outbox-runtime'
 import { createInvalidationGuard } from '../lib/invalidation-guard'
+import { CONTENT_EVENT_ACTION, validateContentEvent } from '../lib/content-events'
 import type {
   ConversationPayload,
   ExtensionStats,
@@ -88,19 +89,18 @@ interface TokenChangedMessage {
   action: 'tokenChanged'
 }
 
+interface ContentEventMessage {
+  action: typeof CONTENT_EVENT_ACTION
+  event: unknown
+}
+
 type BackgroundMessage =
   | EnqueueMessage
   | GetSyncStatusMessage
   | ForceSyncMessage
   | FetchRecommendationsMessage
   | TokenChangedMessage
-
-function formatQuotaExceededMessage(quota: QuotaStatusResponse): string {
-  if (typeof quota.limit === 'number') {
-    return `额度不足（${quota.used}/${quota.limit}），请升级会员或提高服务端额度后重试。`
-  }
-  return '额度不足，请升级会员或提高服务端额度后重试。'
-}
+  | ContentEventMessage
 
 async function buildSyncStatus(snapshot: OutboxSnapshot): Promise<SyncStatus> {
   const counts = {
@@ -118,6 +118,9 @@ async function buildSyncStatus(snapshot: OutboxSnapshot): Promise<SyncStatus> {
     ...counts,
     lastError: snapshot.syncState.lastError,
     lastSyncedAt: snapshot.syncState.lastSyncedAt,
+    lastAcceptedConversationId: snapshot.syncState.lastAcceptedConversationId,
+    lastAcceptedJobId: snapshot.syncState.lastAcceptedJobId,
+    lastRemoteStatus: snapshot.syncState.lastRemoteStatus,
     apiBase: await discoverCloudApiBase(),
   }
 }
@@ -141,7 +144,7 @@ async function saveSnapshot(snapshot: OutboxSnapshot): Promise<void> {
 
 const outboxRuntime = new OutboxRuntime({
   storage: { load: loadSnapshot, save: saveSnapshot },
-  upload: uploadConversation,
+  upload: (item, signal) => uploadConversation(item, { signal }),
   retryBaseDelayMs: RETRY_BASE_DELAY_MS,
   retryMaxDelayMs: RETRY_MAX_DELAY_MS,
   syncingRecoveryStaleMs: SYNCING_RECOVERY_STALE_MS,
@@ -213,14 +216,8 @@ async function resetDailyStats(): Promise<void> {
 }
 
 async function enqueueConversation(payload: ConversationPayload): Promise<EnqueueConversationResult> {
-  const quota = await fetchQuotaStatus()
-  if (quota?.success && quota.exceeded) {
-    return {
-      queued: false,
-      message: formatQuotaExceededMessage(quota),
-    }
-  }
-
+  // Local acceptance is durable before any network, quota or authentication work.
+  // The server enforces quota during upload; refusals remain retryable outbox items.
   const item = await outboxRuntime.enqueue(payload)
 
   void trackEvent({
@@ -280,7 +277,18 @@ chrome.runtime.onStartup?.addListener(() => {
 
 void bootstrap()
 
-chrome.runtime.onMessage.addListener((message: BackgroundMessage, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message: BackgroundMessage, sender, sendResponse) => {
+  if (message.action === CONTENT_EVENT_ACTION) {
+    const event = sender.id === chrome.runtime.id
+      ? validateContentEvent(message.event, sender.url || sender.tab?.url || '') : null
+    if (!event) {
+      sendResponse({ ok: false })
+      return false
+    }
+    trackEvent(event).then((ok) => sendResponse({ ok })).catch(() => sendResponse({ ok: false }))
+    return true
+  }
+
   if (message.action === 'enqueueExtractedConversation') {
     enqueueConversation(message.payload)
       .then((result) => {

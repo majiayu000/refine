@@ -16,7 +16,7 @@
 
 1. **Knowledge Sync** — Capture conversations from ChatGPT, Claude, Gemini, Grok, Claude Code, Codex into one searchable knowledge base
 2. **Session Analysis** — Extract 12 cognitive dimensions from AI coding sessions (decisions, bugs, patterns, friction, knowledge gained, etc.)
-3. **Cognitive Tracking (Mirror)** — 3-layer signal lights, personal baseline, LLM-powered advice, trend tracking
+3. **Cognitive Tracking (Mirror)** — 3-layer signal lights, personal baseline, local deterministic advice, trend tracking
 
 ## Quick Start
 
@@ -88,7 +88,7 @@ and the relevant `~/.refine` log snippet if available.
 
 - Local-first only: the server and extension are intended for a local trusted
   runtime unless you explicitly configure authentication and network exposure.
-- LLM-backed extraction, advice, weekly reports, and profiles require a working
+- LLM-backed extraction, deep insights, and profiles require a working
   OpenAI-compatible or Anthropic-compatible API key.
 - Browser extension support is still a developer preview and should be tested
   against the local API before relying on it for unattended capture.
@@ -103,19 +103,26 @@ Mirror extracts cognitive fingerprints from your AI coding sessions and tracks g
 ### Daily Usage
 
 ```bash
-mirror score                        # 3-layer signal lights + LLM advice
+mirror score                        # 3-layer signal lights + local advice
 mirror motd                         # One-line briefing (add to .zshrc)
 mirror dashboard                    # Full ASCII dashboard
-mirror score --since 2026-03-20     # Filter by date
+mirror score --since 2026-03-20      # View a custom window without updating history
+mirror dashboard --all              # View all session observations without updating history
 ```
 
 ### Periodic Analysis
 
 ```bash
-mirror weekly                       # Weekly delta report (requires LLM)
+mirror weekly                       # local metrics-delta report + deterministic action cards
 mirror profile                      # Cognitive portrait narrative (requires LLM)
 /cognitive-portrait                  # Deep 5-framework analysis (~1000 lines, Claude Code skill)
 ```
+
+Weekly report generation uses existing observations and makes no LLM call. Upstream session extraction can still require an LLM. `mirror score` also renders advice locally, including with `--require-advice`; no remote policy acknowledgement is requested. Unknown portfolio inputs suppress action recommendations. Reason explicitness is a case-insensitive rationale-marker rate over distinct full decision titles, not a decision-quality assessment.
+
+Default `score` and `dashboard` use the rolling 90-day session-start window and refresh matching local advice and statusline output together. Each command reads observations and source metadata from one SQLite snapshot, with the same supported-session and interactive-session filters as Insights. Weekly comparisons and the 7-day advice window reuse that snapshot. A session is assigned by its source document's start time; newly extracted messages from an older session do not become new events merely because extraction ran today.
+
+Metric history is separated by canonical database path, window, scoring method, and target configuration. It keeps the latest snapshot for each UTC date, up to 365 dates per scope. Personal baselines require seven distinct dates with observed values in the last 28 days, from the same scope. Older or unscoped score files still count as activity but do not enter the new metric baseline. `--since` and `--all` are views: they leave canonical history, advice, and statusline caches unchanged, and cannot be combined with `--require-advice`. See [Mirror evidence and history contract](docs/SPEC-mirror-history.md) for the exact rules.
 
 ### What Mirror Tracks
 
@@ -127,7 +134,7 @@ mirror profile                      # Cognitive portrait narrative (requires LLM
 | **Breadth** | Exploration rate, Mature project share, One-off project share | Are you investing wisely across projects? |
 | **Collaboration** | Delegation rate, Mode diversity, Bug/decision extraction ratio | Is your AI collaboration healthy? |
 
-**Signal Lights:** 🟢 Green (healthy) / 🟡 Yellow (watch) / 🔴 Red (act now)
+**Signal Lights:** 🟢 Green (meets configured target) / 🟡 Yellow / 🔴 Red (below target) / ⚪ Unknown (insufficient evidence). Missing values serialize as `null`; coverage shows observed versus eligible evidence. A measured zero remains a valid measurement.
 
 **Personal Baseline:** After enough recent history, arrows show change versus your 4-week average. Signal colors still use fixed targets.
 
@@ -143,7 +150,7 @@ mirror profile                      # Cognitive portrait narrative (requires LLM
 本周243 深度🟢 广度🔴 协作🔴 每周开1次新方向探索
 ```
 
-**SessionStart hook** injects cognitive dashboard + LLM advice into every Claude Code conversation.
+**SessionStart hook** injects cognitive dashboard + local advice into every Claude Code conversation.
 
 ### Automation (launchd)
 
@@ -199,8 +206,8 @@ remem raw sessions/messages         ← Claude Code + Codex + Cursor raw archive
 SQLite (observations, documents)    ← Shared data store
     │
     ├─ mirror score/dashboard       (local clustering → signal lights)
-    ├─ mirror motd                  (reads cached scores + LLM advice)
-    ├─ mirror weekly                (delta analysis via LLM)
+    ├─ mirror motd                  (reads cached scores + local advice)
+    ├─ mirror weekly                (local metrics delta + deterministic action cards)
     ├─ mirror profile               (cognitive portrait via LLM)
     └─ /cognitive-portrait          (5-framework deep analysis, Claude Code skill)
 ```

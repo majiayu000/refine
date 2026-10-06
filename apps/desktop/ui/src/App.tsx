@@ -7,7 +7,7 @@ import { ItemDetail } from './components/ItemDetail'
 import { getAuthToken, getAuthTokenError, setAuthToken } from './lib/tauri'
 
 export default function App() {
-  const { apiCapabilities, loadItems, isSpotlightOpen, setSpotlightOpen } = useStore()
+  const { apiCapabilities, loadItems, isSpotlightOpen, setSpotlightOpen, deleteFeedback, clearDeleteFeedback } = useStore()
   const [authTokenInput, setAuthTokenInput] = useState('')
   const [hasAuthToken, setHasAuthToken] = useState(() => Boolean(getAuthToken()))
   const [authMessage, setAuthMessage] = useState(() => getAuthTokenError() || '')
@@ -122,6 +122,27 @@ export default function App() {
               </div>
             )}
           </header>
+
+          {deleteFeedback && (
+            <div
+              role={deleteFeedback.kind === 'error' ? 'alert' : 'status'}
+              className={`mx-4 mt-3 rounded-xl border p-3 text-xs ${deleteFeedback.kind === 'error'
+                ? 'border-red-200 bg-red-50 text-red-800'
+                : deleteFeedback.kind === 'warning'
+                  ? 'border-orange-200 bg-orange-50 text-orange-900'
+                  : 'border-brand-200 bg-brand-50 text-brand-800'}`}
+            >
+              <p>{deleteFeedback.message}</p>
+              <div className="mt-2 flex gap-3">
+                {deleteFeedback.kind === 'warning' && (
+                  <button type="button" onClick={() => void loadItems().then((loaded) => { if (loaded) clearDeleteFeedback() })} className="underline">
+                    刷新列表
+                  </button>
+                )}
+                <button type="button" onClick={clearDeleteFeedback} className="underline">关闭提示</button>
+              </div>
+            </div>
+          )}
 
           <button
             onClick={() => setSpotlightOpen(true)}

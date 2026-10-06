@@ -1,4 +1,5 @@
-use super::{ops, rows::to_fts_query};
+use super::ops;
+use super::text_search::{SearchTable, TextSearch};
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{Document, DocumentId, Item, RestoreDocumentParams};
 use chrono::{DateTime, Utc};
@@ -145,45 +146,42 @@ pub(super) fn search_text(
     offset: usize,
     limit: usize,
 ) -> InfraResult<Vec<Document>> {
-    let limit = std::cmp::min(limit, i64::MAX as usize) as i64;
-    let offset = std::cmp::min(offset, i64::MAX as usize) as i64;
-    let Some(fts_query) = to_fts_query(query) else {
+    let Some(mut plan) = TextSearch::new(query, SearchTable::Documents) else {
         return Ok(Vec::new());
     };
-
+    let sql = format!(
+        "WITH hits AS ({}) SELECT d.id, d.title, d.raw_content, d.source, d.url, d.source_version, d.captured_at, d.created_at, d.updated_at FROM documents d JOIN hits ON d.rowid = hits.rowid ORDER BY hits.rank, d.id LIMIT ? OFFSET ?", plan.sql,
+    );
+    plan.params.push(rusqlite::types::Value::Integer(
+        limit.min(i64::MAX as usize) as i64,
+    ));
+    plan.params.push(rusqlite::types::Value::Integer(
+        offset.min(i64::MAX as usize) as i64,
+    ));
     let mut stmt = conn
-        .prepare(
-            "SELECT d.id, d.title, d.raw_content, d.source, d.url, d.source_version, d.captured_at, d.created_at, d.updated_at
-             FROM documents d
-             JOIN documents_fts fts ON d.rowid = fts.rowid
-             WHERE documents_fts MATCH ?1
-             ORDER BY fts.rank
-             LIMIT ?2 OFFSET ?3",
-        )
+        .prepare(&sql)
         .map_err(|e| InfraError::Database(e.to_string()))?;
-
     let rows = stmt
-        .query_map(params![fts_query, limit, offset], |row| {
+        .query_map(rusqlite::params_from_iter(plan.params), |row| {
             row_to_document(row).map_err(to_row_err)
         })
         .map_err(|e| InfraError::Database(e.to_string()))?;
-
     rows.map(|r| r.map_err(|e| InfraError::Database(e.to_string())))
         .collect()
 }
 
 pub(super) fn count_text_hits(conn: &Connection, query: &str) -> InfraResult<usize> {
-    let Some(fts_query) = to_fts_query(query) else {
+    let Some(plan) = TextSearch::new(query, SearchTable::Documents) else {
         return Ok(0);
     };
-    let c: i64 = conn
+    let count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM documents_fts WHERE documents_fts MATCH ?1",
-            [fts_query],
+            &format!("SELECT COUNT(*) FROM ({})", plan.sql),
+            rusqlite::params_from_iter(plan.params),
             |row| row.get(0),
         )
         .map_err(|e| InfraError::Database(e.to_string()))?;
-    Ok(c.max(0) as usize)
+    Ok(count.max(0) as usize)
 }
 
 fn row_to_document(row: &rusqlite::Row) -> InfraResult<Document> {

@@ -41,7 +41,10 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     ok(json!({
         "message": "Refine cloud API (Rust) is running",
         "contract_version": SERVER_CONTRACT_VERSION,
-        "llm_configured": state.llm_client.is_some()
+        "llm_configured": state.llm_client.is_some(),
+        "storage_id": state.database_identity,
+        "auth_mode": state.auth_mode(),
+        "runtime_profile": state.runtime_profile()
     }))
 }
 

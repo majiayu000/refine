@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const CACHE_VERSION: &str = "advice-score-v5";
+const CACHE_VERSION: &str = "advice-score-v6-evidence";
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 const STALE_AFTER_HOURS: i64 = 72;
@@ -23,6 +23,8 @@ pub struct CachedAdvice {
     pub cache_key: String,
     #[serde(default)]
     pub model_identity: String,
+    #[serde(default)]
+    pub render_language: String,
     #[serde(default = "legacy_timestamp")]
     pub score_timestamp: DateTime<Utc>,
     #[serde(default)]
@@ -31,6 +33,13 @@ pub struct CachedAdvice {
     pub long_cohort_identity: String,
     #[serde(default)]
     pub recent_cohort_identity: String,
+}
+
+fn render_language_key() -> &'static str {
+    match crate::lang::lang() {
+        crate::lang::Lang::En => "en",
+        crate::lang::Lang::Zh => "zh",
+    }
 }
 
 fn legacy_timestamp() -> DateTime<Utc> {
@@ -46,13 +55,6 @@ impl CachedAdvice {
 pub fn load_cached_for_score(score: &ScoreResult) -> Result<Option<CachedAdvice>> {
     let path = crate::config::mirror_dir().join("advice.json");
     load_cached_matching(&path, None, Some(score.timestamp))
-}
-
-pub(super) fn load_cached_for_key_from_path(
-    path: &Path,
-    expected_key: &str,
-) -> Result<Option<CachedAdvice>> {
-    load_cached_matching(path, Some(expected_key), None)
 }
 
 fn load_cached_matching(
@@ -74,6 +76,7 @@ fn load_cached_matching(
     let cached: CachedAdvice = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse advice cache JSON {}", path.display()))?;
     if cached.cache_version != CACHE_VERSION
+        || cached.render_language != render_language_key()
         || expected_key.is_some_and(|key| cached.cache_key != key)
         || expected_score_timestamp.is_some_and(|timestamp| cached.score_timestamp != timestamp)
     {
@@ -104,6 +107,7 @@ pub(super) fn save_policy_cache(
         cache_version: CACHE_VERSION.to_string(),
         cache_key: cache_key.to_string(),
         model_identity: model_identity.to_string(),
+        render_language: render_language_key().to_string(),
         score_timestamp,
         policy_key: policy.mode.response_key().to_string(),
         long_cohort_identity: long_cohort_identity.to_string(),
@@ -171,6 +175,7 @@ pub(super) fn advice_cache_key(
             &score_timestamp.to_rfc3339(),
             long_cohort_identity,
             recent_cohort_identity,
+            render_language_key(),
         ])
     )
 }
@@ -207,6 +212,7 @@ mod tests {
             cache_version: CACHE_VERSION.into(),
             cache_key: "key".into(),
             model_identity: "deterministic".into(),
+            render_language: render_language_key().into(),
             score_timestamp,
             policy_key: "deepen".into(),
             long_cohort_identity: identity('a'),
@@ -275,5 +281,30 @@ mod tests {
                 &identity('b')
             )
         );
+    }
+    #[test]
+    fn cache_rejects_missing_or_other_render_language() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("advice.json");
+        let current = Utc::now();
+        let other = match crate::lang::lang() {
+            crate::lang::Lang::En => "zh",
+            crate::lang::Lang::Zh => "en",
+        };
+        for language in [None, Some(other)] {
+            let mut value = serde_json::to_value(cached(current)).unwrap();
+            if let Some(language) = language {
+                value["render_language"] = serde_json::json!(language);
+            } else {
+                value.as_object_mut().unwrap().remove("render_language");
+            }
+            std::fs::write(&path, value.to_string()).unwrap();
+            assert!(load_cached_matching(&path, None, Some(current))
+                .unwrap()
+                .is_none());
+            assert!(load_cached_matching(&path, Some("key"), None)
+                .unwrap()
+                .is_none());
+        }
     }
 }

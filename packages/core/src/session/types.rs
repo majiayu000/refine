@@ -26,11 +26,35 @@ impl SessionSource {
 }
 
 /// 消息角色
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum MessageRole {
     User,
     Assistant,
     System,
+}
+
+impl MessageRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::System => "system",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MessageProvenance {
+    pub id: i64,
+    pub event_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SourceMessageReference {
+    pub id: i64,
+    pub role: MessageRole,
+    pub event_time: DateTime<Utc>,
 }
 
 /// Provenance reported by the Codex transcript metadata.
@@ -76,6 +100,50 @@ impl SessionMode {
 pub struct SessionMessage {
     pub role: MessageRole,
     pub content: String,
+    /// Present only when a source provides a real message identity and time.
+    pub provenance: Option<MessageProvenance>,
+}
+
+impl SessionMessage {
+    pub(super) fn facet_content_len(&self) -> usize {
+        let label_len = match self.role {
+            MessageRole::User => 6,
+            MessageRole::Assistant => 11,
+            MessageRole::System => 8,
+        };
+        self.content.len()
+            + label_len
+            + 1
+            + self.provenance.as_ref().map_or(0, |provenance| {
+                format!(
+                    "[remem message_id={} role={} event_time={}]\n",
+                    provenance.id,
+                    self.role.as_str(),
+                    provenance.event_time.to_rfc3339()
+                )
+                .len()
+            })
+    }
+
+    pub(super) fn append_facet_content(&self, output: &mut String) {
+        if let Some(provenance) = &self.provenance {
+            output.push_str(&format!(
+                "[remem message_id={} role={} event_time={}]\n",
+                provenance.id,
+                self.role.as_str(),
+                provenance.event_time.to_rfc3339()
+            ));
+        }
+        let label = match self.role {
+            MessageRole::User => "User",
+            MessageRole::Assistant => "Assistant",
+            MessageRole::System => "System",
+        };
+        output.push_str(label);
+        output.push_str(": ");
+        output.push_str(&self.content);
+        output.push('\n');
+    }
 }
 
 /// 会话元数据
@@ -106,6 +174,32 @@ pub struct Session {
 }
 
 impl Session {
+    /// Extraction view; legacy canonical text and Remem snapshot hashes retain
+    /// their previous format. Provenance is data, never inferred from text.
+    pub fn to_facet_content(&self) -> String {
+        let mut out = String::new();
+        for message in &self.messages {
+            message.append_facet_content(&mut out);
+        }
+        out
+    }
+
+    pub fn source_message_references(&self) -> Vec<SourceMessageReference> {
+        self.messages
+            .iter()
+            .filter_map(|message| {
+                message
+                    .provenance
+                    .as_ref()
+                    .map(|provenance| SourceMessageReference {
+                        id: provenance.id,
+                        role: message.role.clone(),
+                        event_time: provenance.event_time,
+                    })
+            })
+            .collect()
+    }
+
     /// 将消息拼接为纯文本内容（用于存储为 Document.raw_content）
     pub fn to_document_content(&self) -> String {
         let mut out = String::new();
@@ -160,6 +254,7 @@ mod tests {
             messages: messages
                 .into_iter()
                 .map(|(role, content)| SessionMessage {
+                    provenance: None,
                     role,
                     content: content.to_string(),
                 })

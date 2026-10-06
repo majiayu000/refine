@@ -1,11 +1,14 @@
+use crate::cohort::{load_cohorts, EventWindow};
 use crate::document_save::{save_report_to_document, SaveDocumentOptions};
 use crate::lang::t;
 use crate::score::{self, layer_display, Signal};
 use anyhow::Result;
-use chrono::{Duration, Utc};
+#[cfg(test)]
+use chrono::Duration;
+use chrono::Utc;
 use refine_core::infra::{llm_with_retry_for, LlmClient};
 use refine_core::knowledge::{DocumentRepository, Item, ItemRepository, ItemType};
-use refine_core::session::{cluster_observations, format_data_quality_stats, ClusterResult};
+use refine_core::session::{format_data_quality_stats, ClusterResult};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -16,8 +19,11 @@ struct ProjectStat {
     name: String,
     sessions: usize,
     pct: f64,
-    high_skill_pct: f64,
-    delegation_pct: f64,
+    high_skill_pct: Option<f64>,
+    delegation_pct: Option<f64>,
+    cognitive_labels: usize,
+    collaboration_labels: usize,
+    summaries: usize,
 }
 
 struct ProfileData {
@@ -26,7 +32,7 @@ struct ProfileData {
     project_stats: Vec<ProjectStat>,
     decision_count: usize,
     bugfix_count: usize,
-    decision_bugfix_ratio: f64,
+    decision_bugfix_ratio: Option<f64>,
     simple_sessions: usize,
     medium_sessions: usize,
     complex_sessions: usize,
@@ -57,19 +63,13 @@ fn extract_profile_data(
             let cog_total: usize = p.cognitive_levels.values().sum();
             let high_skill = *p.cognitive_levels.get("expert").unwrap_or(&0)
                 + *p.cognitive_levels.get("proficient").unwrap_or(&0);
-            let high_skill_pct = if cog_total == 0 {
-                0.0
-            } else {
-                high_skill as f64 / cog_total as f64 * 100.0
-            };
+            let high_skill_pct =
+                (cog_total > 0).then(|| high_skill as f64 / cog_total as f64 * 100.0);
 
             let collab_total: usize = p.collaboration_modes.values().sum();
             let deleg = *p.collaboration_modes.get("delegation").unwrap_or(&0);
-            let delegation_pct = if collab_total == 0 {
-                0.0
-            } else {
-                deleg as f64 / collab_total as f64 * 100.0
-            };
+            let delegation_pct =
+                (collab_total > 0).then(|| deleg as f64 / collab_total as f64 * 100.0);
 
             let pct = if project_session_assignments == 0 {
                 0.0
@@ -83,6 +83,9 @@ fn extract_profile_data(
                 pct,
                 high_skill_pct,
                 delegation_pct,
+                cognitive_labels: cog_total,
+                collaboration_labels: collab_total,
+                summaries: p.summary_excerpts.len(),
             }
         })
         .collect();
@@ -121,11 +124,7 @@ fn extract_profile_data(
 
     let dec = cluster.global_stats.total_decisions;
     let bug = cluster.global_stats.total_bugfixes;
-    let ratio = if bug == 0 {
-        0.0
-    } else {
-        dec as f64 / bug as f64
-    };
+    let ratio = (bug > 0).then(|| dec as f64 / bug as f64);
 
     ProfileData {
         total_sessions,
@@ -171,19 +170,25 @@ fn build_profile_prompt(data: &ProfileData, cluster: &ClusterResult) -> String {
     lines.push("Top projects by time investment:".to_string());
     for (i, p) in data.project_stats.iter().enumerate() {
         lines.push(format!(
-            "{}. {}: {} sessions ({:.1}%), high-skill {:.1}%, delegation {:.1}%",
+            "{}. {}: {} sessions ({:.1}%), high-skill {} [{}/{} labeled summaries], delegation {} [{}/{} labeled summaries]",
             i + 1,
             p.name,
             p.sessions,
             p.pct,
-            p.high_skill_pct,
-            p.delegation_pct
+            optional_metric(p.high_skill_pct, "%"),
+            p.cognitive_labels,
+            p.summaries,
+            optional_metric(p.delegation_pct, "%"),
+            p.collaboration_labels,
+            p.summaries
         ));
     }
     lines.push(String::new());
     lines.push(format!(
-        "Decision style: {} decisions vs {} bugfixes (ratio {:.1}:1)",
-        data.decision_count, data.bugfix_count, data.decision_bugfix_ratio
+        "Decision style: {} decisions vs {} bugfixes (ratio {})",
+        data.decision_count,
+        data.bugfix_count,
+        optional_metric(data.decision_bugfix_ratio, ":1")
     ));
     lines.push(String::new());
     lines.push(format!(
@@ -192,6 +197,7 @@ fn build_profile_prompt(data: &ProfileData, cluster: &ClusterResult) -> String {
     ));
     lines.push(String::new());
     lines.push(format!("Current signal lights: {}", data.score_summary));
+    lines.push("Unknown means missing evidence, not a measured zero. Label coverage is shown explicitly; do not infer an absent behavior or skill from missing labels.".to_string());
     lines.push(String::new());
     lines.push(format!(
         "Cohort and data quality: {}",
@@ -199,7 +205,7 @@ fn build_profile_prompt(data: &ProfileData, cluster: &ClusterResult) -> String {
     ));
     if cluster.data_quality.is_degraded() {
         lines.push(
-            "Detached observations were excluded. Do not claim historical improvement, decline, or other cross-window trends."
+            "Some input evidence was excluded; the data-quality counts above identify the reasons. Do not claim historical improvement, decline, or other cross-window trends."
                 .to_string(),
         );
     }
@@ -272,11 +278,19 @@ fn format_score_summary(score: &score::ScoreResult) -> String {
                 Signal::Green => "G",
                 Signal::Yellow => "Y",
                 Signal::Red => "R",
+                Signal::Unknown => "?",
             };
             format!("{} {}", layer_display(&l.name), sig)
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn optional_metric(value: Option<f64>, suffix: &str) -> String {
+    value
+        .filter(|value| value.is_finite())
+        .map(|value| format!("{value:.1}{suffix}"))
+        .unwrap_or_else(|| "unknown".into())
 }
 
 fn profile_summary_text(data: &ProfileData, cluster: &ClusterResult) -> String {
@@ -287,13 +301,20 @@ fn profile_summary_text(data: &ProfileData, cluster: &ClusterResult) -> String {
     ));
     for p in data.project_stats.iter().take(3) {
         lines.push(format!(
-            "{}: {:.0}% sessions, {:.0}% high-skill, {:.0}% delegation",
-            p.name, p.pct, p.high_skill_pct, p.delegation_pct
+            "{}: {:.0}% sessions, {} high-skill [{}/{} labels], {} delegation [{}/{} labels]",
+            p.name,
+            p.pct,
+            optional_metric(p.high_skill_pct, "%"),
+            p.cognitive_labels,
+            p.summaries,
+            optional_metric(p.delegation_pct, "%"),
+            p.collaboration_labels,
+            p.summaries
         ));
     }
     lines.push(format!(
-        "decision:bugfix = {:.1}:1",
-        data.decision_bugfix_ratio
+        "decision:bugfix = {}",
+        optional_metric(data.decision_bugfix_ratio, ":1")
     ));
     lines.push(format!("signals: {}", data.score_summary));
     lines.push(format!(
@@ -333,40 +354,41 @@ pub async fn handle_profile(
     llm: Arc<dyn LlmClient>,
 ) -> Result<()> {
     let now = Utc::now();
-    let items = item_repo
-        .find_observations_by_event_range(
-            now - Duration::days(crate::advice::LONG_TERM_WINDOW_DAYS),
+    let cohort = load_cohorts(
+        item_repo.as_ref(),
+        now,
+        &[EventWindow::rolling(
+            crate::advice::LONG_TERM_WINDOW_DAYS,
             now,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    if items.is_empty() {
+        )],
+    )
+    .await?
+    .remove(0);
+    let items = &cohort.cohort_items;
+    let cluster = &cohort.cluster;
+    if cluster.data_quality.input_observations == 0 {
         println!(
             "{}",
             t!(
-                "No observations found in the rolling 90-day event-time window.",
-                "滚动 90 天事件时间窗口内未找到观测数据。"
+                "No observations found in the rolling 90-day session-start window.",
+                "滚动 90 天会话开始时间窗口内未找到观测数据。"
             )
         );
         return Ok(());
     }
-
-    let cluster = cluster_observations(&items);
     if cluster.data_quality.eligible_observations == 0 {
         anyhow::bail!(
-            "No eligible linked interactive observations in the rolling 90-day event-time window (input {}, detached {}, mode-excluded {}); refusing to generate a profile",
-            cluster.data_quality.input_observations,
-            cluster.data_quality.detached_observations,
-            cluster.data_quality.mode_excluded_observations,
+            "No eligible linked interactive observations in the rolling 90-day event-time window ({}); refusing to generate a profile",
+            format_data_quality_stats(&cluster.data_quality),
         );
     }
+
     let config = crate::config::load();
-    let score_result = score::compute(&cluster, &config.targets);
+    let score_result = score::compute(cluster, &config.targets);
     let score_summary = format_score_summary(&score_result);
 
-    let data = extract_profile_data(&cluster, &score_summary, &items);
-    let prompt = build_profile_prompt(&data, &cluster);
+    let data = extract_profile_data(cluster, &score_summary, items);
+    let prompt = build_profile_prompt(&data, cluster);
 
     println!(
         "{}\n",
@@ -377,10 +399,10 @@ pub async fn handle_profile(
         .await
         .map_err(|e| anyhow::anyhow!("LLM profile generation failed: {}", e))?;
 
-    let persisted_narrative = profile_with_metadata(&narrative, &cluster);
+    let persisted_narrative = profile_with_metadata(&narrative, cluster);
     println!("{}", persisted_narrative);
 
-    save_profile_summary(&data, &cluster)?;
+    save_profile_summary(&data, cluster)?;
     let doc_id = save_report_to_document(
         &doc_repo,
         &persisted_narrative,
@@ -497,6 +519,7 @@ mod tests {
                 detached_observations: 0,
                 mode_excluded_observations: 0,
                 source_excluded_observations: 0,
+                curation_excluded_observations: 0,
                 eligible_observations: 450,
                 ambiguous_project_alias_observations: 0,
                 ambiguous_project_aliases: 0,
@@ -515,17 +538,41 @@ mod tests {
         assert_eq!(data.total_projects, 2);
         assert_eq!(data.decision_count, 100);
         assert_eq!(data.bugfix_count, 50);
-        assert!((data.decision_bugfix_ratio - 2.0).abs() < f64::EPSILON);
+        assert!((data.decision_bugfix_ratio.unwrap() - 2.0).abs() < f64::EPSILON);
 
         // proj-a should be first (50 sessions)
         assert_eq!(data.project_stats[0].name, "proj-a");
         assert_eq!(data.project_stats[0].sessions, 50);
         // expert(5) + proficient(10) = 15 out of 20 total = 75%
-        assert!((data.project_stats[0].high_skill_pct - 75.0).abs() < f64::EPSILON);
+        assert!((data.project_stats[0].high_skill_pct.unwrap() - 75.0).abs() < f64::EPSILON);
         // delegation 12 out of 20 = 60%
-        assert!((data.project_stats[0].delegation_pct - 60.0).abs() < f64::EPSILON);
+        assert!((data.project_stats[0].delegation_pct.unwrap() - 60.0).abs() < f64::EPSILON);
 
         assert_eq!(data.project_stats[1].name, "proj-b");
+    }
+
+    #[test]
+    fn profile_prompt_and_export_preserve_missing_label_and_ratio_evidence() {
+        let mut cluster = make_cluster();
+        cluster.global_stats.total_bugfixes = 0;
+        for project in cluster.projects.values_mut() {
+            project.cognitive_levels.clear();
+            project.collaboration_modes.clear();
+        }
+        let data = extract_profile_data(&cluster, "Depth ?, Collaboration ?", &[]);
+        assert!(data.decision_bugfix_ratio.is_none());
+        assert!(data
+            .project_stats
+            .iter()
+            .all(|project| project.high_skill_pct.is_none() && project.delegation_pct.is_none()));
+        let prompt = build_profile_prompt(&data, &cluster);
+        assert!(prompt.contains("high-skill unknown"));
+        assert!(prompt.contains("delegation unknown"));
+        assert!(prompt.contains("ratio unknown"));
+        let export = profile_summary_text(&data, &cluster);
+        assert!(export.contains("unknown high-skill"));
+        assert!(export.contains("unknown delegation"));
+        assert!(export.contains("decision:bugfix = unknown"));
     }
 
     #[test]

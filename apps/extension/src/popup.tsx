@@ -328,16 +328,20 @@ export default function Popup() {
 
   const queueSize = syncStatus.pending + syncStatus.syncing
   const displayedTotalItems = remoteTotalItems ?? stats.totalItems
-  const totalSourceText = remoteTotalItems == null ? '本地缓存' : '云端实时'
+  const totalSourceText = remoteTotalItems == null ? '累计送达会话' : '服务端知识条目'
+  const receiptStatusText = ({
+    captured: '已接收原文', queued: '等待提炼', processing: '提炼中',
+    processed: '提炼完成', failed: '提炼失败',
+  } as Record<string, string>)[syncStatus.lastRemoteStatus || ''] || '已接收'
   const onboardingDoneCount = [onboarding.extracted, onboarding.searched, onboarding.reused].filter(Boolean).length
   const onboardingProgressPercent = Math.round((onboardingDoneCount / 3) * 100)
 
   const syncStateText = (() => {
-    if (syncStatus.failed > 0) return `同步失败 ${syncStatus.failed} 条`
+    if (syncStatus.failed > 0) return `本地保留，待重试 ${syncStatus.failed} 条`
     if (queueSize > 0) {
-      return `待同步 ${queueSize} 条`
+      return `本地已保存，待送达 ${queueSize} 条`
     }
-    return cloudHealthy ? '云端同步正常' : '云端不可达'
+    return cloudHealthy ? '服务连接正常' : '服务暂不可达'
   })()
 
   const syncStateToneClass = (() => {
@@ -470,7 +474,7 @@ export default function Popup() {
     }
 
     if (result.success) {
-      setExtractMessage(`提取成功，已加入同步队列（${result.length ?? 0} 字符）`)
+      setExtractMessage(`本地已保存（${result.length ?? 0} 字符）；等待服务接收和提炼。`)
       setExtractMessageLevel('ok')
       await syncCloudStatus()
       return
@@ -564,7 +568,7 @@ export default function Popup() {
             <p className="stats-value">{stats.todayExtracted}</p>
             <div className="stats-card-bottom">
               <SparkIcon className="stats-bottom-icon" />
-              <span className="stats-bottom-text">今日提炼</span>
+              <span className="stats-bottom-text">今日保存会话</span>
             </div>
           </article>
         </section>
@@ -578,8 +582,13 @@ export default function Popup() {
                 {syncStateText}
               </span>
             </div>
-            <span className="sync-meta">已发送 {syncStatus.sent}，队列 {queueSize}</span>
+            <span className="sync-meta">服务已接收 {syncStatus.sent}，队列 {queueSize}</span>
           </div>
+          {syncStatus.lastAcceptedConversationId && (
+            <p className="sync-meta" title={syncStatus.lastAcceptedConversationId}>
+              接收时状态：{receiptStatusText}。最新提炼结果请查看服务端任务。
+            </p>
+          )}
           {quota && (
             <div className="sync-quota">
               <div className="sync-quota-header">

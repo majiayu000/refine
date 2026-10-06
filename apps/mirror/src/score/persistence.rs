@@ -1,17 +1,19 @@
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::Path;
 
 use crate::config::{ensure_mirror_dir, mirror_dir};
 
+use super::scope::ScoreScope;
 use super::types::ScoreResult;
 
 // ── Persistence ──
 
 const SCORE_HISTORY_LIMIT: usize = 365;
-pub(super) const SCORE_SCHEMA_VERSION: u32 = 5;
+pub(super) const SCORE_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Serialize)]
 struct CurrentScore<'a> {
@@ -41,13 +43,19 @@ fn legacy_score_timestamp() -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::<chrono::Utc>::UNIX_EPOCH
 }
 
-pub fn persist_score(result: &ScoreResult) -> Result<()> {
+pub fn persist_score(result: &ScoreResult) -> Result<bool> {
     let dir = ensure_mirror_dir()?;
     let path = dir.join("scores.jsonl");
     persist_score_to_path(&path, result)
 }
 
-pub(super) fn persist_score_to_path(path: &Path, result: &ScoreResult) -> Result<()> {
+pub(super) fn persist_score_to_path(path: &Path, result: &ScoreResult) -> Result<bool> {
+    let scope = result.scope.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("only a canonical rolling-90-day score can enter metric history")
+    })?;
+    if !scope.is_canonical() || result.timestamp != scope.window_end {
+        anyhow::bail!("invalid canonical score scope or timestamp; refusing to persist score");
+    }
     let lock_path = path.with_extension("lock");
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
@@ -64,12 +72,12 @@ pub(super) fn persist_score_to_path(path: &Path, result: &ScoreResult) -> Result
     let unlock_result = fs2::FileExt::unlock(&lock_file)
         .with_context(|| format!("failed to release score lock {}", lock_path.display()));
 
-    write_result?;
+    let published = write_result?;
     unlock_result?;
-    Ok(())
+    Ok(published)
 }
 
-fn persist_score_to_path_locked(path: &Path, result: &ScoreResult) -> Result<()> {
+fn persist_score_to_path_locked(path: &Path, result: &ScoreResult) -> Result<bool> {
     let history = match std::fs::read_to_string(path) {
         Ok(content) => history_lines_from_content(&content),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -82,18 +90,82 @@ fn persist_score_to_path_locked(path: &Path, result: &ScoreResult) -> Result<()>
         }
     };
     validate_history_before_append(path, &history)?;
-    let mut lines: Vec<_> = history.into_iter().map(|line| line.json).collect();
-
-    lines.push(serde_json::to_string(&CurrentScore {
-        score_schema_version: SCORE_SCHEMA_VERSION,
-        score: result,
-    })?);
-    if lines.len() > SCORE_HISTORY_LIMIT {
-        let trim = lines.len() - SCORE_HISTORY_LIMIT;
-        lines.drain(0..trim);
+    // Group by comparable scope and UTC date. A slower concurrent writer must
+    // not replace a newer snapshot from the same date.
+    type ScopeKey = (String, String, String, String);
+    type DailyRows = BTreeMap<chrono::NaiveDate, (chrono::DateTime<chrono::Utc>, String)>;
+    let mut scoped: BTreeMap<ScopeKey, DailyRows> = BTreeMap::new();
+    let mut legacy = Vec::new();
+    for line in history {
+        let timestamp =
+            parse_history_line::<ScoreActivity>(&line.json, line.number, path)?.timestamp;
+        let current =
+            if score_schema_version(&line.json, line.number, path)? == Some(SCORE_SCHEMA_VERSION) {
+                Some(parse_history_line::<ScoreResult>(
+                    &line.json,
+                    line.number,
+                    path,
+                )?)
+            } else {
+                None
+            };
+        if let Some(scope) = current
+            .as_ref()
+            .and_then(|score| score.scope.as_ref())
+            .filter(|scope| scope.is_canonical() && scope.window_end == timestamp)
+        {
+            let (db, window, method, targets) = scope.retention_key();
+            let daily = scoped
+                .entry((db.into(), window.into(), method.into(), targets.into()))
+                .or_default();
+            let day = timestamp.date_naive();
+            if daily
+                .get(&day)
+                .is_none_or(|(existing, _)| timestamp > *existing)
+            {
+                daily.insert(day, (timestamp, line.json));
+            }
+        } else {
+            // Old and unscoped scores remain readable as activity only.
+            legacy.push((timestamp, line.json));
+        }
     }
+    let scope = result.scope.as_ref().expect("validated canonical scope");
+    let (db, window, method, targets) = scope.retention_key();
+    let daily = scoped
+        .entry((db.into(), window.into(), method.into(), targets.into()))
+        .or_default();
+    let day = result.timestamp.date_naive();
+    let published = daily
+        .get(&day)
+        .is_none_or(|(existing, _)| result.timestamp > *existing);
+    if published {
+        daily.insert(
+            day,
+            (
+                result.timestamp,
+                serde_json::to_string(&CurrentScore {
+                    score_schema_version: SCORE_SCHEMA_VERSION,
+                    score: result,
+                })?,
+            ),
+        );
+    }
+    legacy.sort_by_key(|(timestamp, _)| *timestamp);
+    let legacy_start = legacy.len().saturating_sub(SCORE_HISTORY_LIMIT);
+    let mut retained = legacy.into_iter().skip(legacy_start).collect::<Vec<_>>();
+    for daily in scoped.into_values() {
+        let start = daily.len().saturating_sub(SCORE_HISTORY_LIMIT);
+        retained.extend(daily.into_values().skip(start));
+    }
+    retained.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let lines = retained
+        .into_iter()
+        .map(|(_, json)| json)
+        .collect::<Vec<_>>();
 
-    write_lines_atomically(path, &lines)
+    write_lines_atomically(path, &lines)?;
+    Ok(published)
 }
 
 fn write_lines_atomically(path: &Path, lines: &[String]) -> Result<()> {
@@ -149,28 +221,46 @@ fn write_lines_atomically(path: &Path, lines: &[String]) -> Result<()> {
     write_result
 }
 
-pub fn load_recent_scores(n: usize) -> Result<Vec<ScoreResult>> {
+pub fn load_recent_scores(n: usize, scope: &ScoreScope) -> Result<Vec<ScoreResult>> {
     let path = mirror_dir().join("scores.jsonl");
-    load_recent_scores_from_path(&path, n)
+    load_recent_scores_for_scope_from_path(&path, n, Some(scope))
 }
 
+#[cfg(test)]
 pub(super) fn load_recent_scores_from_path(path: &Path, n: usize) -> Result<Vec<ScoreResult>> {
+    load_recent_scores_for_scope_from_path(path, n, None)
+}
+
+pub(super) fn load_recent_scores_for_scope_from_path(
+    path: &Path,
+    n: usize,
+    expected_scope: Option<&ScoreScope>,
+) -> Result<Vec<ScoreResult>> {
     let mut compatible = Vec::new();
     for line in load_score_history_lines(path)? {
         match score_schema_version(&line.json, line.number, path)? {
-            None | Some(0..=4) => {}
+            None | Some(0..=5) => {}
             Some(SCORE_SCHEMA_VERSION) => {
-                compatible.push(parse_history_line::<ScoreResult>(
-                    &line.json,
-                    line.number,
-                    path,
-                )?);
+                let score = parse_history_line::<ScoreResult>(&line.json, line.number, path)?;
+                let Some(scope) = score.scope.as_ref() else {
+                    continue;
+                };
+                if !scope.is_canonical() || scope.window_end != score.timestamp {
+                    continue;
+                }
+                if expected_scope.is_some_and(|expected| {
+                    !scope.compatible_with(expected) || score.timestamp > expected.window_end
+                }) {
+                    continue;
+                }
+                compatible.push(score);
             }
             Some(version) => return Err(unsupported_schema_error(version, path)),
         }
     }
+    compatible.sort_by_key(|score| score.timestamp);
     let start = compatible.len().saturating_sub(n);
-    Ok(compatible[start..].to_vec())
+    Ok(compatible.into_iter().skip(start).collect())
 }
 
 pub(super) fn load_score_activity(n: usize) -> Result<Vec<ScoreResult>> {
@@ -179,16 +269,31 @@ pub(super) fn load_score_activity(n: usize) -> Result<Vec<ScoreResult>> {
 }
 
 pub(super) fn load_score_activity_from_path(path: &Path, n: usize) -> Result<Vec<ScoreResult>> {
-    let mut all = Vec::new();
+    // Activity is a day-level habit across scopes. Multiple databases scored
+    // on one day must not consume several days of the streak lookback.
+    let now = chrono::Utc::now();
+    let mut by_day = BTreeMap::new();
     for line in load_score_history_lines(path)? {
         let activity = parse_history_line::<ScoreActivity>(&line.json, line.number, path)?;
-        all.push(ScoreResult {
-            timestamp: activity.timestamp,
-            ..ScoreResult::default()
-        });
+        if activity.timestamp > now {
+            continue;
+        }
+        by_day
+            .entry(activity.timestamp.date_naive())
+            .and_modify(|timestamp: &mut chrono::DateTime<chrono::Utc>| {
+                *timestamp = (*timestamp).max(activity.timestamp)
+            })
+            .or_insert(activity.timestamp);
     }
-    let start = all.len().saturating_sub(n);
-    Ok(all[start..].to_vec())
+    let start = by_day.len().saturating_sub(n);
+    Ok(by_day
+        .into_values()
+        .skip(start)
+        .map(|timestamp| ScoreResult {
+            timestamp,
+            ..ScoreResult::default()
+        })
+        .collect())
 }
 
 fn validate_history_before_append(path: &Path, lines: &[HistoryLine]) -> Result<()> {

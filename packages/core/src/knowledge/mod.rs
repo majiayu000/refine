@@ -10,10 +10,16 @@ mod doc_repository;
 mod document;
 mod item;
 mod repository;
+mod session_projection;
 mod types;
 
 pub use doc_repository::DocumentRepository;
 pub use document::{Document, RestoreDocumentParams};
 pub use item::{Item, RestoreParams};
 pub use repository::{ItemRepository, ObservationDocumentMeta, ObservationWindowSnapshot};
+pub use session_projection::assign_session_observation_ids;
+pub(crate) use session_projection::observation_key;
+pub use session_projection::{
+    SessionProjectionMetadata, SessionProjectionRevision, SessionProjectionVersion,
+};
 pub use types::{DocumentId, ItemId, ItemType, Source, Tag};

@@ -10,6 +10,9 @@ pub(super) fn build_weekly_action_card(
     recent_cluster: &ClusterResult,
 ) -> Result<Option<Vec<String>>> {
     let policy = crate::advice::portfolio_policy(long_term, recent)?;
+    if policy.mode == crate::advice::PortfolioMode::InsufficientEvidence {
+        return Ok(None);
+    }
     let policy_non_green = [
         &policy.long_exploration,
         &policy.long_fragmentation,
@@ -64,6 +67,7 @@ pub(super) fn build_weekly_action_card(
     ));
     lines.push(String::new());
     match policy.mode {
+        crate::advice::PortfolioMode::InsufficientEvidence => return Ok(None),
         crate::advice::PortfolioMode::PromoteHoldStop => {
             let stop = projects
                 .last()
@@ -294,9 +298,10 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 
 fn format_action_value(indicator: &Indicator) -> String {
     match indicator.name.as_str() {
-        "exploration" | "deep_invest" | "fragmentation" => {
-            format!("{:.1}%", indicator.actual)
-        }
+        "exploration" | "deep_invest" | "fragmentation" => indicator
+            .observed_value()
+            .map(|value| format!("{value:.1}%"))
+            .unwrap_or_else(|| indicator.display_value()),
         _ => indicator.display_value(),
     }
 }
@@ -306,6 +311,7 @@ fn localized_signal(signal: Signal) -> &'static str {
         Signal::Green => t!("green", "绿灯"),
         Signal::Yellow => t!("yellow", "黄灯"),
         Signal::Red => t!("red", "红灯"),
+        Signal::Unknown => t!("unknown", "证据不足"),
     }
 }
 
@@ -320,7 +326,8 @@ mod tests {
     fn indicator(name: &str, actual: f64, signal: Signal) -> Indicator {
         Indicator {
             name: name.to_string(),
-            actual,
+            actual: Some(actual),
+            coverage: None,
             target: String::new(),
             signal,
         }
@@ -340,6 +347,7 @@ mod tests {
             }),
             tension: None,
             timestamp: DateTime::<Utc>::UNIX_EPOCH,
+            scope: None,
         }
     }
 

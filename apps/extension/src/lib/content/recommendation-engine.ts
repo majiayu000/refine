@@ -1,7 +1,8 @@
-import { trackEvent, type RecommendationItem, type RecommendationResponse } from '../api'
+import type { RecommendationItem, RecommendationResponse } from '../api'
+import { trackContentEvent } from '../content-events'
 import { markOnboardingTask } from '../onboarding'
 import type { ConversationSource } from '../types'
-import { injectStyleOnce } from './runtime'
+import { injectStyleOnce, showToast } from './runtime'
 
 interface RecommendationEngineOptions {
   providerId: string
@@ -383,7 +384,7 @@ export function initRecommendationEngine(options: RecommendationEngineOptions): 
     if (key === exposedKey) return
     exposedKey = key
 
-    await trackEvent({
+    await trackContentEvent({
       event_name: 'recommendation_exposed',
       source: options.source,
       properties: {
@@ -397,7 +398,7 @@ export function initRecommendationEngine(options: RecommendationEngineOptions): 
   }
 
   async function reportClicked(item: RecommendationItem, action: 'insert' | 'copy'): Promise<void> {
-    await trackEvent({
+    await trackContentEvent({
       event_name: 'recommendation_clicked',
       source: options.source,
       properties: {
@@ -409,7 +410,7 @@ export function initRecommendationEngine(options: RecommendationEngineOptions): 
       occurred_at: new Date().toISOString(),
     })
 
-    await trackEvent({
+    await trackContentEvent({
       event_name: 'knowledge_reused',
       source: options.source,
       properties: {
@@ -427,7 +428,8 @@ export function initRecommendationEngine(options: RecommendationEngineOptions): 
     try {
       await navigator.clipboard.writeText(text)
     } catch {
-      // ignore clipboard error, interaction still tracked
+      showToast('复制失败，请重试。')
+      return
     }
     await reportClicked(item, 'copy')
   }

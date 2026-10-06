@@ -25,7 +25,7 @@ fn test_personal_baseline_calculation() {
         })
         .collect();
 
-    let baseline = compute_personal_baseline(&history);
+    let baseline = compute_personal_baseline(&history, &make_scope(Utc::now()));
     assert!(
         baseline.is_some(),
         "should produce baseline with 10 entries"
@@ -92,10 +92,12 @@ fn test_computed_indicators_have_registry_backed_metadata() {
         .map(|i| {
             let mut entry = score.clone();
             entry.timestamp = now - Duration::days(i);
+            entry.scope = Some(make_scope(entry.timestamp));
             entry
         })
         .collect();
-    let baseline = compute_personal_baseline(&history).expect("baseline should exist");
+    let baseline = compute_personal_baseline(&history, &make_scope(Utc::now()))
+        .expect("baseline should exist");
 
     for layer in &score.layers {
         for indicator in &layer.indicators {
@@ -142,7 +144,7 @@ fn test_personal_baseline_insufficient_data() {
         })
         .collect();
 
-    let baseline = compute_personal_baseline(&history);
+    let baseline = compute_personal_baseline(&history, &make_scope(Utc::now()));
     assert!(
         baseline.is_none(),
         "should return None with fewer than 7 entries"
@@ -170,7 +172,7 @@ fn repeated_scores_on_one_day_do_not_manufacture_a_baseline() {
             )
         })
         .collect::<Vec<_>>();
-    assert!(compute_personal_baseline(&history).is_none());
+    assert!(compute_personal_baseline(&history, &make_scope(Utc::now())).is_none());
 }
 
 #[test]
@@ -196,7 +198,7 @@ fn test_personal_baseline_old_data_excluded() {
         })
         .collect();
 
-    let baseline = compute_personal_baseline(&history);
+    let baseline = compute_personal_baseline(&history, &make_scope(Utc::now()));
     assert!(
         baseline.is_none(),
         "should return None when all data is outside 28-day window"
@@ -244,7 +246,7 @@ fn test_personal_baseline_mixed_legacy_schema_repro() {
         ));
     }
 
-    let bl = compute_personal_baseline(&history)
+    let bl = compute_personal_baseline(&history, &make_scope(Utc::now()))
         .expect("baseline should be produced with 10 recent entries");
 
     // Expected baseline should be stable despite mixed history schema.
@@ -388,4 +390,141 @@ fn test_personal_trends_detect_regression_without_recoloring() {
     assert_eq!(trends.indicator("fragmentation"), Some(Trend::Down));
     assert_eq!(trends.indicator("deep_invest"), None);
     assert_eq!(trends.overall(), Some(Trend::Down));
+}
+
+#[test]
+fn future_only_scores_do_not_activate_personal_baseline() {
+    let now = Utc::now();
+    let history = (1..=7)
+        .map(|day| ScoreResult {
+            timestamp: now + Duration::days(day),
+            scope: Some(make_scope(now + Duration::days(day))),
+            ..ScoreResult::default()
+        })
+        .collect::<Vec<_>>();
+    assert!(compute_personal_baseline(&history, &make_scope(Utc::now())).is_none());
+}
+
+#[test]
+fn future_scores_do_not_change_personal_baseline_or_trend() {
+    let now = Utc::now();
+    let mut past = (1..=7)
+        .map(|day| {
+            let mut score = ScoreResult {
+                timestamp: now - Duration::days(day),
+                scope: Some(make_scope(now - Duration::days(day))),
+                ..ScoreResult::default()
+            };
+            score.layers[0].indicators.push(Indicator {
+                name: "dreyfus".into(),
+                actual: Some(3.0),
+                coverage: None,
+                target: ">3.5".into(),
+                signal: Signal::Yellow,
+            });
+            score
+        })
+        .collect::<Vec<_>>();
+    let mut current = past[0].clone();
+    current.timestamp = now;
+    current.layers[0].indicators[0].actual = Some(3.3);
+    let future = past
+        .iter()
+        .map(|score| {
+            let mut score = score.clone();
+            score.timestamp = now + (now - score.timestamp);
+            score.scope = Some(make_scope(score.timestamp));
+            score.layers[0].indicators[0].actual = Some(5.0);
+            score
+        })
+        .collect::<Vec<_>>();
+    past.extend(future);
+    let baseline = compute_personal_baseline(&past, &make_scope(now))
+        .expect("seven past dates remain eligible");
+    assert_eq!(baseline.average("dreyfus"), Some(3.0));
+    assert_eq!(
+        compute_personal_trends(&current, &baseline).indicator("dreyfus"),
+        Some(Trend::Up)
+    );
+}
+
+#[test]
+fn missing_metric_days_do_not_count_as_observed_zero_or_activate_its_baseline() {
+    let now = Utc::now();
+    let mut history = (0..7)
+        .map(|day| {
+            make_score_result(
+                4.0,
+                80.0,
+                0.0,
+                0.0,
+                20.0,
+                25.0,
+                10.0,
+                20.0,
+                4.0,
+                0.2,
+                0.0,
+                now - Duration::days(day),
+            )
+        })
+        .collect::<Vec<_>>();
+    let missing = &mut history[0].layers[0].indicators[0];
+    missing.actual = None;
+    missing.signal = Signal::Unknown;
+    let baseline = compute_personal_baseline(&history, &make_scope(Utc::now())).unwrap();
+    assert_eq!(baseline.average("dreyfus"), None);
+    assert_eq!(baseline.average("decision_quality"), Some(80.0));
+}
+
+#[test]
+fn personal_baseline_excludes_incompatible_and_unscoped_scores() {
+    let now = Utc::now();
+    let scope = make_scope(now);
+    let mut history = (1..=7)
+        .map(|day| {
+            make_score_result(
+                3.0,
+                60.0,
+                0.0,
+                0.0,
+                20.0,
+                25.0,
+                10.0,
+                20.0,
+                4.0,
+                0.2,
+                0.0,
+                now - Duration::days(day),
+            )
+        })
+        .collect::<Vec<_>>();
+    let baseline = compute_personal_baseline(&history, &scope).unwrap();
+    assert_eq!(baseline.average("dreyfus"), Some(3.0));
+
+    for variant in ["database", "targets", "window", "unscoped", "degraded"] {
+        let original = history[0].clone();
+        match variant {
+            "database" => {
+                history[0].scope.as_mut().unwrap().database_identity = "/synthetic/other.db".into()
+            }
+            "targets" => history[0].scope.as_mut().unwrap().targets = "other targets".into(),
+            "window" => history[0].scope.as_mut().unwrap().window = "all".into(),
+            "unscoped" => history[0].scope = None,
+            "degraded" => {
+                history[0]
+                    .scope
+                    .as_mut()
+                    .unwrap()
+                    .data_quality
+                    .detached_observations = 1
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            compute_personal_baseline(&history, &scope).is_none(),
+            "{variant}"
+        );
+        history[0] = original;
+    }
 }

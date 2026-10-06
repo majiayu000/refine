@@ -49,6 +49,7 @@ jobs:
           bash scripts/test-install-local.sh
           bash scripts/test-runtime-wrappers.sh
           bash scripts/test-local-ui-contract.sh
+          node --test scripts/eval_recommendations.test.mjs
 
   msrv:
     runs-on: ubuntu-latest

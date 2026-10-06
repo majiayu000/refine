@@ -608,6 +608,7 @@ mod tests {
             .await
             .expect("build test state");
         let state = Arc::new(AppState {
+            database_identity: state.database_identity.clone(),
             llm_client: None,
             store: state.store.clone(),
             doc_store: state.doc_store.clone(),
@@ -701,6 +702,7 @@ mod tests {
             .map_err(|e| e.to_string())?;
 
         let state = Arc::new(AppState {
+            database_identity: "test-extraction-database".into(),
             store,
             doc_store,
             engine,

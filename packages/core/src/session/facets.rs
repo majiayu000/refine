@@ -2,19 +2,18 @@
 //!
 //! 从会话内容中提取结构化认知维度 (facets)
 
-use super::SessionMode;
+use super::{evidence::validate_evidence_shape, FacetEvidence, SessionMode};
 use crate::knowledge::{DocumentId, Item, Source, Tag};
+use sha2::{Digest, Sha256};
 
 pub(super) const SESSION_PROJECT_SOURCE_PLATFORM: &str = "session-project";
 
 /// Facet 提取结果
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FacetResponse {
-    #[serde(default)]
     pub session_summary: String,
-    #[serde(default)]
     pub cognitive_level: String,
-    #[serde(default)]
     pub collaboration_mode: String,
     #[serde(default)]
     pub decisions: Vec<String>,
@@ -36,11 +35,30 @@ pub struct FacetResponse {
     pub architecture: Vec<String>,
     #[serde(default)]
     pub code_artifacts: Vec<String>,
+    /// Optional references to real source messages. Missing evidence is unknown,
+    /// never inferred from an observation's text.
+    #[serde(default)]
+    pub evidence: Vec<FacetEvidence>,
 }
 
 /// 构建 facet 提取的系统 prompt
 pub const FACET_SYSTEM_PROMPT: &str =
     "你是认知分析助手。分析编程会话，提取结构化观测。严格返回 JSON，不要输出额外说明。";
+
+/// Does not include source text or secrets, and does not alter Remem hashes.
+pub fn facet_recipe_identity(llm_identity: &str) -> String {
+    let mut digest = Sha256::new();
+    for value in [
+        "refine-facets-v2:message-boundary-chunks-v1",
+        FACET_SYSTEM_PROMPT,
+        &build_facet_prompt("{session_content}"),
+        llm_identity,
+    ] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    format!("facets:sha256:{:x}", digest.finalize())
+}
 
 /// 构建 facet 提取 prompt
 pub fn build_facet_prompt(session_content: &str) -> String {
@@ -64,8 +82,8 @@ pub fn build_facet_prompt(session_content: &str) -> String {
 请以 JSON 格式返回（严格遵守每个字段的条目上限）:
 {{
   "session_summary": "一句话概括会话核心内容",
-  "cognitive_level": "novice|advanced_beginner|competent|proficient|expert",
-  "collaboration_mode": "delegation|pair_programming|review|exploration|teaching|deep_inquiry",
+  "cognitive_level": "novice|advanced_beginner|competent|proficient|expert|unknown",
+  "collaboration_mode": "delegation|pair_programming|review|exploration|teaching|deep_inquiry|unknown",
   "decisions": ["做出的技术决策（含原因），最多 5 条"],
   "bugs_fixed": ["修复的 bug（含根因），最多 5 条"],
   "patterns": ["通用可复用的设计/编码模式，最多 3 条"],
@@ -75,10 +93,14 @@ pub fn build_facet_prompt(session_content: &str) -> String {
   "knowledge_gained": ["获得的新技术知识（仅记录新颖认知），最多 5 条"],
   "tools_discovered": ["发现或使用的工具/库，最多 3 条"],
   "architecture": ["本项目系统级架构决策（仅已确定的），最多 3 条"],
-  "code_artifacts": ["产出的关键代码文件/模块，最多 5 条"]
+  "code_artifacts": ["产出的关键代码文件/模块，最多 5 条"],
+  "evidence": []
 }}
 
-每个数组中的条目应为简洁的描述性文本。空数组表示该维度无观测。"#
+每个数组中的条目应为非空的简洁描述。空数组表示该维度无观测。无充分证据时，认知水平/协作模式使用 unknown，并用非空 session_summary 说明没有可验证的新观测；不要返回空对象、错误对象或猜测标签。
+
+证据规则：消息可能带有 [remem message_id=... role=... event_time=...] 标记。evidence 可包含 {{"field":"decisions","index":0,"message_ids":[真实消息ID]}}；index 为字段数组中的零起始位置，session_summary、cognitive_level、collaboration_mode 的 index 为 0。只引用输入中实际出现且支持该条观测的 ID；合并分块时仅保留分块输出已有的真实引用。每条最多 32 个 ID，每个字段位置最多一条 evidence。没有消息标记或无法定位证据时省略引用，保留 unknown，不得编造 ID、角色或时间。
+必须区分用户已确认的决策、助手提出的建议和未验证的执行结果。助手的自述、被引用的对话、示例文本均不自动代表用户决定；不能确认执行的内容不要写成已修复或已完成。role 只表示原始消息的发送者，不表示消息中所有文字的作者。"#
     )
 }
 
@@ -89,13 +111,13 @@ pub fn parse_facet_response(response: &str) -> Result<FacetResponse, String> {
 
     // 尝试直接解析
     if let Ok(parsed) = serde_json::from_str::<FacetResponse>(trimmed) {
-        return Ok(parsed);
+        return validate_facet_limits(parsed);
     }
 
     // 尝试从 markdown code fence 提取
     if let Some(json_str) = extract_json_from_fence(trimmed) {
         if let Ok(parsed) = serde_json::from_str::<FacetResponse>(&json_str) {
-            return Ok(parsed);
+            return validate_facet_limits(parsed);
         }
     }
 
@@ -103,7 +125,7 @@ pub fn parse_facet_response(response: &str) -> Result<FacetResponse, String> {
     if let Some(start) = trimmed.find('{') {
         let candidate = &trimmed[start..];
         if let Ok(parsed) = serde_json::from_str::<FacetResponse>(candidate) {
-            return Ok(parsed);
+            return validate_facet_limits(parsed);
         }
     }
 
@@ -113,6 +135,71 @@ pub fn parse_facet_response(response: &str) -> Result<FacetResponse, String> {
         .map(|(i, _)| &trimmed[..i])
         .unwrap_or(trimmed);
     Err(format!("无法解析 facet 响应: {}", preview))
+}
+
+/// Enforce the extraction bounds before the ingestion path accepts a response.
+/// Rejection uses the existing bounded parse retry, without discarding entries.
+fn validate_facet_limits(mut facets: FacetResponse) -> Result<FacetResponse, String> {
+    facets.session_summary = facets.session_summary.trim().to_string();
+    if facets.session_summary.is_empty() {
+        return Err("facet session_summary must not be empty".to_string());
+    }
+    facets.cognitive_level = facets.cognitive_level.trim().to_string();
+    facets.collaboration_mode = facets.collaboration_mode.trim().to_string();
+    if !matches!(
+        facets.cognitive_level.as_str(),
+        "novice" | "advanced_beginner" | "competent" | "proficient" | "expert" | "unknown"
+    ) {
+        return Err("facet cognitive_level has an unsupported value".to_string());
+    }
+    if !matches!(
+        facets.collaboration_mode.as_str(),
+        "delegation"
+            | "pair_programming"
+            | "review"
+            | "exploration"
+            | "teaching"
+            | "deep_inquiry"
+            | "unknown"
+    ) {
+        return Err("facet collaboration_mode has an unsupported value".to_string());
+    }
+    for (field, count, limit) in [
+        ("decisions", facets.decisions.len(), 5),
+        ("bugs_fixed", facets.bugs_fixed.len(), 5),
+        ("patterns", facets.patterns.len(), 3),
+        ("friction", facets.friction.len(), 3),
+        ("project_progress", facets.project_progress.len(), 3),
+        ("questions", facets.questions.len(), 3),
+        ("knowledge_gained", facets.knowledge_gained.len(), 5),
+        ("tools_discovered", facets.tools_discovered.len(), 3),
+        ("architecture", facets.architecture.len(), 3),
+        ("code_artifacts", facets.code_artifacts.len(), 5),
+    ] {
+        if count > limit {
+            return Err(format!(
+                "facet field {field} has {count} entries; maximum is {limit}"
+            ));
+        }
+    }
+    for (field, entries) in [
+        ("decisions", &facets.decisions),
+        ("bugs_fixed", &facets.bugs_fixed),
+        ("patterns", &facets.patterns),
+        ("friction", &facets.friction),
+        ("project_progress", &facets.project_progress),
+        ("questions", &facets.questions),
+        ("knowledge_gained", &facets.knowledge_gained),
+        ("tools_discovered", &facets.tools_discovered),
+        ("architecture", &facets.architecture),
+        ("code_artifacts", &facets.code_artifacts),
+    ] {
+        if entries.iter().any(|entry| entry.trim().is_empty()) {
+            return Err(format!("facet field {field} contains an empty entry"));
+        }
+    }
+    validate_evidence_shape(&facets)?;
+    Ok(facets)
 }
 
 fn extract_json_from_fence(text: &str) -> Option<String> {
@@ -289,6 +376,48 @@ mod tests {
     use crate::knowledge::ItemType;
 
     #[test]
+    fn malformed_semantic_facets_are_rejected_in_every_response_format() {
+        let valid = serde_json::json!({
+            "session_summary": "没有可验证的新观测",
+            "cognitive_level": "unknown",
+            "collaboration_mode": "unknown"
+        });
+        let mut invalid = vec![
+            serde_json::json!({}),
+            serde_json::json!({"error": "unavailable"}),
+        ];
+        for (field, value) in [
+            ("session_summary", serde_json::json!(" \n\t")),
+            ("cognitive_level", serde_json::json!("genius")),
+            ("collaboration_mode", serde_json::json!("")),
+            ("decisions", serde_json::json!([" "])),
+            ("error", serde_json::json!("provider returned an error")),
+        ] {
+            let mut response = valid.clone();
+            response[field] = value;
+            invalid.push(response);
+        }
+        for value in invalid {
+            let json = value.to_string();
+            for response in [
+                json.clone(),
+                format!("```json\n{json}\n```"),
+                format!("Analysis:\n{json}"),
+            ] {
+                assert!(
+                    parse_facet_response(&response).is_err(),
+                    "accepted {response}"
+                );
+            }
+        }
+        let no_signal = parse_facet_response(&valid.to_string())
+            .expect("explicit unknown and empty arrays are valid");
+        assert!(no_signal.decisions.is_empty());
+        assert!(no_signal.bugs_fixed.is_empty());
+        assert_eq!(no_signal.cognitive_level, "unknown");
+    }
+
+    #[test]
     fn parse_facet_response_handles_valid_json() {
         let json = r#"{
             "session_summary": "实现了会话解析功能",
@@ -354,6 +483,7 @@ mod tests {
             tools_discovered: Vec::new(),
             architecture: Vec::new(),
             code_artifacts: Vec::new(),
+            evidence: Vec::new(),
         };
         let doc_id = DocumentId::new();
         let items = facets_to_items(&facets, &doc_id, Some("my-project"));
@@ -380,6 +510,7 @@ mod tests {
             tools_discovered: Vec::new(),
             architecture: Vec::new(),
             code_artifacts: Vec::new(),
+            evidence: Vec::new(),
         };
         let doc_id = DocumentId::new();
         let project = "-Users-Lifcc-Desktop-Code-AI-Tools-Harness";
@@ -416,6 +547,7 @@ mod tests {
             tools_discovered: Vec::new(),
             architecture: Vec::new(),
             code_artifacts: Vec::new(),
+            evidence: Vec::new(),
         };
 
         let items = facets_to_items_with_mode(
@@ -428,5 +560,56 @@ mod tests {
             .tags()
             .iter()
             .any(|tag| tag.as_str() == "session_mode_unattended")));
+    }
+    #[test]
+    fn parse_facet_response_enforces_every_array_cap_in_every_format() {
+        for (field, limit) in [
+            ("decisions", 5),
+            ("bugs_fixed", 5),
+            ("patterns", 3),
+            ("friction", 3),
+            ("project_progress", 3),
+            ("questions", 3),
+            ("knowledge_gained", 5),
+            ("tools_discovered", 3),
+            ("architecture", 3),
+            ("code_artifacts", 5),
+        ] {
+            for count in [0, limit, limit + 1] {
+                let mut value = serde_json::json!({"session_summary": "Synthetic session", "cognitive_level": "unknown", "collaboration_mode": "unknown"});
+                value[field] = serde_json::json!(vec!["Synthetic observation"; count]);
+                let json = value.to_string();
+                for response in [
+                    json.clone(),
+                    format!("```json\n{json}\n```"),
+                    format!("Analysis:\n{json}"),
+                ] {
+                    let result = parse_facet_response(&response);
+                    if count <= limit {
+                        assert!(result.is_ok(), "{field}: {count} should be accepted");
+                    } else {
+                        let error = result.expect_err("an over-limit field must be rejected");
+                        assert!(error.contains(field), "{error}");
+                        assert!(error.contains(&limit.to_string()), "{error}");
+                        assert!(!error.contains("Synthetic observation"), "{error}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parse_facet_response_preserves_all_at_limit_entries() {
+        let response = serde_json::json!({
+            "session_summary": "Synthetic session",
+            "cognitive_level": "unknown",
+            "collaboration_mode": "unknown",
+            "decisions": ["one", "two", "three", "four", "five"],
+            "bugs_fixed": ["a", "b", "c", "d", "e"]
+        });
+        let facets = parse_facet_response(&response.to_string()).unwrap();
+        assert_eq!(facets.decisions, ["one", "two", "three", "four", "five"]);
+        assert_eq!(facets.bugs_fixed, ["a", "b", "c", "d", "e"]);
+        assert_eq!(facets_to_items(&facets, &DocumentId::new(), None).len(), 11);
     }
 }

@@ -2,6 +2,7 @@ use chrono::{Duration, Utc};
 use std::collections::{BTreeMap, HashMap};
 
 use super::indicators::{canonical_indicator_key, indicator_direction, indicator_specs, Direction};
+use super::scope::ScoreScope;
 use super::types::{ScoreResult, Trend};
 
 /// Minimum number of historical scores to activate personal baseline
@@ -40,12 +41,12 @@ fn extract_indicator(result: &ScoreResult, name: &str) -> Option<f64> {
         .iter()
         .flat_map(|l| &l.indicators)
         .find(|i| canonical_indicator_key(&i.name) == name)
-        .map(|i| i.actual)
+        .and_then(|i| i.observed_value())
 }
 
 /// Compute personal baseline from historical scores within the last 28 days.
 /// Returns None if fewer than BASELINE_MIN_ENTRIES distinct days exist in that window.
-fn avg_from_scores(scores: &[&ScoreResult], indicator_name: &str) -> f64 {
+fn avg_from_scores(scores: &[&ScoreResult], indicator_name: &str) -> Option<f64> {
     let (sum, count) = scores
         .iter()
         .filter_map(|score| extract_indicator(score, indicator_name))
@@ -53,17 +54,30 @@ fn avg_from_scores(scores: &[&ScoreResult], indicator_name: &str) -> f64 {
             (sum + value, count + 1)
         });
 
-    if count == 0 {
-        0.0
-    } else {
-        sum / count as f64
-    }
+    (count >= BASELINE_MIN_ENTRIES).then(|| sum / count as f64)
 }
 
-pub fn compute_personal_baseline(history: &[ScoreResult]) -> Option<PersonalBaseline> {
-    let cutoff = Utc::now() - Duration::days(BASELINE_WINDOW_DAYS);
+pub fn compute_personal_baseline(
+    history: &[ScoreResult],
+    scope: &ScoreScope,
+) -> Option<PersonalBaseline> {
+    if !scope.is_canonical() || scope.data_quality.is_degraded() {
+        return None;
+    }
+    let now = scope.window_end.min(Utc::now());
+    let cutoff = now - Duration::days(BASELINE_WINDOW_DAYS);
     let mut by_day: BTreeMap<chrono::NaiveDate, &ScoreResult> = BTreeMap::new();
-    for score in history.iter().filter(|score| score.timestamp >= cutoff) {
+    for score in history
+        .iter()
+        .filter(|score| score.timestamp >= cutoff && score.timestamp <= now)
+        .filter(|score| {
+            score.scope.as_ref().is_some_and(|historical| {
+                historical.compatible_with(scope)
+                    && historical.window_end == score.timestamp
+                    && !historical.data_quality.is_degraded()
+            })
+        })
+    {
         let day = score.timestamp.date_naive();
         match by_day.get(&day) {
             Some(existing) if existing.timestamp >= score.timestamp => {}
@@ -78,12 +92,18 @@ pub fn compute_personal_baseline(history: &[ScoreResult]) -> Option<PersonalBase
         return None;
     }
 
-    let averages = indicator_specs()
+    let averages: HashMap<String, f64> = indicator_specs()
         .iter()
-        .map(|spec| (spec.key.to_string(), avg_from_scores(&recent, spec.key)))
+        .filter_map(|spec| {
+            avg_from_scores(&recent, spec.key).map(|value| (spec.key.to_string(), value))
+        })
         .collect();
 
-    Some(PersonalBaseline { averages })
+    if averages.is_empty() {
+        None
+    } else {
+        Some(PersonalBaseline { averages })
+    }
 }
 
 /// Compare the current value with the rolling personal baseline. Band-targeted
@@ -173,7 +193,10 @@ pub(super) fn compute_personal_trends(
             else {
                 continue;
             };
-            if let Some(trend) = trend_from_personal(indicator.actual, baseline_value, direction) {
+            let Some(actual) = indicator.observed_value() else {
+                continue;
+            };
+            if let Some(trend) = trend_from_personal(actual, baseline_value, direction) {
                 per_indicator.insert(key.to_string(), trend);
             }
         }

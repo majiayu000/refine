@@ -1,4 +1,5 @@
 import type { ConversationSource } from '../types'
+import { captureAndSave, contentFingerprint, createCaptureGuard, type CaptureValidation } from './capture-context'
 import {
   injectStyleOnce,
   persistAndEnqueueConversation,
@@ -19,6 +20,8 @@ interface PendingSidebarImport {
   conversationKey: string
   title: string
   requestedAt: number
+  requestId?: string
+  previousContentFingerprint?: string
 }
 
 export interface QuickSaveButtonCopy {
@@ -66,7 +69,7 @@ export interface QuickSaveEngineOptions {
   isCurrentConversation: (conversationKey: string) => boolean
   navigateToTarget: (link: HTMLAnchorElement, target: QuickSaveTarget) => Promise<boolean>
   extractConversation: () => string
-  waitForConversationContent?: () => Promise<string | null>
+  waitForConversationContent?: (validation?: CaptureValidation) => Promise<string | null>
   tryExtractContentWithoutNavigation?: (
     target: QuickSaveTarget,
     title: string
@@ -97,7 +100,7 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
   const styleId = options.styleId || `__refine_quick_save_style_${options.providerId}`
 
   const messages: QuickSaveMessages = {
-    successToast: '已加入同步队列，稍后上传到 Refine 云端',
+    successToast: '会话已保存在本地队列，服务接收后再提炼',
     silentSuccessToast: '已后台入队，无需跳转',
     alreadyImportedToast: '该会话已有历史入队记录，本次将按最新内容再次入队',
     invalidTargetToast: '无法识别会话链接',
@@ -117,6 +120,16 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
   let pendingImportScheduled = false
   let sidebarObserver: MutationObserver | null = null
   let pendingImportProcessing = false
+  const captureGuard = createCaptureGuard({
+    currentUrl: () => window.location.href,
+    conversationKey: (url) => options.getConversationKeyFromUrl?.(url) ?? null,
+  })
+  // Navigation API catches pushState/replaceState as well as back/forward,
+  // including A -> B -> A while a provider is awaiting history loading.
+  const navigation = (window as Window & { navigation?: EventTarget }).navigation
+  navigation?.addEventListener('currententrychange', () => captureGuard.invalidate())
+  window.addEventListener('popstate', () => captureGuard.invalidate())
+  window.addEventListener('hashchange', () => captureGuard.invalidate())
 
   function buildImportedConversationMap(raw: unknown): Map<string, number> {
     const imported = new Map<string, number>()
@@ -229,8 +242,13 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
     }
   }
 
-  function clearPendingSidebarImport(): void {
+  function clearPendingSidebarImport(expected?: PendingSidebarImport): void {
     try {
+      if (expected) {
+        const current = readPendingSidebarImport()
+        if (!current || current.requestId !== expected.requestId ||
+            current.requestedAt !== expected.requestedAt || current.url !== expected.url) return
+      }
       window.sessionStorage.removeItem(options.pendingStorageKey)
     } catch {
       // ignore unavailable sessionStorage
@@ -335,24 +353,25 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
     url?: string
     conversationKey?: string
     waitForContent?: boolean
+    previousContentFingerprint?: string
   }): Promise<ExtractResult> {
-    const content =
-      params?.waitForContent && options.waitForConversationContent
-        ? await options.waitForConversationContent()
-        : options.extractConversation()
-
-    if (!content) {
-      return {
-        success: false,
-        message: messages.notFoundContentMessage,
-      }
+    const url = params?.url || window.location.href
+    const title = params?.title || document.title
+    const conversationKey = params?.conversationKey || options.getConversationKeyFromUrl?.(url) || undefined
+    const validation = captureGuard.begin(url, params?.previousContentFingerprint)
+    const result = await captureAndSave(
+      validation,
+      () => params?.waitForContent && options.waitForConversationContent
+        ? options.waitForConversationContent(validation)
+        : options.extractConversation(),
+      (content) => enqueueExtractedContent(content, { title, url, conversationKey }),
+    )
+    return result || {
+      success: false,
+      message: params?.previousContentFingerprint
+        ? '未确认目标会话正文已加载，请在目标会话重新保存。'
+        : messages.notFoundContentMessage,
     }
-
-    return enqueueExtractedContent(content, {
-      title: params?.title,
-      url: params?.url,
-      conversationKey: params?.conversationKey,
-    })
   }
 
   async function handleSidebarQuickSaveClick(
@@ -415,6 +434,8 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
       conversationKey: target.conversationKey,
       title,
       requestedAt: Date.now(),
+      requestId: crypto.randomUUID(),
+      previousContentFingerprint: contentFingerprint(options.extractConversation()),
     })
     if (!written) {
       setButtonErrorState(button, messages.pendingWriteFailedToast)
@@ -463,7 +484,9 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
       button.addEventListener('pointerdown', stopPropagation)
       button.addEventListener('click', (event) => {
         stopPropagation(event)
-        void handleSidebarQuickSaveClick(link, button)
+        void handleSidebarQuickSaveClick(link, button).catch((error: unknown) => {
+          setButtonErrorState(button, error instanceof Error ? error.message : messages.saveFailedFallback)
+        })
       })
 
       host.appendChild(button)
@@ -497,6 +520,7 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
     scheduleResumePendingSidebarImport()
 
     sidebarObserver = new MutationObserver(() => {
+      captureGuard.observeNavigation()
       scheduleEnhanceSidebarConversationLinks()
       scheduleResumePendingSidebarImport()
     })
@@ -515,24 +539,27 @@ export function initQuickSaveEngine(options: QuickSaveEngineOptions): void {
       if (!pending) return
 
       if (Date.now() - pending.requestedAt > pendingTtlMs) {
-        clearPendingSidebarImport()
+        clearPendingSidebarImport(pending)
         return
       }
 
       if (!options.isCurrentConversation(pending.conversationKey)) return
 
-      const result = await extractAndEnqueueConversation({
-        title: pending.title,
-        url: pending.url,
-        conversationKey: pending.conversationKey,
-        waitForContent: true,
-      })
-      clearPendingSidebarImport()
-
-      if (result.success) {
-        showToast(messages.successToast)
-      } else {
-        showToast(saveFailedMessage(result))
+      try {
+        const result = await extractAndEnqueueConversation({
+          title: pending.title,
+          url: pending.url,
+          conversationKey: pending.conversationKey,
+          waitForContent: true,
+          previousContentFingerprint: pending.previousContentFingerprint,
+        })
+        showToast(result.success ? messages.successToast : saveFailedMessage(result))
+      } catch (error) {
+        showToast(error instanceof Error ? error.message : messages.saveFailedFallback)
+      } finally {
+        // A second click may have replaced the pending request while we waited.
+        clearPendingSidebarImport(pending)
+        scheduleResumePendingSidebarImport()
       }
     } finally {
       pendingImportProcessing = false

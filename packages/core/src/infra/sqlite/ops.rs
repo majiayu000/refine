@@ -1,4 +1,5 @@
-use super::rows::{row_to_item, to_fts_query};
+use super::rows::row_to_item;
+use super::text_search::{SearchTable, TextSearch};
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{Item, ItemType};
 use chrono::{DateTime, Utc};
@@ -215,17 +216,13 @@ pub(super) fn save(conn: &Connection, item: &Item) -> InfraResult<()> {
     Ok(())
 }
 pub(super) fn delete(conn: &Connection, id: &str) -> InfraResult<bool> {
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| InfraError::Database(e.to_string()))?;
-    let rows = tx
+    // The caller owns the transaction, including any explicit-deletion tombstone.
+    let rows = conn
         .execute("DELETE FROM items WHERE id = ?1", [id])
         .map_err(|e| InfraError::Database(e.to_string()))?;
     if rows > 0 {
-        prune_item_id_from_conversations(&tx, id)?;
+        prune_item_id_from_conversations(conn, id)?;
     }
-    tx.commit()
-        .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(rows > 0)
 }
 
@@ -301,46 +298,44 @@ pub(super) fn search_text(
     offset: usize,
     limit: usize,
 ) -> InfraResult<Vec<Item>> {
-    let limit = std::cmp::min(limit, i64::MAX as usize) as i64;
-    let offset = std::cmp::min(offset, i64::MAX as usize) as i64;
-    let Some(fts_query) = to_fts_query(query) else {
+    let Some(mut plan) = TextSearch::new(query, SearchTable::Items) else {
         return Ok(Vec::new());
     };
-
+    let sql = format!(
+        "WITH hits AS ({}) SELECT i.id, i.item_type, i.title, i.summary, i.content, i.tags, i.source, i.created_at, i.updated_at, i.document_id, i.excerpt FROM items i JOIN hits ON i.rowid = hits.rowid ORDER BY hits.rank, i.id LIMIT ? OFFSET ?", plan.sql,
+    );
+    plan.params.push(rusqlite::types::Value::Integer(
+        limit.min(i64::MAX as usize) as i64,
+    ));
+    plan.params.push(rusqlite::types::Value::Integer(
+        offset.min(i64::MAX as usize) as i64,
+    ));
     let mut stmt = conn
-        .prepare(
-            "SELECT i.id, i.item_type, i.title, i.summary, i.content, i.tags, i.source, i.created_at, i.updated_at, i.document_id, i.excerpt
-             FROM items i
-             JOIN items_fts fts ON i.rowid = fts.rowid
-             WHERE items_fts MATCH ?1
-             ORDER BY fts.rank
-             LIMIT ?2 OFFSET ?3",
-        )
+        .prepare(&sql)
         .map_err(|e| InfraError::Database(e.to_string()))?;
-
     let rows = stmt
-        .query_map(params![fts_query, limit, offset], |row| {
+        .query_map(rusqlite::params_from_iter(plan.params), |row| {
             row_to_item(row).map_err(to_row_err)
         })
         .map_err(|e| InfraError::Database(e.to_string()))?;
-
     rows.map(|r| r.map_err(|e| InfraError::Database(e.to_string())))
         .collect()
 }
+
 pub(super) fn count_text_hits(conn: &Connection, query: &str) -> InfraResult<usize> {
-    let Some(fts_query) = to_fts_query(query) else {
+    let Some(plan) = TextSearch::new(query, SearchTable::Items) else {
         return Ok(0);
     };
     let count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM items_fts WHERE items_fts MATCH ?1",
-            [fts_query],
+            &format!("SELECT COUNT(*) FROM ({})", plan.sql),
+            rusqlite::params_from_iter(plan.params),
             |row| row.get(0),
         )
         .map_err(|e| InfraError::Database(e.to_string()))?;
-
     Ok(count.max(0) as usize)
 }
+
 pub(super) fn find_since(conn: &Connection, since: DateTime<Utc>) -> InfraResult<Vec<Item>> {
     let mut stmt = conn
         .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at, document_id, excerpt FROM items WHERE created_at >= ?1 ORDER BY created_at DESC")

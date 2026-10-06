@@ -1,0 +1,67 @@
+[
+  {
+    "id": "eval-canary",
+    "item_type": "knowledge",
+    "title": "使用灰度发布降低部署风险",
+    "summary": "逐步放量并监测错误",
+    "content": "Rust service deployment with a canary rollout",
+    "tags": [
+      "deployment",
+      "rust"
+    ]
+  },
+  {
+    "id": "eval-bluegreen",
+    "item_type": "knowledge",
+    "title": "采用蓝绿部署快速回滚",
+    "summary": "两套环境切换",
+    "content": "zero downtime deployment rollback",
+    "tags": [
+      "deployment"
+    ]
+  },
+  {
+    "id": "eval-rust-auth",
+    "item_type": "skill",
+    "title": "Rust auth middleware",
+    "summary": "Axum authentication for requests",
+    "content": "Validate bearer tokens before application handlers run",
+    "tags": [
+      "rust",
+      "auth"
+    ]
+  },
+  {
+    "id": "eval-postgres-isolation",
+    "item_type": "knowledge",
+    "title": "PostgreSQL transaction isolation",
+    "summary": "Read committed and serializable transactions",
+    "content": "database consistency and concurrent writes",
+    "tags": [
+      "database",
+      "postgresql"
+    ]
+  },
+  {
+    "id": "eval-postgres-backup",
+    "item_type": "knowledge",
+    "title": "PostgreSQL backup restore",
+    "summary": "Recover data from a backup",
+    "content": "database dump and restore procedures",
+    "tags": [
+      "database",
+      "postgresql"
+    ]
+  },
+  {
+    "id": "eval-react-debounce",
+    "item_type": "snippet",
+    "title": "React input debounce",
+    "summary": "Delay search until typing stops",
+    "content": "Clear timeout on effect cleanup to cancel obsolete requests",
+    "tags": [
+      "react",
+      "ui"
+    ]
+  }
+]

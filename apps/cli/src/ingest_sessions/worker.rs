@@ -6,10 +6,14 @@ use refine_core::error::InfraError;
 use refine_core::infra::{
     llm_with_retry_policy_for, LlmClient, LlmRetryPolicy, DEFAULT_RETRY_BASE_DELAY_SECS,
 };
-use refine_core::knowledge::{Document, DocumentRepository, RestoreDocumentParams};
+use refine_core::knowledge::{
+    assign_session_observation_ids, Document, DocumentRepository, RestoreDocumentParams,
+    SessionProjectionMetadata,
+};
 use refine_core::session::{
-    build_facet_prompt, facets_to_items_with_mode_and_identity, parse_facet_response, SessionMode,
-    SessionSource, FACET_SYSTEM_PROMPT,
+    build_facet_prompt, facets_to_items_with_mode_and_identity, parse_facet_response,
+    session_projection_evidence, validate_facet_evidence, SessionMode, SessionSource,
+    SourceMessageReference, FACET_SYSTEM_PROMPT,
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -39,6 +43,8 @@ pub(super) struct PendingSession {
     pub(super) captured_at: DateTime<Utc>,
     pub(super) has_embedded_timestamp: bool,
     pub(super) raw_content: String,
+    pub(super) facet_content: Option<String>,
+    pub(super) source_messages: Vec<SourceMessageReference>,
     pub(super) source_version: Option<String>,
     pub(super) needs_chunk: bool,
     pub(super) chunks: Vec<String>,
@@ -281,27 +287,57 @@ pub(super) async fn process_single_session(
     doc_store: &Arc<dyn DocumentRepository>,
     quota_hit: &Arc<AtomicBool>,
 ) -> Result<usize> {
+    let mut reduced_sources = Vec::new();
     let content = if session.needs_chunk {
         let total_chunks = session.chunks.len();
         let mut summaries = Vec::with_capacity(total_chunks);
+        let mut referenced_ids = HashSet::new();
         for (idx, chunk) in session.chunks.iter().enumerate() {
-            let text = llm_call_with_retry(client, chunk, quota_hit)
-                .await
-                .with_context(|| {
-                    format!(
-                        "分块 {}/{} 提取失败，整个 session 视为失败以避免数据缺失",
-                        idx + 1,
-                        total_chunks
-                    )
-                })?;
-            summaries.push(text);
+            let facets = extract_and_parse_facets_with_retry(
+                chunk,
+                client,
+                quota_hit,
+                &session.source_messages,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "分块 {}/{} 提取失败，整个 session 视为失败以避免数据缺失",
+                    idx + 1,
+                    total_chunks
+                )
+            })?;
+            referenced_ids.extend(
+                facets
+                    .evidence
+                    .iter()
+                    .flat_map(|entry| entry.message_ids.iter().copied()),
+            );
+            summaries.push(serde_json::to_string(&facets)?);
         }
+        reduced_sources.extend(
+            session
+                .source_messages
+                .iter()
+                .filter(|message| referenced_ids.contains(&message.id))
+                .cloned(),
+        );
         summaries.join("\n\n---\n\n")
     } else {
-        session.raw_content.clone()
+        session
+            .facet_content
+            .as_ref()
+            .unwrap_or(&session.raw_content)
+            .clone()
     };
 
-    let facet_response = extract_and_parse_facets_with_retry(&content, client, quota_hit).await?;
+    let evidence_sources = if session.needs_chunk {
+        &reduced_sources
+    } else {
+        &session.source_messages
+    };
+    let facet_response =
+        extract_and_parse_facets_with_retry(&content, client, quota_hit, evidence_sources).await?;
     let document = build_session_document(session, &facet_response.session_summary);
     let mut items = facets_to_items_with_mode_and_identity(
         &facet_response,
@@ -310,6 +346,9 @@ pub(super) async fn process_single_session(
         session.project_identity.as_deref(),
         session.mode,
     );
+    assign_session_observation_ids(&mut items, &session.url)?;
+    let evidence = session_projection_evidence(&facet_response, &session.source_messages, &items)
+        .map_err(anyhow::Error::msg)?;
     let item_count = items.len();
     for legacy_document_id in &session.legacy_documents_to_delete {
         let mut legacy_items = doc_store
@@ -323,11 +362,15 @@ pub(super) async fn process_single_session(
         items.extend(legacy_items);
     }
     doc_store
-        .save_with_replaced_items_and_delete_documents(
+        .save_session_projection(
             &document,
             &items,
             &session.legacy_documents_to_delete,
             &session.legacy_documents_to_delete,
+            &SessionProjectionMetadata {
+                recipe_id: refine_core::session::facet_recipe_identity(&client.cache_identity()),
+                evidence,
+            },
         )
         .await
         .context("保存 Document/Items 并清理旧会话失败")?;
@@ -436,17 +479,20 @@ async fn extract_and_parse_facets_with_retry(
     content: &str,
     client: &Arc<dyn LlmClient>,
     quota_hit: &Arc<AtomicBool>,
+    source_messages: &[SourceMessageReference],
 ) -> Result<refine_core::session::FacetResponse> {
-    extract_and_parse_facets_with_retry_policy(
+    extract_and_validate_facets_with_retry_policy(
         content,
         client,
         quota_hit,
+        source_messages,
         DEFAULT_FACET_PARSE_ATTEMPTS,
         DEFAULT_RETRY_BASE_DELAY_SECS,
     )
     .await
 }
 
+#[cfg(test)]
 pub(super) async fn extract_and_parse_facets_with_retry_policy(
     content: &str,
     client: &Arc<dyn LlmClient>,
@@ -454,11 +500,33 @@ pub(super) async fn extract_and_parse_facets_with_retry_policy(
     max_retries: usize,
     base_delay_secs: u64,
 ) -> Result<refine_core::session::FacetResponse> {
+    extract_and_validate_facets_with_retry_policy(
+        content,
+        client,
+        quota_hit,
+        &[],
+        max_retries,
+        base_delay_secs,
+    )
+    .await
+}
+
+async fn extract_and_validate_facets_with_retry_policy(
+    content: &str,
+    client: &Arc<dyn LlmClient>,
+    quota_hit: &Arc<AtomicBool>,
+    source_messages: &[SourceMessageReference],
+    max_retries: usize,
+    base_delay_secs: u64,
+) -> Result<refine_core::session::FacetResponse> {
     let max_retries = max_retries.max(1);
 
     for attempt in 0..max_retries {
         let response = llm_call_with_retry(client, content, quota_hit).await?;
-        match parse_facet_response(&response) {
+        match parse_facet_response(&response).and_then(|facets| {
+            validate_facet_evidence(&facets, source_messages)?;
+            Ok(facets)
+        }) {
             Ok(facets) => return Ok(facets),
             Err(error) if attempt == max_retries - 1 => return Err(anyhow::anyhow!(error)),
             Err(error) => {

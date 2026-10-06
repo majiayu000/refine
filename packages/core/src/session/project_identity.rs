@@ -1,5 +1,6 @@
 use super::clustering::{
-    eligible_observations, is_generic_project_path_segment, is_project_meta_tag, is_session_id,
+    eligible_observations, is_generic_project_path_segment, is_pending_curation,
+    is_project_meta_tag, is_session_id,
 };
 use super::facets::SESSION_PROJECT_SOURCE_PLATFORM;
 #[cfg(test)]
@@ -57,6 +58,9 @@ impl ProjectIdentityResolver {
         let mut candidates = BTreeMap::new();
         let mut bare_aliases = BTreeSet::new();
         for item in items {
+            if is_pending_curation(item) {
+                continue;
+            }
             if let Some(project) = structured_project(item) {
                 record_candidate(project, &mut candidates, &mut bare_aliases);
             } else {

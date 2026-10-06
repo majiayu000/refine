@@ -23,6 +23,7 @@ import {
   waitForConversationExtraction,
 } from '../lib/content/platform-adapter'
 import { delay, toErrorMessage } from '../lib/content/runtime'
+import type { CaptureValidation } from '../lib/content/capture-context'
 
 interface DebugLogEntry {
   ts: string
@@ -110,10 +111,11 @@ function extractConversation(): string {
   return extractConversationFromRoot(document)
 }
 
-async function waitForConversationContent(timeoutMs = MESSAGE_POLL_TIMEOUT_MS): Promise<string | null> {
+async function waitForConversationContent(validation?: CaptureValidation): Promise<string | null> {
   return waitForConversationExtraction(extractConversation, {
-    timeoutMs,
+    timeoutMs: MESSAGE_POLL_TIMEOUT_MS,
     intervalMs: MESSAGE_POLL_INTERVAL_MS,
+    validation,
   })
 }
 

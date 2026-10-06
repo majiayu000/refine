@@ -141,3 +141,40 @@ ON events(created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_events_event_name_created_at
 ON events(event_name, created_at DESC);
+
+-- Extraction recipe state is distinct from Remem's source snapshot identity.
+CREATE TABLE IF NOT EXISTS session_projections (
+    document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+    recipe_id TEXT NOT NULL CHECK(length(recipe_id) > 0),
+    source_version TEXT,
+    evidence_json TEXT NOT NULL,
+    completed_at TEXT NOT NULL
+);
+
+-- Archive only derived Items and evidence references, never transcript bodies.
+-- No mutable-row FK: historical Item/Document IDs must remain traceable.
+CREATE TABLE IF NOT EXISTS session_projection_history (
+    revision_id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    session_ref TEXT NOT NULL,
+    source_version TEXT,
+    recipe_id TEXT,
+    archived_at TEXT NOT NULL,
+    items_json TEXT NOT NULL,
+    evidence_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_projection_history_document
+ON session_projection_history(document_id, archived_at DESC);
+
+-- Explicit human edits/deletions survive replacement of machine projections.
+CREATE TABLE IF NOT EXISTS observation_overrides (
+    session_ref TEXT NOT NULL,
+    logical_key TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    item_json TEXT,
+    deleted INTEGER NOT NULL CHECK(deleted IN (0, 1)),
+    changed_at TEXT NOT NULL,
+    PRIMARY KEY(session_ref, logical_key),
+    CHECK((deleted = 1 AND item_json IS NULL) OR (deleted = 0 AND item_json IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_observation_overrides_item ON observation_overrides(item_id);

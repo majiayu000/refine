@@ -1,5 +1,6 @@
 mod advice;
 mod cli;
+mod cohort;
 mod config;
 mod dashboard;
 mod document_save;
@@ -50,11 +51,20 @@ async fn main() -> Result<()> {
             all,
             require_advice,
         } => {
-            let llm = build_llm_client_from_env();
-            score::handle_score(store, llm, since, all, require_advice, &db_path).await
+            score::handle_score(
+                store,
+                since,
+                all,
+                require_advice,
+                &db_path,
+                &config::mirror_dir(),
+            )
+            .await
         }
-        Commands::Motd => motd::handle_motd(),
-        Commands::Dashboard { since, all } => dashboard::handle_dashboard(store, since, all).await,
+        Commands::Motd => motd::handle_motd(&db_path),
+        Commands::Dashboard { since, all } => {
+            dashboard::handle_dashboard(store, since, all, &db_path).await
+        }
         Commands::Weekly => weekly::handle_weekly(store.clone(), store).await,
         Commands::Profile => {
             let llm = build_llm_client_from_env().ok_or_else(|| {

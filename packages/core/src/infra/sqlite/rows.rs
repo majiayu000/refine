@@ -56,7 +56,7 @@ pub(super) fn to_fts_query(query: &str) -> Option<String> {
     )
 }
 
-fn sanitize_fts_term(raw: &str) -> Option<String> {
+pub(super) fn sanitize_fts_term(raw: &str) -> Option<String> {
     let term: String = raw
         .chars()
         .filter(|ch| ch.is_alphanumeric() || *ch == '_')

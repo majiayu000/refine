@@ -1,0 +1,11 @@
+{"id": "canary-cjk", "query": "灰度发布 Rust service", "relevant_ids": ["eval-canary"]}
+{"id": "bluegreen-cjk", "query": "蓝绿部署 zero downtime", "relevant_ids": ["eval-bluegreen"]}
+{"id": "rust-auth", "query": "Rust auth middleware", "relevant_ids": ["eval-rust-auth"]}
+{"id": "postgres-isolation", "query": "PostgreSQL transaction isolation", "relevant_ids": ["eval-postgres-isolation"]}
+{"id": "postgres-backup", "query": "PostgreSQL backup restore", "relevant_ids": ["eval-postgres-backup"]}
+{"id": "react-debounce", "query": "React input debounce", "relevant_ids": ["eval-react-debounce"]}
+{"id": "multiple-relevant", "query": "database PostgreSQL", "relevant_ids": ["eval-postgres-isolation", "eval-postgres-backup"]}
+{"id": "negative-shared-tags", "query": "PostgreSQL vacuum scheduler", "relevant_ids": []}
+{"id": "negative-redis", "query": "Redis cluster failover", "relevant_ids": []}
+{"id": "negative-cjk", "query": "不存在的编译器内存模型解释", "relevant_ids": []}
+{"id": "negative-kubernetes", "query": "Kubernetes admission webhook", "relevant_ids": []}

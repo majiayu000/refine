@@ -314,6 +314,26 @@ fn loads_multiple_pages_and_builds_stable_identity() {
     assert_eq!(loaded[0].session.source, SessionSource::Codex);
     assert_eq!(loaded[0].session.meta.mode, SessionMode::Interactive);
     assert_eq!(loaded[0].first_epoch, 10);
+    let references = loaded[0].session.source_message_references();
+    assert_eq!(
+        references
+            .iter()
+            .map(|message| message.id)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(references[1].role, MessageRole::Assistant);
+    assert_eq!(references[1].event_time.timestamp(), 10);
+    assert_eq!(references[2].role, MessageRole::User);
+    assert_eq!(references[2].event_time.timestamp(), 20);
+    assert_eq!(
+        loaded[0].session.to_document_content(),
+        "User: m1\nAssistant: m2\nUser: m3\n"
+    );
+    assert!(loaded[0]
+        .session
+        .to_facet_content()
+        .contains("[remem message_id=2 role=assistant event_time=1970-01-01T00:00:10+00:00]"));
     assert_eq!(
         loaded[0].stable_document_url(),
         "remem://raw-session/v2/636f6465782d636c69/6c6f63616c/2f7265706f/7331"

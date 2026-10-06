@@ -13,15 +13,46 @@ import type {
   TrackEventRequest,
 } from './cloud-contract'
 import type { OutboxItem } from './types'
+import { withRequestDeadline } from './request-deadline'
 
 export type { QuotaStatusResponse, RecommendationResponse, TrackEventRequest } from './cloud-contract'
 export type { RecommendationItem } from './cloud-contract'
 
 const DEFAULT_RECOMMENDATION_TIMEOUT_MS = 1_500
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000
+const DEFAULT_UPLOAD_TIMEOUT_MS = 25_000
 const CONTRACT_VERSION_HEADER = 'X-Refine-Contract-Version'
 const CLIENT_HEADER_NAME = 'X-Refine-Client'
 const CLIENT_HEADER_VALUE = 'extension'
 export const EXTENSION_CONTRACT_VERSION = '1.0'
+
+interface RequestOptions {
+  timeoutMs?: number
+  signal?: AbortSignal
+  public?: boolean
+}
+
+async function requestApi<T>(
+  path: string,
+  init: { method?: string; headers?: Record<string, string>; body?: string } = {},
+  options: RequestOptions = {},
+): Promise<{ res: Response; data: T | null }> {
+  return withRequestDeadline(async (signal) => {
+    const apiBase = await discoverCloudApiBase()
+    const headers = options.public
+      ? buildPublicHeaders(init.headers)
+      : await buildProtectedHeaders(init.headers)
+    if (signal.aborted) throw signal.reason
+    const res = await fetch(`${apiBase}${path}`, { ...init, headers, signal })
+    let data: T | null = null
+    try {
+      data = (await res.json()) as T
+    } catch (error) {
+      if (signal.aborted) throw error
+    }
+    return { res, data }
+  }, options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, options.signal)
+}
 
 function normalizeContractMajor(version: string): string {
   const raw = version.trim()
@@ -88,71 +119,54 @@ function parseRecommendationResponse(value: unknown): RecommendationResponse | n
 }
 
 export async function checkCloudHealth(): Promise<boolean> {
-  const apiBase = await discoverCloudApiBase()
-
   try {
-    const res = await fetch(`${apiBase}/health`, {
-      method: 'GET',
-      headers: buildPublicHeaders(),
-    })
+    const { res, data } = await requestApi<{ success?: boolean }>('/health', {}, { public: true })
     if (!res.ok) return false
     if (!isServerContractCompatible(res.headers.get('x-refine-contract-version'))) return false
-    const data = (await res.json()) as { success?: boolean }
-    return data.success === true
+    return data?.success === true
   } catch {
     return false
   }
 }
 
-export async function uploadConversation(item: OutboxItem): Promise<CloudUploadResult> {
-  const apiBase = await discoverCloudApiBase()
-
+export async function uploadConversation(item: OutboxItem, options?: RequestOptions): Promise<CloudUploadResult> {
   try {
-    const res = await fetch(`${apiBase}/v1/conversations`, {
+    const { res, data } = await requestApi<CloudIngestResponse>('/v1/conversations', {
       method: 'POST',
-      headers: await buildProtectedHeaders({
-        'Content-Type': 'application/json',
-      }),
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(toRequestBody(item)),
-    })
-
-    let data: CloudIngestResponse | null = null
-    try {
-      data = (await res.json()) as CloudIngestResponse
-    } catch {
-      data = null
-    }
+    }, { timeoutMs: DEFAULT_UPLOAD_TIMEOUT_MS, ...options })
 
     if (!res.ok || data?.success !== true) {
       return {
         success: false,
-        message: data?.message || `Cloud API error (${res.status})`,
+        message: data?.message || `服务暂未接收会话（HTTP ${res.status}），本地任务已保留。`,
       }
+    }
+
+    if (typeof data.conversation_id !== 'string' || !data.conversation_id.trim()) {
+      return { success: false, message: '服务未返回有效的会话回执，本地任务已保留。' }
     }
 
     return {
       success: true,
       conversationId: data.conversation_id,
-      status: data.status || 'queued',
+      jobId: typeof data.job_id === 'string' ? data.job_id : undefined,
+      status: data.status,
     }
-  } catch {
+  } catch (error) {
     return {
       success: false,
-      message: '无法连接到云端服务，请检查网络或服务地址',
+      message: error instanceof Error ? error.message : '无法连接到服务，本地任务已保留。',
     }
   }
 }
 
 export async function fetchCloudTotalItems(): Promise<number | null> {
   // Strict contract mode: `total` 字段是必需的，不再支持旧服务端回退扫描。
-  const apiBase = await discoverCloudApiBase()
-
   try {
-    const headers = await buildProtectedHeaders()
-    const firstRes = await fetch(`${apiBase}/v1/items?cursor=0&limit=1`, { method: 'GET', headers })
-    if (!firstRes.ok) return null
-    const first = (await firstRes.json()) as CloudItemsResponse
-    if (first.success === false) return null
+    const { res, data: first } = await requestApi<CloudItemsResponse>('/v1/items?cursor=0&limit=1')
+    if (!res.ok || !first || first.success === false) return null
     return typeof first.total === 'number' ? first.total : null
   } catch {
     return null
@@ -163,43 +177,24 @@ export async function fetchRecommendations(
   query: string,
   options?: { limit?: number; timeoutMs?: number }
 ): Promise<RecommendationResponse | null> {
-  const apiBase = await discoverCloudApiBase()
   const limit = options?.limit ?? 5
   const timeoutMs = options?.timeoutMs ?? DEFAULT_RECOMMENDATION_TIMEOUT_MS
   const q = encodeURIComponent(query)
-  const controller = new AbortController()
-  const timeoutId = globalThis.setTimeout(() => {
-    controller.abort()
-  }, timeoutMs)
-
   try {
-    const res = await fetch(`${apiBase}/v1/recommendations?q=${q}&limit=${limit}`, {
-      method: 'GET',
-      headers: await buildProtectedHeaders(),
-      signal: controller.signal,
-    })
+    const { res, data } = await requestApi<unknown>(`/v1/recommendations?q=${q}&limit=${limit}`, {}, { timeoutMs })
 
     if (!res.ok) return null
-    return parseRecommendationResponse(await res.json())
+    return parseRecommendationResponse(data)
   } catch {
     return null
-  } finally {
-    globalThis.clearTimeout(timeoutId)
   }
 }
 
-export async function fetchQuotaStatus(): Promise<QuotaStatusResponse | null> {
-  const apiBase = await discoverCloudApiBase()
-
+export async function fetchQuotaStatus(options?: RequestOptions): Promise<QuotaStatusResponse | null> {
   try {
-    const res = await fetch(`${apiBase}/v1/quota`, {
-      method: 'GET',
-      headers: await buildProtectedHeaders(),
-    })
+    const { res, data } = await requestApi<QuotaStatusResponse>('/v1/quota', {}, options)
     if (!res.ok) return null
-
-    const data = (await res.json()) as QuotaStatusResponse
-    if (data.success !== true) return null
+    if (data?.success !== true) return null
     if (typeof data.used !== 'number' || typeof data.exceeded !== 'boolean') return null
 
     return {
@@ -215,20 +210,15 @@ export async function fetchQuotaStatus(): Promise<QuotaStatusResponse | null> {
 }
 
 export async function trackEvent(payload: TrackEventRequest): Promise<boolean> {
-  const apiBase = await discoverCloudApiBase()
-
   try {
-    const res = await fetch(`${apiBase}/v1/events`, {
+    const { res, data } = await requestApi<{ success?: boolean }>('/v1/events', {
       method: 'POST',
-      headers: await buildProtectedHeaders({
-        'Content-Type': 'application/json',
-      }),
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     })
 
     if (!res.ok) return false
-    const data = (await res.json()) as { success?: boolean }
-    return data.success === true
+    return data?.success === true
   } catch {
     return false
   }

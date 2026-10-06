@@ -184,6 +184,7 @@ fn remem_options() -> IngestOptions {
         latest: None,
         dry_run: false,
         retry_quarantined: false,
+        reprocess: None,
         backfill_session_metadata: false,
     }
 }

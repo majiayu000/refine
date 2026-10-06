@@ -32,8 +32,14 @@ export function Spotlight({ isOpen, onClose }: SpotlightProps) {
   const { selectItem, items } = useStore()
 
   useEffect(() => {
+    let active = true
+    if (!isOpen) {
+      setIsSearching(false)
+      return
+    }
     if (!query.trim()) {
       setResults(items.slice(0, 6))
+      setIsSearching(false)
       return
     }
 
@@ -41,16 +47,19 @@ export function Spotlight({ isOpen, onClose }: SpotlightProps) {
       setIsSearching(true)
       try {
         const result = await api.searchItems(query, 10)
-        setResults(result.items)
+        if (active) setResults(result.items)
       } catch {
-        setResults([])
+        if (active) setResults([])
       } finally {
-        setIsSearching(false)
+        if (active) setIsSearching(false)
       }
     }, 140)
 
-    return () => clearTimeout(timer)
-  }, [api, query, items])
+    return () => {
+      active = false
+      clearTimeout(timer)
+    }
+  }, [api, query, items, isOpen])
 
   useEffect(() => {
     if (isOpen) {

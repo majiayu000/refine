@@ -21,29 +21,61 @@ pub struct Cli {
 pub enum Commands {
     /// Compute 3-layer signal lights + 8 indicators + tension analysis
     Score {
-        /// Filter observations since date (YYYY-MM-DD), default: last 90 days
+        /// View observations since date (YYYY-MM-DD) without updating canonical history
         #[arg(long)]
         since: Option<String>,
-        /// Show all observations regardless of date (overrides default 90-day window)
+        /// View all session observations without updating canonical history
         #[arg(long)]
         all: bool,
-        /// Return a failure if LLM advice cannot be generated (for automation).
-        #[arg(long)]
+        /// Require current local portfolio advice to be available (no LLM needed).
+        #[arg(long, conflicts_with_all = ["since", "all"])]
         require_advice: bool,
     },
     /// One-line briefing (add to .zshrc)
     Motd,
     /// Full ASCII dashboard
     Dashboard {
-        /// Filter observations since date (YYYY-MM-DD), default: last 90 days
+        /// View observations since date (YYYY-MM-DD) without updating canonical history
         #[arg(long)]
         since: Option<String>,
-        /// Show all observations regardless of date (overrides default 90-day window)
+        /// View all session observations without updating canonical history
         #[arg(long)]
         all: bool,
     },
-    /// Weekly delta analysis (requires LLM)
+    /// Weekly local metrics-delta report with deterministic action cards
     Weekly,
     /// Generate cognitive portrait narrative (requires LLM)
     Profile,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::CommandFactory;
+
+    #[test]
+    fn weekly_help_and_readme_describe_local_generation() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("weekly")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("local"), "{help}");
+        assert!(!help.contains("requires LLM"), "{help}");
+
+        let readme = include_str!("../../../README.md");
+        let weekly_lines: Vec<_> = readme
+            .lines()
+            .filter(|line| line.contains("mirror weekly "))
+            .collect();
+        assert_eq!(weekly_lines.len(), 2);
+        for line in weekly_lines {
+            assert!(line.contains("local"), "{line}");
+            assert!(
+                !line.contains("via LLM") && !line.contains("requires LLM"),
+                "{line}"
+            );
+        }
+    }
 }

@@ -3,6 +3,7 @@ mod compute;
 mod display;
 mod indicators;
 mod persistence;
+mod scope;
 mod statusline;
 pub(crate) mod streak;
 mod types;
@@ -10,12 +11,11 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-use anyhow::Result;
+use crate::cohort::{load_cohorts, EventWindow};
+use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
-use refine_core::knowledge::{Item, ItemRepository, ItemType};
-use refine_core::session::{
-    cluster_observations, cluster_observations_with_resolver, ProjectIdentityResolver,
-};
+use refine_core::knowledge::{Item, ItemRepository};
+use refine_core::session::format_data_quality_stats;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -23,6 +23,7 @@ pub use baseline::compute_personal_baseline;
 pub use compute::compute;
 pub use display::{indicator_display, layer_display};
 pub use persistence::{load_recent_scores, persist_score};
+pub use scope::ScoreScope;
 pub use statusline::write_statusline;
 pub use types::{Indicator, LayerScore, ScoreResult, Signal};
 
@@ -68,48 +69,31 @@ pub fn filter_since(items: Vec<Item>, since: &Option<String>) -> Result<Vec<Item
 
 pub async fn handle_score(
     repo: Arc<dyn ItemRepository>,
-    llm: Option<Arc<dyn refine_core::infra::LlmClient>>,
     since: Option<String>,
     all: bool,
     require_advice: bool,
     db_path: &Path,
+    cache_dir: &Path,
 ) -> Result<()> {
-    if all && since.is_some() {
-        anyhow::bail!("--all and --since are mutually exclusive");
+    let canonical = !all && since.is_none();
+    if require_advice && !canonical {
+        anyhow::bail!("--require-advice requires the default rolling-90-day score");
     }
     let now = Utc::now();
-    let items = if all {
-        repo.find_all()
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?
+    let selected = EventWindow::from_options(since.as_deref(), all, now)?;
+    let windows = if canonical {
+        vec![selected, EventWindow::rolling(7, now)]
     } else {
-        let cutoff = if let Some(ref since_str) = since {
-            chrono::NaiveDate::parse_from_str(since_str, "%Y-%m-%d")
-                .map_err(|e| anyhow::anyhow!("invalid --since date '{}': {}", since_str, e))?
-                .and_hms_opt(0, 0, 0)
-                .ok_or_else(|| anyhow::anyhow!("invalid date"))?
-                .and_utc()
-        } else {
-            now - chrono::Duration::days(90)
-        };
-        repo.find_observations_by_event_range(cutoff, now)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?
+        vec![selected]
     };
-    if items.is_empty() {
-        return finish_without_observations(
-            require_advice,
-            crate::lang::t!(
-                "No observation data. Run `refine ingest-sessions` first.",
-                "暂无观测数据。请先运行 `refine ingest-sessions` 导入会话。"
-            ),
-        );
-    }
-    let obs_count = items
-        .iter()
-        .filter(|i| i.item_type() == ItemType::Observation)
-        .count();
-    if obs_count == 0 {
+    let mut cohorts = load_cohorts(repo.as_ref(), now, &windows)
+        .await?
+        .into_iter();
+    let selected = cohorts.next().expect("selected score window");
+    let cluster = &selected.cluster;
+    let items = &selected.cohort_items;
+    if cluster.data_quality.input_observations == 0 {
+        invalidate_empty_score_cache(canonical, cache_dir)?;
         return finish_without_observations(
             require_advice,
             crate::lang::t!(
@@ -118,38 +102,60 @@ pub async fn handle_score(
             ),
         );
     }
-    let cluster = cluster_observations(&items);
     if cluster.data_quality.eligible_observations == 0 {
+        invalidate_empty_score_cache(canonical, cache_dir)?;
         anyhow::bail!(
-            "No eligible linked interactive observations in the score window (input {}, detached {}, mode-excluded {}); refusing to persist an empty score or generate advice",
-            cluster.data_quality.input_observations,
-            cluster.data_quality.detached_observations,
-            cluster.data_quality.mode_excluded_observations,
+            "No eligible linked interactive observations in the score window ({}); refusing to persist an empty score or generate advice",
+            format_data_quality_stats(&cluster.data_quality),
         );
     }
     let config = crate::config::load();
-    let result = compute(&cluster, &config.targets);
-
-    // Try personal baseline: load history BEFORE persisting current score
-    let history = load_recent_scores(365)?;
-    let baseline = compute_personal_baseline(&history);
-    persist_score(&result)?;
-    let trends = baseline
+    let mut result = compute(cluster, &config.targets);
+    result.timestamp = now;
+    let published = if canonical {
+        result.scope = Some(ScoreScope::canonical(
+            db_path,
+            &config.targets,
+            now,
+            &cluster.data_quality,
+        )?);
+        let recent = cohorts.next().expect("canonical recent advice window");
+        let recent_score = compute(&recent.cluster, &config.targets);
+        Some(publish_canonical_score(
+            &result,
+            &recent_score,
+            &recent.cluster.data_quality.cohort_identity,
+            db_path,
+        )?)
+    } else {
+        None
+    };
+    let trends = published
         .as_ref()
-        .map(|baseline| compute_personal_trends(&result, baseline));
-    print_score(&result, trends.as_ref());
+        .and_then(|published| published.trends.as_ref());
+    print_score(&result, trends);
+
+    println!(
+        "  {} {}",
+        crate::lang::t!("Data quality:", "数据质量:"),
+        format_data_quality_stats(&cluster.data_quality)
+    );
 
     let window = if all {
-        crate::lang::t!("all observations", "全部观测").to_string()
+        crate::lang::t!(
+            "all session observations (view only)",
+            "全部会话观测(仅查看)"
+        )
+        .to_string()
     } else if let Some(since_date) = since.as_deref() {
         crate::lang::t!(
-            format!("since {} (event time)", since_date),
-            format!("自 {} 起(事件时间)", since_date)
+            format!("since {} (session start; view only)", since_date),
+            format!("自 {} 起(会话开始时间；仅查看)", since_date)
         )
     } else {
         crate::lang::t!(
-            "rolling 90 days (event time)".to_string(),
-            "滚动 90 天(事件时间)".to_string()
+            "rolling 90 days (session start)".to_string(),
+            "滚动 90 天(会话开始时间)".to_string()
         )
     };
     println!("  {} {}", crate::lang::t!("Window:", "窗口:"), window);
@@ -194,113 +200,124 @@ pub async fn handle_score(
         }
     }
 
-    let mut advice_error = None;
-    match compute_portfolio_advice_scores(&repo, now).await {
-        Ok(portfolio) => {
-            match crate::advice::cache_current_deterministic(
-                &portfolio.long_term,
-                &portfolio.recent,
-                result.timestamp,
-                &portfolio.long_cohort_identity,
-                &portfolio.recent_cohort_identity,
-            ) {
-                Ok(_) => {}
-                Err(error) => advice_error = Some(error),
-            }
-            if let Some(llm) = llm {
-                match crate::advice::generate_and_cache(
-                    &portfolio.long_term,
-                    &portfolio.recent,
-                    &llm,
-                    result.timestamp,
-                    &portfolio.long_cohort_identity,
-                    &portfolio.recent_cohort_identity,
-                )
-                .await
-                {
-                    Ok(advice) => {
-                        println!("\n  {} {}", crate::lang::t!("Advice:", "建议:"), advice)
-                    }
-                    Err(error) => {
-                        tracing::error!("advice generation failed: {}", error);
-                        advice_error = Some(error);
-                    }
-                }
-            } else if require_advice {
-                advice_error = Some(anyhow::anyhow!(
-                    "LLM advice is required but no supported API key is configured"
-                ));
-            }
-        }
-        Err(error) => {
-            tracing::error!("portfolio advice metrics failed: {}", error);
-            if let Err(invalidation_error) = crate::advice::invalidate_cached() {
-                advice_error = Some(invalidation_error.context(format!(
-                    "portfolio metrics failed ({error}); stale advice cache also could not be invalidated"
-                )));
-            } else {
-                advice_error = Some(error);
-            }
-        }
+    if !canonical {
+        println!(
+            "  {}",
+            crate::lang::t!(
+                "View only: canonical history and portfolio advice are unchanged.",
+                "仅查看：不更新标准评分历史和项目建议。"
+            )
+        );
+        return Ok(());
     }
 
-    if let Err(e) = write_statusline(&result, db_path, trends.as_ref()) {
-        tracing::warn!("failed to write statusline.txt: {}", e);
-    }
-    if require_advice {
-        if let Some(error) = advice_error {
-            return Err(error.context("required mirror advice generation failed"));
+    match published.expect("canonical score publication").advice {
+        Ok(advice) => println!("\n  {} {}", crate::lang::t!("Advice:", "建议:"), advice),
+        Err(error) if require_advice => {
+            return Err(error.context("required mirror advice generation failed"))
         }
+        Err(_) => {} // The shared publisher already reports the local cache error.
     }
     Ok(())
 }
 
-struct PortfolioAdviceScores {
-    long_term: ScoreResult,
-    recent: ScoreResult,
-    long_cohort_identity: String,
-    recent_cohort_identity: String,
+pub(crate) struct PublishedScore {
+    pub trends: Option<baseline::PersonalTrends>,
+    pub advice: Result<String>,
 }
 
-async fn compute_portfolio_advice_scores(
-    repo: &Arc<dyn ItemRepository>,
-    now: DateTime<Utc>,
-) -> Result<PortfolioAdviceScores> {
-    let long_term_items = repo
-        .find_observations_by_event_range(
-            now - chrono::Duration::days(crate::advice::LONG_TERM_WINDOW_DAYS),
-            now,
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to load rolling-90-day advice cohort: {error}"))?;
-    let recent_items = repo
-        .find_observations_by_event_range(now - chrono::Duration::days(7), now)
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to load rolling-7-day advice cohort: {error}"))?;
+/// Publish a canonical snapshot and its dependent output together for both
+/// score and dashboard. Serialize writers so an older process cannot overwrite
+/// cache/statusline output after a newer daily snapshot has been retained.
+pub(crate) fn publish_canonical_score(
+    result: &ScoreResult,
+    recent: &ScoreResult,
+    recent_cohort_identity: &str,
+    db_path: &Path,
+) -> Result<PublishedScore> {
+    let scope = result
+        .scope
+        .as_ref()
+        .context("canonical publication requires a score scope")?;
+    let dir = crate::config::ensure_mirror_dir()?;
+    with_publication_lock(&dir, || {
+        let history = load_recent_scores(365, scope)?;
+        let baseline = compute_personal_baseline(&history, scope);
+        let trends = baseline
+            .as_ref()
+            .map(|baseline| compute_personal_trends(result, baseline));
+        let retained = persist_score(result)?;
+        let advice = if retained {
+            match crate::advice::cache_current_deterministic(
+                result,
+                recent,
+                result.timestamp,
+                &scope.cohort_identity,
+                recent_cohort_identity,
+            ) {
+                Ok(advice) => Ok(advice),
+                Err(error) => {
+                    tracing::error!("portfolio advice failed: {}", error);
+                    Err(match crate::advice::invalidate_cached() {
+                        Ok(()) => error,
+                        Err(invalidation) => invalidation.context(format!(
+                            "portfolio advice failed ({error}); stale advice cache also could not be invalidated"
+                        )),
+                    })
+                }
+            }
+        } else {
+            // A newer same-day snapshot is already retained. Render this view
+            // locally while preserving the retained snapshot's derived files.
+            crate::advice::portfolio_policy(result, recent)
+                .map(|policy| crate::advice::deterministic_advice(&policy))
+        };
+        if retained {
+            if let Err(error) = write_statusline(result, db_path, trends.as_ref()) {
+                tracing::warn!("failed to write statusline.txt: {}", error);
+            }
+        }
+        Ok(PublishedScore { trends, advice })
+    })
+}
 
-    let resolver = ProjectIdentityResolver::from_observation_windows(&[
-        long_term_items.as_slice(),
-        recent_items.as_slice(),
-    ]);
-    let long_term = cluster_observations_with_resolver(&long_term_items, &resolver);
-    let recent = cluster_observations_with_resolver(&recent_items, &resolver);
-    if long_term.data_quality.eligible_observations == 0 {
-        anyhow::bail!(
-            "portfolio advice requires eligible linked observations in the rolling-90-day window"
-        );
-    }
-    if recent.data_quality.eligible_observations == 0 {
-        anyhow::bail!(
-            "portfolio advice requires eligible linked observations in the rolling-7-day window"
-        );
-    }
+fn with_publication_lock<T>(directory: &Path, work: impl FnOnce() -> Result<T>) -> Result<T> {
+    let path = directory.join("score-publication.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("open canonical publication lock {}", path.display()))?;
+    fs2::FileExt::lock_exclusive(&lock).context("acquire canonical publication lock")?;
+    let result = work();
+    let unlocked = fs2::FileExt::unlock(&lock).context("release canonical publication lock");
+    let value = result?;
+    unlocked?;
+    Ok(value)
+}
 
-    let config = crate::config::load();
-    Ok(PortfolioAdviceScores {
-        long_term: compute(&long_term, &config.targets),
-        recent: compute(&recent, &config.targets),
-        long_cohort_identity: long_term.data_quality.cohort_identity,
-        recent_cohort_identity: recent.data_quality.cohort_identity,
+pub(crate) fn invalidate_empty_score_cache(canonical: bool, cache_dir: &Path) -> Result<()> {
+    // A custom display window says nothing about the full portfolio cohort.
+    if !canonical || !cache_dir.exists() {
+        return Ok(());
+    }
+    with_publication_lock(cache_dir, || {
+        for filename in ["advice.json", "statusline.txt"] {
+            let path = cache_dir.join(filename);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to invalidate empty-score cache {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
     })
 }
 

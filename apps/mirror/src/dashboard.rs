@@ -1,8 +1,10 @@
+use crate::cohort::{load_cohorts, EventWindow};
 use crate::lang::t;
 use crate::score::{self, ScoreResult};
 use anyhow::{Context, Result};
-use refine_core::knowledge::{ItemRepository, ItemType};
-use refine_core::session::cluster_observations;
+use refine_core::knowledge::ItemRepository;
+use refine_core::session::format_data_quality_stats;
+use std::path::Path;
 use std::sync::Arc;
 use unicode_width::UnicodeWidthChar;
 
@@ -32,46 +34,23 @@ pub async fn handle_dashboard(
     repo: Arc<dyn ItemRepository>,
     since: Option<String>,
     all: bool,
+    db_path: &Path,
 ) -> Result<()> {
-    if all && since.is_some() {
-        anyhow::bail!("--all and --since are mutually exclusive");
-    }
-    let items = if all {
-        repo.find_all()
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?
-    } else if let Some(ref since_str) = since {
-        let date = chrono::NaiveDate::parse_from_str(since_str, "%Y-%m-%d")
-            .map_err(|e| anyhow::anyhow!("invalid --since date '{}': {}", since_str, e))?;
-        let cutoff = date
-            .and_hms_opt(0, 0, 0)
-            .ok_or_else(|| anyhow::anyhow!("invalid date"))?
-            .and_utc();
-        repo.find_observations_by_event_range(cutoff, chrono::Utc::now())
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?
+    let canonical = !all && since.is_none();
+    let now = chrono::Utc::now();
+    let window = EventWindow::from_options(since.as_deref(), all, now)?;
+    let windows = if canonical {
+        vec![window, EventWindow::rolling(7, now)]
     } else {
-        let cutoff = chrono::Utc::now() - chrono::Duration::days(90);
-        repo.find_observations_by_event_range(cutoff, chrono::Utc::now())
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?
+        vec![window]
     };
-    if items.is_empty() {
-        println!(
-            "{}",
-            t!(
-                "No observation data. Run `refine ingest-sessions` first.",
-                "暂无观测数据。请先运行 `refine ingest-sessions` 导入会话。"
-            )
-        );
-        return Ok(());
-    }
-
-    let obs_count = items
-        .iter()
-        .filter(|i| i.item_type() == ItemType::Observation)
-        .count();
-    if obs_count == 0 {
+    let mut cohorts = load_cohorts(repo.as_ref(), now, &windows)
+        .await?
+        .into_iter();
+    let cohort = cohorts.next().expect("dashboard score window");
+    let cluster = &cohort.cluster;
+    if cluster.data_quality.input_observations == 0 {
+        score::invalidate_empty_score_cache(canonical, &crate::config::mirror_dir())?;
         println!(
             "{}",
             t!(
@@ -81,19 +60,34 @@ pub async fn handle_dashboard(
         );
         return Ok(());
     }
-
-    let cluster = cluster_observations(&items);
     if cluster.data_quality.eligible_observations == 0 {
+        score::invalidate_empty_score_cache(canonical, &crate::config::mirror_dir())?;
         anyhow::bail!(
-            "No eligible linked interactive observations in the dashboard window (input {}, detached {}, mode-excluded {}); refusing to persist an empty score",
-            cluster.data_quality.input_observations,
-            cluster.data_quality.detached_observations,
-            cluster.data_quality.mode_excluded_observations,
+            "No eligible linked interactive observations in the dashboard window ({}); refusing to persist an empty score",
+            format_data_quality_stats(&cluster.data_quality),
         );
     }
     let config = crate::config::load();
-    let result = score::compute(&cluster, &config.targets);
-    score::persist_score(&result).context("Failed to persist score")?;
+    let mut result = score::compute(cluster, &config.targets);
+    result.timestamp = now;
+    let published = if canonical {
+        result.scope = Some(score::ScoreScope::canonical(
+            db_path,
+            &config.targets,
+            now,
+            &cluster.data_quality,
+        )?);
+        let recent = cohorts.next().expect("dashboard recent advice window");
+        let recent_score = score::compute(&recent.cluster, &config.targets);
+        Some(score::publish_canonical_score(
+            &result,
+            &recent_score,
+            &recent.cluster.data_quality.cohort_identity,
+            db_path,
+        )?)
+    } else {
+        None
+    };
 
     let stats = &cluster.global_stats;
     let cog_total: usize = stats.cognitive_levels.values().sum();
@@ -148,8 +142,28 @@ pub async fn handle_dashboard(
     }
     p(&border_mid(w));
 
-    print_trend(&result, w)?;
+    if canonical {
+        print_trend(&result, w)?;
+    } else {
+        p(&padded_row(
+            t!(
+                " View only: no canonical history update",
+                " 仅查看：不更新标准评分历史"
+            ),
+            w,
+        ));
+    }
     p(&border_bot(w));
+    if let Some(published) = published {
+        if let Ok(advice) = published.advice {
+            println!("{} {}", t!("Advice:", "建议:"), advice);
+        }
+    }
+    println!(
+        "{} {}",
+        t!("Data quality:", "数据质量:"),
+        format_data_quality_stats(&cluster.data_quality)
+    );
     Ok(())
 }
 
@@ -159,14 +173,19 @@ fn p(s: &str) {
 
 fn format_indicator(ind: &score::Indicator) -> String {
     format!(
-        "{} {}",
+        "{} {}{}",
         score::indicator_display(&ind.name),
-        ind.display_value()
+        ind.display_value(),
+        ind.coverage_label()
     )
 }
 
 fn print_trend(current: &ScoreResult, w: usize) -> Result<()> {
-    let mut history = score::load_recent_scores(5)?;
+    let scope = current
+        .scope
+        .as_ref()
+        .context("dashboard trend requires canonical scope")?;
+    let mut history = score::load_recent_scores(5, scope)?;
     if history.is_empty() {
         history.push(current.clone());
     }
@@ -209,11 +228,10 @@ fn truncate(s: &str, max_w: usize) -> String {
 // ── Box drawing ──
 
 fn row_bar(label: &str, count: usize, total: usize, w: usize) -> String {
-    let ratio = if total == 0 {
-        0.0
-    } else {
-        count as f64 / total as f64
-    };
+    if total == 0 {
+        return padded_row(&format!("  {:<11} {} (0)", label, t!("n/a", "证据不足")), w);
+    }
+    let ratio = count as f64 / total as f64;
     let filled = (ratio * BAR_W as f64).round() as usize;
     let bar = format!(
         "{}{}",
@@ -300,7 +318,8 @@ mod tests {
     #[test]
     fn test_row_bar_zero_total() {
         let row = row_bar("test", 0, 0, 76);
-        assert!(row.contains("0.0%"));
+        assert!(!row.contains("0.0%"));
+        assert!(row.contains(t!("n/a", "证据不足")));
     }
 
     #[test]
@@ -336,7 +355,7 @@ mod tests {
     async fn dashboard_handler_rejects_detached_only_cohort_before_persist() {
         let (_fixture, store) = crate::test_support::legacy_detached_store();
 
-        let error = handle_dashboard(store, None, true)
+        let error = handle_dashboard(store, None, true, Path::new("synthetic.db"))
             .await
             .expect_err("detached-only cohort must fail closed");
 

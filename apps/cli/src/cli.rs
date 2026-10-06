@@ -9,6 +9,14 @@ pub enum IngestProvider {
     Local,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ReprocessMode {
+    /// Rebuild projections with a missing or different extraction recipe.
+    Stale,
+    /// Rebuild even projections already produced by the current recipe.
+    All,
+}
+
 impl IngestProvider {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -141,6 +149,15 @@ pub enum Commands {
         /// Explicitly retry sessions previously quarantined for deterministic provider rejection.
         #[arg(long)]
         retry_quarantined: bool,
+        /// 有界重提炼；默认 stale 仅重算旧配方，all 强制重算，必须指定 --latest N
+        #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "stale", require_equals = true, requires = "latest", conflicts_with = "limit")]
+        reprocess: Option<ReprocessMode>,
+    },
+    /// 查看会话旧观测/人工修订的归档版本（不会拉取原文或调用 LLM）
+    ProjectionHistory {
+        document_id: String,
+        #[arg(long, default_value = "20")]
+        limit: usize,
     },
     /// 生成认知洞察报告
     Insights {
@@ -207,6 +224,7 @@ impl Commands {
         matches!(
             self,
             Self::IngestSessions { dry_run: true, .. }
+                | Self::ProjectionHistory { .. }
                 | Self::AuditItemLinks { .. }
                 | Self::RepairItemLinks { apply: false, .. }
                 | Self::CognitivePortrait {
@@ -257,6 +275,38 @@ mod tests {
     fn ingest_sessions_rejects_removed_direct_scan_switches() {
         for removed in ["--provider", "--source", "--legacy-local-scan"] {
             assert!(Cli::try_parse_from(["refine", "ingest-sessions", removed, "local"]).is_err());
+        }
+    }
+
+    #[test]
+    fn reprocessing_requires_an_explicit_final_selection_bound() {
+        assert!(Cli::try_parse_from(["refine", "ingest-sessions", "--reprocess"]).is_err());
+        assert!(
+            Cli::try_parse_from(["refine", "ingest-sessions", "--reprocess", "--limit", "10"])
+                .is_err()
+        );
+        for argument in ["--reprocess", "--reprocess=all"] {
+            let cli = Cli::try_parse_from([
+                "refine",
+                "ingest-sessions",
+                argument,
+                "--latest",
+                "10",
+                "--dry-run",
+            ])
+            .unwrap();
+            assert!(cli.command.is_read_only_preview());
+            let Commands::IngestSessions { reprocess, .. } = cli.command else {
+                panic!("expected ingest");
+            };
+            assert_eq!(
+                reprocess,
+                Some(if argument == "--reprocess" {
+                    ReprocessMode::Stale
+                } else {
+                    ReprocessMode::All
+                })
+            );
         }
     }
 

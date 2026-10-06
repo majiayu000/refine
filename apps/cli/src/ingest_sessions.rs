@@ -1,6 +1,6 @@
 //! ingest-sessions：从 Remem raw archive 导入会话投影。
 
-use crate::cli::IngestProvider;
+use crate::cli::{IngestProvider, ReprocessMode};
 use crate::remem_sessions::{
     is_missing_remem_executable, load_remem_session, load_remem_session_summaries, RememSession,
     RememSessionSummary,
@@ -34,7 +34,7 @@ use legacy_convergence::{
     include_hostless_v1_document, might_have_legacy_documents, referenced_session_document,
     same_projection_or_snapshot, save_referenced_session_and_delete_legacy,
 };
-use legacy_migration::claim_legacy_documents;
+use legacy_migration::{claim_legacy_documents, LegacyDocumentIndex};
 
 pub(crate) fn lock_session_mutations_for_repair(db_path: &Path) -> Result<std::fs::File> {
     cursor::try_lock_session_mutations(db_path)
@@ -62,6 +62,7 @@ pub struct IngestOptions {
     pub latest: Option<usize>,
     pub dry_run: bool,
     pub retry_quarantined: bool,
+    pub reprocess: Option<ReprocessMode>,
     pub backfill_session_metadata: bool,
 }
 
@@ -127,6 +128,11 @@ pub async fn handle_ingest_sessions(
     doc_store: Arc<dyn DocumentRepository>,
     llm_client: Option<Arc<dyn LlmClient>>,
 ) -> Result<()> {
+    if options.reprocess.is_some()
+        && (options.provider != IngestProvider::Remem || options.latest.unwrap_or(0) == 0)
+    {
+        anyhow::bail!("--reprocess requires Remem and --latest N with N greater than zero");
+    }
     if options.source.is_some() && options.provider != IngestProvider::Local {
         anyhow::bail!(
             "--source requires --provider local because remem does not expose a trustworthy Claude/Codex source"
@@ -235,6 +241,28 @@ where
     let filter_config = FilterConfig::default();
     let document_count = doc_store.count().await?;
     let existing_documents = doc_store.find_recent(0, document_count).await?;
+    let projection_versions = if options.reprocess == Some(ReprocessMode::Stale) {
+        doc_store
+            .find_session_projection_versions()
+            .await?
+            .into_iter()
+            .map(|version| (version.document_id.clone(), version))
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
+    };
+    let target_recipe = llm_client
+        .as_ref()
+        .map(|client| refine_core::session::facet_recipe_identity(&client.cache_identity()));
+    if options.reprocess.is_some() {
+        println!(
+            "reprocess={:?} target_recipe={}",
+            options.reprocess.unwrap(),
+            target_recipe
+                .as_deref()
+                .unwrap_or("unknown (configure an LLM to preview recipe changes exactly)")
+        );
+    }
     let existing_documents_by_url: HashMap<&str, &Document> = existing_documents
         .iter()
         .map(|document| (document.url(), document))
@@ -244,9 +272,7 @@ where
     // Remember those invalidated IDs so later sessions neither rematch nor retry
     // deletes against the frozen pre-cleanup snapshot.
     let mut looper_deleted_legacy_ids = HashSet::new();
-    // Incremental filtered view for matching helpers: retain refs after Looper
-    // invalidation instead of deep-cloning Documents for every remaining summary.
-    let mut matching_documents: Vec<&Document> = existing_documents.iter().collect();
+    let legacy_document_index = LegacyDocumentIndex::new(&existing_documents);
     let mut pending = Vec::new();
     let mut skipped_dup = 0usize;
     let mut skipped_filter = 0usize;
@@ -284,6 +310,22 @@ where
             stable_document.is_none() && existing_document.is_some();
         let session_source = summary.session_source()?;
         let source_version = summary.projection_version();
+        let reprocess_session = match options.reprocess {
+            Some(ReprocessMode::All) => true,
+            Some(ReprocessMode::Stale) => existing_document.as_ref().is_some_and(|document| {
+                let previous = projection_versions.get(document.id());
+                previous.is_none_or(|version| {
+                    Some(version.recipe_id.as_str()) != target_recipe.as_deref()
+                        || version.source_version.as_deref() != document.source_version()
+                })
+            }),
+            None => false,
+        };
+        let matching_documents: Vec<&Document> = legacy_document_index
+            .candidates(&summary)
+            .into_iter()
+            .filter(|document| !looper_deleted_legacy_ids.contains(document.id()))
+            .collect();
         // Matching helpers and the unchanged-session probe can both react to stale
         // frozen rows. Use the incremental filtered refs so a deleted candidate cannot
         // force a full load or abort ingest.
@@ -309,6 +351,7 @@ where
             continue;
         }
         if !summary_is_looper
+            && !reprocess_session
             && legacy_convergence::skip_unchanged_session(
                 &doc_store,
                 existing_document.as_ref(),
@@ -391,15 +434,16 @@ where
                 if let Some(existing) = existing_for_cleanup {
                     looper_deleted_legacy_ids.insert(existing.id().clone());
                 }
-                matching_documents
-                    .retain(|document| !looper_deleted_legacy_ids.contains(document.id()));
                 quarantine.resolve(&url);
                 quarantine.save_if_dirty()?;
             }
             skipped_filter += 1;
             continue;
         }
-        if existing_document.is_none() && legacy_documents_to_delete.len() == 1 {
+        if options.reprocess.is_none()
+            && existing_document.is_none()
+            && legacy_documents_to_delete.len() == 1
+        {
             let legacy_id = &legacy_documents_to_delete[0];
             let legacy_document = existing_documents
                 .iter()
@@ -431,9 +475,10 @@ where
             }
         }
         if let Some(existing_doc) = existing_document.as_ref() {
-            if existing_doc.raw_content() == raw_content
-                || (!existing_document_uses_legacy_identity
-                    && same_projection_or_snapshot(existing_doc, &source_version))
+            if !reprocess_session
+                && (existing_doc.raw_content() == raw_content
+                    || (!existing_document_uses_legacy_identity
+                        && same_projection_or_snapshot(existing_doc, &source_version)))
             {
                 claim_legacy_documents(&mut claimed_legacy_documents, &legacy_documents_to_delete)?;
                 if !options.dry_run {
@@ -482,6 +527,8 @@ where
             Vec::new()
         };
 
+        let facet_content = Some(remem_session.session.to_facet_content());
+        let source_messages = remem_session.session.source_message_references();
         pending.push(PendingSession {
             idx,
             total,
@@ -493,6 +540,8 @@ where
             captured_at,
             has_embedded_timestamp: true,
             raw_content,
+            facet_content,
+            source_messages,
             source_version: Some(source_version),
             needs_chunk: !chunks.is_empty(),
             chunks,
@@ -762,6 +811,8 @@ async fn handle_legacy_ingest_sessions(
             captured_at,
             has_embedded_timestamp,
             raw_content,
+            facet_content: Some(session.to_facet_content()),
+            source_messages: session.source_message_references(),
             source_version: Some(source_version),
             needs_chunk: !chunks.is_empty(),
             chunks,

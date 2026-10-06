@@ -9,9 +9,10 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::vector_search::InMemoryVectorSearch;
+use crate::vector_search::FeatureHashSearch;
 
 pub struct AppState {
+    pub(crate) database_identity: String,
     pub store: Arc<dyn ItemRepository>,
     pub doc_store: Arc<dyn DocumentRepository>,
     pub engine: Arc<SearchEngine>,
@@ -63,7 +64,10 @@ impl AppStateConfig {
     fn from_env() -> Result<Self, String> {
         Ok(Self {
             db_path: resolve_db_path(&["REFINE_SERVER_DB_PATH"]),
-            semantic_search_enabled: env_flag(&["REFINE_ENABLE_SEMANTIC_SEARCH"]),
+            semantic_search_enabled: env_flag(&[
+                "REFINE_ENABLE_FEATURE_HASH_SEARCH",
+                "REFINE_ENABLE_SEMANTIC_SEARCH",
+            ]),
             free_quota_items: env_usize(&["REFINE_MAX_ITEMS", "REFINE_FREE_QUOTA_ITEMS"])
                 .unwrap_or(0),
             premium_users: env_csv_set(&["REFINE_PREMIUM_USERS"])
@@ -89,6 +93,13 @@ impl AppStateConfig {
 impl AppState {
     pub async fn build() -> Result<Self, String> {
         Self::build_with_config(AppStateConfig::from_env()?).await
+    }
+
+    /// Build the shared service using the desktop's selected database path.
+    pub async fn build_at(db_path: PathBuf) -> Result<Self, String> {
+        let mut config = AppStateConfig::from_env()?;
+        config.db_path = db_path;
+        Self::build_with_config(config).await
     }
 
     async fn build_with_config(config: AppStateConfig) -> Result<Self, String> {
@@ -125,20 +136,22 @@ impl AppState {
         let event_repo: Arc<dyn EventRepository> = sqlite_store;
         let mut engine_builder = SearchEngine::new(store.clone());
         if semantic_search_enabled {
-            engine_builder =
-                engine_builder.with_vector_search(Arc::new(InMemoryVectorSearch::new()));
+            let index =
+                Arc::new(FeatureHashSearch::with_database(&db_path).map_err(|e| e.to_string())?);
+            let count = index
+                .refresh_from_database()
+                .await
+                .map_err(|e| e.to_string())?;
+            tracing::info!(
+                count,
+                "feature-hash lexical search enabled; index refreshes after database item changes"
+            );
+            engine_builder = engine_builder.with_vector_search(index);
         }
         let engine = Arc::new(engine_builder);
 
-        if semantic_search_enabled {
-            let indexed_count = bootstrap_semantic_index(store.as_ref(), engine.as_ref()).await?;
-            tracing::info!(
-                "semantic search enabled, bootstrapped {} items into vector index",
-                indexed_count
-            );
-        }
-
         Ok(Self {
+            database_identity: database_identity(&db_path)?,
             store,
             doc_store,
             engine,
@@ -160,6 +173,7 @@ impl AppState {
     }
 }
 
+#[cfg(test)]
 async fn bootstrap_semantic_index(
     store: &dyn ItemRepository,
     engine: &SearchEngine,
@@ -181,10 +195,55 @@ async fn bootstrap_semantic_index(
 }
 
 impl AppState {
+    pub(crate) fn runtime_profile(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut premium: Vec<_> = self.premium_users.iter().collect();
+        premium.sort();
+        let mut origins: Vec<_> = std::env::var("REFINE_TRUSTED_ORIGINS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|origin| !origin.is_empty())
+            .map(str::to_string)
+            .collect();
+        origins.sort();
+        origins.dedup();
+        let profile = serde_json::json!({
+            "llm": self.llm_client.as_ref().map(|client| client.cache_identity()),
+            "feature_hash": self.semantic_search_enabled,
+            "quota": self.free_quota_items,
+            "premium_users": premium,
+            "trusted_origins": origins,
+        });
+        format!(
+            "sha256:{:x}",
+            Sha256::digest(profile.to_string().as_bytes())
+        )
+    }
+
+    pub(crate) fn auth_mode(&self) -> &'static str {
+        if self.api_token.is_some() {
+            "token"
+        } else if self.dev_anon {
+            "anonymous"
+        } else {
+            "unconfigured"
+        }
+    }
+
     pub fn is_premium_user(&self, user_id: &str) -> bool {
         let normalized = user_id.trim();
         !normalized.is_empty() && self.premium_users.contains(normalized)
     }
+}
+
+fn database_identity(path: &std::path::Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let canonical = path.canonicalize().map_err(|error| error.to_string())?;
+    Ok(format!(
+        "sha256:{:x}",
+        Sha256::digest(canonical.as_os_str().as_encoded_bytes())
+    ))
 }
 
 fn env_var(keys: &[&str]) -> Option<String> {

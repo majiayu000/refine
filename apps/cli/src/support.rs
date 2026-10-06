@@ -41,7 +41,7 @@ pub fn format_item(item: &Item, verbose: bool) -> String {
         format!(
             "[{:?}] {} - {}",
             item.item_type(),
-            item.id().as_str().chars().take(8).collect::<String>(),
+            item.id().as_str(),
             item.title()
         )
     }

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { OutboxRuntime, type OutboxSnapshot, type OutboxStorage } from './outbox-runtime'
 import type { ConversationPayload, OutboxItem } from './types'
+import type { CloudUploadResult } from './cloud-contract'
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -178,5 +179,64 @@ describe('OutboxRuntime', () => {
 
     expect(counters.uploadCalls).toBe(1)
     expect(storage.current().outbox[0]?.status).toBe('sent')
+  })
+
+  test('persists capture without contacting a slow or unavailable service', async () => {
+    const storage = memoryStorage()
+    const counters = { uploadCalls: 0 }
+    const service = runtime(storage, () => new Promise(() => {}), counters)
+    const captured = await service.enqueue(payload('offline'))
+    expect(storage.current().outbox[0]?.id).toBe(captured.id)
+    expect(storage.current().outbox[0]?.status).toBe('pending')
+    expect(counters.uploadCalls).toBe(0)
+  })
+
+  test('a timed-out upload releases the queue and its late receipt cannot overwrite a retry', async () => {
+    const storage = memoryStorage()
+    const late = deferred<CloudUploadResult>()
+    let calls = 0
+    let signal: AbortSignal | undefined
+    const service = new OutboxRuntime({
+      storage,
+      async upload(_item, currentSignal) {
+        calls += 1
+        if (calls === 1) { signal = currentSignal; return late.promise }
+        return { success: true, conversationId: 'accepted', jobId: 'job-1', status: 'queued' }
+      },
+      uploadTimeoutMs: 5,
+      retryBaseDelayMs: 1_000,
+      retryMaxDelayMs: 10_000,
+      syncingRecoveryStaleMs: 60_000,
+    })
+    const item = await service.enqueue(payload('first'))
+    const normal = service.requestFlush(false)
+    const forced = service.requestFlush(true)
+    await Promise.all([normal, forced])
+    expect(signal?.aborted).toBe(true)
+    expect(calls).toBe(2)
+    late.resolve({ success: true, conversationId: 'obsolete' })
+    await Promise.resolve()
+    const snapshot = storage.current()
+    expect(snapshot.outbox[0]?.idempotencyKey).toBe(item.idempotencyKey)
+    expect(snapshot.outbox[0]?.remoteConversationId).toBe('accepted')
+    expect(snapshot.outbox[0]?.syncLeaseId).toBeUndefined()
+    expect(snapshot.outbox[0]?.remoteStatus).toBe('queued')
+    expect(snapshot.syncState.lastAcceptedJobId).toBe('job-1')
+    expect(snapshot.stats.totalItems).toBe(1)
+  })
+
+  test('a thrown upload failure is persisted and does not strand the following item', async () => {
+    const storage = memoryStorage()
+    const service = runtime(storage, async (item) => {
+      if (item.payload.content === 'first') throw new Error('network failed')
+      return { success: true, conversationId: 'second' }
+    })
+    await service.enqueue(payload('first'))
+    await service.enqueue(payload('second'))
+    await service.requestFlush(false)
+    const snapshot = storage.current()
+    expect(snapshot.outbox.map((item) => item.status)).toEqual(['failed', 'sent'])
+    expect(snapshot.outbox[0]?.syncLeaseId).toBeUndefined()
+    expect(snapshot.outbox[0]?.lastError).toBe('network failed')
   })
 })

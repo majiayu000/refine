@@ -59,7 +59,7 @@ registerExtractActionHandler(async () => {
   try {
     const result = await extractAndEnqueueConversation()
     if (result.success) {
-      showToast('已加入同步队列，稍后上传到 Refine 云端')
+      showToast('会话已保存在本地队列，服务接收后再提炼')
       return result
     }
 

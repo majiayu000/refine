@@ -1,6 +1,6 @@
 use crate::config::{ensure_mirror_dir, mirror_dir};
 use crate::lang::{self, t, Lang};
-use crate::score::{load_recent_scores, ScoreResult, Signal};
+use crate::score::{load_recent_scores, ScoreResult, ScoreScope, Signal};
 use anyhow::Result;
 use chrono::{Datelike, Local, Utc, Weekday};
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ fn default_lang_en() -> String {
 fn signal_severity(s: Signal) -> u8 {
     match s {
         Signal::Red => 0,
+        Signal::Unknown => 3,
         Signal::Yellow => 1,
         Signal::Green => 2,
     }
@@ -30,6 +31,9 @@ fn signal_severity(s: Signal) -> u8 {
 /// Compare current vs previous signal and return a trend arrow.
 /// Returns "↑" if improved, "↓" if degraded, "" if unchanged.
 fn trend_signal(current: Signal, previous: Signal) -> &'static str {
+    if current == Signal::Unknown || previous == Signal::Unknown {
+        return "";
+    }
     let curr = signal_severity(current);
     let prev = signal_severity(previous);
     if curr > prev {
@@ -60,7 +64,7 @@ fn weakest_indicator(score: &ScoreResult) -> Option<(String, String, f64)> {
     Some((
         dim.to_string(),
         weakest_ind.name.clone(),
-        weakest_ind.actual,
+        weakest_ind.observed_value()?,
     ))
 }
 
@@ -230,8 +234,10 @@ fn select_tip(tips: &[Tip], dimension: &str) -> String {
     t!("Stay curious", "保持好奇心").to_string()
 }
 
-pub fn handle_motd() -> Result<()> {
-    let scores = load_recent_scores(2)?;
+pub fn handle_motd(db_path: &std::path::Path) -> Result<()> {
+    let targets = crate::config::load().targets;
+    let scope = ScoreScope::canonical(db_path, &targets, Utc::now(), &Default::default())?;
+    let scores = load_recent_scores(2, &scope)?;
     if scores.is_empty() {
         println!(
             "🪞 {}",
@@ -447,6 +453,7 @@ mod tests {
             }),
             tension: None,
             timestamp: Utc::now(),
+            scope: None,
         }
     }
 
@@ -513,19 +520,22 @@ mod tests {
             vec![
                 vec![Indicator {
                     name: "dreyfus".into(),
-                    actual: 4.0,
+                    actual: Some(4.0),
+                    coverage: None,
                     target: ">3.5".into(),
                     signal: Signal::Green,
                 }],
                 vec![Indicator {
                     name: "exploration".into(),
-                    actual: 5.0,
+                    actual: Some(5.0),
+                    coverage: None,
                     target: ">15%".into(),
                     signal: Signal::Red,
                 }],
                 vec![Indicator {
                     name: "delegation".into(),
-                    actual: 50.0,
+                    actual: Some(50.0),
+                    coverage: None,
                     target: "<40%".into(),
                     signal: Signal::Yellow,
                 }],

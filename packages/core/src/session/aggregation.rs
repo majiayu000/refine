@@ -2,6 +2,7 @@
 //!
 //! 从 Observation Items 中计算宏观认知指标
 
+use super::clustering::is_pending_curation;
 use crate::knowledge::{Item, ItemType};
 use std::collections::HashMap;
 
@@ -56,6 +57,7 @@ pub fn aggregate_observations(items: &[Item]) -> AggregationReport {
     let observations: Vec<&Item> = items
         .iter()
         .filter(|i| i.item_type() == ItemType::Observation)
+        .filter(|item| !is_pending_curation(item))
         .collect();
 
     let mut l1 = L1CognitiveEvolution {

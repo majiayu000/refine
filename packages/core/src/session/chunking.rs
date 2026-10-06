@@ -2,7 +2,7 @@
 //!
 //! 大会话按消息边界分块，避免超大 LLM 调用
 
-use super::types::{MessageRole, Session, SessionMessage};
+use super::types::{Session, SessionMessage};
 
 const CHUNK_THRESHOLD: usize = 30_000;
 const CHUNK_TARGET: usize = 25_000;
@@ -16,16 +16,22 @@ pub struct SessionChunk {
 
 /// 判断会话是否需要分块
 pub fn needs_chunking(session: &Session) -> bool {
-    session.char_count() > CHUNK_THRESHOLD
+    session
+        .messages
+        .iter()
+        .map(SessionMessage::facet_content_len)
+        .sum::<usize>()
+        > CHUNK_THRESHOLD
 }
 
 /// 将会话按消息边界分块
 ///
-/// 每块不超过 CHUNK_TARGET 字符，不在消息中间切断
+/// Aim for CHUNK_TARGET bytes at message boundaries. A single oversized
+/// message remains intact, and provenance headers count toward the target.
 pub fn chunk_session(session: &Session) -> Vec<SessionChunk> {
     if !needs_chunking(session) {
         return vec![SessionChunk {
-            content: session.to_document_content(),
+            content: session.to_facet_content(),
             message_count: session.messages.len(),
         }];
     }
@@ -35,7 +41,7 @@ pub fn chunk_session(session: &Session) -> Vec<SessionChunk> {
     let mut current_size: usize = 0;
 
     for msg in &session.messages {
-        let msg_size = msg.content.len() + role_label_len(&msg.role);
+        let msg_size = msg.facet_content_len();
 
         if current_size + msg_size > CHUNK_TARGET && !current_messages.is_empty() {
             chunks.push(build_chunk(&current_messages));
@@ -57,15 +63,7 @@ pub fn chunk_session(session: &Session) -> Vec<SessionChunk> {
 fn build_chunk(messages: &[&SessionMessage]) -> SessionChunk {
     let mut content = String::new();
     for msg in messages {
-        let label = match msg.role {
-            MessageRole::User => "User",
-            MessageRole::Assistant => "Assistant",
-            MessageRole::System => "System",
-        };
-        content.push_str(label);
-        content.push_str(": ");
-        content.push_str(&msg.content);
-        content.push('\n');
+        msg.append_facet_content(&mut content);
     }
     SessionChunk {
         content,
@@ -73,23 +71,16 @@ fn build_chunk(messages: &[&SessionMessage]) -> SessionChunk {
     }
 }
 
-fn role_label_len(role: &MessageRole) -> usize {
-    match role {
-        MessageRole::User => 6,       // "User: "
-        MessageRole::Assistant => 12, // "Assistant: "
-        MessageRole::System => 9,     // "System: "
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{SessionMeta, SessionSource};
+    use crate::session::{MessageRole, SessionMeta, SessionSource};
     use std::path::PathBuf;
 
     fn make_session_with_chars(msg_count: usize, chars_per_msg: usize) -> Session {
         let messages = (0..msg_count)
             .map(|i| SessionMessage {
+                provenance: None,
                 role: if i % 2 == 0 {
                     MessageRole::User
                 } else {

@@ -117,3 +117,17 @@ describe('HTTP adapter document errors', () => {
     )
   })
 })
+
+describe('HTTP deletion receipts', () => {
+  test('maps a missing item to false, while surfacing failed or invalid receipts', async () => {
+    const adapter = createHttpAdapter()
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ success: false, message: 'Item not found' }), { status: 404 }))
+    await expect(adapter.deleteItem('missing')).resolves.toBe(false)
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ success: false, message: 'database failed' }), { status: 500 }))
+    await expect(adapter.deleteItem('broken')).rejects.toThrow('database failed')
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ success: true }), { status: 200 }))
+    await expect(adapter.deleteItem('unknown')).rejects.toThrow('删除结果')
+    fetchMock.mockResolvedValueOnce(new Response('not json', { status: 404 }))
+    await expect(adapter.deleteItem('invalid')).rejects.toThrow('无效 JSON')
+  })
+})

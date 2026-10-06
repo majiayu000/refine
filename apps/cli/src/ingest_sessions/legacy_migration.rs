@@ -4,14 +4,85 @@ use crate::remem_sessions::RememSessionSummary;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use refine_core::knowledge::{Document, DocumentId};
-#[cfg(test)]
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 const LOCAL_SOURCE_ROOT: &str = "local";
 const LOCAL_SOURCE_ROOT_HEX: &str = "6c6f63616c";
 const LEGACY_SOURCES: [&str; 2] = ["claude-code-session", "codex-session"];
+
+/// Build the migration-only lookup once. A fully migrated archive has no
+/// candidates, so unchanged ingestion never rescans all current Documents.
+pub(super) struct LegacyDocumentIndex<'a> {
+    by_session_id: HashMap<String, Vec<&'a Document>>,
+    by_epoch: HashMap<i64, Vec<&'a Document>>,
+}
+
+impl<'a> LegacyDocumentIndex<'a> {
+    pub(super) fn new(documents: &'a [Document]) -> Self {
+        let mut index = Self {
+            by_session_id: HashMap::new(),
+            by_epoch: HashMap::new(),
+        };
+        for document in documents.iter().filter(|document| {
+            LEGACY_SOURCES.contains(&document.source())
+                && !document.url().starts_with("remem://raw-session/v2/")
+        }) {
+            index
+                .by_epoch
+                .entry(document.captured_at().timestamp())
+                .or_default()
+                .push(document);
+            if let Some(stem) = Path::new(document.url())
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+            {
+                // The historical matcher accepts both the complete stem and any
+                // '-{session_id}' suffix, including non-UUID IDs. Index exactly
+                // those boundaries; don't narrow the migration identity rule.
+                index
+                    .by_session_id
+                    .entry(stem.to_string())
+                    .or_default()
+                    .push(document);
+                for (offset, _) in stem.match_indices('-') {
+                    let suffix = &stem[offset + 1..];
+                    if !suffix.is_empty() {
+                        index
+                            .by_session_id
+                            .entry(suffix.to_string())
+                            .or_default()
+                            .push(document);
+                    }
+                }
+            }
+        }
+        index
+    }
+
+    pub(super) fn candidates(
+        &self,
+        summary: &crate::remem_sessions::RememSessionSummary,
+    ) -> Vec<&'a Document> {
+        if summary.source_root != LOCAL_SOURCE_ROOT {
+            return Vec::new();
+        }
+        let mut seen = HashSet::new();
+        self.by_session_id
+            .get(&summary.session_id)
+            .into_iter()
+            .flatten()
+            .chain(
+                self.by_epoch
+                    .get(&summary.first_epoch)
+                    .into_iter()
+                    .flatten(),
+            )
+            .copied()
+            .filter(|document| seen.insert(document.id()))
+            .collect()
+    }
+}
 
 pub(super) fn legacy_document_might_match_summary(
     document: &Document,
@@ -324,6 +395,53 @@ mod tests {
             user_message_samples: Vec::new(),
             legacy_identity_is_unique: true,
         }
+    }
+
+    #[test]
+    fn migration_index_has_no_candidates_for_a_fully_migrated_archive() {
+        let documents: Vec<_> = (0..2_000)
+            .map(|index| {
+                document(
+                    "codex-session",
+                    &format!("remem://raw-session/v2/current/{index}"),
+                    "",
+                    10,
+                )
+            })
+            .collect();
+        let index = LegacyDocumentIndex::new(&documents);
+        assert!(index.by_epoch.is_empty());
+        assert!(index.by_session_id.is_empty());
+        assert!(index.candidates(&summary("local", "session-id")).is_empty());
+    }
+
+    #[test]
+    fn migration_index_preserves_filename_suffix_epoch_and_remote_rules() {
+        let documents = vec![
+            document("codex-session", "/tmp/prefix-session-id.jsonl", "a", 20),
+            document("claude-code-session", "/tmp/unrelated.jsonl", "b", 10),
+            document("codex-session", "/tmp/session-id.jsonl", "c", 10),
+            document("report", "/tmp/session-id.jsonl", "d", 10),
+            document("codex-session", "remem://raw-session/v2/current/id", "", 10),
+        ];
+        let index = LegacyDocumentIndex::new(&documents);
+        for id in ["session-id", "id", "prefix-session-id", "unknown"] {
+            let summary = summary("local", id);
+            let expected: HashSet<_> = documents
+                .iter()
+                .filter(|doc| legacy_document_might_match_summary(doc, &summary))
+                .map(Document::id)
+                .collect();
+            let actual: HashSet<_> = index
+                .candidates(&summary)
+                .into_iter()
+                .map(Document::id)
+                .collect();
+            assert_eq!(actual, expected, "{id}");
+        }
+        assert!(index
+            .candidates(&summary("remote", "session-id"))
+            .is_empty());
     }
 
     #[test]

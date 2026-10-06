@@ -330,6 +330,7 @@ mod tests {
                 detached_observations: 1,
                 mode_excluded_observations: 0,
                 source_excluded_observations: 0,
+                curation_excluded_observations: 0,
                 eligible_observations: 2,
                 ambiguous_project_alias_observations: 0,
                 ambiguous_project_aliases: 0,

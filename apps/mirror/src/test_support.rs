@@ -26,6 +26,11 @@ pub(crate) fn legacy_detached_store() -> (tempfile::TempDir, Arc<SqliteStore>) {
             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', NULL, NULL);",
     )
     .expect("seed detached row before fail-closed triggers exist");
+    conn.execute(
+        "UPDATE items SET created_at = ?1, updated_at = ?1",
+        [chrono::Utc::now().to_rfc3339()],
+    )
+    .expect("keep synthetic detached evidence inside the current score window");
     drop(conn);
     let store = Arc::new(SqliteStore::open(&db_path).expect("upgrade legacy detached fixture"));
     (directory, store)

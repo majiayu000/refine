@@ -1,323 +1,362 @@
 use chrono::Utc;
 use refine_core::session::{ClusterResult, GlobalStats};
+use std::collections::HashSet;
 
 use crate::config::Targets;
 use crate::lang::t;
 
-use super::types::{worst, Indicator, LayerScore, ScoreResult, Signal};
+use super::types::{worst, EvidenceCoverage, Indicator, LayerScore, ScoreResult, Signal};
 
-const DECISION_KEYWORDS: &[&str] = &[
-    "因为", "因", "原因", "选择", "采用", "because", "reason", "chose", "chosen", "adopted",
-    "selected",
+// This remains a lexical observation, not a decision-quality judgment. Choice
+// verbs alone do not establish a rationale; English matching is case-insensitive.
+const REASON_MARKERS: &[&str] = &[
+    "因为",
+    "原因",
+    "由于",
+    "考虑到",
+    "鉴于",
+    "以便",
+    "为了",
+    "because",
+    "due to",
+    "rationale:",
+    "rationale：",
+    "reason:",
+    "reason：",
+    "so that",
 ];
 
-// ── Layer 1: Depth ──
+fn ratio(numerator: usize, denominator: usize) -> Option<f64> {
+    (denominator > 0).then(|| numerator as f64 / denominator as f64)
+}
 
-pub(super) fn dreyfus_weighted(stats: &GlobalStats) -> f64 {
-    let weights: &[(&str, f64)] = &[
+fn above(actual: Option<f64>, green: f64, yellow: f64) -> Signal {
+    match actual {
+        Some(value) if value > green => Signal::Green,
+        Some(value) if value >= yellow => Signal::Yellow,
+        Some(_) => Signal::Red,
+        None => Signal::Unknown,
+    }
+}
+
+fn below(actual: Option<f64>, green: f64, yellow: f64) -> Signal {
+    match actual {
+        Some(value) if value < green => Signal::Green,
+        Some(value) if value <= yellow => Signal::Yellow,
+        Some(_) => Signal::Red,
+        None => Signal::Unknown,
+    }
+}
+
+fn measured(
+    name: &str,
+    actual: Option<f64>,
+    target: String,
+    signal: Signal,
+    coverage: EvidenceCoverage,
+) -> Indicator {
+    Indicator {
+        name: name.into(),
+        actual,
+        target,
+        signal,
+        coverage: Some(coverage),
+    }
+}
+
+fn layer(name: &str, indicators: Vec<Indicator>) -> LayerScore {
+    LayerScore {
+        name: name.into(),
+        signal: worst(
+            &indicators
+                .iter()
+                .map(|indicator| indicator.signal)
+                .collect::<Vec<_>>(),
+        ),
+        indicators,
+    }
+}
+
+pub(super) fn dreyfus_weighted(stats: &GlobalStats) -> Option<f64> {
+    let weights = [
         ("novice", 1.0),
         ("advanced_beginner", 2.0),
         ("competent", 3.0),
         ("proficient", 4.0),
         ("expert", 5.0),
     ];
-    let mut sum = 0.0;
-    let mut count = 0usize;
-    for (level, w) in weights {
-        let n = *stats.cognitive_levels.get(*level).unwrap_or(&0);
-        sum += n as f64 * w;
-        count += n;
-    }
-    if count == 0 {
-        0.0
-    } else {
-        sum / count as f64
-    }
+    let (sum, count) = weights
+        .iter()
+        .fold((0.0, 0usize), |(sum, count), (level, weight)| {
+            let n = stats.cognitive_levels.get(*level).copied().unwrap_or(0);
+            (sum + n as f64 * weight, count + n)
+        });
+    (count > 0).then(|| sum / count as f64)
 }
 
-fn reason_explicitness_rate(cluster: &ClusterResult) -> f64 {
-    let total: usize = cluster
+fn reason_explicitness(cluster: &ClusterResult) -> (Option<f64>, EvidenceCoverage) {
+    let titles: Vec<_> = cluster
         .projects
         .values()
-        .map(|p| p.decision_titles.len())
-        .sum();
-    if total == 0 {
-        return 0.0;
-    }
-    let with_reason: usize = cluster
-        .projects
-        .values()
-        .flat_map(|p| &p.decision_titles)
-        .filter(|t| DECISION_KEYWORDS.iter().any(|kw| t.contains(kw)))
+        .flat_map(|project| &project.decision_titles)
+        .filter(|title| !title.trim().is_empty())
+        .collect();
+    let with_reason = titles
+        .iter()
+        .filter(|title| {
+            let normalized = title.to_lowercase();
+            REASON_MARKERS
+                .iter()
+                .any(|marker| normalized.contains(marker))
+        })
         .count();
-    with_reason as f64 / total as f64
+    (
+        ratio(with_reason, titles.len()),
+        EvidenceCoverage::new(titles.len(), titles.len(), "unique_decisions"),
+    )
 }
 
-pub(super) fn layer1(cluster: &ClusterResult, t: &Targets) -> LayerScore {
-    let dw = dreyfus_weighted(&cluster.global_stats);
-    let dq = reason_explicitness_rate(cluster);
-
-    let sig_dw = if dw > t.dreyfus_green {
-        Signal::Green
-    } else if dw >= t.dreyfus_yellow {
-        Signal::Yellow
-    } else {
-        Signal::Red
-    };
-    let sig_dq = if dq > t.decision_quality_green {
-        Signal::Green
-    } else if dq >= t.decision_quality_yellow {
-        Signal::Yellow
-    } else {
-        Signal::Red
-    };
-
-    let indicators = vec![
-        Indicator {
-            name: "dreyfus".into(),
-            actual: dw,
-            target: format!(">{}", t.dreyfus_green),
-            signal: sig_dw,
-        },
-        Indicator {
-            name: "decision_quality".into(),
-            actual: dq * 100.0,
-            target: format!(">{}%", (t.decision_quality_green * 100.0) as u32),
-            signal: sig_dq,
-        },
-    ];
-
-    LayerScore {
-        name: "depth".into(),
-        signal: worst(&[sig_dw, sig_dq]),
-        indicators,
-    }
+pub(super) fn layer1(cluster: &ClusterResult, targets: &Targets) -> LayerScore {
+    let dreyfus = dreyfus_weighted(&cluster.global_stats);
+    let observed = cluster.global_stats.cognitive_levels.values().sum();
+    let (reasons, reason_coverage) = reason_explicitness(cluster);
+    layer(
+        "depth",
+        vec![
+            measured(
+                "dreyfus",
+                dreyfus,
+                format!(">{}", targets.dreyfus_green),
+                above(dreyfus, targets.dreyfus_green, targets.dreyfus_yellow),
+                EvidenceCoverage::new(observed, cluster.global_stats.total_summaries, "summaries"),
+            ),
+            measured(
+                "decision_quality",
+                reasons.map(|value| value * 100.0),
+                format!(">{}%", (targets.decision_quality_green * 100.0) as u32),
+                above(
+                    reasons,
+                    targets.decision_quality_green,
+                    targets.decision_quality_yellow,
+                ),
+                reason_coverage,
+            ),
+        ],
+    )
 }
 
-// ── Layer 2: Breadth ──
+fn collaboration_coverage(cluster: &ClusterResult) -> EvidenceCoverage {
+    EvidenceCoverage::new(
+        cluster.global_stats.collaboration_modes.values().sum(),
+        cluster.global_stats.total_summaries,
+        "summaries",
+    )
+}
 
-fn layer2(cluster: &ClusterResult, t: &Targets) -> LayerScore {
-    let collab_total: usize = cluster.global_stats.collaboration_modes.values().sum();
-    let exploration = *cluster
-        .global_stats
-        .collaboration_modes
-        .get("exploration")
-        .unwrap_or(&0);
-    let exploration_rate = if collab_total == 0 {
-        0.0
-    } else {
-        exploration as f64 / collab_total as f64
-    };
-
-    let scored_projects: Vec<_> = cluster
+fn layer2(cluster: &ClusterResult, targets: &Targets) -> LayerScore {
+    let collaboration_count = cluster.global_stats.collaboration_modes.values().sum();
+    let exploration = ratio(
+        cluster
+            .global_stats
+            .collaboration_modes
+            .get("exploration")
+            .copied()
+            .unwrap_or(0),
+        collaboration_count,
+    );
+    let projects: Vec<_> = cluster
         .projects
         .values()
         .filter(|project| project.project_name != "other" && project.session_count > 0)
         .collect();
-    let project_count = scored_projects.len();
-    let mature_projects = scored_projects
+    let mature = projects
         .iter()
         .filter(|project| project.session_count >= 20)
         .count();
-    let one_off_projects = scored_projects
+    let one_off = projects
         .iter()
         .filter(|project| project.session_count == 1)
         .count();
-    let (deep_rate, frag_rate) = if project_count == 0 {
-        (0.0, 0.0)
-    } else {
-        (
-            mature_projects as f64 / project_count as f64,
-            one_off_projects as f64 / project_count as f64,
-        )
+    let mature_share = ratio(mature, projects.len());
+    let fragmentation = ratio(one_off, projects.len());
+    let assigned_sessions = projects
+        .iter()
+        .flat_map(|project| &project.doc_ids)
+        .collect::<HashSet<_>>()
+        .len();
+    let project_coverage = EvidenceCoverage::new(
+        assigned_sessions,
+        cluster.global_stats.total_sessions,
+        "sessions",
+    );
+    let mature_signal = match mature_share {
+        Some(value)
+            if value >= targets.deep_invest_green_lo && value <= targets.deep_invest_green_hi =>
+        {
+            Signal::Green
+        }
+        Some(value)
+            if value >= targets.deep_invest_yellow_lo && value <= targets.deep_invest_yellow_hi =>
+        {
+            Signal::Yellow
+        }
+        Some(_) => Signal::Red,
+        None => Signal::Unknown,
     };
-
-    let sig_exp = if exploration_rate > t.exploration_green {
-        Signal::Green
-    } else if exploration_rate >= t.exploration_yellow {
-        Signal::Yellow
-    } else {
-        Signal::Red
-    };
-    let sig_deep = if deep_rate >= t.deep_invest_green_lo && deep_rate <= t.deep_invest_green_hi {
-        Signal::Green
-    } else if deep_rate >= t.deep_invest_yellow_lo && deep_rate <= t.deep_invest_yellow_hi {
-        Signal::Yellow
-    } else {
-        Signal::Red
-    };
-    let sig_frag = if frag_rate < t.fragmentation_green {
-        Signal::Green
-    } else if frag_rate <= t.fragmentation_yellow {
-        Signal::Yellow
-    } else {
-        Signal::Red
-    };
-
-    let indicators = vec![
-        Indicator {
-            name: "exploration".into(),
-            actual: exploration_rate * 100.0,
-            target: format!(">{}%", (t.exploration_green * 100.0) as u32),
-            signal: sig_exp,
-        },
-        Indicator {
-            name: "deep_invest".into(),
-            actual: deep_rate * 100.0,
-            target: format!(
-                "{}-{}%",
-                (t.deep_invest_green_lo * 100.0) as u32,
-                (t.deep_invest_green_hi * 100.0) as u32
+    layer(
+        "breadth",
+        vec![
+            measured(
+                "exploration",
+                exploration.map(|value| value * 100.0),
+                format!(">{}%", (targets.exploration_green * 100.0) as u32),
+                above(
+                    exploration,
+                    targets.exploration_green,
+                    targets.exploration_yellow,
+                ),
+                collaboration_coverage(cluster),
             ),
-            signal: sig_deep,
-        },
-        Indicator {
-            name: "fragmentation".into(),
-            actual: frag_rate * 100.0,
-            target: format!("<{}%", (t.fragmentation_green * 100.0) as u32),
-            signal: sig_frag,
-        },
-    ];
-
-    LayerScore {
-        name: "breadth".into(),
-        signal: worst(&[sig_exp, sig_deep, sig_frag]),
-        indicators,
-    }
+            measured(
+                "deep_invest",
+                mature_share.map(|value| value * 100.0),
+                format!(
+                    "{}-{}%",
+                    (targets.deep_invest_green_lo * 100.0) as u32,
+                    (targets.deep_invest_green_hi * 100.0) as u32
+                ),
+                mature_signal,
+                project_coverage.clone(),
+            ),
+            measured(
+                "fragmentation",
+                fragmentation.map(|value| value * 100.0),
+                format!("<{}%", (targets.fragmentation_green * 100.0) as u32),
+                below(
+                    fragmentation,
+                    targets.fragmentation_green,
+                    targets.fragmentation_yellow,
+                ),
+                project_coverage,
+            ),
+        ],
+    )
 }
 
-// ── Layer 3: Collaboration ──
-
-pub(super) fn layer3(cluster: &ClusterResult, t: &Targets) -> LayerScore {
-    let collab_total: usize = cluster.global_stats.collaboration_modes.values().sum();
-    let delegation = *cluster
-        .global_stats
-        .collaboration_modes
-        .get("delegation")
-        .unwrap_or(&0);
-    let delegation_rate = if collab_total == 0 {
-        0.0
-    } else {
-        delegation as f64 / collab_total as f64
+pub(super) fn layer3(cluster: &ClusterResult, targets: &Targets) -> LayerScore {
+    let collaboration_count = cluster.global_stats.collaboration_modes.values().sum();
+    let delegation = ratio(
+        cluster
+            .global_stats
+            .collaboration_modes
+            .get("delegation")
+            .copied()
+            .unwrap_or(0),
+        collaboration_count,
+    );
+    let mode_count = (collaboration_count > 0).then(|| {
+        cluster
+            .global_stats
+            .collaboration_modes
+            .values()
+            .filter(|&&count| count > 0)
+            .count()
+    });
+    let diversity_signal = match mode_count {
+        Some(value) if value >= targets.mode_diversity_green => Signal::Green,
+        Some(value) if value >= targets.mode_diversity_yellow => Signal::Yellow,
+        Some(_) => Signal::Red,
+        None => Signal::Unknown,
     };
-
-    let mode_count = cluster
-        .global_stats
-        .collaboration_modes
-        .values()
-        .filter(|&&v| v > 0)
-        .count();
-
-    let bug_dec_ratio = if cluster.global_stats.total_decisions == 0 {
-        0.0
-    } else {
-        cluster.global_stats.total_bugfixes as f64 / cluster.global_stats.total_decisions as f64
-    };
-
-    let sig_del = if delegation_rate < t.delegation_green {
-        Signal::Green
-    } else if delegation_rate <= t.delegation_yellow {
-        Signal::Yellow
-    } else {
-        Signal::Red
-    };
-    let sig_div = if mode_count >= t.mode_diversity_green {
-        Signal::Green
-    } else if mode_count >= t.mode_diversity_yellow {
-        Signal::Yellow
-    } else {
-        Signal::Red
-    };
-    let sig_bug = if bug_dec_ratio < t.bug_decision_green {
-        Signal::Green
-    } else if bug_dec_ratio <= t.bug_decision_yellow {
-        Signal::Yellow
-    } else {
-        Signal::Red
-    };
-
-    let indicators = vec![
-        Indicator {
-            name: "delegation".into(),
-            actual: delegation_rate * 100.0,
-            target: format!("<{}%", (t.delegation_green * 100.0) as u32),
-            signal: sig_del,
-        },
-        Indicator {
-            name: "mode_diversity".into(),
-            actual: mode_count as f64,
-            target: format!(">={}", t.mode_diversity_green),
-            signal: sig_div,
-        },
-        Indicator {
-            name: "bug_decision".into(),
-            actual: bug_dec_ratio,
-            target: format!("<{}", t.bug_decision_green),
-            signal: sig_bug,
-        },
-    ];
-
-    LayerScore {
-        name: "collaboration".into(),
-        signal: worst(&[sig_del, sig_div, sig_bug]),
-        indicators,
-    }
+    let bug_ratio = ratio(
+        cluster.global_stats.total_bugfixes,
+        cluster.global_stats.total_decisions,
+    );
+    layer(
+        "collaboration",
+        vec![
+            measured(
+                "delegation",
+                delegation.map(|value| value * 100.0),
+                format!("<{}%", (targets.delegation_green * 100.0) as u32),
+                below(
+                    delegation,
+                    targets.delegation_green,
+                    targets.delegation_yellow,
+                ),
+                collaboration_coverage(cluster),
+            ),
+            measured(
+                "mode_diversity",
+                mode_count.map(|value| value as f64),
+                format!(">={}", targets.mode_diversity_green),
+                diversity_signal,
+                collaboration_coverage(cluster),
+            ),
+            measured(
+                "bug_decision",
+                bug_ratio,
+                format!("<{}", targets.bug_decision_green),
+                below(
+                    bug_ratio,
+                    targets.bug_decision_green,
+                    targets.bug_decision_yellow,
+                ),
+                EvidenceCoverage::new(
+                    cluster.global_stats.total_decisions,
+                    cluster.global_stats.total_decisions,
+                    "decisions",
+                ),
+            ),
+        ],
+    )
 }
 
-// ── Tension analysis ──
-
+// Tension describes the snapshot only. Actions belong exclusively to the
+// shared 90d/7d portfolio policy, so a fragmentation warning cannot also
+// instruct the user to open a new project through this display path.
 pub(super) fn analyze_tension(layers: &[LayerScore; 3]) -> Option<String> {
-    let s = [layers[0].signal, layers[1].signal, layers[2].signal];
-    match s {
-        [Signal::Green, Signal::Red, _] => Some(
+    let signals = [layers[0].signal, layers[1].signal, layers[2].signal];
+    if signals.contains(&Signal::Unknown) {
+        return Some(
             t!(
-                "L1+L2 tension: deep but narrowing — try an exploration session in a new direction",
-                "层1绿+层2红 → 深耕但视野收窄，开一个新方向的探索 session"
+                "Some metrics lack evidence; no conclusion is drawn for those metrics.",
+                "部分指标证据不足，未对这些指标作行为判断。"
             )
             .into(),
-        ),
-        [_, Signal::Green, Signal::Red] => Some(
-            t!(
-                "L2+L3 tension: exploring but over-delegating — try pair mode instead",
-                "层2绿+层3红 → 探索多但 delegation 过高，探索时用 pair 模式而非委托"
-            )
-            .into(),
-        ),
-        [Signal::Red, _, Signal::Green] => Some(
-            t!(
-                "L1+L3 tension: smooth collaboration but no cognitive growth — challenge yourself",
-                "层1红+层3绿 → 协作顺畅但认知没提升，你在舒适区，挑战更难的问题"
-            )
-            .into(),
-        ),
-        [Signal::Green, Signal::Green, Signal::Green] => Some(
-            t!(
-                "All green — healthy growth, consider raising your baseline",
-                "全绿 → 健康成长，考虑提升基线标准"
-            )
-            .into(),
-        ),
-        [Signal::Red, Signal::Red, Signal::Red] => Some(
-            t!(
-                "All red — time to replan, run refine insights --prescription",
-                "全红 → 需要重新规划，建议运行 refine insights --prescription"
-            )
-            .into(),
-        ),
+        );
+    }
+    match signals {
+        [Signal::Green, Signal::Red, _] => Some(t!(
+            "Depth meets configured targets; breadth has a below-target indicator.",
+            "认知深度指标达标；战略广度存在未达标指标。").into()),
+        [_, Signal::Green, Signal::Red] => Some(t!(
+            "Breadth meets configured targets; collaboration has a below-target indicator.",
+            "战略广度指标达标；协作效能存在未达标指标。").into()),
+        [Signal::Red, _, Signal::Green] => Some(t!(
+            "Collaboration meets configured targets; depth has a below-target indicator.",
+            "协作效能指标达标；认知深度存在未达标指标。").into()),
+        [Signal::Green, Signal::Green, Signal::Green] => Some(t!(
+            "All green: all three layers meet configured targets in this snapshot.",
+            "当前快照中，三个层级均达到配置目标。").into()),
+        [Signal::Red, Signal::Red, Signal::Red] => Some(t!(
+            "All three layers include below-target indicators; inspect their evidence before choosing an action.",
+            "三个层级都有未达标指标，请结合各指标证据评估。").into()),
         _ => None,
     }
 }
 
-// ── Compute entry ──
-
 pub fn compute(cluster: &ClusterResult, targets: &Targets) -> ScoreResult {
-    let l1 = layer1(cluster, targets);
-    let l2 = layer2(cluster, targets);
-    let l3 = layer3(cluster, targets);
-    let tension = analyze_tension(&[l1.clone(), l2.clone(), l3.clone()]);
+    let layers = [
+        layer1(cluster, targets),
+        layer2(cluster, targets),
+        layer3(cluster, targets),
+    ];
+    let tension = analyze_tension(&layers);
     ScoreResult {
-        layers: [l1, l2, l3],
+        layers,
         tension,
         timestamp: Utc::now(),
+        scope: None,
     }
 }

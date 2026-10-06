@@ -226,10 +226,16 @@ export function createHttpAdapter(): RefineApiClient {
     },
 
     deleteItem: async (id: string): Promise<boolean> => {
-      const data = await requestJson<{ deleted?: boolean }>(`/v1/items/${encodeURIComponent(id)}`, {
-        method: 'DELETE',
-      })
-      return Boolean(data.deleted)
+      try {
+        const data = await requestJson<{ deleted?: boolean }>(`/v1/items/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+        })
+        if (typeof data.deleted !== 'boolean') throw new Error('服务未返回有效的删除结果')
+        return data.deleted
+      } catch (error) {
+        if (error instanceof Error && 'status' in error && error.status === 404) return false
+        throw error
+      }
     },
 
     getDocuments: async (params?: ListDocumentsParams): Promise<DocumentListResult> => {

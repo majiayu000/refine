@@ -9,7 +9,8 @@ use crate::conversation::{
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{
     Document, DocumentId, DocumentRepository, Item, ItemId, ItemRepository, ItemType,
-    ObservationWindowSnapshot, Tag,
+    ObservationWindowSnapshot, SessionProjectionMetadata, SessionProjectionRevision,
+    SessionProjectionVersion, Tag,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -21,6 +22,8 @@ mod doc_ops;
 mod insights_snapshot;
 mod ops;
 mod rows;
+mod session_projection;
+mod text_search;
 mod worker;
 mod worker_support;
 
@@ -266,9 +269,61 @@ impl DocumentRepository for SqliteStore {
                 items,
                 source_document_ids,
                 obsolete_document_ids,
+                metadata: None,
                 resp,
             },
         )
+        .await
+    }
+
+    async fn save_session_projection(
+        &self,
+        doc: &Document,
+        items: &[Item],
+        source_document_ids: &[DocumentId],
+        obsolete_document_ids: &[DocumentId],
+        metadata: &SessionProjectionMetadata,
+    ) -> InfraResult<()> {
+        let doc = doc.clone();
+        let items = items.to_vec();
+        let source_document_ids = source_document_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let obsolete_document_ids = obsolete_document_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let metadata = Some(metadata.clone());
+        self.request(
+            |resp| SqliteCommand::DocSaveWithReplacedItemsAndDeleteDocuments {
+                doc,
+                items,
+                source_document_ids,
+                obsolete_document_ids,
+                metadata,
+                resp,
+            },
+        )
+        .await
+    }
+
+    async fn find_session_projection_versions(&self) -> InfraResult<Vec<SessionProjectionVersion>> {
+        self.request(|resp| SqliteCommand::SessionProjectionVersions { resp })
+            .await
+    }
+
+    async fn find_session_projection_history(
+        &self,
+        document_id: &DocumentId,
+        limit: usize,
+    ) -> InfraResult<Vec<SessionProjectionRevision>> {
+        let document_id = document_id.to_string();
+        self.request(|resp| SqliteCommand::SessionProjectionHistory {
+            document_id,
+            limit,
+            resp,
+        })
         .await
     }
 

@@ -1,10 +1,11 @@
 use super::rows::{configure_connection, configure_read_only_connection};
 use super::worker_support::{send_init_result, send_response};
-use super::{conversation_ops, doc_ops, insights_snapshot, ops};
+use super::{conversation_ops, doc_ops, insights_snapshot, ops, session_projection};
 use crate::conversation::{ConversationRecord, EventRecord, ExtractionJobRecord};
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{
     Document, Item, ItemType, ObservationWindowSnapshot, RestoreDocumentParams,
+    SessionProjectionMetadata, SessionProjectionRevision, SessionProjectionVersion,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
@@ -109,7 +110,16 @@ pub(super) enum SqliteCommand {
         items: Vec<Item>,
         source_document_ids: Vec<String>,
         obsolete_document_ids: Vec<String>,
+        metadata: Option<SessionProjectionMetadata>,
         resp: oneshot::Sender<InfraResult<()>>,
+    },
+    SessionProjectionVersions {
+        resp: oneshot::Sender<InfraResult<Vec<SessionProjectionVersion>>>,
+    },
+    SessionProjectionHistory {
+        document_id: String,
+        limit: usize,
+        resp: oneshot::Sender<InfraResult<Vec<SessionProjectionRevision>>>,
     },
     DocFindById {
         id: String,
@@ -350,10 +360,18 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
             send_response("FindByTags", resp, ops::find_by_tags(conn, &tags));
         }
         SqliteCommand::Save { item, resp } => {
-            send_response("Save", resp, ops::save(conn, &item));
+            send_response(
+                "Save",
+                resp,
+                session_projection::save_explicit_item(conn, &item),
+            );
         }
         SqliteCommand::Delete { id, resp } => {
-            send_response("Delete", resp, ops::delete(conn, &id));
+            send_response(
+                "Delete",
+                resp,
+                session_projection::delete_explicit_item(conn, &id),
+            );
         }
         SqliteCommand::Exists { id, resp } => {
             send_response("Exists", resp, ops::exists(conn, &id));
@@ -426,6 +444,7 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
             items,
             source_document_ids,
             obsolete_document_ids,
+            metadata,
             resp,
         } => {
             send_response(
@@ -437,7 +456,26 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
                     &items,
                     &source_document_ids,
                     &obsolete_document_ids,
+                    metadata.as_ref(),
                 ),
+            );
+        }
+        SqliteCommand::SessionProjectionVersions { resp } => {
+            send_response(
+                "SessionProjectionVersions",
+                resp,
+                session_projection::versions(conn),
+            );
+        }
+        SqliteCommand::SessionProjectionHistory {
+            document_id,
+            limit,
+            resp,
+        } => {
+            send_response(
+                "SessionProjectionHistory",
+                resp,
+                session_projection::history(conn, &document_id, limit),
             );
         }
         SqliteCommand::DocFindById { id, resp } => {
@@ -721,22 +759,36 @@ fn save_document_with_replaced_items_and_delete_documents(
     items: &[Item],
     source_document_ids: &[String],
     obsolete_document_ids: &[String],
+    metadata: Option<&SessionProjectionMetadata>,
 ) -> InfraResult<()> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|e| InfraError::Database(e.to_string()))?;
     let input_document_id = doc.id().clone();
     let (doc, replacement_items) = canonicalize_document_items(&tx, doc, items)?;
     let source_items = doc_ops::load_items(&tx, source_document_ids, &input_document_id, doc.id())?;
+    if metadata.is_some() {
+        let mut archived_ids = obsolete_document_ids.to_vec();
+        archived_ids.push(doc.id().to_string());
+        session_projection::archive(&tx, &archived_ids)?;
+    }
+    // Fresh replacements take precedence over the transaction's source-item
+    // snapshot for the same ID (for example updated session-mode tags).
+    let mut incoming_by_id = std::collections::BTreeMap::new();
+    for item in source_items.into_iter().chain(replacement_items) {
+        incoming_by_id.insert(item.id().to_string(), item);
+    }
+    let incoming = incoming_by_id.into_values().collect();
+    let final_items = session_projection::apply_overrides(&tx, &doc, incoming)?;
     doc_ops::delete_same_id_with_different_url(&tx, &doc)?;
     doc_ops::save(&tx, &doc)?;
     ops::delete_by_document_id(&tx, doc.id().as_str())?;
-    for item in &source_items {
-        ops::save(&tx, item)?;
-    }
-    for item in &replacement_items {
+    for item in &final_items {
         ops::save(&tx, item)?;
     }
     delete_documents_with_items_in_transaction(&tx, obsolete_document_ids)?;
+    if let Some(metadata) = metadata {
+        session_projection::save_metadata(&tx, &doc, metadata)?;
+    }
     tx.commit()
         .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(())

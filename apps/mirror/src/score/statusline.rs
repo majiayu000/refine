@@ -18,7 +18,7 @@ fn sanitize_single_line(s: &str) -> String {
 ///
 /// Format: "🪞🟡🔴🔴 🔥4天 <short_advice>"
 ///
-/// `short` is the short advice from the LLM advice cache (may be empty).
+/// `short` is the short advice from the local advice cache (may be empty).
 pub fn build_statusline(
     result: &ScoreResult,
     short: &str,
@@ -114,13 +114,15 @@ mod tests {
                 signal: signals[i],
                 indicators: vec![Indicator {
                     name: "test".into(),
-                    actual: 1.0,
+                    actual: Some(1.0),
+                    coverage: None,
                     target: ">0".into(),
                     signal: signals[i],
                 }],
             }),
             tension: None,
             timestamp: Utc::now(),
+            scope: None,
         }
     }
 
@@ -163,7 +165,7 @@ mod tests {
         ];
         for (layer, (name, actual)) in result.layers.iter_mut().zip(indicators) {
             layer.indicators[0].name = name.into();
-            layer.indicators[0].actual = actual;
+            layer.indicators[0].actual = Some(actual);
         }
         let baseline = PersonalBaseline::from_averages(&[
             ("dreyfus", 3.0),
