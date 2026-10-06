@@ -11,6 +11,23 @@ Items 和本地 Documents 同时维护词项 FTS5 索引与 trigram 外部内容
 全文索引的回填。后续 insert/update/delete 在业务事务内维护索引。
 trigram 使用 external content，不另存一份正文。
 
+Items 的默认 keyword 检索把 type 和全部 tags 的 AND 条件放在 SQL 中，
+同一读快照内用相同谓词获取精确 total 和目标页。空查询的最近条目也使用同一路径。
+每页固定为一次 count 和一次分页查询，只反序列化目标页的完整 Item，
+不再以 128 条为一批反复 OFFSET 读取所有文本命中。相同排名或创建时间用完整 ID
+稳定排序。标签保留 Rust `Tag` 的 Unicode 大小写与旧数据规范化行为，
+不依赖只处理 ASCII 的 SQLite `LOWER`。
+
+精确 count 仍可能扫描所有匹配行；这项变更不承诺与库大小无关的查询时间。
+`packages/core/tests/search_filters.rs` 覆盖中英文、Unicode 标签、类型组合、
+空查询、空页，以及目标页之外的匹配行不会被完整反序列化。可用以下可重复探针
+比较 1k/10k 合成库的旧扫描路径和当前第一页，记录耗时与物化条目数；
+它没有依赖机器速度的通过阈值：
+
+```sh
+cargo test --locked -p refine-core --test search_filters filtered_search_scale_probe -- --ignored --nocapture
+```
+
 SQLite 的 trigram MATCH 至少需要三个 Unicode 字符。一至两个字的查询使用
 字面 LIKE 回退，保证召回；这类查询可能扫描全表。不能据此宣称所有中文查询都有
 相同的延迟。参见 [SQLite FTS5 trigram 文档](https://www.sqlite.org/fts5.html#the_trigram_tokenizer)。
@@ -76,43 +93,54 @@ Seed 工具拒绝覆盖已存在的文件。不要把测试语料导入个人数
 `ingest_only` 返回真实持久化的 captured receipt；普通提炼返回持久化 conversation/job ID，
 可使用 `/v1/extraction-jobs/:id` 查询。幂等重放不会创建伪造的 local ID。
 
-配置正数 Items 配额时，配额限制新采集的准入。已持久化的幂等键仍能重放并返回
-原 conversation、当前状态及适用的 job ID，即使首次响应丢失后配额已满。
-新幂等键继续返回配额错误；已完成的采集不会因重放重新提炼。配额仍沿用当前
-单用户、全库 Items 计数合同，不是对尚未完成任务的 Item 数量预留。
-幂等键查询、新采集的 Items 计数、conversation 与初始 job 写入在同一个
-IMMEDIATE 事务中执行；不把事务外曾查到的旧 key 当作准入许可。其他写入者
-删除或修改了该 key 后，新请求须重新满足准入配额。输入校验与现有鉴权不变，
-重放不改写已经持久化的原 payload。
+### 采集接收顺序、发布与回执
 
-### 同 URL 采集结果的发布顺序
+每个首次持久化的 conversation 由同一 SQLite 数据库分配递增接收序号。
+正文、来源、URL、标题或采集时间真正改变时，使用同一个接收序列取得新版本；
+状态更新和幂等重放保持原版本。任务领取时固定源版本，提交结果时在事务内
+重新核对版本和实际输入。运行期间修改后再改回也不能让旧任务提交；这种任务
+以 `capture_source_changed` 失败并保留终态回执，不会被恢复流程自动重跑。
+相同 URL 的普通 HTTP capture 以**已经成功发布的最大接收序号**作为当前版本：
+较新任务尚在运行或失败时，保留此前有效结果；较新任务一旦发布，较早采集的
+任务即使随后完成，也不能覆盖 Document 或 Items。判定、正文与 Items 替换、
+job/conversation 终态位于同一个 IMMEDIATE 事务中。该顺序不比较客户端
+`captured_at`：离线采集稍后送达会获得新的接收序号，相同或不准确的客户端时间
+不会改变接收顺序。
 
-服务器在首次持久化采集的同一 SQLite 事务内分配递增接收 revision；修改同一
-采集的提炼输入也会获得新 revision。幂等重放及单纯任务状态更新不改变 revision。
-worker 领取任务时绑定该源 revision，发布事务重新核对 lease、源 revision 与
-Document 输入，再与该 URL **已经成功发布**的 revision 比较。较新任务仅排队、
-仍在提炼或失败时，不阻止较旧有效任务发布；较新结果成功发布后，旧任务不能覆盖
-Document、Items 或索引。接收顺序不使用客户端 `captured_at` 或模型完成时间。
+被较新采集替代的任务仍是 `succeeded` / `processed`，表示已经处理完毕。
+创建回执、job 查询和 conversation 列表可包含 `superseded_by`，其值是替代它的
+conversation ID；再次替代时可以沿此关系追到当前发布者。被替代的 conversation
+清空 `item_ids`，不会把已删除的旧 Items 描述为当前结果。会话原文与终态保留。
+这套规则仅作用于普通 capture 的提炼发布；Session observation 的人工覆盖、
+tombstone 和历史投影继续遵循自己的合同。
 
-旧任务仍可通过原 job ID 查询：保留现有 `failed` 状态，`error` /
-conversation `last_error` 中的 `capture_superseded` 解释较新结果已发布；
-`capture_source_changed` 表示提炼期间原文版本发生变化。自动恢复只处理
-pending/running，不会把这些终态重新排入。HTTP 回执字段和状态枚举保持兼容。
+未记录接收序号的历史 conversation 保持未知版本 0；升级不会用 rowid 或客户端
+时间推测旧顺序，也不会重发或改写已有文档。已经记录的正版本与序列高水位保留。
+历史任务可以在尚无正版本成功发布时完成；正版本发布后，晚到的版本 0 结果
+只形成 `superseded_by` 回执，不会替换当前文档。
 
-升级前历史采集的真实接收 revision 无法可靠恢复，迁移记录为未知的 `0`，不从
-rowid、`created_at` 或完成时间猜测。已完成历史与现有 Document 保持可读；
-旧任务在该 URL 尚未发布正 revision 时仍可完成，多个历史 `0` 之间保留原行为。
-一旦正 revision 成功发布，晚到的历史 `0` 也必须拒绝。防止发布回退的顺序保证
-从迁移后分配的正 revision 起生效，不宣称恢复了历史发布先后。较新任务仅排队
-或失败不会阻止旧工作。旧 worker 应在升级前停止，再由新版本恢复任务。
-此规则不自动重算历史；新版本领取任务后若源内容发生变化，重新提交采集可明确
-建立新版输入。
+旧库导入在事务内使用未知历史模式，不把另一数据库的任务版本当成本地顺序。
+已在本地取得正版本的采集和任务不被旧库的同 key、同 ID 或更换父级的记录覆盖；
+已由正版本发布的 Document 和 Items 也受保护。未知历史记录仍按原有的版本、
+单向状态迁移和身份映射规则合并；导入完成或回滚后恢复正常接收计数。
+升级时应重启所有使用该数据库的旧版本提炼进程，使所有发布者执行同一规则。
 
-历史 `server.db` 等文件的合并同样使用未知 `0`：导入在事务内暂停正 revision
-分配，外部数据库的 job revision 不带入本库时钟。导入不能用文件遍历或源库
-revision 猜测跨库接收顺序。已经发布正 revision 的 URL，其 Document 与附属
-Items 不被未知顺序的历史快照替换；历史原始文件与回执仍按原迁移合同保留。
-尚无正 revision 发布的 URL 继续沿用原历史合并行为。
+### 幂等重放与准入配额
+
+准入在同一写事务内先查幂等键。已有请求须匹配原 owner、source、URL、title、
+content 和 metadata，否则返回 400，并要求新的请求使用新的键。创建时间与
+capture 时间不参与身份比较；回放保留原记录的时间，避免未传时间的同一请求无法重放。
+只有真正创建 conversation 的分支才检查启用的 Item 配额。原请求的 captured、
+pending 或 processed 回执可以在之后达到配额时继续重放；processed 提炼重放
+保留可查询的终态 job ID，且不重新运行该任务。
+
+配额仍是新 capture 的准入阈值，作用于不在 premium 集合中的用户；它不是为
+尚未完成的提炼预留未知数量 Items 的硬上限。新请求被拒绝时不创建 conversation、
+job 或接收序号。
+
+计数沿用单用户、全库 Items 合同。IMMEDIATE 事务保护幂等键查询、配额计数、
+conversation 和初始 job 写入；事务外曾经读到的 key 不能作为后续写入的准入许可。
+其他写入者删除或修改该 key 后，请求必须重新满足准入配额。
 
 原生 HTTP 接口沿用独立服务的显式访问配置：`REFINE_API_TOKEN`，或开发时
 `REFINE_DEV_ANON=1`。未配置时原生 UI 可使用，HTTP 接口不绑定端口，并记录

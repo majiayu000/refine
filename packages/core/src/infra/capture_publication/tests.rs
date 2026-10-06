@@ -1,6 +1,6 @@
 use crate::conversation::{
     ConversationRecord, ConversationRepository, ConversationStatus, ExtractionJobRecord,
-    ExtractionMode, JobRepository, JobStatus,
+    ExtractionMode, JobPublicationOutcome, JobRepository, JobStatus,
 };
 use crate::infra::SqliteStore;
 use crate::knowledge::{DocumentRepository, Item, ItemRepository};
@@ -26,6 +26,7 @@ fn capture(key: &str, content: &str) -> ConversationRecord {
         idempotency_key: key.into(),
         item_ids: vec![],
         last_error: None,
+        superseded_by: None,
     }
 }
 
@@ -78,7 +79,7 @@ async fn publish(
     store: &SqliteStore,
     job: &ExtractionJobRecord,
     capture: &ConversationRecord,
-) -> InfraResult<bool> {
+) -> InfraResult<JobPublicationOutcome> {
     let (doc, items) = result(capture);
     store
         .finish_job_claim_with_results(&job.id, &job.id, &doc, &items, NOW)
@@ -86,7 +87,7 @@ async fn publish(
 }
 
 #[tokio::test]
-async fn newer_publication_survives_older_completion_and_failure_receipt_is_durable() {
+async fn newer_publication_survives_older_completion_and_superseded_receipt_is_durable() {
     let store = SqliteStore::in_memory().unwrap();
     let mut old = capture("old", "Use MySQL");
     old.captured_at = "2090-01-01T00:00:00Z".into();
@@ -96,27 +97,17 @@ async fn newer_publication_survives_older_completion_and_failure_receipt_is_dura
     let new_job = enqueue(&store, &new).await;
     claim(&store, &old_job).await;
     claim(&store, &new_job).await;
-    assert!(publish(&store, &new_job, &new).await.unwrap());
+    assert_eq!(
+        publish(&store, &new_job, &new).await.unwrap(),
+        JobPublicationOutcome::Published
+    );
     let before = store.find_by_url(&new.url).await.unwrap().unwrap();
     let items_before = store.find_by_document_id(before.id()).await.unwrap();
 
-    let error = publish(&store, &old_job, &old)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("capture_superseded"), "{error}");
-    // This is the same terminal error path used by the server worker.
-    assert!(store
-        .finish_job_claim(
-            &old_job.id,
-            &old_job.id,
-            JobStatus::Failed,
-            &[],
-            Some(&error),
-            NOW
-        )
-        .await
-        .unwrap());
+    assert_eq!(
+        publish(&store, &old_job, &old).await.unwrap(),
+        JobPublicationOutcome::Superseded
+    );
     let after = store.find_by_url(&new.url).await.unwrap().unwrap();
     assert_eq!(after.raw_content(), "Use PostgreSQL");
     assert_eq!(after.id(), before.id());
@@ -124,14 +115,15 @@ async fn newer_publication_survives_older_completion_and_failure_receipt_is_dura
     assert_eq!(items_after.len(), 1);
     assert_eq!(items_after[0].id(), items_before[0].id());
     let receipt = store.find_job_by_id(&old_job.id).await.unwrap().unwrap();
-    assert_eq!(receipt.status, JobStatus::Failed);
-    assert_eq!(receipt.error.as_deref(), Some(error.as_str()));
+    assert_eq!(receipt.status, JobStatus::Succeeded);
+    assert!(receipt.error.is_none());
     let conversation = store
         .find_conversation_by_id(&old.id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(conversation.status, ConversationStatus::Failed);
+    assert_eq!(conversation.status, ConversationStatus::Processed);
+    assert_eq!(conversation.superseded_by.as_deref(), Some(new.id.as_str()));
     assert!(conversation.item_ids.is_empty());
     assert_eq!(conversation.last_error, receipt.error);
     assert!(store
@@ -164,7 +156,10 @@ async fn newer_pending_or_failed_capture_does_not_block_older_publication() {
                 .await
                 .unwrap());
         }
-        assert!(publish(&store, &old_job, &old).await.unwrap());
+        assert_eq!(
+            publish(&store, &old_job, &old).await.unwrap(),
+            JobPublicationOutcome::Published
+        );
         assert_eq!(
             store
                 .find_by_url(&old.url)
@@ -176,7 +171,10 @@ async fn newer_pending_or_failed_capture_does_not_block_older_publication() {
         );
         if !newer_fails {
             claim(&store, &new_job).await;
-            assert!(publish(&store, &new_job, &new).await.unwrap());
+            assert_eq!(
+                publish(&store, &new_job, &new).await.unwrap(),
+                JobPublicationOutcome::Published
+            );
             assert_eq!(
                 store
                     .find_by_url(&new.url)
@@ -215,7 +213,7 @@ async fn source_change_and_revert_after_claim_cannot_reuse_the_old_revision() {
 }
 
 #[tokio::test]
-async fn idempotent_replay_preserves_receive_revision_and_initial_input() {
+async fn quota_conflict_and_receipt_replay_preserve_receive_revision_and_initial_input() {
     let store = SqliteStore::in_memory().unwrap();
     let original = capture("same-key", "Original passage");
     let job = enqueue(&store, &original).await;
@@ -223,13 +221,24 @@ async fn idempotent_replay_preserves_receive_revision_and_initial_input() {
     let mut replay = original.clone();
     replay.id = "different-proposed-id".into();
     replay.raw_content = "Retry cannot replace accepted input".into();
+    assert!(matches!(
+        store
+            .insert_or_fetch_conversation_with_quota(&replay, None, None)
+            .await,
+        Err(InfraError::IdempotencyConflict)
+    ));
+    // The legacy receipt lookup also returns the stored payload without writing
+    // a new source revision; strict HTTP admission uses the quota API above.
     let existing = store
         .insert_or_fetch_conversation_by_idempotency(&replay)
         .await
         .unwrap();
     assert_eq!(existing.id, original.id);
     assert_eq!(existing.raw_content, original.raw_content);
-    assert!(publish(&store, &job, &original).await.unwrap());
+    assert_eq!(
+        publish(&store, &job, &original).await.unwrap(),
+        JobPublicationOutcome::Published
+    );
 }
 
 #[tokio::test]
@@ -248,7 +257,10 @@ async fn failed_result_transaction_does_not_advance_publication_revision() {
         .await
         .is_err());
     assert!(store.find_by_url(&new.url).await.unwrap().is_none());
-    assert!(publish(&store, &old_job, &old).await.unwrap());
+    assert_eq!(
+        publish(&store, &old_job, &old).await.unwrap(),
+        JobPublicationOutcome::Published
+    );
 }
 
 #[test]
@@ -260,13 +272,13 @@ fn migration_preserves_unknown_history_without_inventing_receive_order() {
          VALUES('legacy','user','chatgpt','https://chatgpt.com/c/shared','Legacy content','{}',?1,?1,'processing','legacy-key','[]')",
         [NOW],
     ).unwrap();
-    conn.execute("INSERT INTO extraction_jobs(id,conversation_id,mode,status,created_at,updated_at,source_revision)
-        VALUES('legacy-job','legacy','auto','running',?1,?1,0)", [NOW]).unwrap();
+    conn.execute("INSERT INTO extraction_jobs(id,conversation_id,mode,status,created_at,updated_at,source_revision,lease_owner)
+        VALUES('legacy-job','legacy','auto','running',?1,?1,0,'worker')", [NOW]).unwrap();
     prepare(&conn).unwrap();
     prepare(&conn).unwrap();
     let legacy: i64 = conn
         .query_row(
-            "SELECT revision FROM conversation_source_revisions WHERE conversation_id='legacy'",
+            "SELECT COALESCE((SELECT revision FROM capture_revisions WHERE conversation_id='legacy'),0)",
             [],
             |row| row.get(0),
         )
@@ -279,9 +291,10 @@ fn migration_preserves_unknown_history_without_inventing_receive_order() {
             .unwrap()
             .with_timezone(&Utc),
     );
-    let legacy_publication = authorize(&conn, "legacy-job", &legacy_doc).unwrap();
-    assert_eq!(legacy_publication.revision, 0);
-    record(&conn, &legacy_doc, &legacy_publication).unwrap();
+    let legacy_source = claimed_source(&conn, "legacy-job", "worker", &legacy_doc)
+        .unwrap()
+        .unwrap();
+    assert_eq!(legacy_source.revision, 0);
     conn.execute(
         "INSERT INTO conversations(id,user_id,source,url,raw_content,metadata_json,captured_at,created_at,status,idempotency_key,item_ids)
          VALUES('new','user','chatgpt','https://chatgpt.com/c/shared','New content','{}',?1,?1,'queued','new-key','[]')",
@@ -289,23 +302,26 @@ fn migration_preserves_unknown_history_without_inventing_receive_order() {
     ).unwrap();
     let current: i64 = conn
         .query_row(
-            "SELECT revision FROM conversation_source_revisions WHERE conversation_id='new'",
+            "SELECT revision FROM capture_revisions WHERE conversation_id='new'",
             [],
             |row| row.get(0),
         )
         .unwrap();
     assert!(current > 0);
     let clock: i64 = conn
-        .query_row("SELECT revision FROM capture_receive_clock", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name='capture_revisions'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     prepare(&conn).unwrap();
     assert_eq!(
-        conn.query_row("SELECT revision FROM capture_receive_clock", [], |row| row
-            .get::<_, i64>(
-            0
-        ))
+        conn.query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name='capture_revisions'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
         .unwrap(),
         clock
     );
@@ -345,16 +361,21 @@ async fn legacy_zero_can_publish_until_a_new_revision_has_successfully_published
     // Admission of a positive revision does not fence out unfinished history.
     for index in 0..2 {
         claim(&store, &jobs[index]).await;
-        assert!(publish(&store, &jobs[index], &legacy[index]).await.unwrap());
+        assert_eq!(
+            publish(&store, &jobs[index], &legacy[index]).await.unwrap(),
+            JobPublicationOutcome::Published
+        );
     }
     claim(&store, &new_job).await;
-    assert!(publish(&store, &new_job, &new).await.unwrap());
+    assert_eq!(
+        publish(&store, &new_job, &new).await.unwrap(),
+        JobPublicationOutcome::Published
+    );
     claim(&store, &jobs[2]).await;
-    let error = publish(&store, &jobs[2], &legacy[2])
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("capture_superseded"), "{error}");
+    assert_eq!(
+        publish(&store, &jobs[2], &legacy[2]).await.unwrap(),
+        JobPublicationOutcome::Superseded
+    );
     assert_eq!(
         store
             .find_by_url(&new.url)
@@ -374,7 +395,10 @@ async fn legacy_database_import_keeps_unknown_revisions_and_preserves_local_publ
     let local = capture("local", "Current local result");
     let local_job = enqueue(&target, &local).await;
     claim(&target, &local_job).await;
-    assert!(publish(&target, &local_job, &local).await.unwrap());
+    assert_eq!(
+        publish(&target, &local_job, &local).await.unwrap(),
+        JobPublicationOutcome::Published
+    );
 
     let legacy_path = directory.path().join("server.db");
     let legacy = SqliteStore::open(&legacy_path).unwrap();
@@ -382,13 +406,16 @@ async fn legacy_database_import_keeps_unknown_revisions_and_preserves_local_publ
     foreign.captured_at = "2099-01-01T00:00:00Z".into();
     let foreign_job = enqueue(&legacy, &foreign).await;
     claim(&legacy, &foreign_job).await;
-    assert!(publish(&legacy, &foreign_job, &foreign).await.unwrap());
+    assert_eq!(
+        publish(&legacy, &foreign_job, &foreign).await.unwrap(),
+        JobPublicationOutcome::Published
+    );
 
     crate::infra::migrate_stale_dbs(&target_path).unwrap();
     let conn = Connection::open(&target_path).unwrap();
     let imported_revision: i64 = conn
         .query_row(
-            "SELECT revision FROM conversation_source_revisions WHERE conversation_id=?1",
+            "SELECT COALESCE((SELECT revision FROM capture_revisions WHERE conversation_id=?1),0)",
             [&foreign.id],
             |row| row.get(0),
         )
@@ -404,7 +431,7 @@ async fn legacy_database_import_keeps_unknown_revisions_and_preserves_local_publ
     assert_eq!(imported_claim, None);
     let clock: (i64, bool) = conn
         .query_row(
-            "SELECT revision, legacy_import FROM capture_receive_clock",
+            "SELECT (SELECT seq FROM sqlite_sequence WHERE name='capture_revisions'), legacy_import FROM capture_publication_context",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -419,10 +446,13 @@ async fn legacy_database_import_keeps_unknown_revisions_and_preserves_local_publ
     let fresh = capture("fresh", "Fresh admission after import");
     let fresh_job = enqueue(&target, &fresh).await;
     claim(&target, &fresh_job).await;
-    assert!(publish(&target, &fresh_job, &fresh).await.unwrap());
+    assert_eq!(
+        publish(&target, &fresh_job, &fresh).await.unwrap(),
+        JobPublicationOutcome::Published
+    );
     let revision: i64 = conn
         .query_row(
-            "SELECT revision FROM conversation_source_revisions WHERE conversation_id=?1",
+            "SELECT COALESCE((SELECT revision FROM capture_revisions WHERE conversation_id=?1),0)",
             [&fresh.id],
             |row| row.get(0),
         )
@@ -439,7 +469,10 @@ async fn legacy_import_cannot_overwrite_published_rows_by_reusing_their_ids() {
         let local = capture("local", "Current local source");
         let job = enqueue(&target, &local).await;
         claim(&target, &job).await;
-        assert!(publish(&target, &job, &local).await.unwrap());
+        assert_eq!(
+            publish(&target, &job, &local).await.unwrap(),
+            JobPublicationOutcome::Published
+        );
         let doc = target.find_by_url(&local.url).await.unwrap().unwrap();
         let item = target
             .find_by_document_id(doc.id())
@@ -499,5 +532,97 @@ async fn legacy_import_cannot_overwrite_published_rows_by_reusing_their_ids() {
         assert_eq!(after_item.document_id(), Some(doc.id()));
         assert_eq!(after_item.title(), item.title());
         assert_eq!(after_item.content(), item.content());
+    }
+}
+
+#[tokio::test]
+async fn legacy_import_preserves_accepted_capture_and_its_running_claim() {
+    for case in ["same-key", "same-id", "job-reparent", "extra-job"] {
+        let directory = tempfile::tempdir().unwrap();
+        let target_path = directory.path().join("refine.db");
+        let target = SqliteStore::open(&target_path).unwrap();
+        let local = capture("local", "Accepted local input");
+        let local_job = enqueue(&target, &local).await;
+        claim(&target, &local_job).await;
+
+        let legacy_path = directory.path().join("server.db");
+        let legacy = SqliteStore::open(&legacy_path).unwrap();
+        let mut foreign = capture(
+            "foreign",
+            "Imported input must not replace the active source",
+        );
+        foreign.user_id = "foreign-owner".into();
+        match case {
+            "same-key" => foreign.idempotency_key = local.idempotency_key.clone(),
+            "same-id" | "extra-job" => foreign.id = local.id.clone(),
+            "job-reparent" => {}
+            _ => unreachable!(),
+        }
+        let foreign_job = ExtractionJobRecord {
+            id: if case == "job-reparent" || case == "same-id" {
+                local_job.id.clone()
+            } else {
+                "foreign-extra-job".into()
+            },
+            conversation_id: foreign.id.clone(),
+            ..local_job.clone()
+        };
+        legacy
+            .insert_or_fetch_conversation_with_job(&foreign, &foreign_job)
+            .await
+            .unwrap();
+        legacy
+            .claim_job(
+                &foreign_job.id,
+                "foreign-worker",
+                "2090-01-01T00:00:00Z",
+                EXPIRES,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        crate::infra::migrate_stale_dbs(&target_path).unwrap();
+        let after = target
+            .find_conversation_by_id(&local.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.raw_content, local.raw_content, "{case}");
+        assert_eq!(after.user_id, local.user_id, "{case}");
+        assert_eq!(after.idempotency_key, local.idempotency_key, "{case}");
+        let job = target.find_job_by_id(&local_job.id).await.unwrap().unwrap();
+        assert_eq!(job.conversation_id, local.id, "{case}");
+        assert_eq!(job.status, JobStatus::Running, "{case}");
+        assert_eq!(
+            job.lease_owner.as_deref(),
+            Some(local_job.id.as_str()),
+            "{case}"
+        );
+        let conn = Connection::open(&target_path).unwrap();
+        let revisions: (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT r.revision,j.source_revision FROM capture_revisions r
+             JOIN extraction_jobs j ON j.conversation_id=r.conversation_id WHERE j.id=?1",
+                [&local_job.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(revisions, (1, Some(1)), "{case}");
+        if foreign_job.id != local_job.id {
+            assert!(
+                target
+                    .find_job_by_id(&foreign_job.id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{case}"
+            );
+        }
+        assert_eq!(
+            publish(&target, &local_job, &local).await.unwrap(),
+            JobPublicationOutcome::Published,
+            "{case}"
+        );
     }
 }

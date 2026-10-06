@@ -21,8 +21,7 @@ pub(crate) fn configure_connection(conn: &Connection, in_memory: bool) -> InfraR
 
     conn.execute_batch(pragma_sql)
         .map_err(|e| InfraError::Database(e.to_string()))?;
-
-    Ok(())
+    register_tag_normalization(conn)
 }
 
 pub(crate) fn configure_read_only_connection(conn: &Connection) -> InfraResult<()> {
@@ -34,7 +33,23 @@ pub(crate) fn configure_read_only_connection(conn: &Connection) -> InfraResult<(
          PRAGMA query_only = ON;",
     )
     .map_err(|e| InfraError::Database(e.to_string()))?;
-    Ok(())
+    register_tag_normalization(conn)
+}
+
+fn register_tag_normalization(conn: &Connection) -> InfraResult<()> {
+    use rusqlite::functions::FunctionFlags;
+    conn.create_scalar_function(
+        "refine_normalize_tag",
+        1,
+        FunctionFlags::SQLITE_UTF8
+            | FunctionFlags::SQLITE_DETERMINISTIC
+            | FunctionFlags::SQLITE_INNOCUOUS,
+        |ctx| {
+            let value = ctx.get::<String>(0)?;
+            Ok(Tag::try_new(&value).map(|tag| tag.as_str().to_string()))
+        },
+    )
+    .map_err(|e| InfraError::Database(e.to_string()))
 }
 
 pub(super) fn to_fts_query(query: &str) -> Option<String> {

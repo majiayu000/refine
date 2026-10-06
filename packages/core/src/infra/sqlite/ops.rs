@@ -336,6 +336,98 @@ pub(super) fn count_text_hits(conn: &Connection, query: &str) -> InfraResult<usi
     Ok(count.max(0) as usize)
 }
 
+pub(super) fn search_page(
+    conn: &Connection,
+    query: &str,
+    item_type: Option<ItemType>,
+    tags: &[String],
+    offset: usize,
+    limit: usize,
+) -> InfraResult<(Vec<Item>, usize)> {
+    use rusqlite::types::Value;
+    let (prefix, from, order, mut values) = if query.trim().is_empty() {
+        (
+            String::new(),
+            "items i",
+            "i.created_at DESC, i.id",
+            Vec::new(),
+        )
+    } else {
+        let Some(plan) = TextSearch::new(query, SearchTable::Items) else {
+            return Ok((Vec::new(), 0));
+        };
+        (
+            format!("WITH hits AS ({}) ", plan.sql),
+            // Keep the FTS cursor outermost. Otherwise the type index can
+            // make SQLite rerun the MATCH cursor once per Item, turning a
+            // broad text query into quadratic work.
+            "hits CROSS JOIN items i ON i.rowid = hits.rowid",
+            "hits.rank, i.id",
+            plan.params,
+        )
+    };
+    let mut predicates = vec!["1 = 1"];
+    if let Some(item_type) = item_type {
+        predicates.push("i.item_type = ?");
+        values.push(Value::Text(item_type.as_str().to_string()));
+    }
+    if !tags.is_empty() {
+        // SQLite's built-in LOWER handles ASCII only. Match Tag's Unicode
+        // normalization, including legacy rows not written by the current
+        // serializer, without loading each full Item into Rust.
+        predicates.push(
+            "NOT EXISTS (
+                SELECT 1 FROM json_each(?) required
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM json_each(i.tags) item_tag
+                    WHERE refine_normalize_tag(item_tag.value) = required.value
+                )
+            )",
+        );
+        let required: Vec<_> = tags.iter().map(|tag| tag.to_lowercase()).collect();
+        values.push(Value::Text(
+            serde_json::to_string(&required)
+                .map_err(|e| InfraError::Serialization(e.to_string()))?,
+        ));
+    }
+    // Both statements reuse this exact predicate and a single read snapshot.
+    // Counting may still scan matches, but it never deserializes their bodies
+    // or replays successively larger OFFSET pages.
+    let filtered = format!("FROM {from} WHERE {}", predicates.join(" AND "));
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let total: i64 = tx
+        .query_row(
+            &format!("{prefix}SELECT COUNT(*) {filtered}"),
+            rusqlite::params_from_iter(values.iter()),
+            |row| row.get(0),
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let sql = format!(
+        "{prefix}SELECT i.id, i.item_type, i.title, i.summary, i.content, i.tags,
+         i.source, i.created_at, i.updated_at, i.document_id, i.excerpt
+         {filtered} ORDER BY {order} LIMIT ? OFFSET ?"
+    );
+    values.push(Value::Integer(limit.min(i64::MAX as usize) as i64));
+    values.push(Value::Integer(offset.min(i64::MAX as usize) as i64));
+    let items = {
+        let mut stmt = tx
+            .prepare(&sql)
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                row_to_item(row).map_err(to_row_err)
+            })
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+        rows.map(|row| row.map_err(|e| InfraError::Database(e.to_string())))
+            .collect::<InfraResult<Vec<_>>>()?
+    };
+    tx.commit()
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    Ok((items, total.max(0) as usize))
+}
+
 pub(super) fn find_since(conn: &Connection, since: DateTime<Utc>) -> InfraResult<Vec<Item>> {
     let mut stmt = conn
         .prepare("SELECT id, item_type, title, summary, content, tags, source, created_at, updated_at, document_id, excerpt FROM items WHERE created_at >= ?1 ORDER BY created_at DESC")

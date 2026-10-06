@@ -85,6 +85,7 @@ async fn full_quota_replays_processed_and_running_receipts_without_new_jobs() {
             idempotency_key: "accepted-key".into(),
             item_ids: vec![],
             last_error: None,
+            superseded_by: None,
         };
         state
             .conversation_repo
@@ -114,7 +115,7 @@ async fn full_quota_replays_processed_and_running_receipts_without_new_jobs() {
         assert_eq!(replay["deduplicated"], true);
         if processed {
             assert_eq!(replay["status"], "processed");
-            assert!(replay.get("job_id").is_none());
+            assert_eq!(replay["job_id"], job.id);
         } else {
             assert_eq!(replay["status"], "processing");
             assert_eq!(replay["job_id"], job.id);

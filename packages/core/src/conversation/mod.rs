@@ -13,6 +13,6 @@ mod repository;
 
 pub use record::{
     normalize_timestamp, now_iso, ConversationRecord, ConversationStatus, EventRecord,
-    ExtractionJobRecord, ExtractionMode, JobStatus,
+    ExtractionJobRecord, ExtractionMode, JobPublicationOutcome, JobStatus,
 };
 pub use repository::{ConversationRepository, EventRepository, JobRepository};

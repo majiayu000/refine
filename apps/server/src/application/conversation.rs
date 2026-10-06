@@ -19,6 +19,7 @@ pub struct CreateConversationResult {
     pub status: ConversationStatus,
     pub deduplicated: bool,
     pub job_id: Option<String>,
+    pub superseded_by: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +94,7 @@ pub async fn create_conversation(
         idempotency_key: normalized.idempotency_key,
         item_ids: Vec::new(),
         last_error: None,
+        superseded_by: None,
     };
 
     if ingest_only {
@@ -107,6 +109,7 @@ pub async fn create_conversation(
             status: persisted.status,
             deduplicated,
             job_id: None,
+            superseded_by: persisted.superseded_by,
         });
     }
 
@@ -128,10 +131,9 @@ pub async fn create_conversation(
         .await
         .map_err(admission_error)?;
     let deduplicated = persisted.id != conversation_id;
-    if let Some(persisted_job) = persisted_job
-        .as_ref()
-        .filter(|job| job.status == JobStatus::Pending)
-    {
+    if let Some(persisted_job) = persisted_job.as_ref().filter(|job| {
+        persisted.status != ConversationStatus::Processed && job.status == JobStatus::Pending
+    }) {
         spawn_extraction(
             state,
             persisted.id.clone(),
@@ -145,6 +147,7 @@ pub async fn create_conversation(
         status: persisted.status,
         deduplicated,
         job_id: persisted_job.map(|job| job.id),
+        superseded_by: persisted.superseded_by,
     })
 }
 
@@ -153,6 +156,7 @@ fn admission_error(error: InfraError) -> CreateConversationError {
         InfraError::CaptureQuotaExceeded { used, limit } => {
             CreateConversationError::QuotaExceeded { used, limit }
         }
+        InfraError::IdempotencyConflict => CreateConversationError::BadRequest(error.to_string()),
         error => CreateConversationError::Internal(error.to_string()),
     }
 }

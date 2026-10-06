@@ -85,6 +85,7 @@ pub async fn create_conversation(
             None
         },
         job_id: result.job_id,
+        superseded_by: result.superseded_by,
     };
     ok_serializable(response)
 }
@@ -109,7 +110,10 @@ pub async fn get_extraction_job(
     Path(job_id): Path<String>,
 ) -> impl IntoResponse {
     match run_get_extraction_job(state, job_id).await {
-        Ok(result) => ok_serializable(GetExtractionJobResponse { job: result.job }),
+        Ok(result) => ok_serializable(GetExtractionJobResponse {
+            job: result.job,
+            superseded_by: result.superseded_by,
+        }),
         Err(err) => err_response(status_from_error_code(err.code()), err.message()),
     }
 }

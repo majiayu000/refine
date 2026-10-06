@@ -792,6 +792,15 @@ fn copy_table(
         _ => "",
     };
     let capture_publication_guard = match table {
+        "conversations" => {
+            "AND NOT EXISTS (SELECT 1 FROM main.capture_revisions AS revision \
+             WHERE revision.conversation_id=conv_map.canonical_id AND revision.revision > 0)"
+        }
+        "extraction_jobs" if common.iter().any(|column| column == "conversation_id") => {
+            "AND NOT EXISTS (SELECT 1 FROM main.capture_revisions AS revision \
+             WHERE revision.conversation_id=COALESCE(conv_map.canonical_id,src.conversation_id) \
+               AND revision.revision > 0)"
+        }
         "documents" => {
             "AND NOT EXISTS (SELECT 1 FROM main.document_capture_publications AS publication \
              WHERE publication.url=src.url AND publication.revision > 0)"
@@ -809,6 +818,13 @@ fn copy_table(
     // ON CONFLICT can target a protected row even when the incoming URL or
     // parent changed, or an old items schema has no document_id column at all.
     let existing_publication_guard = match table {
+        "extraction_jobs" => {
+            "AND NOT EXISTS ( \
+               SELECT 1 FROM main.extraction_jobs AS existing \
+               JOIN main.capture_revisions AS revision ON revision.conversation_id=existing.conversation_id \
+               WHERE existing.id=src.id AND revision.revision > 0 \
+             )"
+        }
         "documents" => {
             "AND NOT EXISTS ( \
                SELECT 1 FROM main.documents AS existing \
@@ -1407,12 +1423,27 @@ mod tests {
         assert_eq!(event_count, 1);
     }
 
+    // These fixtures represent snapshots accepted before the local receive
+    // sequence existed. Seed them through the real historical-import mode so
+    // their transition assertions exercise legacy reconciliation, not the
+    // separate protection of a new local positive revision.
+    fn seed_historical_rows(conn: &Connection, sql: &str) {
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+        crate::infra::capture_publication::set_legacy_import(&tx, true).unwrap();
+        tx.execute_batch(sql).unwrap();
+        crate::infra::capture_publication::set_legacy_import(&tx, false).unwrap();
+        tx.commit().unwrap();
+    }
+
     #[test]
     fn later_legacy_job_timestamp_does_not_regress_terminal_state() {
         let tmp = TempDir::new().unwrap();
         let target = make_target_db(tmp.path());
         let tc = Connection::open(&target).unwrap();
-        tc.execute_batch(
+        seed_historical_rows(
+            &tc,
             "INSERT INTO conversations
                (id, user_id, source, url, raw_content, captured_at, created_at,
                 status, idempotency_key, item_ids)
@@ -1425,8 +1456,7 @@ mod tests {
              VALUES
                ('job-state', 'conv-job-state', 'auto', 'succeeded',
                 '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z');",
-        )
-        .unwrap();
+        );
         drop(tc);
 
         let legacy = tmp.path().join("server.db");
@@ -1494,7 +1524,8 @@ mod tests {
             let tmp = TempDir::new().unwrap();
             let target = make_target_db(tmp.path());
             let tc = Connection::open(&target).unwrap();
-            tc.execute_batch(
+            seed_historical_rows(
+                &tc,
                 "INSERT INTO conversations
                    (id, user_id, source, url, raw_content, captured_at, created_at,
                     status, idempotency_key, item_ids)
@@ -1507,8 +1538,7 @@ mod tests {
                  VALUES
                    ('job-submillisecond', 'conv-submillisecond', 'auto', 'pending',
                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00.123400Z', NULL);",
-            )
-            .unwrap();
+            );
             drop(tc);
 
             let legacy = tmp.path().join("server.db");
@@ -1596,8 +1626,10 @@ mod tests {
             let tmp = TempDir::new().unwrap();
             let target = make_target_db(tmp.path());
             let tc = Connection::open(&target).unwrap();
-            tc.execute_batch(&format!(
-                "INSERT INTO conversations
+            seed_historical_rows(
+                &tc,
+                &format!(
+                    "INSERT INTO conversations
                    (id, user_id, source, url, raw_content, captured_at, created_at,
                     status, idempotency_key, item_ids)
                  VALUES
@@ -1609,8 +1641,8 @@ mod tests {
                  VALUES
                    ('job-matrix', 'conv-matrix', 'auto', '{target_status}',
                     '2026-01-01T00:00:00Z', '{target_time}');"
-            ))
-            .unwrap();
+                ),
+            );
             drop(tc);
 
             let legacy = tmp.path().join("server.db");
@@ -1851,7 +1883,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let target = make_target_db(tmp.path());
         let tc = Connection::open(&target).unwrap();
-        tc.execute_batch(
+        seed_historical_rows(
+            &tc,
             "INSERT INTO documents
                (id, title, raw_content, source, url, source_version,
                 captured_at, created_at, updated_at)
@@ -1865,8 +1898,7 @@ mod tests {
                ('target-conv', 'u', 'legacy', 'https://example.com/conversation', 'old',
                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'queued',
                 'shared-idempotency-key', '[]');",
-        )
-        .unwrap();
+        );
         drop(tc);
 
         let legacy = tmp.path().join("server.db");

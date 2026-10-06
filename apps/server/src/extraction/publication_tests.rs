@@ -45,6 +45,7 @@ async fn enqueue(state: &AppState, key: &str, raw_content: &str) -> (String, Str
         idempotency_key: key.into(),
         item_ids: vec![],
         last_error: None,
+        superseded_by: None,
     };
     let job = ExtractionJobRecord {
         id: format!("job-{key}"),
@@ -67,7 +68,7 @@ async fn enqueue(state: &AppState, key: &str, raw_content: &str) -> (String, Str
 }
 
 #[tokio::test]
-async fn late_model_result_gets_durable_superseded_receipt_and_preserves_newer_items() {
+async fn source_change_and_revert_during_model_request_leaves_durable_failed_receipt() {
     let directory = tempfile::tempdir().unwrap();
     let provider = Arc::new(OrderedResponses {
         old_started: Semaphore::new(0),
@@ -90,13 +91,6 @@ async fn late_model_result_gets_durable_superseded_receipt_and_preserves_newer_i
         "User: slow-old-capture\nAssistant: old answer",
     )
     .await;
-    let (new_capture, new_job) = enqueue(
-        &state,
-        "new",
-        "User: current capture\nAssistant: new answer",
-    )
-    .await;
-
     let old_state = state.clone();
     let old_id = old_capture.clone();
     let old_job_id = old_job.clone();
@@ -108,12 +102,32 @@ async fn late_model_result_gets_durable_superseded_receipt_and_preserves_newer_i
         .unwrap()
         .unwrap()
         .forget();
-    run_extraction(state.clone(), &new_capture, &new_job, ExtractionMode::Auto)
+    let mut changed = state
+        .conversation_repo
+        .find_conversation_by_id(&old_capture)
+        .await
+        .unwrap()
+        .unwrap();
+    let original_input = changed.raw_content.clone();
+    changed.raw_content = "User: edited input\nAssistant: edited answer".into();
+    state
+        .conversation_repo
+        .upsert_conversation(&changed)
+        .await
+        .unwrap();
+    changed.raw_content = original_input;
+    state
+        .conversation_repo
+        .upsert_conversation(&changed)
         .await
         .unwrap();
     provider.release_old.add_permits(1);
-    let error = old.await.unwrap().unwrap_err();
-    assert!(error.contains("capture_superseded"), "{error}");
+    let error = tokio::time::timeout(Duration::from_secs(5), old)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(error.contains("capture_source_changed"), "{error}");
 
     let job = state
         .job_repo
@@ -122,7 +136,11 @@ async fn late_model_result_gets_durable_superseded_receipt_and_preserves_newer_i
         .unwrap()
         .unwrap();
     assert_eq!(job.status, JobStatus::Failed);
-    assert!(job.error.as_deref().unwrap().contains("capture_superseded"));
+    assert!(job
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("capture_source_changed"));
     let capture = state
         .conversation_repo
         .find_conversation_by_id(&old_capture)
@@ -132,26 +150,13 @@ async fn late_model_result_gets_durable_superseded_receipt_and_preserves_newer_i
     assert_eq!(capture.status, ConversationStatus::Failed);
     assert_eq!(capture.last_error, job.error);
     assert!(capture.item_ids.is_empty());
-    assert_eq!(
-        state
-            .job_repo
-            .find_job_by_id(&new_job)
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        JobStatus::Succeeded
-    );
-    let doc = state
+    assert!(state
         .doc_store
         .find_by_url("https://chatgpt.com/c/concurrent")
         .await
         .unwrap()
-        .unwrap();
-    assert!(doc.raw_content().contains("current capture"));
-    let items = state.store.find_by_document_id(doc.id()).await.unwrap();
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].title(), "Current new result");
+        .is_none());
+    assert_eq!(state.store.count_items(None).await.unwrap(), 0);
     assert!(state
         .job_repo
         .list_recoverable_jobs("2099-01-01T00:00:00Z", 10)
