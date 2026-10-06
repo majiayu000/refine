@@ -249,6 +249,7 @@ fn digest(value: &str) -> String {
 fn error_kind(error: &InfraError) -> &'static str {
     match error {
         InfraError::Database(_) => "database",
+        InfraError::CaptureQuotaExceeded { .. } => "capture_quota_exceeded",
         InfraError::NotFound(_) => "not_found",
         InfraError::Serialization(_) => "serialization",
         InfraError::LlmRequest(_) => "request",
