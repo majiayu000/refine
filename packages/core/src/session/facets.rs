@@ -49,7 +49,7 @@ pub const FACET_SYSTEM_PROMPT: &str =
 pub fn facet_recipe_identity(llm_identity: &str) -> String {
     let mut digest = Sha256::new();
     for value in [
-        "refine-facets-v2:message-boundary-chunks-v1",
+        "refine-facets-v2:message-boundary-chunks-v2:chunk-evidence-v1",
         FACET_SYSTEM_PROMPT,
         &build_facet_prompt("{session_content}"),
         llm_identity,
