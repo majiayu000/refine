@@ -520,9 +520,6 @@ where
             })?;
         let chunks = if needs_chunking(&remem_session.session) {
             chunk_session(&remem_session.session)
-                .into_iter()
-                .map(|chunk| chunk.content)
-                .collect()
         } else {
             Vec::new()
         };
@@ -794,8 +791,7 @@ async fn handle_legacy_ingest_sessions(
             continue;
         }
         let chunks = if needs_chunking(&session) {
-            let cs = chunk_session(&session);
-            cs.iter().map(|c| c.content.clone()).collect()
+            chunk_session(&session)
         } else {
             Vec::new()
         };

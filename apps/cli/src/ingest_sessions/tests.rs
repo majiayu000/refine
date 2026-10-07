@@ -908,7 +908,11 @@ async fn process_single_session_refresh_replaces_old_items_without_duplicate_tra
         raw_content: "User: original transcript\nAssistant: final answer\n".to_string(),
         source_version: None,
         needs_chunk: true,
-        chunks: vec!["chunk summary input".to_string()],
+        chunks: vec![refine_core::session::SessionChunk {
+            content: "chunk summary input".to_string(),
+            message_count: 1,
+            source_messages: Vec::new(),
+        }],
         existing_document: Some(existing_doc.clone()),
         legacy_documents_to_delete: Vec::new(),
     };
