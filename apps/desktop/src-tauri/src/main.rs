@@ -21,6 +21,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
+            app::commands::get_commit_context,
             app::commands::get_items,
             app::commands::get_item,
             app::commands::search_items,

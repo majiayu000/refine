@@ -41,12 +41,12 @@ export function validateContentEvent(value: unknown, senderUrl: string): TrackEv
   return { event_name: event.event_name, source: event.source, properties, occurred_at: new Date().toISOString() }
 }
 
-export async function trackContentEvent(event: TrackEventRequest): Promise<boolean> {
+export async function trackContentEvent(event: TrackEventRequest, tabId?: number): Promise<boolean> {
   try {
     // Content-script fetch runs with the host page's origin. Only the service
     // worker performs the authenticated request, using its existing host grant.
     return await withRequestDeadline(() => new Promise<boolean>((resolve) => {
-      chrome.runtime.sendMessage({ action: CONTENT_EVENT_ACTION, event }, (response?: { ok?: boolean }) => {
+      chrome.runtime.sendMessage({ action: CONTENT_EVENT_ACTION, event, tabId }, (response?: { ok?: boolean }) => {
         resolve(!chrome.runtime.lastError && response?.ok === true)
       })
     }), 12_000)

@@ -13,8 +13,10 @@ const RAW_SOURCE_TYPE: &str = "raw_archive";
 const RAW_MESSAGE_ORDER: &str = "created_at_epoch_asc_id_asc";
 const RAW_MESSAGE_LIMIT: &str = "2000";
 
+mod commit;
 mod document;
 mod process;
+pub use commit::{load_commit_context, CommitContext, CommitDiscussion, CommitMessage};
 pub use document::load_document_content as load_remem_document_content;
 use process::ProcessRunner;
 pub use process::{
@@ -92,7 +94,7 @@ struct SessionsEnvelope {
     sessions: Vec<RememSessionSummary>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct RememSessionSummary {
     pub session_ref: String,
     pub host: String,

@@ -1,5 +1,15 @@
 # Mirror evidence, cohorts, and daily history
 
+## Interpretation
+
+Mirror is experimental session reflection. Colors express fixed configured
+preferences; personal-baseline arrows apply those same directions to changes
+relative to a recent average. Neither establishes user progress or decline.
+High delegation can be appropriate, and bug/decision extraction ratios depend
+on recorded evidence. Interpret signals against source discussions and actual
+project outcomes. The product focus is recovering decisions and reusing lessons,
+including failed approaches.
+
 ## Missing evidence
 
 Every indicator carries an optional measured value and coverage. A missing

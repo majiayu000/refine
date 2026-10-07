@@ -720,3 +720,14 @@ body,
   width: 22px;
   height: 22px;
 }
+
+.recommendations-card { padding: 14px; border: 1px solid var(--outline-strong); background: var(--surface-low); flex-shrink: 0; overflow-wrap: anywhere; border-radius: 12px; }
+.recommendations-head { display: flex; align-items: center; gap: 8px; }
+.recommendations-head h3 { font-size: 14px; margin: 0; flex: 1; }
+.recommendations-card button { font-size: 12px; padding: 4px 8px; border: 1px solid var(--outline-strong); background: var(--surface-high); border-radius: 6px; cursor: pointer; }
+.recommendations-note, .recommendations-card p { font-size: 12px; line-height: 1.5; }
+.recommendations-note { color: var(--text-muted); }
+.recommendations-item { border-top: 1px solid var(--outline-strong); margin-top: 12px; padding-top: 10px; }
+.recommendations-item h4 { font-size: 13px; margin: 0; }
+.recommendations-meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: var(--text-muted); }
+.recommendations-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }

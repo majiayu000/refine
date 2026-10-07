@@ -32,6 +32,111 @@ fn metadata(recipe: &str) -> SessionProjectionMetadata {
 }
 
 #[tokio::test]
+async fn projection_context_excludes_direct_edits_and_deletions_without_tag_hints() {
+    for full_tag_budget in [false, true] {
+        let store = SqliteStore::in_memory().unwrap();
+        let document = document();
+        let mut original = items(&document);
+        if full_tag_budget {
+            let mut tags = original[0].tags().to_vec();
+            tags.extend((0..18).map(|index| Tag::new(&format!("user-{index}")).unwrap()));
+            original[0].set_tags(tags).unwrap();
+            assert_eq!(original[0].tags().len(), 20);
+        }
+        let evidence = serde_json::json!({
+            "observations": [{"item_id": original[0].id(), "field": "decisions", "index": 0}],
+            "facets": [{"field": "decisions", "index": 0, "status": "references_validated", "message_ids": [42]}]
+        });
+        let metadata = SessionProjectionMetadata {
+            recipe_id: "recipe-a".into(),
+            evidence,
+        };
+        store
+            .save_session_projection(&document, &original, &[], &[], &metadata)
+            .await
+            .unwrap();
+        let before = store
+            .find_session_projection_context(document.url())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.evidence["observations"].as_array().unwrap().len(), 1);
+        let mut edited = original[0].clone();
+        edited.set_title("Human selected a different approach");
+        ItemRepository::save(&store, &edited).await.unwrap();
+        let context = store
+            .find_session_projection_context(document.url())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(context.document.id(), document.id());
+        assert_eq!(context.items[0].title(), edited.title());
+        assert!(!context.items[0]
+            .tags()
+            .iter()
+            .any(|tag| tag.as_str() == "curated"));
+        assert_eq!(context.items[0].tags().len(), original[0].tags().len());
+        assert!(context.evidence["observations"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            context.evidence["facets"][0]["message_ids"],
+            serde_json::json!([42])
+        );
+        ItemRepository::delete(&store, edited.id()).await.unwrap();
+        let deleted = store
+            .find_session_projection_context(document.url())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(deleted.items.is_empty());
+        assert!(deleted.evidence["observations"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+}
+
+#[tokio::test]
+async fn projection_context_suppresses_evidence_from_a_different_document_version() {
+    let store = SqliteStore::in_memory().unwrap();
+    let mut document = document();
+    store
+        .save_session_projection(
+            &document,
+            &items(&document),
+            &[],
+            &[],
+            &metadata("recipe-a"),
+        )
+        .await
+        .unwrap();
+    assert!(!store
+        .find_session_projection_context(document.url())
+        .await
+        .unwrap()
+        .unwrap()
+        .evidence
+        .is_null());
+    document.set_source_version(Some(&format!("sha256:{}:interactive", "b".repeat(64))));
+    DocumentRepository::save(&store, &document).await.unwrap();
+    let context = store
+        .find_session_projection_context(document.url())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(context.document.source_version(), document.source_version());
+    assert!(context.evidence.is_null());
+    assert_eq!(context.items.len(), 1);
+    assert!(store
+        .find_session_projection_context("remem://raw-session/v2/missing")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
 async fn explicit_edits_and_deletions_survive_reprocessing() {
     let store = SqliteStore::in_memory().unwrap();
     let document = document();

@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "mirror")]
-#[command(about = "Mirror — cognitive growth tracker for AI-assisted development")]
+#[command(about = "Mirror — experimental session reflection for AI-assisted development")]
 #[command(version)]
 pub struct Cli {
     /// Database path (defaults to shared refine path)

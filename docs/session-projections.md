@@ -52,6 +52,38 @@ previous valid projection.
 The Document, derived Items, recipe identity, and revision archive commit in one
 SQLite transaction. A failure in any component leaves the previous state intact.
 
+## Complete facet request limit
+
+Facet extraction has a fixed local input limit, `FACET_REQUEST_MAX_BYTES = 65,536`.
+Its unit is UTF-8 bytes: the fully rendered user prompt (including the template,
+role/provenance headers, newlines, and reduction separators), plus the full
+`FACET_SYSTEM_PROMPT`, plus a fixed 1,024-byte framing allowance. Requests exactly
+at the limit are accepted; requests above it are rejected before a provider call.
+This is a bound on logical prompt/system text with reserved framing space, not an
+exact serialized HTTP-body size, provider token count, or guarantee of fitting any
+model's context window. JSON escaping and provider-specific model/wire metadata
+are not measured by this contract.
+
+The 30,000-byte chunk activation threshold and 25,000-byte message-boundary target
+remain soft chunking choices. A whole oversized message retains its source ID,
+role, time, and text; it is never split or silently truncated. All initial chunks
+are preflighted before the session's first provider request, so an oversized later
+chunk spends nothing on earlier chunks. The same check at the shared facet call
+boundary covers unchunked sessions, the final reduction, parse regeneration, and
+the unchanged input used by provider retries. There is no extraction recipe bump:
+accepted input, message identities, prompts, and reduction semantics are unchanged.
+
+`InfraError::FacetRequestTooLarge` reports the stage and measured/allowed sizes,
+without source text. It is a deterministic non-retryable error and enters the
+existing quarantine as `facet_request_too_large`. Unchanged quarantined snapshots
+are skipped unless `--retry-quarantined` is explicit; adjust the source input before
+retrying. No partial projection is published, any previous projection remains
+intact, and a failed incremental ingest does not advance its success cursor.
+Unrelated sessions in the selected batch continue; request-size rejection does not
+set the batch quota flag. A final reduction can fail after successful chunk calls:
+the diagnostic reports completed chunks, and their provider attempts remain in the
+existing usage ledger. The separate process-wide attempt/token budget is unchanged.
+
 ## Message evidence
 
 Verified Remem messages retain their original ID, sender role, and timestamp.

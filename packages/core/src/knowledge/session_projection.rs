@@ -1,6 +1,6 @@
 //! Versioned derived session data. This never contains a second transcript.
 
-use super::{DocumentId, Item, ItemId, RestoreParams};
+use super::{Document, DocumentId, Item, ItemId, RestoreParams};
 use crate::error::DomainError;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -71,6 +71,16 @@ pub struct SessionProjectionVersion {
     pub document_id: DocumentId,
     pub recipe_id: String,
     pub source_version: Option<String>,
+}
+
+/// Current source and derived content from one read snapshot. Machine evidence
+/// excludes observations that have an authoritative human override.
+#[derive(Debug)]
+pub struct SessionProjectionContext {
+    pub document: Document,
+    pub items: Vec<Item>,
+    pub evidence: serde_json::Value,
+    pub history: Vec<SessionProjectionRevision>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

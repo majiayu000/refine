@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Delivery candidate 0.1.4
+
+- Integrated the canonical #258 repairs and preserved its publication, quota,
+  provenance, and search contracts. #260 shares the same starting head.
+- Moved private recommendation previews into the extension popup; a website
+  receives only the fragment explicitly inserted by the user.
+- Added the complete facet prompt/system UTF-8 size limit for chunks and final
+  reduction, preserving the separate process budget and source message identity.
+- Added a commit/public-PR discussion prototype using Remem's successful commit
+  links, exact raw-session identities, current decisions and projection history.
+  Missing provenance and unknown semantic replacement remain visible.
+- Labeled Mirror as experimental reflection; scoring formulas are unchanged.
+
+This candidate has not been published as a release. Validation and external
+acceptance boundaries are recorded in `docs/refine-delivery-20261007.md`.
+
 ### Changed
 
 - Switched public session facet ingestion exclusively to remem's exact-tuple, snapshot-paginated raw archive provider and removed the `--provider`, `--source`, and `--legacy-local-scan` CLI paths. Replacement facets and deletion of matching local path-keyed Documents/items now commit in one transaction, preventing duplicate downstream observations.

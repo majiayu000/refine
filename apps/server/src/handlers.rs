@@ -248,3 +248,14 @@ fn status_from_error_code(code: ApplicationErrorCode) -> StatusCode {
 }
 
 const DASHBOARD_HTML: &str = include_str!("dashboard.html");
+
+pub async fn lookup_commit(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedUser,
+    Query(query): Query<crate::application::commit::CommitQuery>,
+) -> impl IntoResponse {
+    match crate::application::commit::lookup_commit(state, query).await {
+        Ok(result) => ok_serializable(result),
+        Err(err) => err_response(status_from_error_code(err.code()), err.message()),
+    }
+}

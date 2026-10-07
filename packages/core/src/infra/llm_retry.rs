@@ -326,6 +326,11 @@ mod tests {
                 code: "content_filter".into(),
                 message: "blocked".into(),
             },
+            InfraError::FacetRequestTooLarge {
+                stage: "session extraction",
+                request_bytes: 65_537,
+                limit_bytes: 65_536,
+            },
             InfraError::RateLimited {
                 retry_after_secs: Some(60),
             },

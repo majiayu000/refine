@@ -6,9 +6,9 @@
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="Rust"></a>
 </p>
 
-<p align="center"><strong>Re + Fine — improve continuously, conversation by conversation.</strong></p>
+<p align="center"><strong>Find the decisions. Reuse the lessons.</strong></p>
 
-<p align="center">Refine is a local-first Rust toolkit for searching knowledge from AI conversations and analyzing coding sessions. SQLite stores the knowledge base; Mirror tracks cognitive signals over time.</p>
+<p align="center">Refine is a local-first Rust toolkit for searching knowledge from AI conversations and analyzing coding sessions. SQLite stores the knowledge base and source references; Mirror provides experimental session reflection.</p>
 
 <p align="center"><a href="./README.zh-CN.md">中文文档</a></p>
 
@@ -16,7 +16,8 @@
 
 1. **Knowledge Sync** — Capture conversations from ChatGPT, Claude, Gemini, Grok, Claude Code, Codex into one searchable knowledge base
 2. **Session Analysis** — Extract 12 cognitive dimensions from AI coding sessions (decisions, bugs, patterns, friction, knowledge gained, etc.)
-3. **Cognitive Tracking (Mirror)** — 3-layer signal lights, personal baseline, local deterministic advice, trend tracking
+3. **Commit discussion prototype** — Open the Knowledge Console commit/PR entry to inspect linked original discussions, decision evidence and projection history; missing sources remain unknown ([contract and limitations](docs/commit-discussions.md))
+4. **Experimental Reflection (Mirror)** — 3-layer signal lights, personal baseline, local deterministic advice, trend tracking
 
 ## Quick Start
 
@@ -76,10 +77,11 @@ fallback. See the [ingestion contract](#refine-cli-commands) for filtering rules
 
 ## Release Status
 
-Refine is currently distributed as a source install from this repository. A
-packaged GitHub Release for the current `0.1.3` workspace version has not been
-cut yet; use `scripts/install-local.sh` from a checked-out commit for local
-installation. Release notes are tracked in [CHANGELOG.md](CHANGELOG.md).
+The published [v0.1.3 release](https://github.com/majiayu000/refine/releases/tag/v0.1.3)
+points to `2c1dcab` (2026-08-10). The current integration changes are newer than
+that tag and are available as a source install from a checked-out commit using
+`scripts/install-local.sh`; they are not included in v0.1.3. Release notes are
+tracked in [CHANGELOG.md](CHANGELOG.md).
 
 Support path: open a GitHub Issue with your OS, install method, command output,
 and the relevant `~/.refine` log snippet if available.
@@ -96,9 +98,9 @@ and the relevant `~/.refine` log snippet if available.
   scores exist, only fixed-threshold signal lights are shown.
 - No hosted multi-user service or migration SLA is claimed by this repository.
 
-## Mirror — Cognitive Growth Tracker
+## Mirror — Experimental Session Reflection
 
-Mirror extracts cognitive fingerprints from your AI coding sessions and tracks growth over time.
+Mirror summarizes extracted session signals to support reflection. Its fixed directions and thresholds express configured working preferences, not validated measures of cognitive growth, productivity, or collaboration quality. High delegation can be appropriate for the task; bug/decision counts also depend on extraction and what was recorded. Use the source discussions and project outcomes to interpret a change before acting on advice.
 
 ### Daily Usage
 
@@ -130,13 +132,13 @@ Metric history is separated by canonical database path, window, scoring method, 
 
 | Layer | Indicators | What It Measures |
 |-------|-----------|-----------------|
-| **Depth** | Dreyfus level, Reason explicitness | Are you thinking at a higher level? |
-| **Breadth** | Exploration rate, Mature project share, One-off project share | Are you investing wisely across projects? |
-| **Collaboration** | Delegation rate, Mode diversity, Bug/decision extraction ratio | Is your AI collaboration healthy? |
+| **Depth** | Dreyfus level, Reason explicitness | Extracted cognitive labels and recorded rationale markers |
+| **Breadth** | Exploration rate, Mature project share, One-off project share | Recorded collaboration modes and distribution of session counts across projects |
+| **Collaboration** | Delegation rate, Mode diversity, Bug/decision extraction ratio | Extracted collaboration modes and bugfix/decision counts |
 
-**Signal Lights:** 🟢 Green (meets configured target) / 🟡 Yellow / 🔴 Red (below target) / ⚪ Unknown (insufficient evidence). Missing values serialize as `null`; coverage shows observed versus eligible evidence. A measured zero remains a valid measurement.
+**Signal Lights:** 🟢 Green (meets configured target) / 🟡 Yellow / 🔴 Red (outside configured target) / ⚪ Unknown (insufficient evidence). Missing values serialize as `null`; coverage shows observed versus eligible evidence. A measured zero remains a valid measurement.
 
-**Personal Baseline:** After enough recent history, arrows show change versus your 4-week average. Signal colors still use fixed targets.
+**Personal Baseline:** After enough recent history, arrows show change versus your 4-week average along the configured preference (↑ preferred, ↓ opposite). They do not establish personal improvement or decline. Signal colors still use fixed targets. MOTD arrows compare consecutive signal colors instead of the metric baseline.
 
 ### Terminal Integration
 
@@ -231,7 +233,7 @@ refine ingest-sessions --dry-run        # Preview without LLM calls or writes
 refine ingest-sessions --retry-quarantined
                                         # Retry deterministic provider rejections
 refine insights --prescription          # L1-L4 cognitive report
-mirror dashboard                        # Cognitive growth dashboard
+mirror dashboard                        # Experimental session reflection dashboard
 ```
 
 `--latest N` is a Refine processing bound, not a Remem summary window. Refine

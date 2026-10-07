@@ -73,6 +73,7 @@ pub struct QuotaResult {
 
 #[derive(Debug, Clone)]
 pub enum QueryError {
+    BadRequest(String),
     NotFound(String),
     Internal(String),
 }
@@ -80,6 +81,7 @@ pub enum QueryError {
 impl QueryError {
     pub fn code(&self) -> ApplicationErrorCode {
         match self {
+            Self::BadRequest(_) => ApplicationErrorCode::BadRequest,
             Self::NotFound(_) => ApplicationErrorCode::NotFound,
             Self::Internal(_) => ApplicationErrorCode::Internal,
         }
@@ -87,6 +89,7 @@ impl QueryError {
 
     pub fn message(&self) -> &str {
         match self {
+            Self::BadRequest(message) => message,
             Self::NotFound(message) => message,
             Self::Internal(message) => message,
         }
@@ -487,6 +490,7 @@ mod tests {
                 );
             }
             QueryError::NotFound(message) => panic!("unexpected not found: {message}"),
+            QueryError::BadRequest(message) => panic!("unexpected bad request: {message}"),
         }
     }
 }

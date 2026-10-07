@@ -11,6 +11,7 @@ import {
   setApiToken,
 } from './lib/config'
 import type { SyncStatus } from './lib/types'
+import { Recommendations } from './lib/recommendations'
 
 const POPUP_WIDTH_PX = 360
 
@@ -647,6 +648,8 @@ export default function Popup() {
             {authMessage && <p className="auth-message">{authMessage}</p>}
           </section>
         )}
+
+        <Recommendations />
 
         <section className="onboarding-card">
           <div className="onboarding-head">

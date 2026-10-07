@@ -9,8 +9,8 @@ use crate::conversation::{
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{
     Document, DocumentId, DocumentRepository, Item, ItemId, ItemRepository, ItemType,
-    ObservationWindowSnapshot, SessionProjectionMetadata, SessionProjectionRevision,
-    SessionProjectionVersion, Tag,
+    ObservationWindowSnapshot, SessionProjectionContext, SessionProjectionMetadata,
+    SessionProjectionRevision, SessionProjectionVersion, Tag,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -331,6 +331,15 @@ impl DocumentRepository for SqliteStore {
 
     async fn find_session_projection_versions(&self) -> InfraResult<Vec<SessionProjectionVersion>> {
         self.request(|resp| SqliteCommand::SessionProjectionVersions { resp })
+            .await
+    }
+
+    async fn find_session_projection_context(
+        &self,
+        session_ref: &str,
+    ) -> InfraResult<Option<SessionProjectionContext>> {
+        let session_ref = session_ref.to_string();
+        self.request(|resp| SqliteCommand::SessionProjectionContext { session_ref, resp })
             .await
     }
 

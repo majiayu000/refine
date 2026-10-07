@@ -4,10 +4,12 @@ import { useStore } from './lib/store'
 import { Spotlight } from './components/Spotlight'
 import { ItemList } from './components/ItemList'
 import { ItemDetail } from './components/ItemDetail'
+import { CommitDiscussion } from './components/CommitDiscussion'
 import { getAuthToken, getAuthTokenError, setAuthToken } from './lib/tauri'
 
 export default function App() {
   const { apiCapabilities, loadItems, isSpotlightOpen, setSpotlightOpen, deleteFeedback, clearDeleteFeedback } = useStore()
+  const [view, setView] = useState<'items' | 'commit'>('items')
   const [authTokenInput, setAuthTokenInput] = useState('')
   const [hasAuthToken, setHasAuthToken] = useState(() => Boolean(getAuthToken()))
   const [authMessage, setAuthMessage] = useState(() => getAuthTokenError() || '')
@@ -157,11 +159,14 @@ export default function App() {
             </kbd>
           </button>
 
+          <button type="button" onClick={() => setView(view === 'commit' ? 'items' : 'commit')} className="mx-4 mt-3 rounded-xl border px-3 py-2 text-sm">
+            {view === 'commit' ? '返回知识列表' : '从 commit / PR 找讨论'}
+          </button>
           <ItemList />
         </aside>
 
         <main className="animate-rise-in min-h-0 rounded-[28px] border border-sand-200/70 bg-white/78 shadow-soft backdrop-blur-xl [animation-delay:90ms]">
-          <ItemDetail />
+          {view === 'commit' ? <CommitDiscussion /> : <ItemDetail />}
         </main>
       </div>
 

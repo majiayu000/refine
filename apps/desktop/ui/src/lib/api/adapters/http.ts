@@ -1,6 +1,7 @@
 import type { RefineApiClient } from '../client'
 import type {
   ApiCapabilities,
+  CommitResult,
   Conversation,
   ConversationListResult,
   CreateExtractionJobParams,
@@ -69,7 +70,7 @@ function cloneCapabilities(): ApiCapabilities {
 }
 
 function getApiBase(): string {
-  const envBase = (import.meta as any)?.env?.VITE_REFINE_API_BASE
+  const envBase = (import.meta as any).env.VITE_REFINE_API_BASE
   if (typeof envBase === 'string' && envBase.trim()) {
     return envBase
   }
@@ -157,6 +158,11 @@ export function createHttpAdapter(): RefineApiClient {
   }
 
   return {
+    getCommitContext: async (project, reference): Promise<CommitResult> => {
+      const query = new URLSearchParams({ project, reference })
+      const data = await requestJson<CommitResult>(`/v1/commit-context?${query}`)
+      return { commits: data.commits, projections: data.projections }
+    },
     capabilities,
     getCapabilities: cloneCapabilities,
     getAuthToken: () => authToken,

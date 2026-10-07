@@ -1,0 +1,276 @@
+{
+  "sample_kind": "20 actual archived commit associations, no synthetic fixture data",
+  "requests": 20,
+  "commit_and_link_identity_passed": 20,
+  "product_verified_commit_count": 3,
+  "product_unknown_commit_count": 17,
+  "unknown_reason_counts": {
+    "project_identity_differs_for_deleted_loom_worktree": 4,
+    "historical_git_metadata_not_explicit_success_and_no_current_raw_identity": 13
+  },
+  "independent_exact_raw_hydration_commit_count": 7,
+  "human_author_reviewer_time_comparison": "not performed",
+  "all_passed": true,
+  "rows": [
+    {
+      "sha": "d345cd64476ce55c0a687f8050e604bad6a534c0",
+      "source": "capture_git_evidence",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "unknown",
+      "actual_status": "unknown",
+      "original_messages_verified": 0,
+      "projection_count": 0,
+      "response_sha256": "e2d50ce08e187a7d5106ea2133458205ed067582e46acdcd1e28831441f5a286",
+      "project_label": "Loom worktree"
+    },
+    {
+      "sha": "ed70d27c8c0adb505401fc55e20e620303cfa326",
+      "source": "capture_git_evidence",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "verified",
+      "actual_status": "verified",
+      "original_messages_verified": 9,
+      "projection_count": 0,
+      "response_sha256": "c710cac2bdc75c5c489df3afd4324c3ed4402676080a42e177aca1c435bc6f49",
+      "project_label": "rui"
+    },
+    {
+      "sha": "246358efc7c222739c678c7640d0a526cbdf9efe",
+      "source": "capture_git_evidence",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "unknown",
+      "actual_status": "unknown",
+      "original_messages_verified": 0,
+      "projection_count": 0,
+      "response_sha256": "6c9d4bda2377870704d641994e2c1ae3a0bce38ac4577f339628648f0d8b996d",
+      "project_label": "Loom worktree"
+    },
+    {
+      "sha": "5f552699e0ffb94428a55bc766b57861873b2ef6",
+      "source": "capture_git_evidence",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "verified",
+      "actual_status": "verified",
+      "original_messages_verified": 17,
+      "projection_count": 0,
+      "response_sha256": "59b404cf7b48f56eb33a83f820059561525b52e48df4a64c7d6669b2c23ad14c",
+      "project_label": "rclean"
+    },
+    {
+      "sha": "911f4ba05f0c2b7ccbd78324611dc849e2396dfc",
+      "source": "capture_git_evidence",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "verified",
+      "actual_status": "verified",
+      "original_messages_verified": 17,
+      "projection_count": 0,
+      "response_sha256": "5ee672d3160f2dd674dd0f6d7db86ebf77275b9d5af319d5f215ddafc6861198",
+      "project_label": "rclean"
+    },
+    {
+      "sha": "ae5b0ac6cdd172d8ca702ee36d57fa161b371963",
+      "source": "capture_git_evidence",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "unknown",
+      "actual_status": "unknown",
+      "original_messages_verified": 0,
+      "projection_count": 0,
+      "response_sha256": "39cb569346d86fa0971bed2a43dacea98355a98d75d9e22fc0fdbe93795c6fac",
+      "project_label": "Loom worktree"
+    },
+    {
+      "sha": "c1a063979668a406e63c6b9f1964513c99e2e3f7",
+      "source": "capture_git_evidence",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "unknown",
+      "actual_status": "unknown",
+      "original_messages_verified": 0,
+      "projection_count": 0,
+      "response_sha256": "bb6d59e57fd2b68de74cb35bb560a77cd2f29efc27031720ae89600a2ac0c28b",
+      "project_label": "Loom worktree"
+    },
+    {
+      "sha": "49ebfd72ab6381a6b9d6747489cfaa85615e2c19",
+      "source": "git_metadata",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "unknown",
+      "actual_status": "unknown",
+      "original_messages_verified": 0,
+      "projection_count": 0,
+      "response_sha256": "8bbece27d30672e5782cf58ac60a6b7df8f9b4ce040633b9ce9ee86508b605f8",
+      "project_label": "shipwise"
+    },
+    {
+      "sha": "61e70ea98daf2547ad2a09984ecf5e1cce306010",
+      "source": "git_metadata",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "unknown",
+      "actual_status": "unknown",
+      "original_messages_verified": 0,
+      "projection_count": 0,
+      "response_sha256": "7f648bdcb649d46875b8c34f54a5b6ccfd171061ae8f6a66db957e6f180b77fa",
+      "project_label": "harness"
+    },
+    {
+      "sha": "8dfa5646430d705f8d0ff77c8034df18a435b8fa",
+      "source": "git_metadata",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "unknown",
+      "actual_status": "unknown",
+      "original_messages_verified": 0,
+      "projection_count": 0,
+      "response_sha256": "b6194b5a1b7d56045bd0c3b3b06d10813e8bc21ea0e249fb1afca85f3e6a7117",
+      "project_label": "harness"
+    },
+    {
+      "sha": "521df9a32b77505a566084d3b415aa52f5c66cd6",
+      "source": "git_metadata",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "unknown",
+      "actual_status": "unknown",
+      "original_messages_verified": 0,
+      "projection_count": 0,
+      "response_sha256": "925e260dd8a53e40cd6d3330b8fb8b3cbe10af862e49ea606311c8011af09fc1",
+      "project_label": "harness"
+    },
+    {
+      "sha": "ddb440c53f1b1bd424b1d1317af6fd81165120f7",
+      "source": "git_metadata",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "unknown",
+      "actual_status": "unknown",
+      "original_messages_verified": 0,
+      "projection_count": 0,
+      "response_sha256": "6eb5456bb9e266bca3a1a20b6da797165592e613eb7ee5e51b43cb3615940442",
+      "project_label": "harness"
+    },
+    {
+      "sha": "b3bbf2d7fe7abb83f2f9c642e27d67165c2c3a9e",
+      "source": "git_metadata",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "unknown",
+      "actual_status": "unknown",
+      "original_messages_verified": 0,
+      "projection_count": 0,
+      "response_sha256": "4abbf024e24edf61e6611a0eda75c710410ccb9204bba5708e613b81ddd421f6",
+      "project_label": "harness"
+    },
+    {
+      "sha": "46eaf242f11bfc3f1a616ae1599b9cf3a52e8bfd",
+      "source": "git_metadata",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "unknown",
+      "actual_status": "unknown",
+      "original_messages_verified": 0,
+      "projection_count": 0,
+      "response_sha256": "a41dea41102c87f4fe67a0813bb2cfd46717c5e8da6ecef771812704465a28ec",
+      "project_label": "harness"
+    },
+    {
+      "sha": "1b249929f305ef7cec0c2a54ced867500222aa36",
+      "source": "git_metadata",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "unknown",
+      "actual_status": "unknown",
+      "original_messages_verified": 0,
+      "projection_count": 0,
+      "response_sha256": "45810c060814980d00509582f074935960889820ecebefbba763ad7322ba9d4c",
+      "project_label": "harness"
+    },
+    {
+      "sha": "d8e1d06b2d84216becd525af67f340a7f5e7b125",
+      "source": "git_metadata",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "unknown",
+      "actual_status": "unknown",
+      "original_messages_verified": 0,
+      "projection_count": 0,
+      "response_sha256": "f829dcf46e4801e03e4cc1bfddbcc3f450434cbc16e361ded646be1d00f52608",
+      "project_label": "harness"
+    },
+    {
+      "sha": "3afd33d8bdf7bf71ec8e0b6b876f84f1180ff403",
+      "source": "git_metadata",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "unknown",
+      "actual_status": "unknown",
+      "original_messages_verified": 0,
+      "projection_count": 0,
+      "response_sha256": "6b5f1c16269cf7c1b7e3e7d6c5f92f1fdcfefd2939de0f788163fd7bf1768f54",
+      "project_label": "shipwise"
+    },
+    {
+      "sha": "903bd58f098b1d0700ea183dd7858672ec67ce91",
+      "source": "git_metadata",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "unknown",
+      "actual_status": "unknown",
+      "original_messages_verified": 0,
+      "projection_count": 0,
+      "response_sha256": "3f04611f77b7c5304a96e914899242eae52e366dd7f0490bff297df974492e78",
+      "project_label": "harness"
+    },
+    {
+      "sha": "2e6b41e599065856ce43c26e6eca9c7a014f9041",
+      "source": "git_metadata",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "unknown",
+      "actual_status": "unknown",
+      "original_messages_verified": 0,
+      "projection_count": 0,
+      "response_sha256": "ae9397049a8ae12e98912cc1c0943358e700e359239ac5b3fd895d88626481dd",
+      "project_label": "harness"
+    },
+    {
+      "sha": "0f455972dbb606485201a4ba63c618094cde8699",
+      "source": "git_metadata",
+      "http_status": 200,
+      "commit_and_link_identity_verified": true,
+      "expected_status": "unknown",
+      "actual_status": "unknown",
+      "original_messages_verified": 0,
+      "projection_count": 0,
+      "response_sha256": "7787b5861f1e261d687bf8942fb9efb031c7356a414516220f4abfe70cc67112",
+      "project_label": "harness"
+    }
+  ],
+  "negative_checks": [
+    {
+      "case": "invalid-sha",
+      "http_status": 400,
+      "passed": true,
+      "response_sha256": "b72457a85d8f70970dfb45e43bf8cba904f14a9009bab50af99ff45f4970607a"
+    },
+    {
+      "case": "empty-project",
+      "http_status": 400,
+      "passed": true,
+      "response_sha256": "73919e5deefe81d28de630c5ef375a9d2a7da8eb094d1382a66181ebefc66669"
+    },
+    {
+      "case": "unlinked-project",
+      "http_status": 200,
+      "passed": true,
+      "response_sha256": "9fdefd95ac4ffb6ca5fdc3c71e906ff0f9c04c729d8fc701b9e0739620145e5b"
+    }
+  ]
+}

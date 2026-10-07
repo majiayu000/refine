@@ -20,6 +20,7 @@ pub use repository::{ItemRepository, ObservationDocumentMeta, ObservationWindowS
 pub use session_projection::assign_session_observation_ids;
 pub(crate) use session_projection::observation_key;
 pub use session_projection::{
-    SessionProjectionMetadata, SessionProjectionRevision, SessionProjectionVersion,
+    SessionProjectionContext, SessionProjectionMetadata, SessionProjectionRevision,
+    SessionProjectionVersion,
 };
 pub use types::{DocumentId, ItemId, ItemType, Source, Tag};

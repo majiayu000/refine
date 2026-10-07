@@ -64,6 +64,15 @@ pub enum InfraError {
         requested: u64,
     },
 
+    /// A complete facet request exceeds the local UTF-8 byte contract.
+    /// Unchanged input is non-retryable; this does not exhaust the run budget.
+    #[error("Facet 请求超限 ({stage}: {request_bytes} UTF-8 bytes, limit {limit_bytes}); 保留完整消息，不截断，请调整输入后显式重试")]
+    FacetRequestTooLarge {
+        stage: &'static str,
+        request_bytes: usize,
+        limit_bytes: usize,
+    },
+
     /// The provider rejected the prompt for a deterministic policy reason.
     /// Retrying the same input cannot succeed, so callers must quarantine it.
     #[error("LLM 内容被拒绝 ({code}): {message}")]

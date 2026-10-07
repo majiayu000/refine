@@ -1,8 +1,8 @@
 use super::{doc_ops, ops};
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{
-    observation_key, Document, DocumentId, Item, ItemType, SessionProjectionMetadata,
-    SessionProjectionRevision, SessionProjectionVersion, Tag,
+    observation_key, Document, DocumentId, Item, ItemType, SessionProjectionContext,
+    SessionProjectionMetadata, SessionProjectionRevision, SessionProjectionVersion, Tag,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -40,6 +40,62 @@ pub(super) fn versions(conn: &Connection) -> InfraResult<Vec<SessionProjectionVe
         })
         .map_err(db)?;
     rows.map(|row| row.map_err(db)).collect()
+}
+
+pub(super) fn context(
+    conn: &Connection,
+    session_ref: &str,
+) -> InfraResult<Option<SessionProjectionContext>> {
+    // Deferred plus SELECT-only operations also works on a read-only store.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Deferred).map_err(db)?;
+    let Some(document) = doc_ops::find_by_url(&tx, session_ref)? else {
+        return Ok(None);
+    };
+    let items = ops::find_by_document_id(&tx, document.id().as_str())?;
+    let metadata: Option<(Option<String>, String)> = tx
+        .query_row(
+            "SELECT source_version, evidence_json FROM session_projections WHERE document_id=?1",
+            [document.id().as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(db)?;
+    let mut evidence = match metadata {
+        Some((source_version, evidence))
+            if source_version.as_deref() == document.source_version() =>
+        {
+            serde_json::from_str(&evidence).map_err(json)?
+        }
+        _ => serde_json::Value::Null,
+    };
+    let mut statement = tx
+        .prepare("SELECT item_id FROM observation_overrides WHERE session_ref=?1")
+        .map_err(db)?;
+    let overridden = statement
+        .query_map([session_ref], |row| row.get::<_, String>(0))
+        .map_err(db)?
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(db)?;
+    drop(statement);
+    if let Some(observations) = evidence
+        .get_mut("observations")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        observations.retain(|observation| {
+            !observation
+                .get("item_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| overridden.contains(id))
+        });
+    }
+    let history = history(&tx, document.id().as_str(), 20)?;
+    tx.commit().map_err(db)?;
+    Ok(Some(SessionProjectionContext {
+        document,
+        items,
+        evidence,
+        history,
+    }))
 }
 
 pub(super) fn history(

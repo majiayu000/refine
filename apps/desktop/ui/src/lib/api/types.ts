@@ -155,3 +155,17 @@ export interface ApiCapabilities {
     supportsBearerToken: boolean
   }
 }
+
+export interface CommitMessage { id: number; role: string; content: string; created_at_epoch: number }
+export interface CommitDiscussion { session_id: string; source: string; status: string; session_ref: string | null; content_hash: string | null; messages: CommitMessage[] }
+export interface CommitContext { sha: string; project: string; message: string | null; sessions: CommitDiscussion[] }
+export interface ProjectionEvidence {
+  facets?: { field: string; index: number; status: string; message_ids: number[] }[]
+  observations?: { item_id: string; field?: string; index?: number }[]
+}
+export interface CommitProjection {
+  session_ref: string; document_id: string; source_version: string | null
+  items: Item[]; evidence: ProjectionEvidence | null
+  history: { revision_id: string; source_version: string | null; archived_at: string; items: Item[] }[]
+}
+export interface CommitResult { commits: CommitContext[]; projections: CommitProjection[] }

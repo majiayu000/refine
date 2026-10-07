@@ -7,7 +7,8 @@ use crate::conversation::{
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{
     Document, Item, ItemType, ObservationWindowSnapshot, RestoreDocumentParams,
-    SessionProjectionMetadata, SessionProjectionRevision, SessionProjectionVersion,
+    SessionProjectionContext, SessionProjectionMetadata, SessionProjectionRevision,
+    SessionProjectionVersion,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
@@ -125,6 +126,10 @@ pub(super) enum SqliteCommand {
     },
     SessionProjectionVersions {
         resp: oneshot::Sender<InfraResult<Vec<SessionProjectionVersion>>>,
+    },
+    SessionProjectionContext {
+        session_ref: String,
+        resp: oneshot::Sender<InfraResult<Option<SessionProjectionContext>>>,
     },
     SessionProjectionHistory {
         document_id: String,
@@ -495,6 +500,13 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
                 "SessionProjectionVersions",
                 resp,
                 session_projection::versions(conn),
+            );
+        }
+        SqliteCommand::SessionProjectionContext { session_ref, resp } => {
+            send_response(
+                "SessionProjectionContext",
+                resp,
+                session_projection::context(conn, &session_ref),
             );
         }
         SqliteCommand::SessionProjectionHistory {

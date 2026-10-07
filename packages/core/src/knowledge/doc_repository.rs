@@ -4,8 +4,8 @@
 
 use crate::error::InfraResult;
 use crate::knowledge::{
-    Document, DocumentId, Item, SessionProjectionMetadata, SessionProjectionRevision,
-    SessionProjectionVersion,
+    Document, DocumentId, Item, SessionProjectionContext, SessionProjectionMetadata,
+    SessionProjectionRevision, SessionProjectionVersion,
 };
 use async_trait::async_trait;
 
@@ -36,6 +36,11 @@ pub trait DocumentRepository: Send + Sync {
         metadata: &SessionProjectionMetadata,
     ) -> InfraResult<()>;
     async fn find_session_projection_versions(&self) -> InfraResult<Vec<SessionProjectionVersion>>;
+    /// Read source, items, current evidence and recent history consistently.
+    async fn find_session_projection_context(
+        &self,
+        session_ref: &str,
+    ) -> InfraResult<Option<SessionProjectionContext>>;
     async fn find_session_projection_history(
         &self,
         document_id: &DocumentId,

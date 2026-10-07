@@ -236,8 +236,8 @@ fn build_weekly_report_with_portfolio(
     lines.push(format!(
         "> {}",
         t!(
-            "Metrics-derived report — for coaching run `refine cognitive-portrait`",
-            "指标驱动报告 — 教练分析请运行 `refine cognitive-portrait`"
+            "Experimental reflection — configured signals do not establish personal progress",
+            "实验性复盘 — 配置信号不能证明用户进步"
         )
     ));
     lines.push(format!(
@@ -247,8 +247,8 @@ fn build_weekly_report_with_portfolio(
     lines.push(format!(
         "> {}",
         t!(
-            "Window: rolling 7 days (event time) · signals: absolute targets",
-            "窗口: 滚动 7 天(事件时间) · 信号灯: 绝对目标"
+            "Window: rolling 7 days (event time) · signals: configured preferences",
+            "窗口: 滚动 7 天(事件时间) · 信号灯: 配置偏好"
         )
     ));
 

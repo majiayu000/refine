@@ -22,7 +22,13 @@ pub fn indicator_display(key: &str) -> &'static str {
 // ── Output ──
 
 pub(super) fn print_score(result: &ScoreResult, trends: Option<&PersonalTrends>) {
-    println!("{}\n", t!("Mirror Cognitive Snapshot", "Mirror 认知镜像"));
+    println!(
+        "{}\n",
+        t!(
+            "Mirror Experimental Session Snapshot",
+            "Mirror 实验性会话快照"
+        )
+    );
     for layer in &result.layers {
         let details: Vec<String> = layer
             .indicators
@@ -66,13 +72,13 @@ pub(super) fn print_score(result: &ScoreResult, trends: Option<&PersonalTrends>)
 fn trend_legend(available: bool) -> &'static str {
     if available {
         t!(
-            "✓ = meets the absolute target · arrow = vs your 4-week average",
-            "✓ = 达到绝对目标 · 箭头 = 相对你近 4 周均值"
+            "Experimental: ✓ = configured target · arrow = preferred direction vs 4-week average; not personal progress",
+            "实验性：✓ = 配置目标 · 箭头 = 相对近 4 周均值的偏好方向，不代表用户进步"
         )
     } else {
         t!(
-            "✓ = meets the absolute target · trend unavailable (requires 7 distinct eligible scoring dates in the past 28 days)",
-            "✓ = 达到绝对目标 · 趋势不可用(近28天内需有7个不同日期的有效评分)"
+            "Experimental: ✓ = configured target, not personal progress · trend unavailable (requires 7 distinct eligible scoring dates in the past 28 days)",
+            "实验性：✓ = 配置目标，不代表用户进步 · 趋势不可用(近28天内需有7个不同日期的有效评分)"
         )
     }
 }

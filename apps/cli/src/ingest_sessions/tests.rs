@@ -1082,7 +1082,7 @@ async fn quota_hit_short_circuits_before_llm_call() {
     let client: Arc<dyn LlmClient> = Arc::new(ClaudeClient::new("test-key"));
     let quota_hit = Arc::new(AtomicBool::new(true));
 
-    let err = llm_call_with_retry(&client, "content", &quota_hit)
+    let err = llm_call_with_retry(&client, "content", &quota_hit, "session extraction")
         .await
         .expect_err("quota flag should skip the call");
 
@@ -1106,9 +1106,14 @@ async fn provider_rate_limit_sets_batch_early_stop_without_retrying() {
     assert!(quota_hit.load(Ordering::Relaxed));
     assert_eq!(client.calls(), 0);
 
-    let second = llm_call_with_retry(&client_dyn, "other content", &quota_hit)
-        .await
-        .expect_err("later batch work must short-circuit");
+    let second = llm_call_with_retry(
+        &client_dyn,
+        "other content",
+        &quota_hit,
+        "session extraction",
+    )
+    .await
+    .expect_err("later batch work must short-circuit");
     assert!(second.to_string().contains("跳过"));
     assert_eq!(client.calls(), 0);
 }

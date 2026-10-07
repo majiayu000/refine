@@ -92,6 +92,7 @@ interface TokenChangedMessage {
 interface ContentEventMessage {
   action: typeof CONTENT_EVENT_ACTION
   event: unknown
+  tabId?: number
 }
 
 type BackgroundMessage =
@@ -279,13 +280,15 @@ void bootstrap()
 
 chrome.runtime.onMessage.addListener((message: BackgroundMessage, sender, sendResponse) => {
   if (message.action === CONTENT_EVENT_ACTION) {
-    const event = sender.id === chrome.runtime.id
-      ? validateContentEvent(message.event, sender.url || sender.tab?.url || '') : null
-    if (!event) {
-      sendResponse({ ok: false })
-      return false
-    }
-    trackEvent(event).then((ok) => sendResponse({ ok })).catch(() => sendResponse({ ok: false }))
+    const senderIsPopup = sender.id === chrome.runtime.id &&
+      sender.url?.startsWith(chrome.runtime.getURL(''))
+    const sourceUrl = senderIsPopup && typeof message.tabId === 'number'
+      ? chrome.tabs.get(message.tabId).then((tab) => tab.url || '')
+      : Promise.resolve(sender.url || sender.tab?.url || '')
+    sourceUrl.then((url) => {
+      const event = sender.id === chrome.runtime.id ? validateContentEvent(message.event, url) : null
+      return event ? trackEvent(event) : false
+    }).then((ok) => sendResponse({ ok })).catch(() => sendResponse({ ok: false }))
     return true
   }
 

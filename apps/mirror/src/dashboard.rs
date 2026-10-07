@@ -94,7 +94,14 @@ pub async fn handle_dashboard(
 
     p(&border_top(w));
     p(&row_center(
-        t!("Mirror Cognitive Dashboard", "Mirror 认知仪表盘"),
+        t!("Mirror Experimental Reflection", "Mirror 实验性会话复盘"),
+        w,
+    ));
+    p(&padded_row(
+        t!(
+            " Signals follow configured preferences, not personal progress",
+            " 信号遵循配置偏好，不代表用户进步"
+        ),
         w,
     ));
     p(&border_mid(w));

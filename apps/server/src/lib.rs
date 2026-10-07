@@ -5,6 +5,7 @@ mod contract_tests;
 
 mod api_response;
 mod application;
+pub use application::commit::{lookup_commit, CommitQuery, CommitResult};
 mod auth;
 mod extraction;
 mod handlers;
@@ -206,6 +207,7 @@ fn build_app(state: Arc<AppState>, allowed_origins: AllowOrigin) -> Router {
             "/v1/extraction-jobs/:job_id",
             get(handlers::get_extraction_job),
         )
+        .route("/v1/commit-context", get(handlers::lookup_commit))
         .route("/v1/documents", get(handlers::list_documents))
         .route("/v1/documents/:doc_id", get(handlers::get_document))
         .route("/v1/items", get(handlers::list_items))
@@ -477,6 +479,36 @@ mod tests {
             .headers()
             .get(header::ACCESS_CONTROL_ALLOW_METHODS)
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn commit_context_requires_auth_and_rejects_malformed_references() {
+        for (anon, expected) in [
+            (false, StatusCode::UNAUTHORIZED),
+            (true, StatusCode::BAD_REQUEST),
+        ] {
+            let (_tmp, app) = test_app(
+                AuthConfig {
+                    api_token: None,
+                    dev_anon: anon,
+                },
+                &[],
+            )
+            .await;
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/commit-context?project=%2Frepo&reference=not-a-sha")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["success"], json!(false));
+        }
     }
 
     async fn test_app(auth: AuthConfig, trusted_origins: &[&str]) -> (TempDir, Router) {

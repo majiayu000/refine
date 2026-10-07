@@ -2251,7 +2251,7 @@ dependencies = [
 
 [[package]]
 name = "mirror"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3019,7 +3019,7 @@ dependencies = [
 
 [[package]]
 name = "refine-cli"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3043,7 +3043,7 @@ dependencies = [
 
 [[package]]
 name = "refine-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "agent-sessions",
  "anyhow",
@@ -3067,7 +3067,7 @@ dependencies = [
 
 [[package]]
 name = "refine-desktop"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "dirs 5.0.1",
@@ -3086,7 +3086,7 @@ dependencies = [
 
 [[package]]
 name = "refine-server"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "axum",

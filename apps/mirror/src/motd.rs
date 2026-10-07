@@ -18,7 +18,7 @@ fn default_lang_en() -> String {
     "en".into()
 }
 
-/// Signal severity: Red=0, Yellow=1, Green=2 (lower is worse)
+/// Configured signal order: Red=0, Yellow=1, Green=2.
 fn signal_severity(s: Signal) -> u8 {
     match s {
         Signal::Red => 0,
@@ -29,7 +29,8 @@ fn signal_severity(s: Signal) -> u8 {
 }
 
 /// Compare current vs previous signal and return a trend arrow.
-/// Returns "↑" if improved, "↓" if degraded, "" if unchanged.
+/// Returns "↑" toward green, "↓" away from green, "" if unchanged.
+/// This is a configured preference, not a personal-progress assessment.
 fn trend_signal(current: Signal, previous: Signal) -> &'static str {
     if current == Signal::Unknown || previous == Signal::Unknown {
         return "";
@@ -109,7 +110,7 @@ fn default_tips() -> Vec<Tip> {
         ),
         (
             "collaboration",
-            "Use pair mode instead of delegation for the next task",
+            "Consider whether delegation or pair mode fits the next task",
         ),
         (
             "collaboration",
@@ -159,7 +160,7 @@ fn default_tips() -> Vec<Tip> {
         ("breadth", "花 30 分钟读一个你没碰过的开源项目"),
         ("breadth", "尝试用不同语言解决今天的一个小问题"),
         ("breadth", "把今天的任务拆成探索和执行两个阶段"),
-        ("collaboration", "下一个任务用 pair 模式而不是委托"),
+        ("collaboration", "考虑下个任务适合委派还是结对模式"),
         ("collaboration", "让 AI 先描述问题再你写方案"),
         ("collaboration", "今天的第一个任务手写完再对比 AI 方案"),
         ("collaboration", "让 AI review 你的代码而不是帮你写"),
@@ -320,7 +321,8 @@ pub fn handle_motd(db_path: &std::path::Path) -> Result<()> {
         .unwrap_or_default();
 
     println!(
-        "🪞 {d}{de}{dt} {b}{be}{bt} {c}{ce}{ct}{streak} | {tip}{advice_stale}{stale}",
+        "🪞 {experimental} {d}{de}{dt} {b}{be}{bt} {c}{ce}{ct}{streak} | {tip}{advice_stale}{stale}",
+        experimental = t!("Experimental", "实验性"),
         d = t!("Depth", "深度"),
         de = depth_e,
         dt = depth_t,
