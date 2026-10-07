@@ -6,7 +6,7 @@ use super::project_identity::{ProjectIdentityResolver, ProjectResolution};
 use crate::knowledge::{Item, ItemType};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const META_TAGS: &[&str] = &[
     "decision",
@@ -27,6 +27,11 @@ const META_TAGS: &[&str] = &[
     "session_mode_unattended",
     "session_mode_subagent",
     "session_mode_unknown",
+    // Missing facet labels and curation state are metadata, including on
+    // legacy rows that lack a structured session-project source.
+    "unknown",
+    "curated",
+    "curation_needs_review",
 ];
 
 const GENERIC_PATH_SEGMENTS: &[&str] = &[
@@ -84,7 +89,9 @@ pub struct GlobalStats {
 /// only when it is linked to a source document and that document is not tagged
 /// as an unattended or subagent session. Source-aware callers additionally
 /// reject observations linked to non-session document sources. The terminal
-/// buckets satisfy `input = detached + mode_excluded + source_excluded + eligible`.
+/// buckets satisfy `input = detached + source_excluded + curation_excluded + mode_excluded + eligible`.
+/// Pending human corrections remain stored, but cannot become confirmed input
+/// or influence another observation's project/mode assignment.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataQualityStats {
     pub input_observations: usize,
@@ -93,6 +100,8 @@ pub struct DataQualityStats {
     pub mode_excluded_observations: usize,
     #[serde(default)]
     pub source_excluded_observations: usize,
+    #[serde(default)]
+    pub curation_excluded_observations: usize,
     pub eligible_observations: usize,
     /// Eligible observations whose short project alias maps to multiple paths.
     #[serde(default)]
@@ -114,7 +123,9 @@ impl DataQualityStats {
     }
 
     pub fn is_degraded(&self) -> bool {
-        self.detached_observations > 0 || self.source_excluded_observations > 0
+        self.detached_observations > 0
+            || self.source_excluded_observations > 0
+            || self.curation_excluded_observations > 0
     }
 
     pub fn status_label(&self) -> &'static str {
@@ -149,6 +160,7 @@ pub fn eligible_observations(items: &[Item]) -> Vec<&Item> {
         .collect();
     let excluded_doc_ids: HashSet<String> = observations
         .iter()
+        .filter(|item| !is_pending_curation(item))
         .filter(|item| {
             item.tags()
                 .iter()
@@ -159,11 +171,18 @@ pub fn eligible_observations(items: &[Item]) -> Vec<&Item> {
 
     observations
         .into_iter()
+        .filter(|item| !is_pending_curation(item))
         .filter(|item| {
             item.document_id()
                 .is_some_and(|id| !excluded_doc_ids.contains(id.as_str()))
         })
         .collect()
+}
+
+pub(super) fn is_pending_curation(item: &Item) -> bool {
+    item.tags()
+        .iter()
+        .any(|tag| tag.as_str() == "curation_needs_review")
 }
 
 /// 主函数：从全量 observation 生成聚类结果
@@ -192,6 +211,7 @@ pub fn cluster_observations_with_resolver(
         .collect();
     let excluded_doc_ids: HashSet<String> = observations
         .iter()
+        .filter(|item| !is_pending_curation(item))
         .filter(|item| {
             item.tags()
                 .iter()
@@ -208,10 +228,16 @@ pub fn cluster_observations_with_resolver(
     let detached_observations = input_observations - linked_observations;
     let mode_excluded_observations = observations
         .iter()
+        .filter(|item| !is_pending_curation(item))
         .filter_map(|item| item.document_id())
         .filter(|id| excluded_doc_ids.contains(id.as_str()))
         .count();
-    let eligible_observation_count = linked_observations - mode_excluded_observations;
+    let curation_excluded_observations = observations
+        .iter()
+        .filter(|item| item.document_id().is_some() && is_pending_curation(item))
+        .count();
+    let eligible_observation_count =
+        linked_observations - mode_excluded_observations - curation_excluded_observations;
 
     // Single filtering pass: compute tags once per item to avoid double allocation.
     let obs_with_tags: Vec<(&Item, Vec<&str>)> = eligible_observations(items)
@@ -239,6 +265,7 @@ pub fn cluster_observations_with_resolver(
         detached_observations,
         mode_excluded_observations,
         source_excluded_observations: 0,
+        curation_excluded_observations,
         eligible_observations: eligible_observation_count,
         ambiguous_project_alias_observations: 0,
         ambiguous_project_aliases: 0,
@@ -453,14 +480,26 @@ pub fn normalize_project_name(raw: &str) -> Option<String> {
 }
 
 fn dedup_titles(titles: Vec<String>) -> Vec<String> {
-    let mut seen: HashSet<String> = HashSet::new();
-    titles
-        .into_iter()
-        .filter(|t| {
-            let prefix: String = t.chars().take(15).collect::<String>().to_lowercase();
-            seen.insert(prefix)
-        })
-        .collect()
+    // A shared prefix does not identify a decision. Preserve distinct choices
+    // and rationales; only collapse complete normalized duplicates. Sorting
+    // both keys and representatives keeps evidence independent of query order.
+    let mut unique = BTreeMap::<String, String>::new();
+    for title in titles {
+        let normalized = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        if normalized.is_empty() {
+            continue;
+        }
+        let key = normalized.to_lowercase();
+        unique
+            .entry(key)
+            .and_modify(|existing| {
+                if normalized < *existing {
+                    existing.clone_from(&normalized);
+                }
+            })
+            .or_insert(normalized);
+    }
+    unique.into_values().collect()
 }
 
 fn extract_section_items(content: &str, section_name: &str) -> Vec<String> {
@@ -605,8 +644,24 @@ mod tests {
             "采用 SQLite 存储".to_string(),
         ];
         let result = dedup_titles(titles);
-        // 前两条前 15 字符相同（"选择 serde_json 解"），去重后保留 1 条
-        assert_eq!(result.len(), 2);
+        // Similar prefixes describe different decisions and remain distinct.
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn decision_dedup_is_order_independent_and_retains_rationale_evidence() {
+        let titles = vec![
+            "Database backend: PostgreSQL".to_string(),
+            "Database backend: SQLite because embedded".to_string(),
+            "  database   backend: SQLite because embedded  ".to_string(),
+        ];
+        let forward = dedup_titles(titles.clone());
+        let backward = dedup_titles(titles.into_iter().rev().collect());
+        assert_eq!(forward, backward);
+        assert_eq!(forward.len(), 2);
+        assert!(forward
+            .iter()
+            .any(|title| title.contains("because embedded")));
     }
 
     #[test]
@@ -642,6 +697,39 @@ mod tests {
         assert_eq!(cluster.global_stats.total_sessions, 2);
         assert_eq!(cluster.projects["project-a"].session_count, 1);
         assert_eq!(cluster.projects["project-b"].session_count, 2);
+    }
+
+    #[test]
+    fn metadata_tags_never_create_or_override_projects() {
+        // These legacy-style fixtures intentionally have source=None. A
+        // structured project source would otherwise take priority over tags.
+        let cluster = cluster_observations(&[
+            observation(
+                "curated-item",
+                "doc-1",
+                &[
+                    "competent",
+                    "review",
+                    "refine",
+                    "session_mode_interactive",
+                    "curated",
+                ],
+            ),
+            observation(
+                "unknown-item",
+                "doc-2",
+                &["unknown", "session_mode_interactive"],
+            ),
+        ]);
+        assert_eq!(cluster.projects.len(), 2);
+        assert_eq!(cluster.projects["refine"].session_count, 1);
+        assert_eq!(cluster.projects["other"].session_count, 1);
+        assert_eq!(cluster.item_projects["curated-item"], "refine");
+        assert_eq!(cluster.item_projects["unknown-item"], "other");
+        assert_eq!(cluster.untagged_count, 1);
+        assert_eq!(cluster.global_stats.cognitive_levels.len(), 1);
+        assert_eq!(cluster.global_stats.collaboration_modes.len(), 1);
+        assert!(is_project_meta_tag("curation_needs_review"));
     }
 
     #[test]

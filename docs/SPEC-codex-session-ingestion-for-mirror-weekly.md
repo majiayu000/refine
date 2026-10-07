@@ -48,24 +48,30 @@ work merely because the observations were inserted today.
 Signals and trends are separate:
 
 - `Signal` color answers: does the current score meet the fixed target?
-- `Trend` arrow answers: is the current score better than the user's recent
-  4-week average?
+- `Trend` arrow answers: did the value change along the configured preferred
+  direction relative to the user's recent 4-week average? This does not establish
+  personal improvement or decline.
 - Personal trends never rewrite indicator or layer signals.
 - Band metrics, currently `deep_invest`, do not get personal trend arrows
   because "higher than average" is not necessarily better.
+
+Mirror is an experimental reflection tool. The fixed directions below encode
+working preferences, not validated growth or collaboration-quality measures.
+High delegation can fit a task; extracted bug/decision counts depend on coverage
+and recording. The scoring model remains unchanged.
 
 Mirror now scores three layers with eight live indicators:
 
 | Layer | Indicator | Direction | Target source |
 | --- | --- | --- | --- |
-| Depth | `dreyfus` | Higher is better | Weighted cognitive level average |
-| Depth | `decision_quality` | Higher is better | Decision titles with explicit reason keywords |
-| Breadth | `exploration` | Higher is better | Exploration observations over all collaboration-mode observations |
+| Depth | `dreyfus` | Higher preferred | Weighted cognitive level average |
+| Depth | `decision_quality` | Higher preferred | Decision titles with explicit reason keywords |
+| Breadth | `exploration` | Higher preferred | Exploration observations over all collaboration-mode observations |
 | Breadth | `deep_invest` | Band | Share of valid projects with at least 20 sessions |
-| Breadth | `fragmentation` | Lower is better | Share of valid projects with exactly one session |
-| Collaboration | `delegation` | Lower is better | Delegation observations over all collaboration-mode observations |
-| Collaboration | `mode_diversity` | Higher is better | Count of observed collaboration modes |
-| Collaboration | `bug_decision` | Lower is better | Bugfix count over decision count |
+| Breadth | `fragmentation` | Lower preferred | Share of valid projects with exactly one session |
+| Collaboration | `delegation` | Lower preferred | Delegation observations over all collaboration-mode observations |
+| Collaboration | `mode_diversity` | Higher preferred | Count of observed collaboration modes |
+| Collaboration | `bug_decision` | Lower preferred | Bugfix count over decision count |
 
 Codex observations also carry one provenance tag derived from transcript
 metadata: `session_mode_interactive`, `session_mode_unattended`,

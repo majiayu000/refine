@@ -94,6 +94,18 @@ pub trait ItemRepository: Send + Sync {
     /// 全文搜索命中总数
     async fn count_text_hits(&self, query: &str) -> InfraResult<usize>;
 
+    /// Read one filtered page and its exact count under the same snapshot.
+    /// An empty query selects recent Items; tags use the same Unicode case
+    /// normalization as `Tag`. Only the requested page is materialized.
+    async fn search_page(
+        &self,
+        query: &str,
+        item_type: Option<ItemType>,
+        tags: &[String],
+        offset: usize,
+        limit: usize,
+    ) -> InfraResult<(Vec<Item>, usize)>;
+
     /// 按文档 ID 查找关联的 items
     async fn find_by_document_id(&self, doc_id: &DocumentId) -> InfraResult<Vec<Item>>;
 }

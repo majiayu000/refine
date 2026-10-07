@@ -41,7 +41,10 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     ok(json!({
         "message": "Refine cloud API (Rust) is running",
         "contract_version": SERVER_CONTRACT_VERSION,
-        "llm_configured": state.llm_client.is_some()
+        "llm_configured": state.llm_client.is_some(),
+        "storage_id": state.database_identity,
+        "auth_mode": state.auth_mode(),
+        "runtime_profile": state.runtime_profile()
     }))
 }
 
@@ -82,6 +85,7 @@ pub async fn create_conversation(
             None
         },
         job_id: result.job_id,
+        superseded_by: result.superseded_by,
     };
     ok_serializable(response)
 }
@@ -106,7 +110,10 @@ pub async fn get_extraction_job(
     Path(job_id): Path<String>,
 ) -> impl IntoResponse {
     match run_get_extraction_job(state, job_id).await {
-        Ok(result) => ok_serializable(GetExtractionJobResponse { job: result.job }),
+        Ok(result) => ok_serializable(GetExtractionJobResponse {
+            job: result.job,
+            superseded_by: result.superseded_by,
+        }),
         Err(err) => err_response(status_from_error_code(err.code()), err.message()),
     }
 }
@@ -241,3 +248,14 @@ fn status_from_error_code(code: ApplicationErrorCode) -> StatusCode {
 }
 
 const DASHBOARD_HTML: &str = include_str!("dashboard.html");
+
+pub async fn lookup_commit(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedUser,
+    Query(query): Query<crate::application::commit::CommitQuery>,
+) -> impl IntoResponse {
+    match crate::application::commit::lookup_commit(state, query).await {
+        Ok(result) => ok_serializable(result),
+        Err(err) => err_response(status_from_error_code(err.code()), err.message()),
+    }
+}

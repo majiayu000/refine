@@ -17,6 +17,7 @@ import {
   standardQuickSaveNavigateFallbackToast,
 } from '../lib/content/quick-save-presets'
 import { initRecommendationEngine } from '../lib/content/recommendation-engine'
+import type { CaptureValidation } from '../lib/content/capture-context'
 
 const MESSAGE_POLL_TIMEOUT_MS = 20_000
 
@@ -46,8 +47,8 @@ function extractConversation(): string {
   ])
 }
 
-async function waitForConversationContent(timeoutMs = MESSAGE_POLL_TIMEOUT_MS): Promise<string | null> {
-  return waitForConversationExtraction(extractConversation, { timeoutMs })
+async function waitForConversationContent(validation?: CaptureValidation): Promise<string | null> {
+  return waitForConversationExtraction(extractConversation, { timeoutMs: MESSAGE_POLL_TIMEOUT_MS, validation })
 }
 
 function getConversationPath(rawUrl: string): string | null {

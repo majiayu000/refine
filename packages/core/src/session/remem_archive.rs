@@ -1,4 +1,7 @@
-use super::types::{MessageRole, Session, SessionMessage, SessionMeta, SessionMode, SessionSource};
+use super::types::{
+    MessageProvenance, MessageRole, Session, SessionMessage, SessionMeta, SessionMode,
+    SessionSource,
+};
 use anyhow::{bail, ensure, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -10,8 +13,10 @@ const RAW_SOURCE_TYPE: &str = "raw_archive";
 const RAW_MESSAGE_ORDER: &str = "created_at_epoch_asc_id_asc";
 const RAW_MESSAGE_LIMIT: &str = "2000";
 
+mod commit;
 mod document;
 mod process;
+pub use commit::{load_commit_context, CommitContext, CommitDiscussion, CommitMessage};
 pub use document::load_document_content as load_remem_document_content;
 use process::ProcessRunner;
 pub use process::{
@@ -89,7 +94,7 @@ struct SessionsEnvelope {
     sessions: Vec<RememSessionSummary>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct RememSessionSummary {
     pub session_ref: String,
     pub host: String,
@@ -393,6 +398,11 @@ fn load_one_session<R: Runner>(runner: &R, summary: RememSessionSummary) -> Resu
                 other => bail!("unsupported raw message role {other:?}"),
             };
             messages.push(SessionMessage {
+                provenance: Some(MessageProvenance {
+                    id: raw.id,
+                    event_time: DateTime::<Utc>::from_timestamp(raw.created_at_epoch, 0)
+                        .context("raw message epoch is outside chrono range")?,
+                }),
                 role,
                 content: raw.content,
             });

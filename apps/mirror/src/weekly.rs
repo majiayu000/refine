@@ -1,5 +1,6 @@
 mod action_card;
 
+use crate::cohort::{load_cohorts, EventWindow};
 use crate::config::ensure_mirror_dir;
 use crate::document_save::{save_report_to_document, SaveDocumentOptions};
 use crate::lang::t;
@@ -7,10 +8,7 @@ use crate::score::{self, LayerScore, ScoreResult, Signal};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Duration, Utc};
 use refine_core::knowledge::{DocumentRepository, ItemRepository};
-use refine_core::session::{
-    cluster_observations_with_resolver, format_data_quality_stats, ClusterResult, DataQualityStats,
-    ProjectIdentityResolver,
-};
+use refine_core::session::{format_data_quality_stats, ClusterResult, DataQualityStats};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::Path;
@@ -70,22 +68,23 @@ pub async fn handle_weekly(
     let now = Utc::now();
     let week_ago = now - Duration::days(7);
     let two_weeks_ago = now - Duration::days(14);
-    let ninety_days_ago = now - Duration::days(crate::advice::LONG_TERM_WINDOW_DAYS);
-
-    let this_week = item_repo
-        .find_observations_by_event_range(week_ago, now)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    let last_week = item_repo
-        .find_observations_by_event_range(two_weeks_ago, week_ago)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    let long_term_items = item_repo
-        .find_observations_by_event_range(ninety_days_ago, now)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    if this_week.is_empty() {
+    let windows = [
+        EventWindow::rolling(crate::advice::LONG_TERM_WINDOW_DAYS, now),
+        EventWindow::rolling(7, now),
+        EventWindow {
+            start: Some(two_weeks_ago),
+            end: week_ago,
+        },
+    ];
+    let mut cohorts = load_cohorts(item_repo.as_ref(), now, &windows)
+        .await?
+        .into_iter();
+    let long_term = cohorts.next().expect("long-term portfolio window");
+    let this_week = cohorts.next().expect("current weekly window");
+    let last_week = cohorts.next().expect("previous weekly window");
+    let this_cluster = &this_week.cluster;
+    let long_term_cluster = &long_term.cluster;
+    if this_cluster.data_quality.input_observations == 0 {
         println!(
             "{}",
             t!(
@@ -95,66 +94,48 @@ pub async fn handle_weekly(
         );
         return Ok(());
     }
-
     println!(
         "{}\n",
         t!(
             format!(
                 "This week {} / Last week {} observations",
-                this_week.len(),
-                last_week.len()
+                this_cluster.data_quality.input_observations,
+                last_week.cluster.data_quality.input_observations
             ),
             format!(
                 "本周 {} 条 / 上周 {} 条观测数据",
-                this_week.len(),
-                last_week.len()
+                this_cluster.data_quality.input_observations,
+                last_week.cluster.data_quality.input_observations
             )
         )
     );
-
-    let config = crate::config::load();
-    let resolver = ProjectIdentityResolver::from_observation_windows(&[
-        long_term_items.as_slice(),
-        this_week.as_slice(),
-        last_week.as_slice(),
-    ]);
-    let this_cluster = cluster_observations_with_resolver(&this_week, &resolver);
     if this_cluster.data_quality.eligible_observations == 0 {
         anyhow::bail!(
-            "No eligible linked interactive observations this week (input {}, detached {}, mode-excluded {}); refusing to emit scores",
-            this_cluster.data_quality.input_observations,
-            this_cluster.data_quality.detached_observations,
-            this_cluster.data_quality.mode_excluded_observations,
+            "No eligible linked interactive observations this week ({}); refusing to emit scores",
+            format_data_quality_stats(&this_cluster.data_quality),
         );
     }
-    let this_score = score::compute(&this_cluster, &config.targets);
-    let long_term_cluster = cluster_observations_with_resolver(&long_term_items, &resolver);
     if long_term_cluster.data_quality.eligible_observations == 0 {
-        anyhow::bail!(
-            "No eligible linked interactive observations in the rolling-90-day portfolio window; refusing to generate portfolio advice"
-        );
+        anyhow::bail!("No eligible linked interactive observations in the rolling-90-day portfolio window; refusing to generate portfolio advice");
     }
-    let long_term_score = score::compute(&long_term_cluster, &config.targets);
-
-    let last_cluster = if !last_week.is_empty() {
-        Some(cluster_observations_with_resolver(&last_week, &resolver))
-    } else {
-        None
-    };
-    let last_score = last_cluster
-        .as_ref()
-        .map(|cluster| score::compute(cluster, &config.targets));
+    let config = crate::config::load();
+    let mut this_score = score::compute(this_cluster, &config.targets);
+    this_score.timestamp = now;
+    let long_term_score = score::compute(long_term_cluster, &config.targets);
+    let last_cluster =
+        (last_week.cluster.data_quality.input_observations > 0).then_some(&last_week.cluster);
+    let last_score = last_cluster.map(|cluster| score::compute(cluster, &config.targets));
     let last_comparison = last_score
         .as_ref()
-        .zip(last_cluster.as_ref())
+        .zip(last_cluster)
         .map(|(score, cluster)| (score, &cluster.data_quality));
 
     let report = build_weekly_report_with_portfolio(
         &this_score,
         last_comparison,
-        &this_cluster,
+        this_cluster,
         &long_term_score,
-        &long_term_cluster,
+        long_term_cluster,
     )?;
 
     println!("{}", report);
@@ -206,7 +187,14 @@ fn layer_indicators(layer: &LayerScore) -> String {
     layer
         .indicators
         .iter()
-        .map(|i| format!("{}={:.1}", score::indicator_display(&i.name), i.actual))
+        .map(|i| {
+            format!(
+                "{}={}{}",
+                score::indicator_display(&i.name),
+                i.display_value(),
+                i.coverage_label()
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -216,10 +204,14 @@ fn signal_rank(signal: Signal) -> i8 {
         Signal::Green => 2,
         Signal::Yellow => 1,
         Signal::Red => 0,
+        Signal::Unknown => -1,
     }
 }
 
 fn signal_delta(current: Signal, previous: Signal) -> &'static str {
+    if current == Signal::Unknown || previous == Signal::Unknown {
+        return "—";
+    }
     match signal_rank(current) - signal_rank(previous) {
         d if d > 0 => "↑",
         d if d < 0 => "↓",
@@ -244,8 +236,8 @@ fn build_weekly_report_with_portfolio(
     lines.push(format!(
         "> {}",
         t!(
-            "Metrics-derived report — for coaching run `refine cognitive-portrait`",
-            "指标驱动报告 — 教练分析请运行 `refine cognitive-portrait`"
+            "Experimental reflection — configured signals do not establish personal progress",
+            "实验性复盘 — 配置信号不能证明用户进步"
         )
     ));
     lines.push(format!(
@@ -255,8 +247,8 @@ fn build_weekly_report_with_portfolio(
     lines.push(format!(
         "> {}",
         t!(
-            "Window: rolling 7 days (event time) · signals: absolute targets",
-            "窗口: 滚动 7 天(事件时间) · 信号灯: 绝对目标"
+            "Window: rolling 7 days (event time) · signals: configured preferences",
+            "窗口: 滚动 7 天(事件时间) · 信号灯: 配置偏好"
         )
     ));
 
@@ -294,8 +286,8 @@ fn build_weekly_report_with_portfolio(
         _ if recent_cluster.data_quality.is_degraded() => {
             lines.push(
                 t!(
-                    "DEGRADED data quality: detached observations were excluded; week-over-week trend is suppressed.",
-                    "数据质量为 DEGRADED：脱链观测已排除，本周不输出环比趋势。"
+                    "DEGRADED data quality: some input evidence was excluded; see the quality counts. Week-over-week trend is suppressed.",
+                    "数据质量为 DEGRADED：部分输入证据已排除，原因见数据质量计数；本周不输出环比趋势。"
                 )
                 .to_string(),
             );
@@ -374,7 +366,8 @@ fn build_weekly_report(
             {
                 breadth.indicators.push(crate::score::Indicator {
                     name: name.to_string(),
-                    actual: if name == "exploration" { 20.0 } else { 5.0 },
+                    actual: Some(if name == "exploration" { 20.0 } else { 5.0 }),
+                    coverage: None,
                     target: String::new(),
                     signal: Signal::Green,
                 });

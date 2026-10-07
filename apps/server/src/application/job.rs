@@ -7,6 +7,7 @@ use crate::state::AppState;
 #[derive(Debug, Clone)]
 pub struct ExtractionJobResult {
     pub job: ExtractionJobRecord,
+    pub superseded_by: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,7 +42,13 @@ pub async fn get_extraction_job(
         .await
         .map_err(|err| ExtractionJobError::Internal(err.to_string()))?
         .ok_or_else(|| ExtractionJobError::NotFound("Job not found".to_string()))?;
-    Ok(ExtractionJobResult { job })
+    let superseded_by = state
+        .conversation_repo
+        .find_conversation_by_id(&job.conversation_id)
+        .await
+        .map_err(|err| ExtractionJobError::Internal(err.to_string()))?
+        .and_then(|conversation| conversation.superseded_by);
+    Ok(ExtractionJobResult { job, superseded_by })
 }
 
 #[cfg(test)]

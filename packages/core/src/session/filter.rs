@@ -63,10 +63,12 @@ mod tests {
         let mut messages = Vec::new();
         for _ in 0..user_msgs {
             messages.push(SessionMessage {
+                provenance: None,
                 role: MessageRole::User,
                 content: "x".repeat(char_per_msg),
             });
             messages.push(SessionMessage {
+                provenance: None,
                 role: MessageRole::Assistant,
                 content: "y".repeat(char_per_msg),
             });

@@ -1,0 +1,102 @@
+{
+  "browser": "153.0.8010.12",
+  "extensionId": "mfdjafbinelifankmoepimioffmpkmdm",
+  "requests": 4,
+  "events": [
+    {
+      "event_name": "recommendation_exposed",
+      "source": "chatgpt",
+      "properties": {
+        "provider": "chatgpt",
+        "query_length": 31,
+        "item_count": 2
+      },
+      "occurred_at": "2026-10-07T14:23:21.639Z"
+    },
+    {
+      "event_name": "recommendation_clicked",
+      "source": "chatgpt",
+      "properties": {
+        "provider": "chatgpt",
+        "item_id": "ONE",
+        "item_type": "knowledge",
+        "action": "insert"
+      },
+      "occurred_at": "2026-10-07T14:23:22.925Z"
+    },
+    {
+      "event_name": "knowledge_reused",
+      "source": "chatgpt",
+      "properties": {
+        "provider": "chatgpt",
+        "item_id": "ONE",
+        "item_type": "knowledge",
+        "action": "insert"
+      },
+      "occurred_at": "2026-10-07T14:23:22.925Z"
+    },
+    {
+      "event_name": "recommendation_exposed",
+      "source": "chatgpt",
+      "properties": {
+        "provider": "chatgpt",
+        "query_length": 53,
+        "item_count": 2
+      },
+      "occurred_at": "2026-10-07T14:23:23.034Z"
+    },
+    {
+      "event_name": "recommendation_exposed",
+      "source": "chatgpt",
+      "properties": {
+        "provider": "chatgpt",
+        "query_length": 27,
+        "item_count": 2
+      },
+      "occurred_at": "2026-10-07T14:23:23.247Z"
+    },
+    {
+      "event_name": "recommendation_exposed",
+      "source": "chatgpt",
+      "properties": {
+        "provider": "chatgpt",
+        "query_length": 28,
+        "item_count": 2
+      },
+      "occurred_at": "2026-10-07T14:23:23.554Z"
+    },
+    {
+      "event_name": "recommendation_clicked",
+      "source": "chatgpt",
+      "properties": {
+        "provider": "chatgpt",
+        "item_id": "TWO",
+        "item_type": "knowledge",
+        "action": "insert"
+      },
+      "occurred_at": "2026-10-07T14:23:23.616Z"
+    },
+    {
+      "event_name": "knowledge_reused",
+      "source": "chatgpt",
+      "properties": {
+        "provider": "chatgpt",
+        "item_id": "TWO",
+        "item_type": "knowledge",
+        "action": "insert"
+      },
+      "occurred_at": "2026-10-07T14:23:23.616Z"
+    }
+  ],
+  "checks": {
+    "previewPrivate": true,
+    "selectedFragmentOnly": true,
+    "changedInputRefused": true,
+    "changedUrlRefused": true,
+    "perSiteDisabled": true,
+    "clipboardFailureNotReused": true,
+    "contenteditableInsertion": true
+  },
+  "scope": "Real built MV3 extension, synthetic ChatGPT-shaped DOM reader and local API; no live account validation",
+  "extensionVersion": "0.1.4"
+}

@@ -9,6 +9,7 @@ pub(crate) enum PortfolioMode {
     PromoteHoldStop,
     Explore,
     Deepen,
+    InsufficientEvidence,
 }
 
 impl PortfolioMode {
@@ -17,6 +18,7 @@ impl PortfolioMode {
             Self::PromoteHoldStop => "promote_hold_stop",
             Self::Explore => "explore",
             Self::Deepen => "deepen",
+            Self::InsufficientEvidence => "insufficient_evidence",
         }
     }
 }
@@ -64,7 +66,17 @@ pub(crate) fn portfolio_policy(
         long_fragmentation.signal != Signal::Green || recent_fragmentation.signal != Signal::Green;
     let both_exploration_low =
         long_exploration.signal != Signal::Green && recent_exploration.signal != Signal::Green;
-    let mode = if fragmentation_non_green {
+    let incomplete = [
+        &long_exploration,
+        &long_fragmentation,
+        &recent_exploration,
+        &recent_fragmentation,
+    ]
+    .iter()
+    .any(|indicator| indicator.observed_value().is_none());
+    let mode = if incomplete {
+        PortfolioMode::InsufficientEvidence
+    } else if fragmentation_non_green {
         PortfolioMode::PromoteHoldStop
     } else if both_exploration_low {
         PortfolioMode::Explore
@@ -83,41 +95,53 @@ pub(crate) fn portfolio_policy(
 
 pub(crate) fn deterministic_advice(policy: &PortfolioPolicy) -> String {
     match policy.mode {
+        PortfolioMode::InsufficientEvidence => t!(
+            "Portfolio evidence is incomplete. No expand, promote, or stop action is issued; inspect coverage and refresh session observations.",
+            "项目组合证据不足，暂不建议扩张、晋升或退出。请检查指标覆盖情况并补充会话观测。"
+        ).to_string(),
         PortfolioMode::PromoteHoldStop => t!(
             format!(
-                "Promote / Hold / Stop: promote the strongest evidenced project, hold at most one bounded validation, and stop the weakest one-off thread unless it produces a named result this week. One-off share is {:.1}% over 90 days and {:.1}% over 7 days; keep the active portfolio closed to additions.",
-                policy.long_fragmentation.actual, policy.recent_fragmentation.actual
+                "Promote / Hold / Stop: promote the strongest evidenced project, hold at most one bounded validation, and stop the weakest one-off thread unless it produces a named result this week. One-off share is {} over 90 days and {} over 7 days; keep the active portfolio closed to additions.",
+                percent(&policy.long_fragmentation), percent(&policy.recent_fragmentation)
             ),
             format!(
-                "晋升 / 保留 / 退出：晋升证据最强的项目，最多保留一项有边界的验证；最弱的一次性线程若本周没有产出具名结果就退出。90 天与 7 天的一次性项目占比分别为 {:.1}% 和 {:.1}%，本周项目组合不增加任何条目。",
-                policy.long_fragmentation.actual, policy.recent_fragmentation.actual
+                "晋升 / 保留 / 退出：晋升证据最强的项目，最多保留一项有边界的验证；最弱的一次性线程若本周没有产出具名结果就退出。90 天与 7 天的一次性项目占比分别为 {} 和 {}，本周项目组合不增加任何条目。",
+                percent(&policy.long_fragmentation), percent(&policy.recent_fragmentation)
             )
         ),
         PortfolioMode::Explore => t!(
             format!(
-                "Run one bounded exploration inside an existing project and record a keep/stop decision. Exploration is {:.1}% over 90 days and {:.1}% over 7 days while fragmentation remains green in both windows.",
-                policy.long_exploration.actual, policy.recent_exploration.actual
+                "Run one bounded exploration inside an existing project and record a keep/stop decision. Exploration is {} over 90 days and {} over 7 days while fragmentation remains green in both windows.",
+                percent(&policy.long_exploration), percent(&policy.recent_exploration)
             ),
             format!(
-                "在现有项目内做一次有边界的探索，并记录保留或退出决定。90 天与 7 天探索率分别为 {:.1}% 和 {:.1}%，且两个窗口的碎片化均为绿灯。",
-                policy.long_exploration.actual, policy.recent_exploration.actual
+                "在现有项目内做一次有边界的探索，并记录保留或退出决定。90 天与 7 天探索率分别为 {} 和 {}，且两个窗口的碎片化均为绿灯。",
+                percent(&policy.long_exploration), percent(&policy.recent_exploration)
             )
         ),
         PortfolioMode::Deepen => t!(
             format!(
-                "Hold the current portfolio and deepen the strongest active project with one named validation. Exploration is {:.1}% over 90 days and {:.1}% over 7 days, so expansion is not the priority.",
-                policy.long_exploration.actual, policy.recent_exploration.actual
+                "Hold the current portfolio and deepen the strongest active project with one named validation. Exploration is {} over 90 days and {} over 7 days, so expansion is not the priority.",
+                percent(&policy.long_exploration), percent(&policy.recent_exploration)
             ),
             format!(
-                "保持当前项目组合，在证据最强的活跃项目中完成一项具名验证。90 天与 7 天探索率分别为 {:.1}% 和 {:.1}%，扩张不是当前优先级。",
-                policy.long_exploration.actual, policy.recent_exploration.actual
+                "保持当前项目组合，在证据最强的活跃项目中完成一项具名验证。90 天与 7 天探索率分别为 {} 和 {}，扩张不是当前优先级。",
+                percent(&policy.long_exploration), percent(&policy.recent_exploration)
             )
         ),
     }
 }
 
+fn percent(indicator: &Indicator) -> String {
+    indicator
+        .observed_value()
+        .map(|value| format!("{value:.1}%"))
+        .unwrap_or_else(|| t!("n/a", "证据不足").to_string())
+}
+
 pub(crate) fn deterministic_short(mode: PortfolioMode) -> String {
     match mode {
+        PortfolioMode::InsufficientEvidence => t!("Evidence incomplete", "证据不足").to_string(),
         PortfolioMode::PromoteHoldStop => t!("Promote hold stop", "晋升保留退出").to_string(),
         PortfolioMode::Explore => t!("Bound one exploration", "限定一次探索").to_string(),
         PortfolioMode::Deepen => t!("Deepen current portfolio", "深挖当前组合").to_string(),
@@ -135,13 +159,15 @@ pub(crate) fn breadth_score(
     score.layers[1].indicators = vec![
         Indicator {
             name: "exploration".into(),
-            actual: exploration,
+            actual: Some(exploration),
+            coverage: None,
             target: String::new(),
             signal: exploration_signal,
         },
         Indicator {
             name: "fragmentation".into(),
-            actual: fragmentation,
+            actual: Some(fragmentation),
+            coverage: None,
             target: String::new(),
             signal: fragmentation_signal,
         },
@@ -152,6 +178,17 @@ pub(crate) fn breadth_score(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absent_portfolio_metric_abstains_even_when_other_signals_are_green() {
+        let long_term = breadth_score(20.0, Signal::Green, 5.0, Signal::Green);
+        let mut recent = long_term.clone();
+        recent.layers[1].indicators[0].actual = None;
+        recent.layers[1].indicators[0].signal = Signal::Unknown;
+        let policy = portfolio_policy(&long_term, &recent).unwrap();
+        assert_eq!(policy.mode, PortfolioMode::InsufficientEvidence);
+        assert!(deterministic_advice(&policy).contains("evidence is incomplete"));
+    }
 
     #[test]
     fn matrix_prioritizes_fragmentation_over_exploration() {

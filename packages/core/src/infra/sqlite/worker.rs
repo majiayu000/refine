@@ -1,13 +1,17 @@
 use super::rows::{configure_connection, configure_read_only_connection};
 use super::worker_support::{send_init_result, send_response};
-use super::{conversation_ops, doc_ops, insights_snapshot, ops};
-use crate::conversation::{ConversationRecord, EventRecord, ExtractionJobRecord};
+use super::{conversation_ops, doc_ops, insights_snapshot, ops, session_projection};
+use crate::conversation::{
+    ConversationRecord, EventRecord, ExtractionJobRecord, JobPublicationOutcome,
+};
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{
     Document, Item, ItemType, ObservationWindowSnapshot, RestoreDocumentParams,
+    SessionProjectionContext, SessionProjectionMetadata, SessionProjectionRevision,
+    SessionProjectionVersion,
 };
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use tokio::sync::oneshot;
@@ -67,6 +71,14 @@ pub(super) enum SqliteCommand {
         query: String,
         resp: oneshot::Sender<InfraResult<usize>>,
     },
+    SearchPage {
+        query: String,
+        item_type: Option<ItemType>,
+        tags: Vec<String>,
+        offset: usize,
+        limit: usize,
+        resp: oneshot::Sender<InfraResult<(Vec<Item>, usize)>>,
+    },
     FindByDocumentId {
         document_id: String,
         resp: oneshot::Sender<InfraResult<Vec<Item>>>,
@@ -109,7 +121,20 @@ pub(super) enum SqliteCommand {
         items: Vec<Item>,
         source_document_ids: Vec<String>,
         obsolete_document_ids: Vec<String>,
+        metadata: Option<SessionProjectionMetadata>,
         resp: oneshot::Sender<InfraResult<()>>,
+    },
+    SessionProjectionVersions {
+        resp: oneshot::Sender<InfraResult<Vec<SessionProjectionVersion>>>,
+    },
+    SessionProjectionContext {
+        session_ref: String,
+        resp: oneshot::Sender<InfraResult<Option<SessionProjectionContext>>>,
+    },
+    SessionProjectionHistory {
+        document_id: String,
+        limit: usize,
+        resp: oneshot::Sender<InfraResult<Vec<SessionProjectionRevision>>>,
     },
     DocFindById {
         id: String,
@@ -169,6 +194,12 @@ pub(super) enum SqliteCommand {
         job: ExtractionJobRecord,
         resp: oneshot::Sender<InfraResult<(ConversationRecord, Option<ExtractionJobRecord>)>>,
     },
+    ConversationInsertOrFetchWithQuota {
+        record: ConversationRecord,
+        job: Option<ExtractionJobRecord>,
+        item_limit: Option<usize>,
+        resp: oneshot::Sender<InfraResult<(ConversationRecord, Option<ExtractionJobRecord>)>>,
+    },
     // Extraction job 操作
     JobFindById {
         id: String,
@@ -220,7 +251,7 @@ pub(super) enum SqliteCommand {
         document: Document,
         items: Vec<Item>,
         now: String,
-        resp: oneshot::Sender<InfraResult<bool>>,
+        resp: oneshot::Sender<InfraResult<JobPublicationOutcome>>,
     },
     // Event 操作
     EventInsert {
@@ -350,10 +381,18 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
             send_response("FindByTags", resp, ops::find_by_tags(conn, &tags));
         }
         SqliteCommand::Save { item, resp } => {
-            send_response("Save", resp, ops::save(conn, &item));
+            send_response(
+                "Save",
+                resp,
+                session_projection::save_explicit_item(conn, &item),
+            );
         }
         SqliteCommand::Delete { id, resp } => {
-            send_response("Delete", resp, ops::delete(conn, &id));
+            send_response(
+                "Delete",
+                resp,
+                session_projection::delete_explicit_item(conn, &id),
+            );
         }
         SqliteCommand::Exists { id, resp } => {
             send_response("Exists", resp, ops::exists(conn, &id));
@@ -372,6 +411,20 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
         }
         SqliteCommand::CountTextHits { query, resp } => {
             send_response("CountTextHits", resp, ops::count_text_hits(conn, &query));
+        }
+        SqliteCommand::SearchPage {
+            query,
+            item_type,
+            tags,
+            offset,
+            limit,
+            resp,
+        } => {
+            send_response(
+                "SearchPage",
+                resp,
+                ops::search_page(conn, &query, item_type, &tags, offset, limit),
+            );
         }
         SqliteCommand::FindByDocumentId { document_id, resp } => {
             send_response(
@@ -426,6 +479,7 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
             items,
             source_document_ids,
             obsolete_document_ids,
+            metadata,
             resp,
         } => {
             send_response(
@@ -437,7 +491,33 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
                     &items,
                     &source_document_ids,
                     &obsolete_document_ids,
+                    metadata.as_ref(),
                 ),
+            );
+        }
+        SqliteCommand::SessionProjectionVersions { resp } => {
+            send_response(
+                "SessionProjectionVersions",
+                resp,
+                session_projection::versions(conn),
+            );
+        }
+        SqliteCommand::SessionProjectionContext { session_ref, resp } => {
+            send_response(
+                "SessionProjectionContext",
+                resp,
+                session_projection::context(conn, &session_ref),
+            );
+        }
+        SqliteCommand::SessionProjectionHistory {
+            document_id,
+            limit,
+            resp,
+        } => {
+            send_response(
+                "SessionProjectionHistory",
+                resp,
+                session_projection::history(conn, &document_id, limit),
             );
         }
         SqliteCommand::DocFindById { id, resp } => {
@@ -531,6 +611,23 @@ fn handle_command(conn: &Connection, command: SqliteCommand) {
                 "ConversationInsertOrFetchWithJob",
                 resp,
                 conversation_ops::insert_or_fetch_conversation_with_job(conn, &record, &job),
+            );
+        }
+        SqliteCommand::ConversationInsertOrFetchWithQuota {
+            record,
+            job,
+            item_limit,
+            resp,
+        } => {
+            send_response(
+                "ConversationInsertOrFetchWithQuota",
+                resp,
+                conversation_ops::insert_or_fetch_conversation_with_quota(
+                    conn,
+                    &record,
+                    job.as_ref(),
+                    item_limit,
+                ),
             );
         }
         SqliteCommand::JobFindById { id, resp } => {
@@ -669,33 +766,73 @@ fn finish_job_claim_with_results(
     document: &Document,
     items: &[Item],
     now: &str,
-) -> InfraResult<bool> {
+) -> InfraResult<JobPublicationOutcome> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|e| InfraError::Database(e.to_string()))?;
-    let owns_claim: bool = tx
+    let Some(capture) =
+        crate::infra::capture_publication::claimed_source(&tx, id, owner, document)?
+    else {
+        return Ok(JobPublicationOutcome::LostClaim);
+    };
+    let crate::infra::capture_publication::ClaimedSource {
+        conversation_id,
+        url,
+        revision,
+    } = capture;
+    let newer: Option<String> = tx
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM extraction_jobs \
-             WHERE id = ?1 AND status = 'running' AND lease_owner = ?2)",
-            rusqlite::params![id, owner],
+            "SELECT conversation_id FROM document_capture_publications
+             WHERE url = ?1 AND revision > ?2",
+            rusqlite::params![url, revision],
             |row| row.get(0),
         )
+        .optional()
         .map_err(|e| InfraError::Database(e.to_string()))?;
-    if !owns_claim {
-        tx.commit()
-            .map_err(|e| InfraError::Database(e.to_string()))?;
-        return Ok(false);
-    }
-
-    let (document, items) = canonicalize_document_items(&tx, document, items)?;
-    doc_ops::save(&tx, &document)?;
-    ops::delete_by_document_id(&tx, document.id().as_str())?;
-    for item in &items {
-        ops::save(&tx, item)?;
-    }
-    let item_ids = items
-        .iter()
-        .map(|item| item.id().to_string())
-        .collect::<Vec<_>>();
+    let (outcome, item_ids) = if let Some(newer_id) = newer {
+        tx.execute(
+            "UPDATE conversations SET superseded_by = ?2 WHERE id = ?1",
+            rusqlite::params![conversation_id, newer_id],
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+        (JobPublicationOutcome::Superseded, Vec::new())
+    } else {
+        let (document, items) = canonicalize_document_items(&tx, document, items)?;
+        doc_ops::save(&tx, &document)?;
+        ops::delete_by_document_id(&tx, document.id().as_str())?;
+        for item in &items {
+            ops::save(&tx, item)?;
+        }
+        // These receipts now describe historical successful work, not current
+        // Item IDs. Keep their terminal status while naming the replacement.
+        tx.execute(
+            "UPDATE conversations SET item_ids = '[]', superseded_by = ?1
+             WHERE url = ?2 AND id != ?1 AND status = 'processed' AND superseded_by IS NULL
+               AND (COALESCE((SELECT r.revision FROM capture_revisions r
+                              WHERE r.conversation_id = conversations.id),0) < ?3
+                    OR (?3=0 AND NOT EXISTS (SELECT 1 FROM capture_revisions r
+                                            WHERE r.conversation_id=conversations.id)))",
+            rusqlite::params![conversation_id, url, revision],
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+        tx.execute(
+            "INSERT INTO document_capture_publications(url, revision, conversation_id)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(url) DO UPDATE SET revision = excluded.revision,
+                                            conversation_id = excluded.conversation_id
+             WHERE excluded.revision >= document_capture_publications.revision",
+            rusqlite::params![url, revision, conversation_id],
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+        tx.execute(
+            "UPDATE conversations SET superseded_by = NULL WHERE id = ?1",
+            [conversation_id.as_str()],
+        )
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+        (
+            JobPublicationOutcome::Published,
+            items.iter().map(|item| item.id().to_string()).collect(),
+        )
+    };
     let finished = conversation_ops::finish_job_claim_in_transaction(
         &tx,
         id,
@@ -712,7 +849,7 @@ fn finish_job_claim_with_results(
     }
     tx.commit()
         .map_err(|e| InfraError::Database(e.to_string()))?;
-    Ok(true)
+    Ok(outcome)
 }
 
 fn save_document_with_replaced_items_and_delete_documents(
@@ -721,22 +858,36 @@ fn save_document_with_replaced_items_and_delete_documents(
     items: &[Item],
     source_document_ids: &[String],
     obsolete_document_ids: &[String],
+    metadata: Option<&SessionProjectionMetadata>,
 ) -> InfraResult<()> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|e| InfraError::Database(e.to_string()))?;
     let input_document_id = doc.id().clone();
     let (doc, replacement_items) = canonicalize_document_items(&tx, doc, items)?;
     let source_items = doc_ops::load_items(&tx, source_document_ids, &input_document_id, doc.id())?;
+    if metadata.is_some() {
+        let mut archived_ids = obsolete_document_ids.to_vec();
+        archived_ids.push(doc.id().to_string());
+        session_projection::archive(&tx, &archived_ids)?;
+    }
+    // Fresh replacements take precedence over the transaction's source-item
+    // snapshot for the same ID (for example updated session-mode tags).
+    let mut incoming_by_id = std::collections::BTreeMap::new();
+    for item in source_items.into_iter().chain(replacement_items) {
+        incoming_by_id.insert(item.id().to_string(), item);
+    }
+    let incoming = incoming_by_id.into_values().collect();
+    let final_items = session_projection::apply_overrides(&tx, &doc, incoming)?;
     doc_ops::delete_same_id_with_different_url(&tx, &doc)?;
     doc_ops::save(&tx, &doc)?;
     ops::delete_by_document_id(&tx, doc.id().as_str())?;
-    for item in &source_items {
-        ops::save(&tx, item)?;
-    }
-    for item in &replacement_items {
+    for item in &final_items {
         ops::save(&tx, item)?;
     }
     delete_documents_with_items_in_transaction(&tx, obsolete_document_ids)?;
+    if let Some(metadata) = metadata {
+        session_projection::save_metadata(&tx, &doc, metadata)?;
+    }
     tx.commit()
         .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok(())

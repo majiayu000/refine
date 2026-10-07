@@ -7,6 +7,7 @@ mod analysis_routes;
 mod chunking;
 mod clustering;
 mod discovery;
+mod evidence;
 mod facets;
 mod filter;
 mod parser;
@@ -26,8 +27,9 @@ pub use clustering::{
     eligible_observations, ClusterResult, DataQualityStats, GlobalStats, ProjectCluster,
 };
 pub use discovery::{discover_sessions, discover_sessions_in, DiscoveredSession};
+pub use evidence::{session_projection_evidence, validate_facet_evidence, FacetEvidence};
 pub use facets::{
-    build_facet_prompt, facets_to_items, facets_to_items_with_mode,
+    build_facet_prompt, facet_recipe_identity, facets_to_items, facets_to_items_with_mode,
     facets_to_items_with_mode_and_identity, parse_facet_response, FacetResponse,
     FACET_SYSTEM_PROMPT,
 };
@@ -40,8 +42,9 @@ pub use prescription::{build_prescription_prompt, PRESCRIPTION_SYSTEM_PROMPT};
 pub use project_identity::ProjectIdentityResolver;
 pub use remem_archive::{
     is_missing_remem_executable, is_remem_process_output_overflow, is_remem_process_timeout,
-    load_remem_document_content, load_remem_session, load_remem_session_summaries,
-    remem_hydration_failure_message, remem_snapshot_hash, RememSession, RememSessionSummary,
+    load_commit_context, load_remem_document_content, load_remem_session,
+    load_remem_session_summaries, remem_hydration_failure_message, remem_snapshot_hash,
+    CommitContext, CommitDiscussion, CommitMessage, RememSession, RememSessionSummary,
 };
 pub use report::{
     build_final_prompt, build_final_prompt_with_delta, build_final_prompt_with_delta_and_budget,
@@ -54,4 +57,7 @@ pub use source_cohort::{
     portrait_session_observations, PortraitGlobalStats, PortraitSessionCohort,
     SessionCohortCluster, SUPPORTED_SESSION_DOCUMENT_SOURCES,
 };
-pub use types::{MessageRole, Session, SessionMessage, SessionMeta, SessionMode, SessionSource};
+pub use types::{
+    MessageProvenance, MessageRole, Session, SessionMessage, SessionMeta, SessionMode,
+    SessionSource, SourceMessageReference,
+};

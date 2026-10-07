@@ -3,6 +3,7 @@ import {
   Hash,
   NotebookPen,
   Trash2,
+  LoaderCircle,
 } from 'lucide-react'
 import { useStore } from '../lib/store'
 import { cn } from '../lib/utils'
@@ -17,7 +18,7 @@ function formatFullDate(date: string): string {
 }
 
 export function ItemDetail() {
-  const { selectedItem, deleteItem } = useStore()
+  const { selectedItem, deleteItem, deletingItemId } = useStore()
 
   if (!selectedItem) {
     return (
@@ -67,11 +68,15 @@ export function ItemDetail() {
 
           <button
             onClick={handleDelete}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700 transition-colors hover:bg-red-100"
+            disabled={deletingItemId !== null}
+            aria-busy={deletingItemId === selectedItem.id}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700 transition-colors hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
             title="删除"
           >
-            <Trash2 className="h-4 w-4" />
-            删除
+            {deletingItemId === selectedItem.id
+              ? <LoaderCircle className="h-4 w-4 animate-spin" />
+              : <Trash2 className="h-4 w-4" />}
+            {deletingItemId === selectedItem.id ? '正在删除…' : '删除'}
           </button>
         </div>
 

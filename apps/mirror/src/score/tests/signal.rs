@@ -8,6 +8,7 @@ fn test_signal_conversions_are_canonical() {
         (Signal::Green, "green", "🟢", "\x1b[32m●\x1b[0m"),
         (Signal::Yellow, "yellow", "🟡", "\x1b[33m●\x1b[0m"),
         (Signal::Red, "red", "🔴", "\x1b[31m●\x1b[0m"),
+        (Signal::Unknown, "unknown", "⚪", "\x1b[90m●\x1b[0m"),
     ];
 
     for (signal, plain, emoji, ansi) in cases {
@@ -44,7 +45,7 @@ fn test_dreyfus_weighted_calculation() {
     };
     let dw = dreyfus_weighted(&stats);
     // (5*5 + 5*4) / 10 = 4.5
-    assert!((dw - 4.5).abs() < f64::EPSILON);
+    assert!((dw.unwrap() - 4.5).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -116,7 +117,9 @@ fn test_tension_analysis() {
     // L1 green + L2 red
     let tension = analyze_tension(&[green_layer.clone(), red_layer.clone(), green_layer.clone()]);
     assert!(tension.is_some());
-    assert!(tension.unwrap_or_default().contains("narrowing"));
+    assert!(tension
+        .unwrap_or_default()
+        .contains("breadth has a below-target indicator"));
 
     // All green
     let tension = analyze_tension(&[
@@ -124,9 +127,45 @@ fn test_tension_analysis() {
         green_layer.clone(),
         green_layer.clone(),
     ]);
-    assert!(tension.unwrap_or_default().contains("healthy"));
+    assert!(tension
+        .unwrap_or_default()
+        .contains("all three layers meet configured targets"));
 
     // All red
     let tension = analyze_tension(&[red_layer.clone(), red_layer.clone(), red_layer.clone()]);
-    assert!(tension.unwrap_or_default().contains("replan"));
+    assert!(tension
+        .unwrap_or_default()
+        .contains("below-target indicators"));
+}
+
+#[test]
+fn snapshot_tension_does_not_claim_personal_growth() {
+    for first in [Signal::Green, Signal::Yellow, Signal::Red] {
+        for second in [Signal::Green, Signal::Yellow, Signal::Red] {
+            for third in [Signal::Green, Signal::Yellow, Signal::Red] {
+                let layers = [first, second, third].map(|signal| LayerScore {
+                    name: "synthetic".into(),
+                    signal,
+                    indicators: Vec::new(),
+                });
+                if let Some(text) = analyze_tension(&layers) {
+                    assert!(!text.contains("growth"), "{text}");
+                    assert!(!text.contains("healthy"), "{text}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn tension_never_issues_a_portfolio_action() {
+    let layers = [Signal::Green, Signal::Red, Signal::Green].map(|signal| LayerScore {
+        name: "synthetic".into(),
+        signal,
+        indicators: Vec::new(),
+    });
+    let text = analyze_tension(&layers).unwrap();
+    assert!(!text.contains("new direction"));
+    assert!(!text.contains("exploration session"));
+    assert!(!text.contains("over-delegating"));
 }

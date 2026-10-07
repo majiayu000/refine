@@ -12,6 +12,7 @@ pub const RECOMMENDATION_MIN_QUERY_CHARS: usize = 10;
 pub struct RecommendationMeta {
     pub latency_ms: u128,
     pub strategy: String,
+    pub backend: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -86,6 +87,12 @@ pub async fn recommend_items(
             meta: RecommendationMeta {
                 latency_ms: latency_start.elapsed().as_millis(),
                 strategy: context.strategy_name.to_string(),
+                backend: if state.semantic_search_enabled {
+                    "feature_hash"
+                } else {
+                    "fts5"
+                }
+                .to_string(),
             },
         });
     }
@@ -126,6 +133,12 @@ pub async fn recommend_items(
         meta: RecommendationMeta {
             latency_ms: latency_start.elapsed().as_millis(),
             strategy: context.strategy_name.to_string(),
+            backend: if state.semantic_search_enabled {
+                "feature_hash"
+            } else {
+                "fts5"
+            }
+            .to_string(),
         },
     })
 }

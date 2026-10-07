@@ -37,8 +37,8 @@
 ### 4.1 服务端快速回滚
 
 ```bash
-# 关闭语义混排，回退到关键词
-export REFINE_ENABLE_SEMANTIC_SEARCH=false
+# 关闭哈希特征混排，回退到关键词
+export REFINE_ENABLE_FEATURE_HASH_SEARCH=false
 
 # 临时放开配额限制（0 = 不限）
 export REFINE_FREE_QUOTA_ITEMS=0
@@ -67,7 +67,7 @@ unset REFINE_ENV
 
 ### Q3: 推荐结果突然变差怎么办？
 
-先将 `REFINE_ENABLE_SEMANTIC_SEARCH=false` 回退到关键词模式，再分析评测脚本输出：
+先将 `REFINE_ENABLE_FEATURE_HASH_SEARCH=false` 回退到关键词模式，再分析评测脚本输出。只有标注了 `relevant_ids` 的样本才进入相关性指标；旧 type/tag 样本单独标为 metadata proxy。固定合成语料的运行方式见 [检索与服务合同](search-and-api-contracts.md)：
 
 ```bash
 node scripts/eval_recommendations.mjs --base-url http://127.0.0.1:21567

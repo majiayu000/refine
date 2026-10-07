@@ -1,6 +1,6 @@
 use crate::config::{ensure_mirror_dir, mirror_dir};
 use crate::lang::{self, t, Lang};
-use crate::score::{load_recent_scores, ScoreResult, Signal};
+use crate::score::{load_recent_scores, ScoreResult, ScoreScope, Signal};
 use anyhow::Result;
 use chrono::{Datelike, Local, Utc, Weekday};
 use serde::{Deserialize, Serialize};
@@ -18,18 +18,23 @@ fn default_lang_en() -> String {
     "en".into()
 }
 
-/// Signal severity: Red=0, Yellow=1, Green=2 (lower is worse)
+/// Configured signal order: Red=0, Yellow=1, Green=2.
 fn signal_severity(s: Signal) -> u8 {
     match s {
         Signal::Red => 0,
+        Signal::Unknown => 3,
         Signal::Yellow => 1,
         Signal::Green => 2,
     }
 }
 
 /// Compare current vs previous signal and return a trend arrow.
-/// Returns "↑" if improved, "↓" if degraded, "" if unchanged.
+/// Returns "↑" toward green, "↓" away from green, "" if unchanged.
+/// This is a configured preference, not a personal-progress assessment.
 fn trend_signal(current: Signal, previous: Signal) -> &'static str {
+    if current == Signal::Unknown || previous == Signal::Unknown {
+        return "";
+    }
     let curr = signal_severity(current);
     let prev = signal_severity(previous);
     if curr > prev {
@@ -60,7 +65,7 @@ fn weakest_indicator(score: &ScoreResult) -> Option<(String, String, f64)> {
     Some((
         dim.to_string(),
         weakest_ind.name.clone(),
-        weakest_ind.actual,
+        weakest_ind.observed_value()?,
     ))
 }
 
@@ -105,7 +110,7 @@ fn default_tips() -> Vec<Tip> {
         ),
         (
             "collaboration",
-            "Use pair mode instead of delegation for the next task",
+            "Consider whether delegation or pair mode fits the next task",
         ),
         (
             "collaboration",
@@ -155,7 +160,7 @@ fn default_tips() -> Vec<Tip> {
         ("breadth", "花 30 分钟读一个你没碰过的开源项目"),
         ("breadth", "尝试用不同语言解决今天的一个小问题"),
         ("breadth", "把今天的任务拆成探索和执行两个阶段"),
-        ("collaboration", "下一个任务用 pair 模式而不是委托"),
+        ("collaboration", "考虑下个任务适合委派还是结对模式"),
         ("collaboration", "让 AI 先描述问题再你写方案"),
         ("collaboration", "今天的第一个任务手写完再对比 AI 方案"),
         ("collaboration", "让 AI review 你的代码而不是帮你写"),
@@ -230,8 +235,10 @@ fn select_tip(tips: &[Tip], dimension: &str) -> String {
     t!("Stay curious", "保持好奇心").to_string()
 }
 
-pub fn handle_motd() -> Result<()> {
-    let scores = load_recent_scores(2)?;
+pub fn handle_motd(db_path: &std::path::Path) -> Result<()> {
+    let targets = crate::config::load().targets;
+    let scope = ScoreScope::canonical(db_path, &targets, Utc::now(), &Default::default())?;
+    let scores = load_recent_scores(2, &scope)?;
     if scores.is_empty() {
         println!(
             "🪞 {}",
@@ -314,7 +321,8 @@ pub fn handle_motd() -> Result<()> {
         .unwrap_or_default();
 
     println!(
-        "🪞 {d}{de}{dt} {b}{be}{bt} {c}{ce}{ct}{streak} | {tip}{advice_stale}{stale}",
+        "🪞 {experimental} {d}{de}{dt} {b}{be}{bt} {c}{ce}{ct}{streak} | {tip}{advice_stale}{stale}",
+        experimental = t!("Experimental", "实验性"),
         d = t!("Depth", "深度"),
         de = depth_e,
         dt = depth_t,
@@ -447,6 +455,7 @@ mod tests {
             }),
             tension: None,
             timestamp: Utc::now(),
+            scope: None,
         }
     }
 
@@ -513,19 +522,22 @@ mod tests {
             vec![
                 vec![Indicator {
                     name: "dreyfus".into(),
-                    actual: 4.0,
+                    actual: Some(4.0),
+                    coverage: None,
                     target: ">3.5".into(),
                     signal: Signal::Green,
                 }],
                 vec![Indicator {
                     name: "exploration".into(),
-                    actual: 5.0,
+                    actual: Some(5.0),
+                    coverage: None,
                     target: ">15%".into(),
                     signal: Signal::Red,
                 }],
                 vec![Indicator {
                     name: "delegation".into(),
-                    actual: 50.0,
+                    actual: Some(50.0),
+                    coverage: None,
                     target: "<40%".into(),
                     signal: Signal::Yellow,
                 }],

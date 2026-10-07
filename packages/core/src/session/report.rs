@@ -112,7 +112,7 @@ pub fn format_global_stats(stats: &GlobalStats) -> String {
 /// Visible cohort metadata shared by prompts and persisted reports.
 pub fn format_data_quality_stats(quality: &DataQualityStats) -> String {
     format!(
-        "状态: {} | 输入观测: {} | 已关联: {} ({:.1}%) | 脱链排除: {} | 模式排除: {} | 来源排除: {} | 合格 cohort: {} | 项目别名歧义: {} 条观测 / {} 个别名",
+        "状态: {} | 输入观测: {} | 已关联: {} ({:.1}%) | 脱链排除: {} | 模式排除: {} | 来源排除: {} | 待核对修订排除: {} | 合格 cohort: {} | 项目别名歧义: {} 条观测 / {} 个别名",
         quality.status_label(),
         quality.input_observations,
         quality.linked_observations,
@@ -120,6 +120,7 @@ pub fn format_data_quality_stats(quality: &DataQualityStats) -> String {
         quality.detached_observations,
         quality.mode_excluded_observations,
         quality.source_excluded_observations,
+        quality.curation_excluded_observations,
         quality.eligible_observations,
         quality.ambiguous_project_alias_observations,
         quality.ambiguous_project_aliases,
@@ -176,7 +177,7 @@ pub fn build_final_prompt_with_delta_and_budget(
     let stats_summary = format_global_stats(stats);
     let quality_summary = format_data_quality_stats(quality);
     let trend_guard = if quality.is_degraded() {
-        "数据质量为 DEGRADED。脱链或非 Session 来源观测已从全部统计和证据中排除；不得据此输出跨期趋势、增减或改善/退化结论。"
+        "数据质量为 DEGRADED。脱链、非 Session 来源或待核对人工修订已从全部统计和证据中排除；不得据此输出跨期趋势、增减或改善/退化结论。"
     } else {
         "当前输入是单一窗口聚合；只有各维度分析提供显式时序证据时，才可输出趋势结论。"
     };
@@ -330,6 +331,7 @@ mod tests {
             detached_observations: 1,
             mode_excluded_observations: 0,
             source_excluded_observations: 0,
+            curation_excluded_observations: 0,
             eligible_observations: 2,
             ambiguous_project_alias_observations: 0,
             ambiguous_project_aliases: 0,

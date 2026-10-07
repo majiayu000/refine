@@ -1,5 +1,6 @@
 import type { QuickSaveTarget } from './quick-save-engine'
 import { delay, normalizeText } from './runtime'
+import { assertCurrentCapture, contentFingerprint, type CaptureValidation } from './capture-context'
 
 export interface ConversationTurnSelector {
   role: 'Human' | 'Assistant'
@@ -86,6 +87,7 @@ export async function waitForConversationExtraction(
     timeoutMs?: number
     intervalMs?: number
     stableForMs?: number
+    validation?: CaptureValidation
   }
 ): Promise<string | null> {
   const timeoutMs = options?.timeoutMs ?? DEFAULT_POLL_TIMEOUT_MS
@@ -97,8 +99,10 @@ export async function waitForConversationExtraction(
   let stableSince = 0
 
   while (Date.now() - startedAt <= timeoutMs) {
+    assertCurrentCapture(options?.validation)
     const content = extractConversation()
-    if (content) {
+    const staleContent = options?.validation?.previousContentFingerprint === contentFingerprint(content)
+    if (content && !staleContent) {
       if (content.length > longestContent.length) {
         longestContent = content
       }
@@ -106,12 +110,21 @@ export async function waitForConversationExtraction(
         latestContent = content
         stableSince = Date.now()
       } else if (stableSince > 0 && Date.now() - stableSince >= stableForMs) {
+        assertCurrentCapture(options?.validation)
         return content
       }
+    } else {
+      latestContent = ''
+      longestContent = ''
+      stableSince = 0
     }
     await delay(intervalMs)
   }
 
+  assertCurrentCapture(options?.validation)
+  // A bound capture must confirm stable target content, not accept whichever
+  // conversation happened to produce the longest text before the deadline.
+  if (options?.validation) return null
   if (longestContent) return longestContent
   if (latestContent) return latestContent
   return null

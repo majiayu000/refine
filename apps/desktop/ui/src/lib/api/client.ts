@@ -2,6 +2,7 @@ import { createHttpAdapter } from './adapters/http'
 import { createTauriAdapter } from './adapters/tauri'
 import type {
   ApiCapabilities,
+  CommitResult,
   ConversationListResult,
   CreateExtractionJobParams,
   CreateExtractionJobResult,
@@ -25,6 +26,7 @@ export interface RefineApiClient {
   getAuthToken: () => string
   getAuthTokenError: () => string | null
   setAuthToken: (token: string) => void
+  getCommitContext: (project: string, reference: string) => Promise<CommitResult>
   getItems: (params?: ListItemsParams) => Promise<ItemListResult>
   getItem: (id: string) => Promise<Item | null>
   searchItems: (query: string, limit?: number) => Promise<SearchResult>

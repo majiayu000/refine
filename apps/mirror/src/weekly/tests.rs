@@ -52,6 +52,7 @@ fn make_score_result(signals: [Signal; 3]) -> ScoreResult {
         }),
         tension: None,
         timestamp: Utc::now(),
+        scope: None,
     }
 }
 
@@ -117,6 +118,7 @@ fn cluster_with_project_evidence() -> ClusterResult {
             detached_observations: 0,
             mode_excluded_observations: 0,
             source_excluded_observations: 0,
+            curation_excluded_observations: 0,
             eligible_observations: 1,
             ambiguous_project_alias_observations: 0,
             ambiguous_project_aliases: 0,
@@ -192,6 +194,7 @@ fn test_build_weekly_report_with_prior_data_shows_delta() {
         detached_observations: 0,
         mode_excluded_observations: 0,
         source_excluded_observations: 0,
+        curation_excluded_observations: 0,
         eligible_observations: 1,
         ambiguous_project_alias_observations: 0,
         ambiguous_project_aliases: 0,
@@ -218,7 +221,8 @@ fn test_build_weekly_report_with_indicators() {
                 signal: Signal::Green,
                 indicators: vec![Indicator {
                     name: "dreyfus".into(),
-                    actual: 4.2,
+                    actual: Some(4.2),
+                    coverage: None,
                     target: ">3.5".into(),
                     signal: Signal::Green,
                 }],
@@ -226,6 +230,7 @@ fn test_build_weekly_report_with_indicators() {
         }),
         tension: Some("test tension".into()),
         timestamp: Utc::now(),
+        scope: None,
     };
     let report = build_weekly_report(&score, None, &empty_cluster());
     assert!(
@@ -246,6 +251,7 @@ fn degraded_quality_suppresses_week_over_week_trend() {
         detached_observations: 1,
         mode_excluded_observations: 0,
         source_excluded_observations: 0,
+        curation_excluded_observations: 0,
         eligible_observations: 2,
         ambiguous_project_alias_observations: 0,
         ambiguous_project_aliases: 0,
@@ -278,19 +284,22 @@ fn test_build_weekly_report_includes_action_card_from_same_cluster() {
                 indicators: vec![
                     Indicator {
                         name: "exploration".into(),
-                        actual: 5.2,
+                        actual: Some(5.2),
+                        coverage: None,
                         target: ">15%".into(),
                         signal: Signal::Red,
                     },
                     Indicator {
                         name: "deep_invest".into(),
-                        actual: 19.0,
+                        actual: Some(19.0),
+                        coverage: None,
                         target: "15-30%".into(),
                         signal: Signal::Yellow,
                     },
                     Indicator {
                         name: "fragmentation".into(),
-                        actual: 26.0,
+                        actual: Some(26.0),
+                        coverage: None,
                         target: "<20%".into(),
                         signal: Signal::Red,
                     },
@@ -304,6 +313,7 @@ fn test_build_weekly_report_includes_action_card_from_same_cluster() {
         ],
         tension: None,
         timestamp: Utc::now(),
+        scope: None,
     };
 
     let report = build_weekly_report(&score, None, &cluster_with_project_evidence());
@@ -328,19 +338,22 @@ fn fragmented_other_only_cohort_keeps_weekly_report_without_action_card() {
                 indicators: vec![
                     Indicator {
                         name: "exploration".into(),
-                        actual: 20.0,
+                        actual: Some(20.0),
+                        coverage: None,
                         target: ">15%".into(),
                         signal: Signal::Green,
                     },
                     Indicator {
                         name: "deep_invest".into(),
-                        actual: 5.0,
+                        actual: Some(5.0),
+                        coverage: None,
                         target: "15-30%".into(),
                         signal: Signal::Red,
                     },
                     Indicator {
                         name: "fragmentation".into(),
-                        actual: 40.0,
+                        actual: Some(40.0),
+                        coverage: None,
                         target: "<20%".into(),
                         signal: Signal::Red,
                     },
@@ -354,6 +367,7 @@ fn fragmented_other_only_cohort_keeps_weekly_report_without_action_card() {
         ],
         tension: None,
         timestamp: Utc::now(),
+        scope: None,
     };
     let mut other = cluster_with_project_evidence();
     let mut project = other.projects.remove("codex-tool").unwrap();
@@ -365,7 +379,7 @@ fn fragmented_other_only_cohort_keeps_weekly_report_without_action_card() {
         .expect("synthetic-only cohort must not abort the weekly report");
 
     assert!(report.contains("This Week Signals"));
-    assert!(report.contains("One-off Project Share=40.0"));
+    assert!(report.contains("One-off Project Share=40%"));
     assert!(report.contains("Data quality:"));
     assert!(!report.contains("Weekly Action Card"));
 }

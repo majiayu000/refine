@@ -18,11 +18,12 @@ fn sanitize_single_line(s: &str) -> String {
 ///
 /// Format: "🪞🟡🔴🔴 🔥4天 <short_advice>"
 ///
-/// `short` is the short advice from the LLM advice cache (may be empty).
-pub fn build_statusline(
+/// `short` is the short advice from the local advice cache (may be empty).
+fn build_statusline(
     result: &ScoreResult,
     short: &str,
     trends: Option<&PersonalTrends>,
+    streak: u32,
 ) -> String {
     let depth_e = result.layers[0].signal.emoji();
     let breadth_e = result.layers[1].signal.emoji();
@@ -31,8 +32,6 @@ pub fn build_statusline(
         .and_then(PersonalTrends::overall)
         .map(|trend| trend.arrow())
         .unwrap_or("");
-
-    let streak = super::streak::current_streak();
 
     let mut parts = vec![format!("🪞{}{}{}{}", depth_e, breadth_e, collab_e, arrow)];
     if streak >= 2 {
@@ -47,17 +46,17 @@ pub fn build_statusline(
 
 /// Write the one-line statusline to `~/.mirror/statusline.txt`.
 ///
-/// Called after `mirror score` completes so that `cat ~/.mirror/statusline.txt`
-/// returns the status in O(1) without spawning python3.
+/// Called by the canonical score/dashboard publisher so that
+/// `cat ~/.mirror/statusline.txt` returns the status in O(1).
 ///
 /// Uses an atomic write (temp file + rename) to prevent concurrent readers from
 /// observing a partially-written file.
-pub fn write_statusline(
+pub(super) fn write_statusline(
     result: &ScoreResult,
-    _db_path: &Path,
+    directory: &Path,
     trends: Option<&PersonalTrends>,
 ) -> Result<()> {
-    let short = match crate::advice::load_cached_for_score(result) {
+    let short = match crate::advice::load_cached_for_score_in(directory, result) {
         Ok(Some(cached)) if cached.is_stale() => {
             crate::lang::t!("⚠️ advice stale", "⚠️ 建议已过期").to_string()
         }
@@ -71,14 +70,18 @@ pub fn write_statusline(
         }
     };
 
-    let line = build_statusline(result, &short, trends);
-    let dir = crate::config::ensure_mirror_dir()?;
+    let activity =
+        super::persistence::load_score_activity_from_path(&directory.join("scores.jsonl"), 365)
+            .unwrap_or_default();
+    let streak = super::streak::calculate_streak(&activity, chrono::Utc::now().date_naive());
+    let line = build_statusline(result, &short, trends, streak);
+    let dir = directory;
     let dest = dir.join("statusline.txt");
 
     // Atomic write: write to a PID-unique sibling temp file then rename.
     // Using std::process::id() in the name prevents two concurrent `mirror score`
-    // invocations from clobbering each other's temp file.  The last rename wins
-    // deterministically because rename(2) on POSIX is atomic.
+    // invocations from clobbering each other's temp file. The publication lock
+    // orders writers, while the rename keeps readers from seeing partial lines.
     let tmp = dir.join(format!("statusline.txt.{}.tmp", std::process::id()));
     std::fs::write(&tmp, &line)
         .map_err(|e| anyhow::anyhow!("failed to write {}: {}", tmp.display(), e))?;
@@ -114,20 +117,22 @@ mod tests {
                 signal: signals[i],
                 indicators: vec![Indicator {
                     name: "test".into(),
-                    actual: 1.0,
+                    actual: Some(1.0),
+                    coverage: None,
                     target: ">0".into(),
                     signal: signals[i],
                 }],
             }),
             tension: None,
             timestamp: Utc::now(),
+            scope: None,
         }
     }
 
     #[test]
     fn build_statusline_compact_format() {
         let result = make_result([Signal::Green, Signal::Red, Signal::Yellow]);
-        let line = build_statusline(&result, "some advice", None);
+        let line = build_statusline(&result, "some advice", None, 0);
         assert!(line.starts_with("🪞"), "should start with mirror emoji");
         assert!(line.contains("🟢"), "depth signal missing");
         assert!(line.contains("🔴"), "breadth signal missing");
@@ -138,7 +143,7 @@ mod tests {
     #[test]
     fn build_statusline_no_advice_no_trailing_space() {
         let result = make_result([Signal::Green, Signal::Green, Signal::Green]);
-        let line = build_statusline(&result, "", None);
+        let line = build_statusline(&result, "", None, 0);
         assert!(!line.ends_with(' '), "should not have trailing space");
         assert!(line.starts_with("🪞🟢🟢🟢"));
     }
@@ -146,7 +151,7 @@ mod tests {
     #[test]
     fn build_statusline_ends_with_advice() {
         let result = make_result([Signal::Red, Signal::Red, Signal::Red]);
-        let line = build_statusline(&result, "tip", None);
+        let line = build_statusline(&result, "tip", None, 0);
         assert!(line.ends_with("tip"), "advice should be last: {}", line);
         assert!(line.starts_with("🪞🔴🔴🔴"));
     }
@@ -163,7 +168,7 @@ mod tests {
         ];
         for (layer, (name, actual)) in result.layers.iter_mut().zip(indicators) {
             layer.indicators[0].name = name.into();
-            layer.indicators[0].actual = actual;
+            layer.indicators[0].actual = Some(actual);
         }
         let baseline = PersonalBaseline::from_averages(&[
             ("dreyfus", 3.0),
@@ -171,7 +176,7 @@ mod tests {
             ("bug_decision", 0.6),
         ]);
         let trends = compute_personal_trends(&result, &baseline);
-        let line = build_statusline(&result, "", Some(&trends));
+        let line = build_statusline(&result, "", Some(&trends), 0);
 
         assert!(line.starts_with("🪞🟢🟡🔴↑"));
         assert_eq!(line.chars().filter(|c| "↑→↓".contains(*c)).count(), 1);
@@ -182,7 +187,7 @@ mod tests {
     fn write_statusline_creates_file() -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         let result = make_result([Signal::Green, Signal::Red, Signal::Yellow]);
-        let line = build_statusline(&result, "test-advice", None);
+        let line = build_statusline(&result, "test-advice", None, 0);
         let path = dir.path().join("statusline.txt");
         std::fs::write(&path, &line)?;
         let content = std::fs::read_to_string(&path)?;

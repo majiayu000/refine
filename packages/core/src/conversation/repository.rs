@@ -32,6 +32,18 @@ pub trait ConversationRepository: Send + Sync {
         record: &ConversationRecord,
         job: &ExtractionJobRecord,
     ) -> InfraResult<(ConversationRecord, Option<ExtractionJobRecord>)>;
+    /// In one transaction, replays an existing idempotency key or admits a new
+    /// capture only while the global persisted item count is below `item_limit`.
+    /// An optional initial job uses the same recovery behavior as the job API.
+    /// Existing keys bypass admission quota only after their immutable owner
+    /// and payload match. Timestamps and lifecycle state are not key identity.
+    /// Replays never modify the persisted payload or reserve future Item output.
+    async fn insert_or_fetch_conversation_with_quota(
+        &self,
+        record: &ConversationRecord,
+        job: Option<&ExtractionJobRecord>,
+        item_limit: Option<usize>,
+    ) -> InfraResult<(ConversationRecord, Option<ExtractionJobRecord>)>;
 }
 
 #[async_trait]
@@ -72,8 +84,9 @@ pub trait JobRepository: Send + Sync {
         error: Option<&str>,
         now: &str,
     ) -> InfraResult<bool>;
-    /// Atomically verifies the active lease, replaces the extracted document
-    /// items, and marks both job and conversation successful.
+    /// Atomically verifies the active lease and publishes only if no later
+    /// accepted capture has already published for the URL. A superseded job
+    /// succeeds without replacing content, and exposes the newer receipt ID.
     async fn finish_job_claim_with_results(
         &self,
         id: &str,
@@ -81,7 +94,7 @@ pub trait JobRepository: Send + Sync {
         document: &Document,
         items: &[Item],
         now: &str,
-    ) -> InfraResult<bool>;
+    ) -> InfraResult<super::record::JobPublicationOutcome>;
 }
 
 #[async_trait]

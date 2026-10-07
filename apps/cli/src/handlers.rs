@@ -39,12 +39,11 @@ pub async fn run(
             latest,
             dry_run,
             retry_quarantined,
+            reprocess,
         } => {
-            let llm_client = if dry_run {
-                None
-            } else {
-                refine_core::infra::build_llm_client_from_env()
-            };
+            // Constructing a client makes its recipe identity available to a
+            // preview; the dry-run path never executes a provider request.
+            let llm_client = refine_core::infra::build_llm_client_from_env();
             let doc_store: Arc<dyn DocumentRepository> = store.clone();
             handle_ingest_sessions(
                 IngestOptions {
@@ -54,6 +53,7 @@ pub async fn run(
                     latest,
                     dry_run,
                     retry_quarantined,
+                    reprocess,
                     backfill_session_metadata: false,
                 },
                 db_path,
@@ -61,6 +61,13 @@ pub async fn run(
                 llm_client,
             )
             .await
+        }
+        Commands::ProjectionHistory { document_id, limit } => {
+            let history = store
+                .find_session_projection_history(&DocumentId::from(document_id.as_str()), limit)
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&history)?);
+            Ok(())
         }
         Commands::Insights {
             period,
@@ -263,7 +270,7 @@ async fn handle_docs(limit: usize, store: Arc<SqliteStore>) -> Result<()> {
             let title = doc.title().unwrap_or("(无标题)");
             println!(
                 "  {} | {} | {} | {}",
-                doc.id().as_str().chars().take(8).collect::<String>(),
+                doc.id().as_str(),
                 title,
                 doc.source(),
                 doc.created_at().format("%Y-%m-%d %H:%M"),
@@ -327,12 +334,7 @@ async fn handle_doc_search(query: &str, limit: usize, store: Arc<SqliteStore>) -
         println!("找到 {} 篇匹配文档:\n", total);
         for doc in &docs {
             let title = doc.title().unwrap_or("(无标题)");
-            println!(
-                "  {} | {} | {}",
-                doc.id().as_str().chars().take(8).collect::<String>(),
-                title,
-                doc.source(),
-            );
+            println!("  {} | {} | {}", doc.id().as_str(), title, doc.source(),);
         }
     }
 

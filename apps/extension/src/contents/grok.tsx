@@ -6,6 +6,7 @@
 
 import type { PlasmoCSConfig } from 'plasmo'
 import { initQuickSaveEngine } from '../lib/content/quick-save-engine'
+import { assertCurrentCapture, type CaptureValidation } from '../lib/content/capture-context'
 import {
   createStandardQuickSaveResolvers,
   DEFAULT_CONVERSATION_QUERY_PARAM_KEYS,
@@ -126,6 +127,9 @@ function extractConversationByKnownSelectors(): string {
 }
 
 function inferBubbleRole(bubble: Element, index: number): 'Human' | 'Assistant' {
+  const knownRole = GROK_TURN_SELECTORS.find(({ selector }) => bubble.matches(selector))?.role
+  if (knownRole) return knownRole
+
   const text = [
     bubble.getAttribute('data-role') || '',
     bubble.getAttribute('data-author') || '',
@@ -216,7 +220,8 @@ function findConversationScrollContainer(): HTMLElement | null {
   return scrollingEl instanceof HTMLElement ? scrollingEl : null
 }
 
-async function loadConversationHistoryForCurrentUrl(): Promise<void> {
+async function loadConversationHistoryForCurrentUrl(validation?: CaptureValidation): Promise<void> {
+  assertCurrentCapture(validation)
   const scroller = findConversationScrollContainer()
   if (!scroller) return
 
@@ -224,6 +229,7 @@ async function loadConversationHistoryForCurrentUrl(): Promise<void> {
   let lastSignature = ''
 
   for (let round = 0; round < HISTORY_SCROLL_MAX_ROUNDS; round += 1) {
+    assertCurrentCapture(validation)
     if (scroller === document.scrollingElement) {
       window.scrollTo(0, 0)
     } else {
@@ -231,6 +237,7 @@ async function loadConversationHistoryForCurrentUrl(): Promise<void> {
     }
 
     await delay(HISTORY_SCROLL_INTERVAL_MS)
+    assertCurrentCapture(validation)
 
     const turns = countRenderedTurns()
     const signature = `${turns}:${scroller.scrollHeight}:${scroller.scrollTop}`
@@ -253,11 +260,12 @@ function extractConversation(): string {
   return pickRicherContent(fromKnownSelectors, fromFallback)
 }
 
-async function waitForConversationContent(timeoutMs = MESSAGE_POLL_TIMEOUT_MS): Promise<string | null> {
-  await loadConversationHistoryForCurrentUrl()
+async function waitForConversationContent(validation?: CaptureValidation): Promise<string | null> {
+  await loadConversationHistoryForCurrentUrl(validation)
   return waitForConversationExtraction(extractConversation, {
-    timeoutMs,
+    timeoutMs: MESSAGE_POLL_TIMEOUT_MS,
     stableForMs: 1_800,
+    validation,
   })
 }
 

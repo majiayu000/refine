@@ -9,6 +9,7 @@
 use crate::error::{InfraError, InfraResult};
 use rusqlite::Connection;
 
+mod capture_publication;
 mod contract;
 mod db_migration;
 mod document_fk_migration;
@@ -21,14 +22,17 @@ mod observation_integrity;
 mod paths;
 pub mod quota_state;
 mod sqlite;
+#[cfg(test)]
+mod startup_tests;
+mod substring_index;
 
 const FTS_BOOTSTRAP_USER_VERSION: i64 = 1;
-const ALLOWED_COLUMN_EXISTS_TABLES: &[&str] = &["items", "documents", "extraction_jobs"];
+const ALLOWED_COLUMN_EXISTS_TABLES: &[&str] =
+    &["items", "documents", "extraction_jobs", "conversations"];
 const ALLOWED_FOREIGN_KEY_TABLES: &[&str] = &["extraction_jobs"];
 
 pub fn prepare_sqlite_db(conn: &Connection) -> InfraResult<()> {
-    let tx = conn
-        .unchecked_transaction()
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     tx.execute_batch(include_str!("schema.sql"))
@@ -40,10 +44,21 @@ pub fn prepare_sqlite_db(conn: &Connection) -> InfraResult<()> {
     observation_integrity::ensure_triggers(&tx)?;
     migrate_extraction_jobs_add_lease_columns(&tx)?;
     migrate_extraction_jobs_conversation_fk(&tx)?;
+    migrate_capture_publications(&tx)?;
+    capture_publication::prepare(&tx)?;
     maybe_rebuild_fts_index(&tx)?;
+    substring_index::prepare(&tx)?;
     tx.commit()
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
+    Ok(())
+}
+
+fn migrate_capture_publications(conn: &Connection) -> InfraResult<()> {
+    if !column_exists(conn, "conversations", "superseded_by")? {
+        conn.execute_batch("ALTER TABLE conversations ADD COLUMN superseded_by TEXT")
+            .map_err(|e| InfraError::Database(e.to_string()))?;
+    }
     Ok(())
 }
 

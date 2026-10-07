@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import type { RefineApiClient } from '../client'
 import type {
   ApiCapabilities,
+  CommitResult,
   ConversationListResult,
   CreateExtractionJobParams,
   CreateExtractionJobResult,
@@ -71,6 +72,7 @@ function cloneCapabilities(): ApiCapabilities {
 
 export function createTauriAdapter(): RefineApiClient {
   return {
+    getCommitContext: (project, reference): Promise<CommitResult> => invoke('get_commit_context', { project, reference }),
     capabilities,
     getCapabilities: cloneCapabilities,
     getAuthToken: () => '',

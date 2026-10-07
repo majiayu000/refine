@@ -17,11 +17,26 @@ pub(super) fn find_conversation_by_id(
     conn.query_row(
         r#"
         SELECT id, user_id, source, url, title, raw_content, metadata_json,
-               captured_at, created_at, status, idempotency_key, item_ids, last_error
+               captured_at, created_at, status, idempotency_key, item_ids, last_error, superseded_by
         FROM conversations
         WHERE id = ?1
         "#,
         [id],
+        row_to_conversation,
+    )
+    .optional()
+    .map_err(|e| InfraError::Database(e.to_string()))
+}
+
+pub(super) fn find_conversation_by_idempotency(
+    conn: &Connection,
+    idempotency_key: &str,
+) -> InfraResult<Option<ConversationRecord>> {
+    conn.query_row(
+        "SELECT id, user_id, source, url, title, raw_content, metadata_json,
+                captured_at, created_at, status, idempotency_key, item_ids, last_error, superseded_by
+         FROM conversations WHERE idempotency_key = ?1",
+        [idempotency_key],
         row_to_conversation,
     )
     .optional()
@@ -44,7 +59,7 @@ pub(super) fn list_conversations(
             .prepare(
                 r#"
                 SELECT id, user_id, source, url, title, raw_content, metadata_json,
-                       captured_at, created_at, status, idempotency_key, item_ids, last_error
+                       captured_at, created_at, status, idempotency_key, item_ids, last_error, superseded_by
                 FROM conversations
                 WHERE status = ?1
                 ORDER BY captured_at DESC
@@ -65,7 +80,7 @@ pub(super) fn list_conversations(
         .prepare(
             r#"
             SELECT id, user_id, source, url, title, raw_content, metadata_json,
-                   captured_at, created_at, status, idempotency_key, item_ids, last_error
+                   captured_at, created_at, status, idempotency_key, item_ids, last_error, superseded_by
             FROM conversations
             ORDER BY captured_at DESC
             LIMIT ?1 OFFSET ?2
@@ -202,7 +217,7 @@ pub(super) fn insert_or_fetch_conversation_by_idempotency(
           (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
         ON CONFLICT(idempotency_key) DO UPDATE SET id=id
         RETURNING id, user_id, source, url, title, raw_content, metadata_json,
-                  captured_at, created_at, status, idempotency_key, item_ids, last_error
+                  captured_at, created_at, status, idempotency_key, item_ids, last_error, superseded_by
         "#,
         params![
             record.id,
@@ -224,21 +239,80 @@ pub(super) fn insert_or_fetch_conversation_by_idempotency(
     .map_err(|e| InfraError::Database(e.to_string()))
 }
 
+pub(super) fn insert_or_fetch_conversation_with_quota(
+    conn: &Connection,
+    record: &ConversationRecord,
+    job: Option<&ExtractionJobRecord>,
+    item_limit: Option<usize>,
+) -> InfraResult<(ConversationRecord, Option<ExtractionJobRecord>)> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    let existing = find_conversation_by_idempotency(&tx, &record.idempotency_key)?;
+    let persisted = if let Some(existing) = existing {
+        // Timestamps and lifecycle state are not request identity: an omitted
+        // capture timestamp receives a fresh default when a client retries.
+        if existing.user_id != record.user_id
+            || existing.source != record.source
+            || existing.url != record.url
+            || existing.title != record.title
+            || existing.raw_content != record.raw_content
+            || existing.metadata != record.metadata
+        {
+            return Err(InfraError::IdempotencyConflict);
+        }
+        existing
+    } else {
+        if let Some(limit) = item_limit {
+            let used = super::ops::count_items(&tx, None)?;
+            if used >= limit {
+                return Err(InfraError::CaptureQuotaExceeded { used, limit });
+            }
+        }
+        insert_or_fetch_conversation_by_idempotency(&tx, record)?
+    };
+    let result = if let Some(job) = job {
+        if persisted.status == ConversationStatus::Processed {
+            let terminal_job = tx
+                .query_row(
+                    "SELECT id, conversation_id, mode, status, created_at, updated_at, error,
+                            attempt_count, lease_owner, lease_expires_at
+                     FROM extraction_jobs WHERE conversation_id = ?1
+                     ORDER BY created_at DESC, id DESC LIMIT 1",
+                    [persisted.id.as_str()],
+                    row_to_job,
+                )
+                .optional()
+                .map_err(|e| InfraError::Database(e.to_string()))?;
+            (persisted, terminal_job)
+        } else {
+            ensure_conversation_job(&tx, persisted, job)?
+        }
+    } else {
+        (persisted, None)
+    };
+    tx.commit()
+        .map_err(|e| InfraError::Database(e.to_string()))?;
+    Ok(result)
+}
+
 pub(super) fn insert_or_fetch_conversation_with_job(
     conn: &Connection,
     record: &ConversationRecord,
     job: &ExtractionJobRecord,
 ) -> InfraResult<(ConversationRecord, Option<ExtractionJobRecord>)> {
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
-        .map_err(|e| InfraError::Database(e.to_string()))?;
-    let mut persisted = insert_or_fetch_conversation_by_idempotency(&tx, record)?;
+    insert_or_fetch_conversation_with_quota(conn, record, Some(job), None)
+}
+
+fn ensure_conversation_job(
+    conn: &Connection,
+    mut persisted: ConversationRecord,
+    job: &ExtractionJobRecord,
+) -> InfraResult<(ConversationRecord, Option<ExtractionJobRecord>)> {
     if persisted.status == ConversationStatus::Processed {
-        tx.commit()
-            .map_err(|e| InfraError::Database(e.to_string()))?;
         return Ok((persisted, None));
     }
 
-    let existing = tx
+    let existing = conn
         .query_row(
             r#"
             SELECT id, conversation_id, mode, status, created_at, updated_at, error,
@@ -259,7 +333,7 @@ pub(super) fn insert_or_fetch_conversation_with_job(
         None => {
             let mut initial_job = job.clone();
             initial_job.conversation_id = persisted.id.clone();
-            upsert_job(&tx, &initial_job)?;
+            upsert_job(conn, &initial_job)?;
             Some(initial_job)
         }
     };
@@ -267,7 +341,7 @@ pub(super) fn insert_or_fetch_conversation_with_job(
         persisted.status,
         ConversationStatus::Captured | ConversationStatus::Failed
     ) {
-        tx.execute(
+        conn.execute(
             "UPDATE conversations SET status = 'queued', last_error = NULL WHERE id = ?1",
             [persisted.id.as_str()],
         )
@@ -275,8 +349,6 @@ pub(super) fn insert_or_fetch_conversation_with_job(
         persisted.status = ConversationStatus::Queued;
         persisted.last_error = None;
     }
-    tx.commit()
-        .map_err(|e| InfraError::Database(e.to_string()))?;
     Ok((persisted, persisted_job))
 }
 
@@ -527,7 +599,11 @@ pub(super) fn claim_job(
             UPDATE extraction_jobs
             SET status = 'running', updated_at = ?3, error = NULL,
                 attempt_count = attempt_count + 1,
-                lease_owner = ?2, lease_expires_at = ?4
+                lease_owner = ?2, lease_expires_at = ?4,
+                source_revision = COALESCE((
+                    SELECT revision FROM capture_revisions
+                    WHERE conversation_id = extraction_jobs.conversation_id
+                ), 0)
             WHERE id = ?1 AND EXISTS (
                 SELECT 1 FROM conversations
                 WHERE conversations.id = extraction_jobs.conversation_id
@@ -797,6 +873,7 @@ fn row_to_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation
         idempotency_key: row.get(10)?,
         item_ids,
         last_error: row.get(12)?,
+        superseded_by: row.get(13)?,
     })
 }
 
@@ -892,6 +969,9 @@ fn job_status_from_db(raw: &str) -> Result<JobStatus, String> {
 }
 
 #[cfg(test)]
+mod quota_tests;
+
+#[cfg(test)]
 mod tests {
     use crate::conversation::{
         now_iso, ConversationRecord, ConversationRepository, ConversationStatus, EventRecord,
@@ -942,6 +1022,7 @@ mod tests {
             idempotency_key: idempotency_key.to_string(),
             item_ids: vec![],
             last_error: None,
+            superseded_by: None,
         }
     }
 
@@ -1231,7 +1312,7 @@ mod tests {
             .await
             .expect("replay processed conversation");
         assert_eq!(persisted.status, ConversationStatus::Processed);
-        assert!(replayed_job.is_none());
+        assert_eq!(replayed_job.expect("original terminal job").id, claimed.id);
         cleanup(&path);
     }
 

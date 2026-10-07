@@ -147,6 +147,7 @@ pub fn parse_session_content(
                 _ => continue,
             };
             messages.push(SessionMessage {
+                provenance: None,
                 role,
                 content: message.text,
             });

@@ -15,7 +15,7 @@ use crate::cognitive_portrait_data::projection::hashing::{
 };
 
 pub(crate) const MANIFEST_VERSION: u32 = 2;
-pub(crate) const COHORT_CONTRACT_IDENTITY: &str = "source-aware-linked-interactive-v2";
+pub(crate) const COHORT_CONTRACT_IDENTITY: &str = "source-aware-linked-interactive-v3-reviewed";
 pub(crate) const MAX_UNSUPPORTED_SOURCE_ENTRIES: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +62,8 @@ pub(crate) struct WindowManifest {
     pub detached_observations: usize,
     pub mode_excluded_observations: usize,
     pub source_excluded_observations: usize,
+    #[serde(default)]
+    pub curation_excluded_observations: usize,
     pub eligible_observations: usize,
     #[serde(default)]
     pub ambiguous_project_alias_observations: usize,
@@ -180,6 +182,7 @@ pub(crate) fn build_window_manifest_from_refs(
         detached_observations: quality.detached_observations,
         mode_excluded_observations: quality.mode_excluded_observations,
         source_excluded_observations: quality.source_excluded_observations,
+        curation_excluded_observations: quality.curation_excluded_observations,
         eligible_observations: quality.eligible_observations,
         ambiguous_project_alias_observations: quality.ambiguous_project_alias_observations,
         ambiguous_project_aliases: quality.ambiguous_project_aliases,
@@ -481,13 +484,15 @@ pub(crate) fn build_delta_summary(
     };
     if current.status != "OK" || previous.status != "OK" {
         return format!(
-            "新增/消失/反转: 已抑制；两个窗口中至少一个为 DEGRADED，禁止跨期趋势。\n证据缺口: current={} previous={}；current detached={} previous detached={}；current source-excluded={} previous source-excluded={}；platform unknown sessions current={} previous={}",
+            "新增/消失/反转: 已抑制；两个窗口中至少一个为 DEGRADED，禁止跨期趋势。\n证据缺口: current={} previous={}；current detached={} previous detached={}；current source-excluded={} previous source-excluded={}；current curation-excluded={} previous curation-excluded={}；platform unknown sessions current={} previous={}",
             current.status,
             previous.status,
             current.detached_observations,
             previous.detached_observations,
             current.source_excluded_observations,
             previous.source_excluded_observations,
+            current.curation_excluded_observations,
+            previous.curation_excluded_observations,
             current.platform_unknown_sessions,
             previous.platform_unknown_sessions,
         );
@@ -585,6 +590,7 @@ mod tests {
             detached_observations: usize::from(status == "DEGRADED"),
             mode_excluded_observations: 0,
             source_excluded_observations: 0,
+            curation_excluded_observations: 0,
             eligible_observations: 1,
             ambiguous_project_alias_observations: 0,
             ambiguous_project_aliases: 0,

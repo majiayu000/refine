@@ -1,4 +1,6 @@
-use super::clustering::{cluster_observations_with_resolver, ClusterResult, DataQualityStats};
+use super::clustering::{
+    cluster_observations_with_resolver, is_pending_curation, ClusterResult, DataQualityStats,
+};
 use super::project_identity::{ProjectIdentityResolver, ProjectResolution};
 use crate::knowledge::{Item, ItemType};
 use sha2::{Digest, Sha256};
@@ -11,7 +13,8 @@ pub const SUPPORTED_SESSION_DOCUMENT_SOURCES: &[&str] = &[
     "remem-raw-session",
 ];
 
-/// A clustering result plus the exact source-validated input used to build it.
+/// A clustering result plus source-validated evidence with pending human
+/// corrections removed. Exclusion counts retain the complete input contract.
 #[derive(Debug)]
 pub struct SessionCohortCluster {
     pub cluster: ClusterResult,
@@ -76,7 +79,7 @@ pub fn cluster_session_observation_windows(
 }
 
 fn build_session_cohort(
-    cohort_items: Vec<Item>,
+    mut cohort_items: Vec<Item>,
     excluded_observations: usize,
     resolver: &ProjectIdentityResolver,
 ) -> SessionCohortCluster {
@@ -89,8 +92,12 @@ fn build_session_cohort(
         cluster.data_quality.detached_observations
             + cluster.data_quality.mode_excluded_observations
             + cluster.data_quality.source_excluded_observations
+            + cluster.data_quality.curation_excluded_observations
             + cluster.data_quality.eligible_observations
     );
+    // Consumers may inspect source-valid rows separately from cluster counters.
+    // Keep pending edits out of that evidence too, after recording their bucket.
+    cohort_items.retain(|item| !is_pending_curation(item));
     SessionCohortCluster {
         cluster,
         cohort_items,
@@ -186,6 +193,7 @@ fn prepare_portrait_cohort<'a>(
     let excluded_document_ids: HashSet<&str> = items
         .iter()
         .filter(|item| item.item_type() == ItemType::Observation)
+        .filter(|item| !is_pending_curation(item))
         .filter(|item| {
             item.document_id().is_some_and(|document_id| {
                 document_sources
@@ -203,6 +211,7 @@ fn prepare_portrait_cohort<'a>(
     let mode_excluded_observations = items
         .iter()
         .filter(|item| item.item_type() == ItemType::Observation)
+        .filter(|item| !is_pending_curation(item))
         .filter_map(|item| item.document_id())
         .filter(|document_id| {
             document_sources
@@ -211,9 +220,21 @@ fn prepare_portrait_cohort<'a>(
                 && excluded_document_ids.contains(document_id.as_str())
         })
         .count();
+    let curation_excluded_observations = items
+        .iter()
+        .filter(|item| item.item_type() == ItemType::Observation && is_pending_curation(item))
+        .filter(|item| {
+            item.document_id().is_some_and(|id| {
+                document_sources
+                    .get(id.as_str())
+                    .is_some_and(|source| is_supported_session_document_source(source))
+            })
+        })
+        .count();
     let eligible_items: Vec<&Item> = items
         .iter()
         .filter(|item| item.item_type() == ItemType::Observation)
+        .filter(|item| !is_pending_curation(item))
         .filter(|item| {
             item.document_id().is_some_and(|document_id| {
                 document_sources
@@ -240,11 +261,20 @@ fn prepare_portrait_cohort<'a>(
         detached_observations,
         mode_excluded_observations,
         source_excluded_observations,
+        curation_excluded_observations,
         eligible_observations: eligible_items.len(),
         ambiguous_project_alias_observations: 0,
         ambiguous_project_aliases: 0,
         cohort_identity: format!("sha256:{:x}", cohort_hasher.finalize()),
     };
+    debug_assert_eq!(
+        data_quality.input_observations,
+        data_quality.detached_observations
+            + data_quality.source_excluded_observations
+            + data_quality.curation_excluded_observations
+            + data_quality.mode_excluded_observations
+            + data_quality.eligible_observations
+    );
 
     PreparedPortraitCohort {
         eligible_items,
@@ -405,6 +435,72 @@ mod tests {
         assert_eq!(result.cluster.data_quality.source_excluded_observations, 2);
         assert!(result.cluster.data_quality.is_degraded());
         assert_eq!(result.cohort_items.len(), 3);
+    }
+
+    #[test]
+    fn pending_curation_has_one_terminal_bucket_and_cannot_exclude_a_current_session() {
+        let active = linked_observation("active");
+        let mut pending = linked_observation("pending");
+        pending.set_document_id(DocumentId::from("active"));
+        pending
+            .set_tags(vec![
+                Tag::new("curation_needs_review").unwrap(),
+                Tag::new("session_mode_unattended").unwrap(),
+            ])
+            .unwrap();
+        let mut detached = Item::new_observation("detached", "pending unlinked correction");
+        detached
+            .set_tags(vec![Tag::new("curation_needs_review").unwrap()])
+            .unwrap();
+        let mut unsupported = linked_observation("unsupported");
+        unsupported
+            .set_tags(vec![Tag::new("curation_needs_review").unwrap()])
+            .unwrap();
+        let mut unattended = linked_observation("unattended");
+        unattended
+            .set_tags(vec![Tag::new("session_mode_unattended").unwrap()])
+            .unwrap();
+        let mut pending_in_unattended = linked_observation("pending-unattended");
+        pending_in_unattended.set_document_id(DocumentId::from("unattended"));
+        pending_in_unattended
+            .set_tags(vec![Tag::new("curation_needs_review").unwrap()])
+            .unwrap();
+        let items = vec![
+            active,
+            pending,
+            detached,
+            unsupported,
+            unattended,
+            pending_in_unattended,
+        ];
+        let sources = HashMap::from([
+            ("active".into(), "codex-session".into()),
+            ("unattended".into(), "codex-session".into()),
+            ("unsupported".into(), "grok-knowledge".into()),
+        ]);
+        let full = cluster_session_observations(&items, &sources);
+        let portrait = portrait_session_observations(&items, &sources);
+        assert_eq!(full.cluster.data_quality, portrait.data_quality);
+        let quality = &full.cluster.data_quality;
+        assert_eq!(quality.input_observations, 6);
+        assert_eq!(quality.detached_observations, 1);
+        assert_eq!(quality.source_excluded_observations, 1);
+        assert_eq!(quality.curation_excluded_observations, 2);
+        assert_eq!(quality.mode_excluded_observations, 1);
+        assert_eq!(quality.eligible_observations, 1);
+        assert_eq!(full.cluster.global_stats.total_sessions, 1);
+        assert_eq!(
+            portrait.eligible_items[0].document_id().unwrap().as_str(),
+            "active"
+        );
+
+        let mut legacy_quality = serde_json::to_value(DataQualityStats::default()).unwrap();
+        legacy_quality
+            .as_object_mut()
+            .unwrap()
+            .remove("curation_excluded_observations");
+        let restored: DataQualityStats = serde_json::from_value(legacy_quality).unwrap();
+        assert_eq!(restored.curation_excluded_observations, 0);
     }
 
     #[test]

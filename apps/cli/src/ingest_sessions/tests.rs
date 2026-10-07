@@ -110,6 +110,7 @@ async fn source_filter_requires_explicit_local_provider() {
             latest: None,
             dry_run: true,
             retry_quarantined: false,
+            reprocess: None,
             backfill_session_metadata: false,
         },
         Path::new("/tmp/refine-test.db"),
@@ -134,6 +135,7 @@ async fn metadata_backfill_requires_local_codex_source() {
             latest: None,
             dry_run: true,
             retry_quarantined: false,
+            reprocess: None,
             backfill_session_metadata: true,
         },
         Path::new("/tmp/refine-test.db"),
@@ -220,6 +222,8 @@ async fn parser_to_sqlite_portrait_preserves_case_sensitive_cwd_collisions() {
             mode: session.meta.mode,
             captured_at,
             has_embedded_timestamp: false,
+            facet_content: None,
+            source_messages: Vec::new(),
             raw_content: session.to_document_content(),
             source_version: None,
             needs_chunk: false,
@@ -311,6 +315,48 @@ async fn facet_parse_error_retries_then_succeeds() {
     assert_eq!(client.calls(), 2);
 }
 
+#[tokio::test]
+async fn facet_array_limit_error_uses_bounded_parse_regeneration() {
+    let oversized = serde_json::json!({
+        "session_summary": "Oversized",
+        "cognitive_level": "unknown",
+        "collaboration_mode": "unknown",
+        "decisions": ["one", "two", "three", "four", "five", "six"]
+    })
+    .to_string();
+    let valid = serde_json::json!({
+        "session_summary": "Regenerated",
+        "cognitive_level": "unknown",
+        "collaboration_mode": "unknown",
+        "decisions": ["one", "two"]
+    })
+    .to_string();
+
+    for (responses, expected_success) in [
+        (vec![oversized.clone(), valid], true),
+        (vec![oversized.clone(), oversized], false),
+    ] {
+        let client = Arc::new(SequenceLlmClient::new(responses));
+        let quota_hit = Arc::new(AtomicBool::new(false));
+        let result = extract_and_parse_facets_with_retry_policy(
+            "Synthetic content",
+            &(client.clone() as Arc<dyn LlmClient>),
+            &quota_hit,
+            2,
+            0,
+        )
+        .await;
+        assert_eq!(client.calls(), 2);
+        assert_eq!(result.is_ok(), expected_success);
+        if let Ok(facets) = result {
+            assert_eq!(facets.session_summary, "Regenerated");
+            assert_eq!(facets.decisions, ["one", "two"]);
+        } else {
+            assert!(result.unwrap_err().to_string().contains("decisions"));
+        }
+    }
+}
+
 #[test]
 fn session_refresh_uses_source_content_instead_of_ingest_timestamp() {
     let old_raw = "User: first message\n";
@@ -385,6 +431,8 @@ async fn complete_record_appended_during_llm_is_ingested_on_next_pass() {
         mode: SessionMode::Unknown,
         captured_at: Utc::now(),
         has_embedded_timestamp: false,
+        facet_content: None,
+        source_messages: Vec::new(),
         raw_content: first_raw.clone(),
         source_version: Some(first_version.clone()),
         needs_chunk: false,
@@ -426,6 +474,8 @@ async fn complete_record_appended_during_llm_is_ingested_on_next_pass() {
         mode: SessionMode::Unknown,
         captured_at: Utc::now(),
         has_embedded_timestamp: false,
+        facet_content: None,
+        source_messages: Vec::new(),
         raw_content: appended_raw.clone(),
         source_version: Some(appended_version.clone()),
         needs_chunk: false,
@@ -768,6 +818,8 @@ async fn process_single_session_links_items_to_saved_document_id() {
         mode: SessionMode::Interactive,
         captured_at: Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap(),
         has_embedded_timestamp: true,
+        facet_content: None,
+        source_messages: Vec::new(),
         raw_content: "User: fix the ingest bug".to_string(),
         source_version: None,
         needs_chunk: false,
@@ -851,10 +903,16 @@ async fn process_single_session_refresh_replaces_old_items_without_duplicate_tra
         mode: SessionMode::Unknown,
         captured_at: Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap(),
         has_embedded_timestamp: false,
+        facet_content: None,
+        source_messages: Vec::new(),
         raw_content: "User: original transcript\nAssistant: final answer\n".to_string(),
         source_version: None,
         needs_chunk: true,
-        chunks: vec!["chunk summary input".to_string()],
+        chunks: vec![refine_core::session::SessionChunk {
+            content: "chunk summary input".to_string(),
+            message_count: 1,
+            source_messages: Vec::new(),
+        }],
         existing_document: Some(existing_doc.clone()),
         legacy_documents_to_delete: Vec::new(),
     };
@@ -924,6 +982,8 @@ async fn remem_save_reparents_superseded_legacy_facets() {
         mode: SessionMode::Unattended,
         captured_at: Utc.with_ymd_and_hms(2026, 7, 20, 0, 0, 0).unwrap(),
         has_embedded_timestamp: true,
+        facet_content: None,
+        source_messages: Vec::new(),
         raw_content: "User: old\nAssistant: new\n".to_string(),
         source_version: Some("remem:v1:10:20:2:1:1".to_string()),
         needs_chunk: false,
@@ -1026,7 +1086,7 @@ async fn quota_hit_short_circuits_before_llm_call() {
     let client: Arc<dyn LlmClient> = Arc::new(ClaudeClient::new("test-key"));
     let quota_hit = Arc::new(AtomicBool::new(true));
 
-    let err = llm_call_with_retry(&client, "content", &quota_hit)
+    let err = llm_call_with_retry(&client, "content", &quota_hit, "session extraction")
         .await
         .expect_err("quota flag should skip the call");
 
@@ -1050,9 +1110,14 @@ async fn provider_rate_limit_sets_batch_early_stop_without_retrying() {
     assert!(quota_hit.load(Ordering::Relaxed));
     assert_eq!(client.calls(), 0);
 
-    let second = llm_call_with_retry(&client_dyn, "other content", &quota_hit)
-        .await
-        .expect_err("later batch work must short-circuit");
+    let second = llm_call_with_retry(
+        &client_dyn,
+        "other content",
+        &quota_hit,
+        "session extraction",
+    )
+    .await
+    .expect_err("later batch work must short-circuit");
     assert!(second.to_string().contains("跳过"));
     assert_eq!(client.calls(), 0);
 }
@@ -1145,6 +1210,7 @@ async fn assert_same_snapshot_retags_without_llm(historical_bare_hash: bool) {
             latest: Some(1),
             dry_run: false,
             retry_quarantined: false,
+            reprocess: None,
             backfill_session_metadata: false,
         },
         &temp.path().join("refine.db"),
@@ -1230,6 +1296,7 @@ async fn changed_remem_projection_does_not_delete_its_canonical_document() {
             latest: Some(1),
             dry_run: false,
             retry_quarantined: false,
+            reprocess: None,
             backfill_session_metadata: false,
         },
         &temp.path().join("refine.db"),
@@ -1292,10 +1359,12 @@ fn loaded_remem_session(summary: &RememSessionSummary, first_user_message: &str)
             file_path: PathBuf::from(&summary.session_ref),
             messages: vec![
                 refine_core::session::SessionMessage {
+                    provenance: None,
                     role: refine_core::session::MessageRole::User,
                     content: first_user_message.to_string(),
                 },
                 refine_core::session::SessionMessage {
+                    provenance: None,
                     role: refine_core::session::MessageRole::Assistant,
                     content: "answer ".repeat(100),
                 },
@@ -1312,6 +1381,207 @@ fn loaded_remem_session(summary: &RememSessionSummary, first_user_message: &str)
             },
         },
     }
+}
+
+#[tokio::test]
+async fn stale_reprocessing_advances_in_bounded_batches_and_preview_does_not_publish() {
+    use refine_core::knowledge::SessionProjectionMetadata;
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let summaries = || {
+        vec![
+            remem_summary("first", 30, 'a'),
+            remem_summary("second", 20, 'b'),
+        ]
+    };
+    for summary in summaries() {
+        let mut document = Document::new("codex-session", "");
+        document.set_url(&summary.session_ref);
+        document.set_source_version(Some(&summary.projection_version()));
+        store
+            .save_session_projection(
+                &document,
+                &[],
+                &[],
+                &[],
+                &SessionProjectionMetadata {
+                    recipe_id: "previous-recipe".into(),
+                    evidence: serde_json::json!({"status":"unknown"}),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let response = serde_json::json!({"session_summary":"Verified synthetic session", "cognitive_level":"unknown", "collaboration_mode":"unknown"}).to_string();
+    let client = Arc::new(SequenceLlmClient::new(vec![response.clone(), response]));
+    let loads = AtomicUsize::new(0);
+    for _ in 0..3 {
+        handle_remem_ingest_sessions_with_loader(
+            IngestOptions {
+                source: None,
+                provider: IngestProvider::Remem,
+                limit: None,
+                latest: Some(1),
+                dry_run: false,
+                retry_quarantined: false,
+                reprocess: Some(ReprocessMode::Stale),
+                backfill_session_metadata: false,
+            },
+            &tmp.path().join("refine.db"),
+            summaries(),
+            Some(QuarantineStore::load_from(tmp.path().join("quarantine.jsonl")).unwrap()),
+            |summary| {
+                loads.fetch_add(1, Ordering::Relaxed);
+                Ok(loaded_remem_session(&summary, "ordinary question"))
+            },
+            doc_store.clone(),
+            Some(client.clone()),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(client.calls(), 2);
+    assert_eq!(loads.load(Ordering::Relaxed), 2);
+    let before =
+        serde_json::to_value(store.find_session_projection_versions().await.unwrap()).unwrap();
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: Some(1),
+            dry_run: true,
+            retry_quarantined: false,
+            reprocess: Some(ReprocessMode::All),
+            backfill_session_metadata: false,
+        },
+        &tmp.path().join("refine.db"),
+        summaries(),
+        Some(QuarantineStore::load_from(tmp.path().join("quarantine.jsonl")).unwrap()),
+        |summary| Ok(loaded_remem_session(&summary, "ordinary question")),
+        doc_store,
+        Some(client.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(client.calls(), 2);
+    assert_eq!(
+        before,
+        serde_json::to_value(store.find_session_projection_versions().await.unwrap()).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn invalid_extraction_preserves_the_previous_document_and_items() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let mut document = Document::new("codex-session", "");
+    document.set_url("remem://raw-session/v2/synthetic/local/project/session");
+    document.set_title("Prior valid summary");
+    let old_version = format!("sha256:{}:interactive", "a".repeat(64));
+    document.set_source_version(Some(&old_version));
+    DocumentRepository::save(store.as_ref(), &document)
+        .await
+        .unwrap();
+    let mut original = Item::new_observation("Prior verified decision", "Prior reason");
+    original.set_document_id(document.id().clone());
+    ItemRepository::save(store.as_ref(), &original)
+        .await
+        .unwrap();
+    let pending = PendingSession {
+        idx: 0,
+        total: 1,
+        url: document.url().to_string(),
+        source: SessionSource::Codex,
+        project: None,
+        project_identity: None,
+        mode: SessionMode::Interactive,
+        captured_at: document.captured_at(),
+        has_embedded_timestamp: true,
+        facet_content: None,
+        source_messages: Vec::new(),
+        raw_content: "New user message".into(),
+        source_version: Some(format!("sha256:{}:interactive", "b".repeat(64))),
+        needs_chunk: false,
+        chunks: Vec::new(),
+        existing_document: Some(document.clone()),
+        legacy_documents_to_delete: Vec::new(),
+    };
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    for response in [
+        "{}".to_string(),
+        serde_json::json!({"session_summary": "Invented reference", "cognitive_level": "unknown", "collaboration_mode": "unknown", "evidence": [{"field": "session_summary", "index": 0, "message_ids": [999]}]}).to_string(),
+    ] {
+        let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient { response });
+        assert!(process_single_session(&pending, &client, &doc_store, &Arc::new(AtomicBool::new(false))).await.is_err());
+        let saved = doc_store.find_by_id(document.id()).await.unwrap().unwrap();
+        assert_eq!(saved.source_version(), Some(old_version.as_str()));
+        assert_eq!(saved.title(), document.title());
+        assert_eq!(store.find_items_by_document_id(document.id()).await.unwrap()[0].id(), original.id());
+        assert!(store.find_session_projection_versions().await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn process_single_session_preserves_verified_message_evidence_in_history() {
+    use refine_core::session::{MessageRole, SourceMessageReference};
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+        response: serde_json::json!({
+            "session_summary": "讨论缓存", "cognitive_level": "unknown", "collaboration_mode": "exploration",
+            "decisions": ["用户确认采用缓存"],
+            "evidence": [{"field": "decisions", "index": 0, "message_ids": [41, 42]}],
+        }).to_string(),
+    });
+    let mut pending = PendingSession {
+        idx: 0, total: 1,
+        url: "remem://raw-session/v2/synthetic/local/project/evidence".into(),
+        source: SessionSource::Codex, project: None, project_identity: None,
+        mode: SessionMode::Interactive,
+        captured_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+        has_embedded_timestamp: true,
+        raw_content: "Assistant: proposed cache\nUser: accepted cache\n".into(),
+        facet_content: Some("[remem message_id=41 role=assistant] proposed cache\n[remem message_id=42 role=user] accepted cache".into()),
+        source_messages: vec![
+            SourceMessageReference { id: 41, role: MessageRole::Assistant, event_time: Utc.timestamp_opt(1_700_000_000, 0).unwrap() },
+            SourceMessageReference { id: 42, role: MessageRole::User, event_time: Utc.timestamp_opt(1_700_000_100, 0).unwrap() },
+        ],
+        source_version: Some(format!("sha256:{}:interactive", "a".repeat(64))),
+        needs_chunk: false, chunks: Vec::new(), existing_document: None,
+        legacy_documents_to_delete: Vec::new(),
+    };
+    let quota = Arc::new(AtomicBool::new(false));
+    process_single_session(&pending, &client, &doc_store, &quota)
+        .await
+        .unwrap();
+    let document = doc_store.find_by_url(&pending.url).await.unwrap().unwrap();
+    pending.existing_document = Some(document.clone());
+    process_single_session(&pending, &client, &doc_store, &quota)
+        .await
+        .unwrap();
+    let history = store
+        .find_session_projection_history(document.id(), 20)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 1);
+    let evidence = &history[0].evidence;
+    assert_eq!(evidence["source_messages"][0]["role"], "assistant");
+    assert_eq!(evidence["source_messages"][1]["role"], "user");
+    assert_eq!(
+        evidence["source_messages"][1]["event_time"],
+        "2023-11-14T22:15:00Z"
+    );
+    let decision = evidence["facets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["field"] == "decisions")
+        .unwrap();
+    assert_eq!(decision["message_ids"], serde_json::json!([41, 42]));
+    assert_eq!(decision["status"], "references_validated");
+    assert_eq!(evidence["facets"][0]["status"], "unknown");
+    assert!(!evidence.to_string().contains("proposed cache"));
 }
 
 #[tokio::test]
@@ -1350,6 +1620,7 @@ async fn latest_counts_only_eligible_pending_sessions_and_stops_loading_older_bo
             latest: Some(1),
             dry_run: true,
             retry_quarantined: false,
+            reprocess: None,
             backfill_session_metadata: false,
         },
         &temp.path().join("refine.db"),
@@ -1456,6 +1727,7 @@ async fn quarantined_looper_clears_stable_and_legacy_items_without_consuming_lat
             latest: Some(1),
             dry_run: false,
             retry_quarantined: false,
+            reprocess: None,
             backfill_session_metadata: false,
         },
         &temp.path().join("refine.db"),
@@ -1577,6 +1849,7 @@ async fn body_detected_looper_clears_stable_and_legacy_when_summary_samples_omit
             latest: Some(1),
             dry_run: false,
             retry_quarantined: false,
+            reprocess: None,
             backfill_session_metadata: false,
         },
         &temp.path().join("refine.db"),
@@ -1714,6 +1987,7 @@ async fn quarantined_latest_does_not_consume_quota_but_keeps_ingest_incomplete()
             latest: Some(1),
             dry_run: false,
             retry_quarantined: false,
+            reprocess: None,
             backfill_session_metadata: false,
         },
         &temp.path().join("refine.db"),
@@ -1769,6 +2043,7 @@ async fn omitting_latest_scans_every_eligible_session_body() {
             latest: None,
             dry_run: true,
             retry_quarantined: false,
+            reprocess: None,
             backfill_session_metadata: false,
         },
         &temp.path().join("refine.db"),
@@ -1834,6 +2109,7 @@ async fn filter_abandon_does_not_leak_legacy_document_claims() {
             latest: None,
             dry_run: true,
             retry_quarantined: false,
+            reprocess: None,
             backfill_session_metadata: false,
         },
         &temp.path().join("refine.db"),
@@ -1899,6 +2175,7 @@ async fn two_proceeding_sessions_still_detect_ambiguous_legacy_claims() {
             latest: None,
             dry_run: true,
             retry_quarantined: false,
+            reprocess: None,
             backfill_session_metadata: false,
         },
         &temp.path().join("refine.db"),
@@ -1972,6 +2249,7 @@ async fn summary_looper_cleanup_does_not_poison_later_legacy_deletes() {
             latest: None,
             dry_run: false,
             retry_quarantined: false,
+            reprocess: None,
             backfill_session_metadata: false,
         },
         &temp.path().join("refine.db"),
@@ -2065,6 +2343,7 @@ async fn looper_cleanup_does_not_delete_earlier_claimed_legacy_ids() {
             latest: None,
             dry_run: false,
             retry_quarantined: false,
+            reprocess: None,
             backfill_session_metadata: false,
         },
         &temp.path().join("refine.db"),
@@ -2165,6 +2444,7 @@ async fn looper_deleted_hostless_identity_is_dropped_from_existing_lookup() {
             latest: None,
             dry_run: false,
             retry_quarantined: false,
+            reprocess: None,
             backfill_session_metadata: false,
         },
         &temp.path().join("refine.db"),
@@ -2274,6 +2554,7 @@ async fn looper_deleted_ids_are_excluded_from_legacy_matching_snapshot() {
             latest: None,
             dry_run: false,
             retry_quarantined: false,
+            reprocess: None,
             backfill_session_metadata: false,
         },
         &temp.path().join("refine.db"),
@@ -2384,6 +2665,7 @@ async fn looper_rewritten_existing_id_is_invalidated_for_later_matching() {
             latest: None,
             dry_run: false,
             retry_quarantined: false,
+            reprocess: None,
             backfill_session_metadata: false,
         },
         &temp.path().join("refine.db"),
@@ -2500,6 +2782,7 @@ async fn looper_deleted_ids_are_excluded_from_unchanged_session_probe() {
             latest: None,
             dry_run: false,
             retry_quarantined: false,
+            reprocess: None,
             backfill_session_metadata: false,
         },
         &temp.path().join("refine.db"),

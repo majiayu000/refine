@@ -17,6 +17,8 @@ export interface OutboxItem {
   nextAttemptAt: number
   lastError?: string
   remoteConversationId?: string
+  remoteJobId?: string
+  remoteStatus?: string
   syncLeaseId?: string
   createdAt: number
   updatedAt: number
@@ -30,6 +32,9 @@ export interface ExtensionStats {
 export interface SyncState {
   lastError?: string
   lastSyncedAt?: number
+  lastAcceptedConversationId?: string
+  lastAcceptedJobId?: string
+  lastRemoteStatus?: string
 }
 
 export interface SyncStatus {
@@ -40,4 +45,7 @@ export interface SyncStatus {
   lastError?: string
   lastSyncedAt?: number
   apiBase: string
+  lastAcceptedConversationId?: string
+  lastAcceptedJobId?: string
+  lastRemoteStatus?: string
 }

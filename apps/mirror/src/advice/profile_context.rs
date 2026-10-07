@@ -6,6 +6,7 @@ use std::path::Path;
 const SCHEMA_VERSION: u32 = 3;
 const SOURCE_REVISION: &str = "mirror-profile-context-v3-project-identity";
 const COHORT_RELATION: &str = "exact-source-snapshot";
+#[cfg(test)]
 const STALE_AFTER_DAYS: i64 = 14;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -66,6 +67,7 @@ pub(crate) fn save_profile_context_to_path(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn load_profile_context_from_path(
     path: &Path,
     now: DateTime<Utc>,

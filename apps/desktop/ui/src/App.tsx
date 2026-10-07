@@ -4,10 +4,12 @@ import { useStore } from './lib/store'
 import { Spotlight } from './components/Spotlight'
 import { ItemList } from './components/ItemList'
 import { ItemDetail } from './components/ItemDetail'
+import { CommitDiscussion } from './components/CommitDiscussion'
 import { getAuthToken, getAuthTokenError, setAuthToken } from './lib/tauri'
 
 export default function App() {
-  const { apiCapabilities, loadItems, isSpotlightOpen, setSpotlightOpen } = useStore()
+  const { apiCapabilities, loadItems, isSpotlightOpen, setSpotlightOpen, deleteFeedback, clearDeleteFeedback } = useStore()
+  const [view, setView] = useState<'items' | 'commit'>('items')
   const [authTokenInput, setAuthTokenInput] = useState('')
   const [hasAuthToken, setHasAuthToken] = useState(() => Boolean(getAuthToken()))
   const [authMessage, setAuthMessage] = useState(() => getAuthTokenError() || '')
@@ -123,6 +125,27 @@ export default function App() {
             )}
           </header>
 
+          {deleteFeedback && (
+            <div
+              role={deleteFeedback.kind === 'error' ? 'alert' : 'status'}
+              className={`mx-4 mt-3 rounded-xl border p-3 text-xs ${deleteFeedback.kind === 'error'
+                ? 'border-red-200 bg-red-50 text-red-800'
+                : deleteFeedback.kind === 'warning'
+                  ? 'border-orange-200 bg-orange-50 text-orange-900'
+                  : 'border-brand-200 bg-brand-50 text-brand-800'}`}
+            >
+              <p>{deleteFeedback.message}</p>
+              <div className="mt-2 flex gap-3">
+                {deleteFeedback.kind === 'warning' && (
+                  <button type="button" onClick={() => void loadItems().then((loaded) => { if (loaded) clearDeleteFeedback() })} className="underline">
+                    刷新列表
+                  </button>
+                )}
+                <button type="button" onClick={clearDeleteFeedback} className="underline">关闭提示</button>
+              </div>
+            </div>
+          )}
+
           <button
             onClick={() => setSpotlightOpen(true)}
             className="mx-4 mt-4 flex items-center gap-3 rounded-2xl border border-sand-200/90 bg-white/90 px-3.5 py-3 text-left text-sm shadow-sm transition-all hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-glow"
@@ -136,11 +159,14 @@ export default function App() {
             </kbd>
           </button>
 
+          <button type="button" onClick={() => setView(view === 'commit' ? 'items' : 'commit')} className="mx-4 mt-3 rounded-xl border px-3 py-2 text-sm">
+            {view === 'commit' ? '返回知识列表' : '从 commit / PR 找讨论'}
+          </button>
           <ItemList />
         </aside>
 
         <main className="animate-rise-in min-h-0 rounded-[28px] border border-sand-200/70 bg-white/78 shadow-soft backdrop-blur-xl [animation-delay:90ms]">
-          <ItemDetail />
+          {view === 'commit' ? <CommitDiscussion /> : <ItemDetail />}
         </main>
       </div>
 

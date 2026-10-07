@@ -2,6 +2,7 @@ use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use refine_core::error::InfraError;
 use refine_core::infra::{normalize_conversation_input, trim_required_field};
 
 use crate::application::error::ApplicationErrorCode;
@@ -18,6 +19,7 @@ pub struct CreateConversationResult {
     pub status: ConversationStatus,
     pub deduplicated: bool,
     pub job_id: Option<String>,
+    pub superseded_by: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,19 +67,8 @@ pub async fn create_conversation(
     let normalized = normalize_conversation_input(content, url, source, title, idempotency_key)
         .map_err(CreateConversationError::BadRequest)?;
 
-    if state.free_quota_items > 0 && !state.is_premium_user(&user_id) {
-        let used = state
-            .store
-            .count_items(None)
-            .await
-            .map_err(|err| CreateConversationError::Internal(err.to_string()))?;
-        if used >= state.free_quota_items {
-            return Err(CreateConversationError::QuotaExceeded {
-                used,
-                limit: state.free_quota_items,
-            });
-        }
-    }
+    let item_limit = (state.free_quota_items > 0 && !state.is_premium_user(&user_id))
+        .then_some(state.free_quota_items);
 
     let now = now_iso();
     let conversation_id = Uuid::new_v4().to_string();
@@ -103,20 +94,22 @@ pub async fn create_conversation(
         idempotency_key: normalized.idempotency_key,
         item_ids: Vec::new(),
         last_error: None,
+        superseded_by: None,
     };
 
     if ingest_only {
-        let persisted = state
+        let (persisted, _) = state
             .conversation_repo
-            .insert_or_fetch_conversation_by_idempotency(&conversation)
+            .insert_or_fetch_conversation_with_quota(&conversation, None, item_limit)
             .await
-            .map_err(|err| CreateConversationError::Internal(err.to_string()))?;
+            .map_err(admission_error)?;
         let deduplicated = persisted.id != conversation_id;
         return Ok(CreateConversationResult {
             conversation_id: persisted.id,
             status: persisted.status,
             deduplicated,
             job_id: None,
+            superseded_by: persisted.superseded_by,
         });
     }
 
@@ -134,14 +127,13 @@ pub async fn create_conversation(
     };
     let (persisted, persisted_job) = state
         .conversation_repo
-        .insert_or_fetch_conversation_with_job(&conversation, &job)
+        .insert_or_fetch_conversation_with_quota(&conversation, Some(&job), item_limit)
         .await
-        .map_err(|err| CreateConversationError::Internal(err.to_string()))?;
+        .map_err(admission_error)?;
     let deduplicated = persisted.id != conversation_id;
-    if let Some(persisted_job) = persisted_job
-        .as_ref()
-        .filter(|job| job.status == JobStatus::Pending)
-    {
+    if let Some(persisted_job) = persisted_job.as_ref().filter(|job| {
+        persisted.status != ConversationStatus::Processed && job.status == JobStatus::Pending
+    }) {
         spawn_extraction(
             state,
             persisted.id.clone(),
@@ -155,7 +147,18 @@ pub async fn create_conversation(
         status: persisted.status,
         deduplicated,
         job_id: persisted_job.map(|job| job.id),
+        superseded_by: persisted.superseded_by,
     })
+}
+
+fn admission_error(error: InfraError) -> CreateConversationError {
+    match error {
+        InfraError::CaptureQuotaExceeded { used, limit } => {
+            CreateConversationError::QuotaExceeded { used, limit }
+        }
+        InfraError::IdempotencyConflict => CreateConversationError::BadRequest(error.to_string()),
+        error => CreateConversationError::Internal(error.to_string()),
+    }
 }
 
 #[derive(Debug, Clone)]

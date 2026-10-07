@@ -49,6 +49,7 @@ jobs:
           bash scripts/test-install-local.sh
           bash scripts/test-runtime-wrappers.sh
           bash scripts/test-local-ui-contract.sh
+          node --test scripts/eval_recommendations.test.mjs
 
   msrv:
     runs-on: ubuntu-latest
@@ -123,6 +124,8 @@ jobs:
       - run: bun run test
       - run: bun run typecheck
       - run: bun run build
+      - run: bunx playwright install --with-deps chromium
+      - run: bun run test:privacy
 
   desktop-ui:
     runs-on: ubuntu-latest

@@ -1,8 +1,8 @@
 <h1 align="center">Refine</h1>
 
-<p align="center"><strong>Re + Fine — 持续精进，每一次对话都更好一点。</strong></p>
+<p align="center"><strong>找回当时的决定，复用失败的经验。</strong></p>
 
-<p align="center">Refine 是本地优先的 Rust 知识工具：把 AI 对话知识保存到 SQLite 知识库，支持全文搜索、会话分析和 Mirror 认知信号追踪。</p>
+<p align="center">Refine 是本地优先的 Rust 知识工具：把 AI 对话知识保存到 SQLite 知识库，支持全文搜索、会话分析和 Mirror 实验性会话复盘。</p>
 
 <p align="center"><a href="./README.md">English</a></p>
 
@@ -18,7 +18,8 @@ transcript 回退。匹配的历史 Document/items 收敛与 Remem 引用投影�
 - **会话存储与可追溯** — 保存 Remem 引用与提炼结果，需要时按引用读取原文
 - **智能提炼（可选能力层）** — 从已同步对话中提取知识卡片、技能、代码片段
 - **全文搜索** — SQLite FTS5 驱动的中英混合搜索
-- **Session Insights 与成长分析（可选能力层）** — 对 Claude Code / Codex 会话做认知分析
+- **Session Insights 与会话复盘（可选能力层）** — 对 Claude Code / Codex 会话做认知分析
+- **从 commit / PR 找回讨论（原型）** — 在 Knowledge Console 中查询来源原话、决定引用与历史候选；来源缺失显示不知道（[合同与边界](docs/commit-discussions.md)）
 - **多端访问** — 浏览器扩展 / API 服务 / CLI / 桌面应用
 
 ## Refine 主要是干嘛的
@@ -88,7 +89,7 @@ refine ingest-sessions --dry-run        # 预览，不调 LLM
 refine insights                         # 生成 L1-L3 报告
 refine insights --prescription          # 含 L4 成长处方
 
-mirror dashboard                        # 认知成长仪表盘（替代已移除的 refine growth）
+mirror dashboard                        # 实验性会话复盘仪表盘（替代已移除的 refine growth）
 mirror score                            # 三层信号灯评分
 ```
 
@@ -112,9 +113,11 @@ refine doc-show <id>                    # 查看会话/报告详情
 refine doc-search "query"               # 搜索原文文档
 ```
 
-## 认知仪表盘
+## Mirror 实验性复盘
 
-使用 `mirror dashboard` 查看认知成长仪表盘（`refine growth` 已移除，请改用 `mirror dashboard`）。
+使用 `mirror dashboard` 查看实验性会话复盘仪表盘（`refine growth` 已移除，请改用 `mirror dashboard`）。
+
+Mirror 的灯色与箭头表示提取指标相对配置目标的变化，不是经过验证的认知成长、生产力或协作质量评价。委派比例高可能适合当前任务，bug/decision 比例也受记录方式和提炼结果影响。应结合原始讨论与项目结果判断，不能直接把指标方向当成用户进步。↑/↓ 表示相对近四周均值沿既定偏好方向/相反方向变化；MOTD 箭头比较相邻评分的灯色。
 
 ## 架构
 

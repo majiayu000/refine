@@ -1,3 +1,4 @@
+pub mod commit;
 pub mod conversation;
 pub mod error;
 pub mod event;
@@ -11,7 +12,8 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    const APPLICATION_FILES: [&str; 7] = [
+    const APPLICATION_FILES: [&str; 8] = [
+        "commit.rs",
         "conversation.rs",
         "error.rs",
         "event.rs",

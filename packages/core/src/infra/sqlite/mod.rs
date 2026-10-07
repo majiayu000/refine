@@ -4,12 +4,13 @@
 
 use crate::conversation::{
     ConversationRecord, ConversationRepository, EventRecord, EventRepository, ExtractionJobRecord,
-    JobRepository,
+    JobPublicationOutcome, JobRepository,
 };
 use crate::error::{InfraError, InfraResult};
 use crate::knowledge::{
     Document, DocumentId, DocumentRepository, Item, ItemId, ItemRepository, ItemType,
-    ObservationWindowSnapshot, Tag,
+    ObservationWindowSnapshot, SessionProjectionContext, SessionProjectionMetadata,
+    SessionProjectionRevision, SessionProjectionVersion, Tag,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -21,6 +22,8 @@ mod doc_ops;
 mod insights_snapshot;
 mod ops;
 mod rows;
+mod session_projection;
+mod text_search;
 mod worker;
 mod worker_support;
 
@@ -151,6 +154,27 @@ impl ItemRepository for SqliteStore {
             .await
     }
 
+    async fn search_page(
+        &self,
+        query: &str,
+        item_type: Option<ItemType>,
+        tags: &[String],
+        offset: usize,
+        limit: usize,
+    ) -> InfraResult<(Vec<Item>, usize)> {
+        let query = query.to_string();
+        let tags = tags.to_vec();
+        self.request(|resp| SqliteCommand::SearchPage {
+            query,
+            item_type,
+            tags,
+            offset,
+            limit,
+            resp,
+        })
+        .await
+    }
+
     async fn find_since(&self, since: DateTime<Utc>) -> InfraResult<Vec<Item>> {
         self.request(|resp| SqliteCommand::FindSince { since, resp })
             .await
@@ -266,9 +290,70 @@ impl DocumentRepository for SqliteStore {
                 items,
                 source_document_ids,
                 obsolete_document_ids,
+                metadata: None,
                 resp,
             },
         )
+        .await
+    }
+
+    async fn save_session_projection(
+        &self,
+        doc: &Document,
+        items: &[Item],
+        source_document_ids: &[DocumentId],
+        obsolete_document_ids: &[DocumentId],
+        metadata: &SessionProjectionMetadata,
+    ) -> InfraResult<()> {
+        let doc = doc.clone();
+        let items = items.to_vec();
+        let source_document_ids = source_document_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let obsolete_document_ids = obsolete_document_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let metadata = Some(metadata.clone());
+        self.request(
+            |resp| SqliteCommand::DocSaveWithReplacedItemsAndDeleteDocuments {
+                doc,
+                items,
+                source_document_ids,
+                obsolete_document_ids,
+                metadata,
+                resp,
+            },
+        )
+        .await
+    }
+
+    async fn find_session_projection_versions(&self) -> InfraResult<Vec<SessionProjectionVersion>> {
+        self.request(|resp| SqliteCommand::SessionProjectionVersions { resp })
+            .await
+    }
+
+    async fn find_session_projection_context(
+        &self,
+        session_ref: &str,
+    ) -> InfraResult<Option<SessionProjectionContext>> {
+        let session_ref = session_ref.to_string();
+        self.request(|resp| SqliteCommand::SessionProjectionContext { session_ref, resp })
+            .await
+    }
+
+    async fn find_session_projection_history(
+        &self,
+        document_id: &DocumentId,
+        limit: usize,
+    ) -> InfraResult<Vec<SessionProjectionRevision>> {
+        let document_id = document_id.to_string();
+        self.request(|resp| SqliteCommand::SessionProjectionHistory {
+            document_id,
+            limit,
+            resp,
+        })
         .await
     }
 
@@ -364,6 +449,23 @@ impl ConversationRepository for SqliteStore {
         let job = job.clone();
         self.request(|resp| SqliteCommand::ConversationInsertOrFetchWithJob { record, job, resp })
             .await
+    }
+
+    async fn insert_or_fetch_conversation_with_quota(
+        &self,
+        record: &ConversationRecord,
+        job: Option<&ExtractionJobRecord>,
+        item_limit: Option<usize>,
+    ) -> InfraResult<(ConversationRecord, Option<ExtractionJobRecord>)> {
+        let record = record.clone();
+        let job = job.cloned();
+        self.request(|resp| SqliteCommand::ConversationInsertOrFetchWithQuota {
+            record,
+            job,
+            item_limit,
+            resp,
+        })
+        .await
     }
 }
 
@@ -478,7 +580,7 @@ impl JobRepository for SqliteStore {
         document: &Document,
         items: &[Item],
         now: &str,
-    ) -> InfraResult<bool> {
+    ) -> InfraResult<JobPublicationOutcome> {
         let id = id.to_string();
         let owner = owner.to_string();
         let document = document.clone();

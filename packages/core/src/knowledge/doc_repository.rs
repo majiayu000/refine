@@ -3,7 +3,10 @@
 //! 定义在领域层，实现在 infra 层
 
 use crate::error::InfraResult;
-use crate::knowledge::{Document, DocumentId, Item};
+use crate::knowledge::{
+    Document, DocumentId, Item, SessionProjectionContext, SessionProjectionMetadata,
+    SessionProjectionRevision, SessionProjectionVersion,
+};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -22,6 +25,27 @@ pub trait DocumentRepository: Send + Sync {
         source_document_ids: &[DocumentId],
         obsolete_document_ids: &[DocumentId],
     ) -> InfraResult<()>;
+    /// Publish a validated extraction and its independent recipe identity in
+    /// the same transaction. Previous observations remain in revision history.
+    async fn save_session_projection(
+        &self,
+        doc: &Document,
+        items: &[Item],
+        source_document_ids: &[DocumentId],
+        obsolete_document_ids: &[DocumentId],
+        metadata: &SessionProjectionMetadata,
+    ) -> InfraResult<()>;
+    async fn find_session_projection_versions(&self) -> InfraResult<Vec<SessionProjectionVersion>>;
+    /// Read source, items, current evidence and recent history consistently.
+    async fn find_session_projection_context(
+        &self,
+        session_ref: &str,
+    ) -> InfraResult<Option<SessionProjectionContext>>;
+    async fn find_session_projection_history(
+        &self,
+        document_id: &DocumentId,
+        limit: usize,
+    ) -> InfraResult<Vec<SessionProjectionRevision>>;
     async fn delete_documents_with_items(&self, document_ids: &[DocumentId]) -> InfraResult<()>;
     async fn delete(&self, id: &DocumentId) -> InfraResult<bool>;
     async fn search_text(

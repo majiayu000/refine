@@ -1,17 +1,14 @@
 use super::*;
-use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 
-use refine_core::error::InfraResult;
-use refine_core::infra::LlmClient;
 use refine_core::session::{ClusterResult, DataQualityStats, GlobalStats, ProjectCluster};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod baseline;
 mod compute;
 mod paths;
 mod persistence;
+mod publication;
 mod signal;
 mod streak;
 
@@ -23,40 +20,28 @@ fn required_advice_rejects_empty_observations() {
     assert!(finish_without_observations(false, "no observations").is_ok());
 }
 
-struct CountingLlm {
-    calls: AtomicUsize,
-}
-
-#[async_trait]
-impl LlmClient for CountingLlm {
-    async fn complete(&self, _prompt: &str, _system: Option<&str>) -> InfraResult<String> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok("unused".into())
-    }
-}
-
 #[tokio::test]
 async fn score_handler_rejects_detached_only_cohort_before_persist_or_advice() {
     let (_fixture, store) = crate::test_support::legacy_detached_store();
-    let llm = Arc::new(CountingLlm {
-        calls: AtomicUsize::new(0),
-    });
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("advice.json"), "synthetic stale advice").unwrap();
+    std::fs::write(dir.path().join("statusline.txt"), "synthetic stale status").unwrap();
 
     let error = handle_score(
         store,
-        Some(llm.clone()),
         None,
-        true,
+        false,
         true,
         &dir.path().join("refine.db"),
+        dir.path(),
     )
     .await
     .expect_err("detached-only cohort must fail closed");
 
     assert!(error.to_string().contains("No eligible linked"));
     assert!(error.to_string().contains("refusing to persist"));
-    assert_eq!(llm.calls.load(Ordering::SeqCst), 0);
+    assert!(!dir.path().join("advice.json").exists());
+    assert!(!dir.path().join("statusline.txt").exists());
 }
 
 pub(super) fn make_cluster(
@@ -183,25 +168,29 @@ pub(super) fn make_score_result(
                 indicators: vec![
                     Indicator {
                         name: "dreyfus".into(),
-                        actual: dreyfus,
+                        actual: Some(dreyfus),
+                        coverage: None,
                         target: String::new(),
                         signal: Signal::Yellow,
                     },
                     Indicator {
                         name: "decision_quality".into(),
-                        actual: decision_quality,
+                        actual: Some(decision_quality),
+                        coverage: None,
                         target: String::new(),
                         signal: Signal::Yellow,
                     },
                     Indicator {
                         name: "depth_output".into(),
-                        actual: depth_output,
+                        actual: Some(depth_output),
+                        coverage: None,
                         target: String::new(),
                         signal: Signal::Yellow,
                     },
                     Indicator {
                         name: "knowledge_rate".into(),
-                        actual: knowledge_rate_val,
+                        actual: Some(knowledge_rate_val),
+                        coverage: None,
                         target: String::new(),
                         signal: Signal::Yellow,
                     },
@@ -213,19 +202,22 @@ pub(super) fn make_score_result(
                 indicators: vec![
                     Indicator {
                         name: "exploration".into(),
-                        actual: exploration,
+                        actual: Some(exploration),
+                        coverage: None,
                         target: String::new(),
                         signal: Signal::Yellow,
                     },
                     Indicator {
                         name: "deep_invest".into(),
-                        actual: deep_invest,
+                        actual: Some(deep_invest),
+                        coverage: None,
                         target: String::new(),
                         signal: Signal::Yellow,
                     },
                     Indicator {
                         name: "fragmentation".into(),
-                        actual: fragmentation,
+                        actual: Some(fragmentation),
+                        coverage: None,
                         target: String::new(),
                         signal: Signal::Yellow,
                     },
@@ -237,25 +229,29 @@ pub(super) fn make_score_result(
                 indicators: vec![
                     Indicator {
                         name: "delegation".into(),
-                        actual: delegation,
+                        actual: Some(delegation),
+                        coverage: None,
                         target: String::new(),
                         signal: Signal::Yellow,
                     },
                     Indicator {
                         name: "mode_diversity".into(),
-                        actual: mode_diversity,
+                        actual: Some(mode_diversity),
+                        coverage: None,
                         target: String::new(),
                         signal: Signal::Yellow,
                     },
                     Indicator {
                         name: "bug_decision".into(),
-                        actual: bug_decision,
+                        actual: Some(bug_decision),
+                        coverage: None,
                         target: String::new(),
                         signal: Signal::Yellow,
                     },
                     Indicator {
                         name: "friction_density".into(),
-                        actual: friction_density_val,
+                        actual: Some(friction_density_val),
+                        coverage: None,
                         target: String::new(),
                         signal: Signal::Yellow,
                     },
@@ -264,6 +260,7 @@ pub(super) fn make_score_result(
         ],
         tension: None,
         timestamp,
+        scope: Some(make_scope(timestamp)),
     }
 }
 
@@ -333,7 +330,8 @@ pub(super) fn make_score_at_date(date: chrono::NaiveDate) -> ScoreResult {
                 signal: Signal::Green,
                 indicators: vec![Indicator {
                     name: "test".into(),
-                    actual: 1.0,
+                    actual: Some(1.0),
+                    coverage: None,
                     target: ">0".into(),
                     signal: Signal::Green,
                 }],
@@ -341,5 +339,33 @@ pub(super) fn make_score_at_date(date: chrono::NaiveDate) -> ScoreResult {
         }),
         tension: None,
         timestamp: ts,
+        scope: Some(make_scope(ts)),
     }
+}
+
+#[test]
+fn empty_score_cache_invalidation_keeps_io_failures_visible() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("advice.json")).unwrap();
+    let error =
+        invalidate_empty_score_cache(Some(&make_scope(Utc::now())), dir.path()).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("failed to invalidate empty-score cache"));
+}
+
+pub(super) fn make_scope(timestamp: chrono::DateTime<Utc>) -> ScoreScope {
+    ScoreScope::canonical(
+        std::path::Path::new("/synthetic/refine.db"),
+        &crate::config::Targets::default(),
+        timestamp,
+        &refine_core::session::DataQualityStats {
+            input_observations: 1,
+            linked_observations: 1,
+            eligible_observations: 1,
+            cohort_identity: "synthetic-cohort".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap()
 }

@@ -6,9 +6,9 @@
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="Rust"></a>
 </p>
 
-<p align="center"><strong>Re + Fine — improve continuously, conversation by conversation.</strong></p>
+<p align="center"><strong>Find the decisions. Reuse the lessons.</strong></p>
 
-<p align="center">Refine is a local-first Rust toolkit for searching knowledge from AI conversations and analyzing coding sessions. SQLite stores the knowledge base; Mirror tracks cognitive signals over time.</p>
+<p align="center">Refine is a local-first Rust toolkit for searching knowledge from AI conversations and analyzing coding sessions. SQLite stores the knowledge base and source references; Mirror provides experimental session reflection.</p>
 
 <p align="center"><a href="./README.zh-CN.md">中文文档</a></p>
 
@@ -16,7 +16,8 @@
 
 1. **Knowledge Sync** — Capture conversations from ChatGPT, Claude, Gemini, Grok, Claude Code, Codex into one searchable knowledge base
 2. **Session Analysis** — Extract 12 cognitive dimensions from AI coding sessions (decisions, bugs, patterns, friction, knowledge gained, etc.)
-3. **Cognitive Tracking (Mirror)** — 3-layer signal lights, personal baseline, LLM-powered advice, trend tracking
+3. **Commit discussion prototype** — Open the Knowledge Console commit/PR entry to inspect linked original discussions, decision evidence and projection history; missing sources remain unknown ([contract and limitations](docs/commit-discussions.md))
+4. **Experimental Reflection (Mirror)** — 3-layer signal lights, personal baseline, local deterministic advice, trend tracking
 
 ## Quick Start
 
@@ -76,10 +77,11 @@ fallback. See the [ingestion contract](#refine-cli-commands) for filtering rules
 
 ## Release Status
 
-Refine is currently distributed as a source install from this repository. A
-packaged GitHub Release for the current `0.1.3` workspace version has not been
-cut yet; use `scripts/install-local.sh` from a checked-out commit for local
-installation. Release notes are tracked in [CHANGELOG.md](CHANGELOG.md).
+The published [v0.1.3 release](https://github.com/majiayu000/refine/releases/tag/v0.1.3)
+points to `2c1dcab` (2026-08-10). The current integration changes are newer than
+that tag and are available as a source install from a checked-out commit using
+`scripts/install-local.sh`; they are not included in v0.1.3. Release notes are
+tracked in [CHANGELOG.md](CHANGELOG.md).
 
 Support path: open a GitHub Issue with your OS, install method, command output,
 and the relevant `~/.refine` log snippet if available.
@@ -88,7 +90,7 @@ and the relevant `~/.refine` log snippet if available.
 
 - Local-first only: the server and extension are intended for a local trusted
   runtime unless you explicitly configure authentication and network exposure.
-- LLM-backed extraction, advice, weekly reports, and profiles require a working
+- LLM-backed extraction, deep insights, and profiles require a working
   OpenAI-compatible or Anthropic-compatible API key.
 - Browser extension support is still a developer preview and should be tested
   against the local API before relying on it for unattended capture.
@@ -96,26 +98,33 @@ and the relevant `~/.refine` log snippet if available.
   scores exist, only fixed-threshold signal lights are shown.
 - No hosted multi-user service or migration SLA is claimed by this repository.
 
-## Mirror — Cognitive Growth Tracker
+## Mirror — Experimental Session Reflection
 
-Mirror extracts cognitive fingerprints from your AI coding sessions and tracks growth over time.
+Mirror summarizes extracted session signals to support reflection. Its fixed directions and thresholds express configured working preferences, not validated measures of cognitive growth, productivity, or collaboration quality. High delegation can be appropriate for the task; bug/decision counts also depend on extraction and what was recorded. Use the source discussions and project outcomes to interpret a change before acting on advice.
 
 ### Daily Usage
 
 ```bash
-mirror score                        # 3-layer signal lights + LLM advice
+mirror score                        # 3-layer signal lights + local advice
 mirror motd                         # One-line briefing (add to .zshrc)
 mirror dashboard                    # Full ASCII dashboard
-mirror score --since 2026-03-20     # Filter by date
+mirror score --since 2026-03-20      # View a custom window without updating history
+mirror dashboard --all              # View all session observations without updating history
 ```
 
 ### Periodic Analysis
 
 ```bash
-mirror weekly                       # Weekly delta report (requires LLM)
+mirror weekly                       # local metrics-delta report + deterministic action cards
 mirror profile                      # Cognitive portrait narrative (requires LLM)
 /cognitive-portrait                  # Deep 5-framework analysis (~1000 lines, Claude Code skill)
 ```
+
+Weekly report generation uses existing observations and makes no LLM call. Upstream session extraction can still require an LLM. `mirror score` also renders advice locally, including with `--require-advice`; no remote policy acknowledgement is requested. Unknown portfolio inputs suppress action recommendations. Reason explicitness is a case-insensitive rationale-marker rate over distinct full decision titles, not a decision-quality assessment.
+
+Default `score` and `dashboard` use the rolling 90-day session-start window and refresh matching local advice and statusline output together. Each command reads observations and source metadata from one SQLite snapshot, with the same supported-session and interactive-session filters as Insights. Weekly comparisons and the 7-day advice window reuse that snapshot. A session is assigned by its source document's start time; newly extracted messages from an older session do not become new events merely because extraction ran today.
+
+Metric history is separated by canonical database path, window, scoring method, and target configuration. It keeps the latest snapshot for each UTC date, up to 365 dates per scope. Personal baselines require seven distinct dates with observed values in the last 28 days, from the same scope. Older or unscoped score files still count as activity but do not enter the new metric baseline. `--since` and `--all` are views: they leave canonical history, advice, and statusline caches unchanged, and cannot be combined with `--require-advice`. See [Mirror evidence and history contract](docs/SPEC-mirror-history.md) for the exact rules.
 
 ### What Mirror Tracks
 
@@ -123,13 +132,13 @@ mirror profile                      # Cognitive portrait narrative (requires LLM
 
 | Layer | Indicators | What It Measures |
 |-------|-----------|-----------------|
-| **Depth** | Dreyfus level, Reason explicitness | Are you thinking at a higher level? |
-| **Breadth** | Exploration rate, Mature project share, One-off project share | Are you investing wisely across projects? |
-| **Collaboration** | Delegation rate, Mode diversity, Bug/decision extraction ratio | Is your AI collaboration healthy? |
+| **Depth** | Dreyfus level, Reason explicitness | Extracted cognitive labels and recorded rationale markers |
+| **Breadth** | Exploration rate, Mature project share, One-off project share | Recorded collaboration modes and distribution of session counts across projects |
+| **Collaboration** | Delegation rate, Mode diversity, Bug/decision extraction ratio | Extracted collaboration modes and bugfix/decision counts |
 
-**Signal Lights:** 🟢 Green (healthy) / 🟡 Yellow (watch) / 🔴 Red (act now)
+**Signal Lights:** 🟢 Green (meets configured target) / 🟡 Yellow / 🔴 Red (outside configured target) / ⚪ Unknown (insufficient evidence). Missing values serialize as `null`; coverage shows observed versus eligible evidence. A measured zero remains a valid measurement.
 
-**Personal Baseline:** After enough recent history, arrows show change versus your 4-week average. Signal colors still use fixed targets.
+**Personal Baseline:** After enough recent history, arrows show change versus your 4-week average along the configured preference (↑ preferred, ↓ opposite). They do not establish personal improvement or decline. Signal colors still use fixed targets. MOTD arrows compare consecutive signal colors instead of the metric baseline.
 
 ### Terminal Integration
 
@@ -143,7 +152,7 @@ mirror profile                      # Cognitive portrait narrative (requires LLM
 本周243 深度🟢 广度🔴 协作🔴 每周开1次新方向探索
 ```
 
-**SessionStart hook** injects cognitive dashboard + LLM advice into every Claude Code conversation.
+**SessionStart hook** injects cognitive dashboard + local advice into every Claude Code conversation.
 
 ### Automation (launchd)
 
@@ -199,8 +208,8 @@ remem raw sessions/messages         ← Claude Code + Codex + Cursor raw archive
 SQLite (observations, documents)    ← Shared data store
     │
     ├─ mirror score/dashboard       (local clustering → signal lights)
-    ├─ mirror motd                  (reads cached scores + LLM advice)
-    ├─ mirror weekly                (delta analysis via LLM)
+    ├─ mirror motd                  (reads cached scores + local advice)
+    ├─ mirror weekly                (local metrics delta + deterministic action cards)
     ├─ mirror profile               (cognitive portrait via LLM)
     └─ /cognitive-portrait          (5-framework deep analysis, Claude Code skill)
 ```
@@ -224,7 +233,7 @@ refine ingest-sessions --dry-run        # Preview without LLM calls or writes
 refine ingest-sessions --retry-quarantined
                                         # Retry deterministic provider rejections
 refine insights --prescription          # L1-L4 cognitive report
-mirror dashboard                        # Cognitive growth dashboard
+mirror dashboard                        # Experimental session reflection dashboard
 ```
 
 `--latest N` is a Refine processing bound, not a Remem summary window. Refine

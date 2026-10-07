@@ -961,5 +961,6 @@ fn build_conversation(id: &str, status: ConversationStatus) -> ConversationRecor
         idempotency_key: format!("idempotency-{}", id),
         item_ids: Vec::new(),
         last_error: None,
+        superseded_by: None,
     }
 }

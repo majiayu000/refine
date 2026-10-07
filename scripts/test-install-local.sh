@@ -978,4 +978,6 @@ assert_contains "$ui_doctor_output" "PASS log exists: ${ui_home}/Library/Logs/re
 assert_not_contains "$ui_doctor_output" '.run/launchd-refine-ui.err.log' \
   'Doctor still checked the source checkout for the UI log'
 
+python3 "${SCRIPT_DIR}/test-portrait-binary-replacement.py"
+
 printf 'All local installer tests passed\n'

@@ -12,6 +12,7 @@ export interface CloudUploadRequest {
 export interface CloudUploadResult {
   success: boolean
   conversationId?: string
+  jobId?: string
   status?: string
   message?: string
 }
@@ -22,6 +23,7 @@ export interface CloudIngestSuccess {
   success: true
   message?: string
   conversation_id?: string
+  job_id?: string
   status?: string
 }
 

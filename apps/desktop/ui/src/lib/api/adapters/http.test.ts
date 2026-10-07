@@ -117,3 +117,36 @@ describe('HTTP adapter document errors', () => {
     )
   })
 })
+
+describe('HTTP deletion receipts', () => {
+  test('maps a missing item to false, while surfacing failed or invalid receipts', async () => {
+    const adapter = createHttpAdapter()
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ success: false, message: 'Item not found' }), { status: 404 }))
+    await expect(adapter.deleteItem('missing')).resolves.toBe(false)
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ success: false, message: 'database failed' }), { status: 500 }))
+    await expect(adapter.deleteItem('broken')).rejects.toThrow('database failed')
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ success: true }), { status: 200 }))
+    await expect(adapter.deleteItem('unknown')).rejects.toThrow('删除结果')
+    fetchMock.mockResolvedValueOnce(new Response('not json', { status: 404 }))
+    await expect(adapter.deleteItem('invalid')).rejects.toThrow('无效 JSON')
+  })
+})
+
+describe('commit context HTTP contract', () => {
+  test('encodes source selectors and uses bearer authentication', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ success: true, commits: [], projections: [] }), { status: 200 }))
+    const adapter = createHttpAdapter()
+    adapter.setAuthToken('synthetic-token')
+    expect(await adapter.getCommitContext('/repo with space', 'https://github.com/o/r/pull/1')).toEqual({ commits: [], projections: [] })
+    const [url, options] = fetchMock.mock.calls[0]
+    const parsed = new URL(url)
+    expect(parsed.pathname).toBe('/v1/commit-context')
+    expect(parsed.searchParams.get('project')).toBe('/repo with space')
+    expect(parsed.searchParams.get('reference')).toBe('https://github.com/o/r/pull/1')
+    expect(new Headers(options.headers).get('Authorization')).toBe('Bearer synthetic-token')
+  })
+  test('keeps failed source lookups visible', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ success: false, message: 'source snapshot drift' }), { status: 500 }))
+    await expect(createHttpAdapter().getCommitContext('/repo', 'abcdef1')).rejects.toThrow('source snapshot drift')
+  })
+})

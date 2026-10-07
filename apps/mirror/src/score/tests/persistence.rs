@@ -4,7 +4,8 @@ use std::collections::HashSet;
 use std::sync::{Arc, Barrier};
 
 use super::super::persistence::{
-    load_score_activity_from_path, persist_score_to_path, SCORE_SCHEMA_VERSION,
+    load_recent_scores_for_scope_from_path, load_score_activity_from_path, persist_score_to_path,
+    SCORE_SCHEMA_VERSION,
 };
 
 fn score_line(score: &ScoreResult, schema_version: Option<u32>) -> String {
@@ -23,7 +24,7 @@ fn test_persist_and_load() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scores.jsonl");
 
-    let result = ScoreResult {
+    let mut result = ScoreResult {
         layers: [
             LayerScore {
                 name: "L1".into(),
@@ -43,10 +44,12 @@ fn test_persist_and_load() {
         ],
         tension: Some("test tension".into()),
         timestamp: Utc::now(),
+        scope: None,
     };
 
+    result.scope = Some(make_scope(result.timestamp));
     persist_score_to_path(&path, &result).unwrap();
-    assert_eq!(SCORE_SCHEMA_VERSION, 5);
+    assert_eq!(SCORE_SCHEMA_VERSION, 6);
 
     let persisted: serde_json::Value =
         serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
@@ -62,7 +65,7 @@ fn test_persist_and_load() {
 }
 
 #[test]
-fn test_persist_score_rotates_to_latest_365_entries() {
+fn test_persist_score_retains_latest_365_dates() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scores.jsonl");
 
@@ -79,7 +82,7 @@ fn test_persist_score_rotates_to_latest_365_entries() {
             4.0,
             0.2,
             0.8,
-            Utc::now() + Duration::seconds(idx),
+            Utc::now() - Duration::days(370 - idx),
         );
         result.tension = Some(format!("entry-{}", idx));
         persist_score_to_path(&path, &result).unwrap();
@@ -112,7 +115,7 @@ fn test_persist_score_concurrent_writes_preserve_all_new_entries() {
             4.0,
             0.2,
             0.8,
-            Utc::now() - Duration::days(100) + Duration::seconds(idx as i64),
+            Utc::now() - Duration::days(500 - idx as i64),
         );
         seed.tension = Some(format!("seed-{}", idx));
         persist_score_to_path(&path, &seed).unwrap();
@@ -138,7 +141,7 @@ fn test_persist_score_concurrent_writes_preserve_all_new_entries() {
                 4.0,
                 0.2,
                 0.8,
-                Utc::now() + Duration::seconds(idx as i64),
+                Utc::now() - Duration::days(12 - idx as i64),
             );
             result.tension = Some(format!("writer-{}", idx));
             barrier.wait();
@@ -186,6 +189,7 @@ fn test_load_recent_scores_reports_invalid_jsonl_line() {
         ],
         tension: None,
         timestamp: Utc::now(),
+        scope: None,
     };
     let valid_line = serde_json::to_string(&valid).unwrap();
     std::fs::write(&path, format!("{}\n\n{{\"bad\":\n", valid_line)).unwrap();
@@ -223,30 +227,29 @@ fn test_known_old_schema_is_excluded_from_metrics_but_kept_as_activity() {
 }
 
 #[test]
-fn collision_safe_v5_excludes_pre_resolver_v4_from_metrics_but_keeps_activity() {
+fn evidence_v6_excludes_pre_evidence_v5_from_metrics_but_keeps_activity() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scores.jsonl");
-    let pre_resolver_v4 = make_score_at_date(chrono::NaiveDate::from_ymd_opt(2026, 8, 20).unwrap());
-    let collision_safe_v5 =
-        make_score_at_date(chrono::NaiveDate::from_ymd_opt(2026, 8, 27).unwrap());
+    let pre_evidence_v5 = make_score_at_date(chrono::NaiveDate::from_ymd_opt(2026, 8, 20).unwrap());
+    let evidence_v6 = make_score_at_date(chrono::NaiveDate::from_ymd_opt(2026, 8, 27).unwrap());
     std::fs::write(
         &path,
         format!(
             "{}\n{}\n",
-            score_line(&pre_resolver_v4, Some(4)),
-            score_line(&collision_safe_v5, Some(5)),
+            score_line(&pre_evidence_v5, Some(5)),
+            score_line(&evidence_v6, Some(SCORE_SCHEMA_VERSION)),
         ),
     )
     .unwrap();
 
     let metrics = load_recent_scores_from_path(&path, 10).unwrap();
     assert_eq!(metrics.len(), 1);
-    assert_eq!(metrics[0].timestamp, collision_safe_v5.timestamp);
+    assert_eq!(metrics[0].timestamp, evidence_v6.timestamp);
 
     let activity = load_score_activity_from_path(&path, 10).unwrap();
     assert_eq!(activity.len(), 2);
-    assert_eq!(activity[0].timestamp, pre_resolver_v4.timestamp);
-    assert_eq!(activity[1].timestamp, collision_safe_v5.timestamp);
+    assert_eq!(activity[0].timestamp, pre_evidence_v5.timestamp);
+    assert_eq!(activity[1].timestamp, evidence_v6.timestamp);
 }
 
 #[test]
@@ -307,4 +310,68 @@ fn test_future_schema_errors_for_metrics_but_remains_activity() {
         .to_string()
         .contains("unsupported score schema version 99"));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+}
+
+#[test]
+fn same_day_keeps_latest_snapshot_even_when_an_older_writer_finishes_last() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scores.jsonl");
+    let date = chrono::NaiveDate::from_ymd_opt(2026, 8, 20).unwrap();
+    let mut older = make_score_at_date(date);
+    older.tension = Some("older".into());
+    let mut newer = older.clone();
+    newer.timestamp += Duration::hours(1);
+    newer.scope = Some(make_scope(newer.timestamp));
+    newer.tension = Some("newer".into());
+
+    assert!(persist_score_to_path(&path, &newer).unwrap());
+    assert!(!persist_score_to_path(&path, &older).unwrap());
+    let loaded = load_recent_scores_from_path(&path, 10).unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].tension.as_deref(), Some("newer"));
+}
+
+#[test]
+fn history_filters_database_targets_and_window_before_applying_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scores.jsonl");
+    let date = chrono::NaiveDate::from_ymd_opt(2026, 8, 20).unwrap();
+    let expected = make_score_at_date(date);
+    persist_score_to_path(&path, &expected).unwrap();
+    for variant in ["other database", "other targets"] {
+        let mut other = expected.clone();
+        let scope = other.scope.as_mut().unwrap();
+        if variant == "other database" {
+            scope.database_identity = "/synthetic/other.db".into();
+        } else {
+            scope.targets = "different target configuration".into();
+        }
+        other.tension = Some(variant.into());
+        persist_score_to_path(&path, &other).unwrap();
+    }
+    let loaded = load_recent_scores_for_scope_from_path(&path, 1, expected.scope.as_ref()).unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert!(loaded[0].tension.is_none());
+    assert_eq!(load_recent_scores_from_path(&path, 10).unwrap().len(), 3);
+    assert_eq!(load_score_activity_from_path(&path, 10).unwrap().len(), 1);
+
+    let before = std::fs::read_to_string(&path).unwrap();
+    let mut ad_hoc = expected.clone();
+    ad_hoc.scope = None;
+    assert!(persist_score_to_path(&path, &ad_hoc).is_err());
+    ad_hoc.scope = expected.scope.clone();
+    ad_hoc.scope.as_mut().unwrap().window = "all".into();
+    assert!(persist_score_to_path(&path, &ad_hoc).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+}
+
+#[test]
+fn unscoped_v6_history_is_activity_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scores.jsonl");
+    let mut score = make_score_at_date(chrono::NaiveDate::from_ymd_opt(2026, 8, 20).unwrap());
+    score.scope = None;
+    std::fs::write(&path, score_line(&score, Some(SCORE_SCHEMA_VERSION))).unwrap();
+    assert!(load_recent_scores_from_path(&path, 10).unwrap().is_empty());
+    assert_eq!(load_score_activity_from_path(&path, 10).unwrap().len(), 1);
 }

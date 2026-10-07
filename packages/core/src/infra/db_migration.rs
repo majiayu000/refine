@@ -1,5 +1,7 @@
 use fs2::FileExt;
-use rusqlite::{backup::Backup, backup::StepResult, params, Connection, OptionalExtension};
+use rusqlite::{
+    backup::Backup, backup::StepResult, params, Connection, OpenFlags, OptionalExtension,
+};
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 use std::io::Read;
@@ -9,6 +11,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use super::paths::stale_db_candidates;
 
 mod legacy_import;
+#[cfg(test)]
+mod startup_tests;
 
 /// Result of a `migrate_stale_dbs` run.
 pub enum MigrationReport {
@@ -78,8 +82,19 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
         {
             continue;
         }
+        // Opening a WAL reader may update its ownership metadata when SQLite
+        // runs as root. Prime that reader before taking the migration baseline,
+        // then retain the same connection through the final signature check.
+        let source_conn = match open_backup_source(candidate) {
+            Ok(source_conn) => source_conn,
+            Err(error) => {
+                preserve_forensic_bundle(candidate)?;
+                return Err(format!("failed to backup {}: {error}", candidate.display()));
+            }
+        };
+        let signature_before = source_signature(candidate)?;
         let bak_path = with_suffix(candidate, ".pre-migration.bak");
-        let snapshot = match create_consistent_backup(candidate, &bak_path) {
+        let snapshot = match create_consistent_backup(&source_conn, candidate, &bak_path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 preserve_forensic_bundle(candidate)?;
@@ -117,6 +132,7 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
 
         let result = legacy_import::run(&conn, candidate, &signature_before, &content_hash);
         drop(conn);
+        drop(source_conn);
         let rows =
             result.map_err(|e| format!("migration of {} failed: {}", candidate.display(), e))?;
 
@@ -135,7 +151,9 @@ pub fn migrate_stale_dbs(target: &Path) -> Result<MigrationReport, String> {
 }
 
 fn prepare_migration_state(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("failed to begin legacy migration state upgrade: {e}"))?;
+    tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS refine_legacy_migration_state (
             source_path TEXT PRIMARY KEY,
             signature TEXT NOT NULL,
@@ -144,14 +162,16 @@ fn prepare_migration_state(conn: &Connection) -> Result<(), String> {
         )",
     )
     .map_err(|e| format!("failed to prepare legacy migration state: {e}"))?;
-    let columns = table_columns(conn, "main", "refine_legacy_migration_state")?;
+    let columns = table_columns(&tx, "main", "refine_legacy_migration_state")?;
     if !columns.iter().any(|column| column == "content_hash") {
-        conn.execute_batch(
+        tx.execute_batch(
             "ALTER TABLE refine_legacy_migration_state
              ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
         )
         .map_err(|e| format!("failed to upgrade legacy migration state: {e}"))?;
     }
+    tx.commit()
+        .map_err(|e| format!("failed to commit legacy migration state upgrade: {e}"))?;
     Ok(())
 }
 
@@ -285,15 +305,26 @@ fn force_reconcile() -> bool {
     )
 }
 
-fn create_consistent_backup(
-    source: &Path,
-    destination: &Path,
-) -> Result<MigrationSnapshot, String> {
-    let source_conn = Connection::open(source)
+fn open_backup_source(source: &Path) -> Result<Connection, String> {
+    let source_conn = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| format!("failed to open legacy DB {}: {}", source.display(), e))?;
     source_conn
         .busy_timeout(Duration::from_secs(5))
         .map_err(|e| format!("failed to configure legacy DB {}: {}", source.display(), e))?;
+    // An autocommit read opens the WAL without pinning the backup to this read's
+    // snapshot. Writes before the later signature baseline remain visible to
+    // Backup; writes after it still invalidate the migration, including ctime.
+    source_conn
+        .query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
+        .map_err(|e| format!("failed to read legacy DB {}: {}", source.display(), e))?;
+    Ok(source_conn)
+}
+
+fn create_consistent_backup(
+    source_conn: &Connection,
+    source: &Path,
+    destination: &Path,
+) -> Result<MigrationSnapshot, String> {
     let unique = uuid::Uuid::new_v4();
     let temporary = with_suffix(destination, &format!(".tmp-{unique}"));
     let result = (|| {
@@ -306,7 +337,7 @@ fn create_consistent_backup(
             )
         })?;
         {
-            let backup = Backup::new(&source_conn, &mut destination_conn)
+            let backup = Backup::new(source_conn, &mut destination_conn)
                 .map_err(|e| format!("failed to start backup of {}: {}", source.display(), e))?;
             run_backup_with_deadline(&backup, source, backup_stall_timeout())?;
         }
@@ -671,6 +702,8 @@ fn copy_table(
             ("extraction_jobs", "conversation_id") => {
                 "COALESCE(conv_map.canonical_id, src.conversation_id)".to_string()
             }
+            // Source revisions belong to the originating database's clock.
+            ("extraction_jobs", "source_revision") => "NULL".to_string(),
             _ => format!("src.{column}"),
         })
         .collect::<Vec<_>>()
@@ -758,6 +791,57 @@ fn copy_table(
         }
         _ => "",
     };
+    let capture_publication_guard = match table {
+        "conversations" => {
+            "AND NOT EXISTS (SELECT 1 FROM main.capture_revisions AS revision \
+             WHERE revision.conversation_id=conv_map.canonical_id AND revision.revision > 0)"
+        }
+        "extraction_jobs" if common.iter().any(|column| column == "conversation_id") => {
+            "AND NOT EXISTS (SELECT 1 FROM main.capture_revisions AS revision \
+             WHERE revision.conversation_id=COALESCE(conv_map.canonical_id,src.conversation_id) \
+               AND revision.revision > 0)"
+        }
+        "documents" => {
+            "AND NOT EXISTS (SELECT 1 FROM main.document_capture_publications AS publication \
+             WHERE publication.url=src.url AND publication.revision > 0)"
+        }
+        "items" if common.iter().any(|column| column == "document_id") => {
+            "AND NOT EXISTS ( \
+               SELECT 1 FROM main.documents AS document \
+               JOIN main.document_capture_publications AS publication ON publication.url=document.url \
+               WHERE document.id=COALESCE(doc_map.canonical_id, src.document_id) \
+                 AND publication.revision > 0 \
+             )"
+        }
+        _ => "",
+    };
+    // ON CONFLICT can target a protected row even when the incoming URL or
+    // parent changed, or an old items schema has no document_id column at all.
+    let existing_publication_guard = match table {
+        "extraction_jobs" => {
+            "AND NOT EXISTS ( \
+               SELECT 1 FROM main.extraction_jobs AS existing \
+               JOIN main.capture_revisions AS revision ON revision.conversation_id=existing.conversation_id \
+               WHERE existing.id=src.id AND revision.revision > 0 \
+             )"
+        }
+        "documents" => {
+            "AND NOT EXISTS ( \
+               SELECT 1 FROM main.documents AS existing \
+               JOIN main.document_capture_publications AS publication ON publication.url=existing.url \
+               WHERE existing.id=doc_map.canonical_id AND publication.revision > 0 \
+             )"
+        }
+        "items" => {
+            "AND NOT EXISTS ( \
+               SELECT 1 FROM main.items AS existing \
+               JOIN main.documents AS document ON document.id=existing.document_id \
+               JOIN main.document_capture_publications AS publication ON publication.url=document.url \
+               WHERE existing.id=src.id AND publication.revision > 0 \
+             )"
+        }
+        _ => "",
+    };
     let sql = format!(
         "INSERT INTO {table} ({col_list}) \
          SELECT {select_list} FROM {legacy_alias}.{table} AS src {joins} \
@@ -770,7 +854,7 @@ fn copy_table(
                SELECT 1 FROM main.{table} AS current \
                WHERE current.id=imported.canonical_id \
              ) \
-         ) {parent_tombstone_guard} {order_by} {conflict}"
+         ) {parent_tombstone_guard} {capture_publication_guard} {existing_publication_guard} {order_by} {conflict}"
     );
     let source_path = source.to_string_lossy();
     let copied = conn
@@ -1339,12 +1423,27 @@ mod tests {
         assert_eq!(event_count, 1);
     }
 
+    // These fixtures represent snapshots accepted before the local receive
+    // sequence existed. Seed them through the real historical-import mode so
+    // their transition assertions exercise legacy reconciliation, not the
+    // separate protection of a new local positive revision.
+    fn seed_historical_rows(conn: &Connection, sql: &str) {
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+        crate::infra::capture_publication::set_legacy_import(&tx, true).unwrap();
+        tx.execute_batch(sql).unwrap();
+        crate::infra::capture_publication::set_legacy_import(&tx, false).unwrap();
+        tx.commit().unwrap();
+    }
+
     #[test]
     fn later_legacy_job_timestamp_does_not_regress_terminal_state() {
         let tmp = TempDir::new().unwrap();
         let target = make_target_db(tmp.path());
         let tc = Connection::open(&target).unwrap();
-        tc.execute_batch(
+        seed_historical_rows(
+            &tc,
             "INSERT INTO conversations
                (id, user_id, source, url, raw_content, captured_at, created_at,
                 status, idempotency_key, item_ids)
@@ -1357,8 +1456,7 @@ mod tests {
              VALUES
                ('job-state', 'conv-job-state', 'auto', 'succeeded',
                 '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z');",
-        )
-        .unwrap();
+        );
         drop(tc);
 
         let legacy = tmp.path().join("server.db");
@@ -1426,7 +1524,8 @@ mod tests {
             let tmp = TempDir::new().unwrap();
             let target = make_target_db(tmp.path());
             let tc = Connection::open(&target).unwrap();
-            tc.execute_batch(
+            seed_historical_rows(
+                &tc,
                 "INSERT INTO conversations
                    (id, user_id, source, url, raw_content, captured_at, created_at,
                     status, idempotency_key, item_ids)
@@ -1439,8 +1538,7 @@ mod tests {
                  VALUES
                    ('job-submillisecond', 'conv-submillisecond', 'auto', 'pending',
                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00.123400Z', NULL);",
-            )
-            .unwrap();
+            );
             drop(tc);
 
             let legacy = tmp.path().join("server.db");
@@ -1528,8 +1626,10 @@ mod tests {
             let tmp = TempDir::new().unwrap();
             let target = make_target_db(tmp.path());
             let tc = Connection::open(&target).unwrap();
-            tc.execute_batch(&format!(
-                "INSERT INTO conversations
+            seed_historical_rows(
+                &tc,
+                &format!(
+                    "INSERT INTO conversations
                    (id, user_id, source, url, raw_content, captured_at, created_at,
                     status, idempotency_key, item_ids)
                  VALUES
@@ -1541,8 +1641,8 @@ mod tests {
                  VALUES
                    ('job-matrix', 'conv-matrix', 'auto', '{target_status}',
                     '2026-01-01T00:00:00Z', '{target_time}');"
-            ))
-            .unwrap();
+                ),
+            );
             drop(tc);
 
             let legacy = tmp.path().join("server.db");
@@ -1783,7 +1883,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let target = make_target_db(tmp.path());
         let tc = Connection::open(&target).unwrap();
-        tc.execute_batch(
+        seed_historical_rows(
+            &tc,
             "INSERT INTO documents
                (id, title, raw_content, source, url, source_version,
                 captured_at, created_at, updated_at)
@@ -1797,8 +1898,7 @@ mod tests {
                ('target-conv', 'u', 'legacy', 'https://example.com/conversation', 'old',
                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'queued',
                 'shared-idempotency-key', '[]');",
-        )
-        .unwrap();
+        );
         drop(tc);
 
         let legacy = tmp.path().join("server.db");
@@ -2094,6 +2194,20 @@ mod tests {
         );
         assert!(legacy.exists(), "source remains available for later writes");
 
+        assert!(matches!(
+            migrate_stale_dbs(&target).unwrap(),
+            MigrationReport::NoOp
+        ));
+        insert_item(&lc, "later-wal-item");
+        assert!(matches!(
+            migrate_stale_dbs(&target).unwrap(),
+            MigrationReport::Migrated { rows_copied: 1, .. }
+        ));
+        assert_eq!(
+            item_count(&Connection::open(&target).unwrap(), "later-wal-item"),
+            1
+        );
+
         let backup = Connection::open(tmp.path().join("server.db.pre-migration.bak")).unwrap();
         assert_eq!(
             item_count(&backup, "item-from-wal"),
@@ -2102,6 +2216,70 @@ mod tests {
         );
         drop(backup);
         drop(lc);
+    }
+
+    #[test]
+    fn primed_wal_reader_keeps_signature_stable_but_later_writes_abort_import() {
+        let tmp = TempDir::new().unwrap();
+        let target = make_target_db(tmp.path());
+        let legacy = make_legacy_db_with_items(tmp.path(), "server.db");
+        let writer = Connection::open(&legacy).unwrap();
+        writer
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+            .unwrap();
+        insert_item(&writer, "before-backup");
+
+        let source_conn = open_backup_source(&legacy).unwrap();
+        insert_item(&writer, "after-reader-open");
+        let signature_before = source_signature(&legacy).unwrap();
+        let snapshot = create_consistent_backup(
+            &source_conn,
+            &legacy,
+            &with_suffix(&legacy, ".pre-migration.bak"),
+        )
+        .unwrap();
+        assert_eq!(
+            source_signature(&legacy).unwrap(),
+            signature_before,
+            "the migration's own reader must not invalidate its baseline"
+        );
+        assert_eq!(
+            item_count(
+                &Connection::open(&snapshot.path).unwrap(),
+                "after-reader-open"
+            ),
+            1,
+            "priming must not pin the backup to an older read transaction"
+        );
+
+        insert_item(&writer, "after-backup");
+        assert_ne!(source_signature(&legacy).unwrap(), signature_before);
+        let conn = Connection::open(&target).unwrap();
+        crate::infra::configure_sqlite_connection(&conn).unwrap();
+        prepare_migration_state(&conn).unwrap();
+        prepare_import_ledger(&conn).unwrap();
+        conn.execute(
+            "ATTACH DATABASE ?1 AS refine_migration_src",
+            [snapshot.path.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+        let error = legacy_import::run(
+            &conn,
+            &legacy,
+            &signature_before,
+            &hash_file(&snapshot.path).unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.contains("changed while its migration snapshot was imported"));
+        assert_eq!(item_count(&conn, "before-backup"), 0);
+        assert!(migration_state(&conn, &legacy).unwrap().is_none());
+        drop(conn);
+        drop(source_conn);
+
+        assert!(matches!(
+            migrate_stale_dbs(&target).unwrap(),
+            MigrationReport::Migrated { rows_copied: 3, .. }
+        ));
     }
 
     #[test]

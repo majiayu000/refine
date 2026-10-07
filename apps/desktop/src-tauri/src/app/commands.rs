@@ -161,3 +161,17 @@ pub async fn delete_item(state: State<'_, AppState>, id: String) -> Result<bool,
         .await
         .map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub async fn get_commit_context(
+    state: State<'_, AppState>,
+    project: String,
+    reference: String,
+) -> Result<refine_server::CommitResult, String> {
+    refine_server::lookup_commit(
+        state.inner().clone(),
+        refine_server::CommitQuery { project, reference },
+    )
+    .await
+    .map_err(|error| error.message().to_string())
+}

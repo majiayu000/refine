@@ -1,6 +1,7 @@
 import type { CloudUploadResult } from './cloud-contract'
 import { createAsyncTaskQueue } from './async-queue'
 import { findLeasedItem } from './outbox-state'
+import { withRequestDeadline } from './request-deadline'
 import type {
   ConversationPayload,
   ExtensionStats,
@@ -21,7 +22,7 @@ export interface OutboxStorage {
 
 export interface OutboxRuntimeOptions {
   storage: OutboxStorage
-  upload(item: OutboxItem): Promise<CloudUploadResult>
+  upload(item: OutboxItem, signal: AbortSignal): Promise<CloudUploadResult>
   onSynced?(item: OutboxItem, result: CloudUploadResult): void
   now?: () => number
   randomUUID?: () => string
@@ -29,6 +30,7 @@ export interface OutboxRuntimeOptions {
   retryMaxDelayMs: number
   syncingRecoveryStaleMs: number
   sentTtlMs?: number
+  uploadTimeoutMs?: number
 }
 
 export class OutboxRuntime {
@@ -109,7 +111,15 @@ export class OutboxRuntime {
       const item = await this.claim(candidateId, forceRetry)
       if (!item) continue
 
-      const result = await this.options.upload(item)
+      let result: CloudUploadResult
+      try {
+        result = await withRequestDeadline(
+          (signal) => this.options.upload(item, signal),
+          this.options.uploadTimeoutMs ?? 30_000,
+        )
+      } catch (error) {
+        result = { success: false, message: error instanceof Error ? error.message : String(error) }
+      }
       const committed = await this.finish(item, result)
       if (committed && result.success) this.options.onSynced?.(item, result)
     }
@@ -158,9 +168,14 @@ export class OutboxRuntime {
         item.status = 'sent'
         item.lastError = undefined
         item.remoteConversationId = result.conversationId
+        item.remoteJobId = result.jobId
+        item.remoteStatus = result.status
         snapshot.stats.totalItems += 1
         snapshot.syncState.lastSyncedAt = item.updatedAt
         snapshot.syncState.lastError = undefined
+        snapshot.syncState.lastAcceptedConversationId = result.conversationId
+        snapshot.syncState.lastAcceptedJobId = result.jobId
+        snapshot.syncState.lastRemoteStatus = result.status
       } else {
         item.status = 'failed'
         item.attemptCount += 1
