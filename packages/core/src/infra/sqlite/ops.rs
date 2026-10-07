@@ -513,6 +513,9 @@ fn to_row_err(err: InfraError) -> rusqlite::Error {
 }
 
 #[cfg(test)]
+mod scale_trace_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{init_schema, maybe_rebuild_fts_index, FTS_BOOTSTRAP_USER_VERSION};
     use rusqlite::Connection;

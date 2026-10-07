@@ -21,12 +21,28 @@ Items 的默认 keyword 检索把 type 和全部 tags 的 AND 条件放在 SQL �
 精确 count 仍可能扫描所有匹配行；这项变更不承诺与库大小无关的查询时间。
 `packages/core/tests/search_filters.rs` 覆盖中英文、Unicode 标签、类型组合、
 空查询、空页，以及目标页之外的匹配行不会被完整反序列化。可用以下可重复探针
-比较 1k/10k 合成库的旧扫描路径和当前第一页，记录耗时与物化条目数；
-它没有依赖机器速度的通过阈值：
+比较 1k/10k/100k 合成库的旧扫描路径和当前第一页。每个规模覆盖英文、
+中文短词、中英混合、trigram 和最近条目，以及 type/tag 组合；每种查询记录
+21 次热查询与 5 次新连接查询的 p50/p95、单条写入后延迟、第一页 ID 与总数
+一致性、物化条目数及 Linux 进程 RSS。新连接只清空 SQLite 连接缓存，
+不清操作系统页缓存；输出明确记录该边界。延迟探针与 SQL trace 分开运行，
+避免记录完整 SQL 的开销污染计时。SQL trace 在真实 `ops::search_page` 上记录
+两条 SELECT、BEGIN/COMMIT 和 SQLite FTS 内部语句；三个规模均检查没有重复
+OFFSET 翻页。小规模语句数回归进入普通测试，三规模探针按需运行。
+探针没有依赖机器速度的通过阈值：
 
 ```sh
 cargo test --locked -p refine-core --test search_filters filtered_search_scale_probe -- --ignored --nocapture
+cargo test --locked -p refine-core --lib filtered_search_sql_scale_probe -- --ignored --nocapture
 ```
+
+2026-10-07 的实际合成库结果保存在
+[`docs/eval/search-scale-20261007.json`](eval/search-scale-20261007.json)。
+该次共享 Linux 主机的 debug 构建中，100k 英文首屏热查询 p50/p95 为
+742.6/828.9 ms；旧 128 条分页扫描为 455.2 秒、782 次调用。
+15 种规模/查询组合均保留完整 total 和首屏 ID。SQL trace 实测始终为
+两条顶层 SELECT 加 BEGIN/COMMIT；FTS 内部语句仍随命中增长，精确 count、
+排序和中文短词扫描仍有成本。该结果不等同于生产延迟承诺或真实任务语义召回率。
 
 SQLite 的 trigram MATCH 至少需要三个 Unicode 字符。一至两个字的查询使用
 字面 LIKE 回退，保证召回；这类查询可能扫描全表。不能据此宣称所有中文查询都有

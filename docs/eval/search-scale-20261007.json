@@ -1,0 +1,646 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-10-07T08:31:05.150839+00:00",
+  "source_base_commit": "29b26c8ca52032176a19c17b8801ffb2ed5efa7a",
+  "scope": "informational synthetic corpus; production search functions; no model or real browser",
+  "environment": {
+    "os": "Linux",
+    "machine": "x86_64",
+    "profile": "debug unoptimized + debuginfo",
+    "rustc": "1.97.0",
+    "logical_cpus": 9,
+    "shared_host": true,
+    "os_page_cache_flushed": false
+  },
+  "method": {
+    "timing_command": "cargo test --locked -p refine-core --test search_filters filtered_search_scale_probe -- --ignored --nocapture",
+    "sql_trace_command": "cargo test --locked -p refine-core --lib filtered_search_sql_scale_probe -- --ignored --nocapture",
+    "timing_elapsed_seconds": 631.56,
+    "trace_elapsed_seconds": 14.26,
+    "timing_includes_trace_overhead": false,
+    "latency_fixture": "mixed Knowledge/Skill and one/two tags; all rows text match; same creation timestamp",
+    "trace_fixture": "all Knowledge with both tags, same text corpus; tests actual ops::search_page",
+    "reference": "unfiltered real repository search plus Rust filter, exact top 20 IDs and total; one old 128-row OFFSET scan per size",
+    "reopened_samples": "first search after opening a new read-only SqliteStore; OS cache retained",
+    "rss": "process VmRSS after query/write assertions; includes allocator retention from previous baseline/reference work",
+    "recall": "exact expected first-page ID recall for this synthetic fixture, not semantic task recall"
+  },
+  "source_sha256": {
+    "packages/core/tests/search_filters.rs": "b3cbdc33bb5b72b4b99d1049f30843f244ac78bb03a491c353bb8672acdc703f",
+    "packages/core/src/infra/sqlite/ops/scale_trace_tests.rs": "a4f95a78a81cbf830736ff3ff9e97351764b618ef045e2205c9963a15b94a64b"
+  },
+  "raw_log_sha256": {
+    "refine-scale.log": "522afd16e7312c6ece930b9e96b62c97aa1368f0d99bf007da56b43f11df5ef7",
+    "refine-sql-trace.log": "bdde853d13e8fb363d0d532f30db43f1c45b4637d056a166a3b3b5c98d72fdd9"
+  },
+  "latencies": [
+    {
+      "after_single_write_ms": 15.893481000000001,
+      "first_page_recall": 1.0,
+      "item_type": "knowledge",
+      "legacy_scan_ms": 61.528214,
+      "legacy_scan_page_calls": 8,
+      "legacy_scan_query": "rust",
+      "materialized_items": 20,
+      "os_page_cache_flushed": false,
+      "page_sql_statement_contract": 2,
+      "process_rss_kib": 10140,
+      "query": "rust",
+      "reopened_p50_ms": 14.678422,
+      "reopened_p95_ms": 29.932269,
+      "reopened_samples": 5,
+      "rows": 1000,
+      "sql_statement_count_is_instrumented": false,
+      "tags": [
+        "backend"
+      ],
+      "total": 667,
+      "warm_p50_ms": 7.832387999999999,
+      "warm_p95_ms": 29.752284,
+      "warm_samples": 21
+    },
+    {
+      "after_single_write_ms": 11.326631,
+      "first_page_recall": 1.0,
+      "item_type": "knowledge",
+      "legacy_scan_ms": 61.528214,
+      "legacy_scan_page_calls": 8,
+      "legacy_scan_query": "rust",
+      "materialized_items": 20,
+      "os_page_cache_flushed": false,
+      "page_sql_statement_contract": 2,
+      "process_rss_kib": 10232,
+      "query": "部署",
+      "reopened_p50_ms": 17.384646,
+      "reopened_p95_ms": 49.524694000000004,
+      "reopened_samples": 5,
+      "rows": 1000,
+      "sql_statement_count_is_instrumented": false,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "total": 334,
+      "warm_p50_ms": 11.456463,
+      "warm_p95_ms": 70.663831,
+      "warm_samples": 21
+    },
+    {
+      "after_single_write_ms": 14.65584,
+      "first_page_recall": 1.0,
+      "item_type": null,
+      "legacy_scan_ms": 61.528214,
+      "legacy_scan_page_calls": 8,
+      "legacy_scan_query": "rust",
+      "materialized_items": 20,
+      "os_page_cache_flushed": false,
+      "page_sql_statement_contract": 2,
+      "process_rss_kib": 10044,
+      "query": "部署 rust",
+      "reopened_p50_ms": 21.636291,
+      "reopened_p95_ms": 37.137238,
+      "reopened_samples": 5,
+      "rows": 1000,
+      "sql_statement_count_is_instrumented": false,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "total": 500,
+      "warm_p50_ms": 22.009737,
+      "warm_p95_ms": 43.878544,
+      "warm_samples": 21
+    },
+    {
+      "after_single_write_ms": 13.435005,
+      "first_page_recall": 1.0,
+      "item_type": "knowledge",
+      "legacy_scan_ms": 61.528214,
+      "legacy_scan_page_calls": 8,
+      "legacy_scan_query": "rust",
+      "materialized_items": 20,
+      "os_page_cache_flushed": false,
+      "page_sql_statement_contract": 2,
+      "process_rss_kib": 10724,
+      "query": "灰度发布",
+      "reopened_p50_ms": 9.645379,
+      "reopened_p95_ms": 17.205585999999997,
+      "reopened_samples": 5,
+      "rows": 1000,
+      "sql_statement_count_is_instrumented": false,
+      "tags": [
+        "backend"
+      ],
+      "total": 667,
+      "warm_p50_ms": 9.950410999999999,
+      "warm_p95_ms": 13.385135,
+      "warm_samples": 21
+    },
+    {
+      "after_single_write_ms": 9.609603,
+      "first_page_recall": 1.0,
+      "item_type": "knowledge",
+      "legacy_scan_ms": 61.528214,
+      "legacy_scan_page_calls": 8,
+      "legacy_scan_query": "rust",
+      "materialized_items": 20,
+      "os_page_cache_flushed": false,
+      "page_sql_statement_contract": 2,
+      "process_rss_kib": 10724,
+      "query": "",
+      "reopened_p50_ms": 13.109476,
+      "reopened_p95_ms": 22.576156,
+      "reopened_samples": 5,
+      "rows": 1000,
+      "sql_statement_count_is_instrumented": false,
+      "tags": [
+        "backend"
+      ],
+      "total": 667,
+      "warm_p50_ms": 10.038421000000001,
+      "warm_p95_ms": 12.292572999999999,
+      "warm_samples": 21
+    },
+    {
+      "after_single_write_ms": 67.084798,
+      "first_page_recall": 1.0,
+      "item_type": "knowledge",
+      "legacy_scan_ms": 6328.265318,
+      "legacy_scan_page_calls": 79,
+      "legacy_scan_query": "rust",
+      "materialized_items": 20,
+      "os_page_cache_flushed": false,
+      "page_sql_statement_contract": 2,
+      "process_rss_kib": 26120,
+      "query": "rust",
+      "reopened_p50_ms": 65.74329800000001,
+      "reopened_p95_ms": 84.547786,
+      "reopened_samples": 5,
+      "rows": 10000,
+      "sql_statement_count_is_instrumented": false,
+      "tags": [
+        "backend"
+      ],
+      "total": 6667,
+      "warm_p50_ms": 69.90120499999999,
+      "warm_p95_ms": 121.107532,
+      "warm_samples": 21
+    },
+    {
+      "after_single_write_ms": 109.471476,
+      "first_page_recall": 1.0,
+      "item_type": "knowledge",
+      "legacy_scan_ms": 6328.265318,
+      "legacy_scan_page_calls": 79,
+      "legacy_scan_query": "rust",
+      "materialized_items": 20,
+      "os_page_cache_flushed": false,
+      "page_sql_statement_contract": 2,
+      "process_rss_kib": 27672,
+      "query": "部署",
+      "reopened_p50_ms": 112.432086,
+      "reopened_p95_ms": 138.21762700000002,
+      "reopened_samples": 5,
+      "rows": 10000,
+      "sql_statement_count_is_instrumented": false,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "total": 3334,
+      "warm_p50_ms": 98.138504,
+      "warm_p95_ms": 110.35009,
+      "warm_samples": 21
+    },
+    {
+      "after_single_write_ms": 176.17192400000002,
+      "first_page_recall": 1.0,
+      "item_type": null,
+      "legacy_scan_ms": 6328.265318,
+      "legacy_scan_page_calls": 79,
+      "legacy_scan_query": "rust",
+      "materialized_items": 20,
+      "os_page_cache_flushed": false,
+      "page_sql_statement_contract": 2,
+      "process_rss_kib": 28024,
+      "query": "部署 rust",
+      "reopened_p50_ms": 215.72523900000002,
+      "reopened_p95_ms": 511.135576,
+      "reopened_samples": 5,
+      "rows": 10000,
+      "sql_statement_count_is_instrumented": false,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "total": 5000,
+      "warm_p50_ms": 197.373659,
+      "warm_p95_ms": 250.862103,
+      "warm_samples": 21
+    },
+    {
+      "after_single_write_ms": 83.560504,
+      "first_page_recall": 1.0,
+      "item_type": "knowledge",
+      "legacy_scan_ms": 6328.265318,
+      "legacy_scan_page_calls": 79,
+      "legacy_scan_query": "rust",
+      "materialized_items": 20,
+      "os_page_cache_flushed": false,
+      "page_sql_statement_contract": 2,
+      "process_rss_kib": 28132,
+      "query": "灰度发布",
+      "reopened_p50_ms": 79.55955900000001,
+      "reopened_p95_ms": 1152.350356,
+      "reopened_samples": 5,
+      "rows": 10000,
+      "sql_statement_count_is_instrumented": false,
+      "tags": [
+        "backend"
+      ],
+      "total": 6667,
+      "warm_p50_ms": 81.445809,
+      "warm_p95_ms": 93.067998,
+      "warm_samples": 21
+    },
+    {
+      "after_single_write_ms": 42.898714,
+      "first_page_recall": 1.0,
+      "item_type": "knowledge",
+      "legacy_scan_ms": 6328.265318,
+      "legacy_scan_page_calls": 79,
+      "legacy_scan_query": "rust",
+      "materialized_items": 20,
+      "os_page_cache_flushed": false,
+      "page_sql_statement_contract": 2,
+      "process_rss_kib": 28132,
+      "query": "",
+      "reopened_p50_ms": 46.746663,
+      "reopened_p95_ms": 62.801750000000006,
+      "reopened_samples": 5,
+      "rows": 10000,
+      "sql_statement_count_is_instrumented": false,
+      "tags": [
+        "backend"
+      ],
+      "total": 6667,
+      "warm_p50_ms": 46.839995,
+      "warm_p95_ms": 93.191996,
+      "warm_samples": 21
+    },
+    {
+      "after_single_write_ms": 788.8427690000001,
+      "first_page_recall": 1.0,
+      "item_type": "knowledge",
+      "legacy_scan_ms": 455155.230291,
+      "legacy_scan_page_calls": 782,
+      "legacy_scan_query": "rust",
+      "materialized_items": 20,
+      "os_page_cache_flushed": false,
+      "page_sql_statement_contract": 2,
+      "process_rss_kib": 90812,
+      "query": "rust",
+      "reopened_p50_ms": 835.530769,
+      "reopened_p95_ms": 1408.3831989999999,
+      "reopened_samples": 5,
+      "rows": 100000,
+      "sql_statement_count_is_instrumented": false,
+      "tags": [
+        "backend"
+      ],
+      "total": 66667,
+      "warm_p50_ms": 742.629509,
+      "warm_p95_ms": 828.865851,
+      "warm_samples": 21
+    },
+    {
+      "after_single_write_ms": 1169.613491,
+      "first_page_recall": 1.0,
+      "item_type": "knowledge",
+      "legacy_scan_ms": 455155.230291,
+      "legacy_scan_page_calls": 782,
+      "legacy_scan_query": "rust",
+      "materialized_items": 20,
+      "os_page_cache_flushed": false,
+      "page_sql_statement_contract": 2,
+      "process_rss_kib": 92284,
+      "query": "部署",
+      "reopened_p50_ms": 1248.313867,
+      "reopened_p95_ms": 1776.02226,
+      "reopened_samples": 5,
+      "rows": 100000,
+      "sql_statement_count_is_instrumented": false,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "total": 33334,
+      "warm_p50_ms": 834.190129,
+      "warm_p95_ms": 986.3340579999999,
+      "warm_samples": 21
+    },
+    {
+      "after_single_write_ms": 1709.160064,
+      "first_page_recall": 1.0,
+      "item_type": null,
+      "legacy_scan_ms": 455155.230291,
+      "legacy_scan_page_calls": 782,
+      "legacy_scan_query": "rust",
+      "materialized_items": 20,
+      "os_page_cache_flushed": false,
+      "page_sql_statement_contract": 2,
+      "process_rss_kib": 92372,
+      "query": "部署 rust",
+      "reopened_p50_ms": 2573.011618,
+      "reopened_p95_ms": 3204.040683,
+      "reopened_samples": 5,
+      "rows": 100000,
+      "sql_statement_count_is_instrumented": false,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "total": 50000,
+      "warm_p50_ms": 1713.803733,
+      "warm_p95_ms": 2324.5689450000004,
+      "warm_samples": 21
+    },
+    {
+      "after_single_write_ms": 701.123638,
+      "first_page_recall": 1.0,
+      "item_type": "knowledge",
+      "legacy_scan_ms": 455155.230291,
+      "legacy_scan_page_calls": 782,
+      "legacy_scan_query": "rust",
+      "materialized_items": 20,
+      "os_page_cache_flushed": false,
+      "page_sql_statement_contract": 2,
+      "process_rss_kib": 92428,
+      "query": "灰度发布",
+      "reopened_p50_ms": 786.101348,
+      "reopened_p95_ms": 1002.754411,
+      "reopened_samples": 5,
+      "rows": 100000,
+      "sql_statement_count_is_instrumented": false,
+      "tags": [
+        "backend"
+      ],
+      "total": 66667,
+      "warm_p50_ms": 666.657682,
+      "warm_p95_ms": 993.0552759999999,
+      "warm_samples": 21
+    },
+    {
+      "after_single_write_ms": 468.544479,
+      "first_page_recall": 1.0,
+      "item_type": "knowledge",
+      "legacy_scan_ms": 455155.230291,
+      "legacy_scan_page_calls": 782,
+      "legacy_scan_query": "rust",
+      "materialized_items": 20,
+      "os_page_cache_flushed": false,
+      "page_sql_statement_contract": 2,
+      "process_rss_kib": 92452,
+      "query": "",
+      "reopened_p50_ms": 638.8816710000001,
+      "reopened_p95_ms": 706.138973,
+      "reopened_samples": 5,
+      "rows": 100000,
+      "sql_statement_count_is_instrumented": false,
+      "tags": [
+        "backend"
+      ],
+      "total": 66667,
+      "warm_p50_ms": 634.763153,
+      "warm_p95_ms": 658.330291,
+      "warm_samples": 21
+    }
+  ],
+  "sql_trace": [
+    {
+      "materialized_items": 20,
+      "measurement_boundary": "production ops::search_page with rusqlite trace",
+      "query": "rust",
+      "rows": 1000,
+      "select_statements": 2,
+      "sqlite_internal_statements": 1006,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "top_level_statements": 4,
+      "total": 1000,
+      "transaction_statements": 2
+    },
+    {
+      "materialized_items": 20,
+      "measurement_boundary": "production ops::search_page with rusqlite trace",
+      "query": "部署",
+      "rows": 1000,
+      "select_statements": 2,
+      "sqlite_internal_statements": 5,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "top_level_statements": 4,
+      "total": 1000,
+      "transaction_statements": 2
+    },
+    {
+      "materialized_items": 20,
+      "measurement_boundary": "production ops::search_page with rusqlite trace",
+      "query": "部署 rust",
+      "rows": 1000,
+      "select_statements": 2,
+      "sqlite_internal_statements": 3005,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "top_level_statements": 4,
+      "total": 1000,
+      "transaction_statements": 2
+    },
+    {
+      "materialized_items": 20,
+      "measurement_boundary": "production ops::search_page with rusqlite trace",
+      "query": "灰度发布",
+      "rows": 1000,
+      "select_statements": 2,
+      "sqlite_internal_statements": 1008,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "top_level_statements": 4,
+      "total": 1000,
+      "transaction_statements": 2
+    },
+    {
+      "materialized_items": 20,
+      "measurement_boundary": "production ops::search_page with rusqlite trace",
+      "query": "",
+      "rows": 1000,
+      "select_statements": 2,
+      "sqlite_internal_statements": 0,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "top_level_statements": 4,
+      "total": 1000,
+      "transaction_statements": 2
+    },
+    {
+      "materialized_items": 20,
+      "measurement_boundary": "production ops::search_page with rusqlite trace",
+      "query": "rust",
+      "rows": 10000,
+      "select_statements": 2,
+      "sqlite_internal_statements": 10006,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "top_level_statements": 4,
+      "total": 10000,
+      "transaction_statements": 2
+    },
+    {
+      "materialized_items": 20,
+      "measurement_boundary": "production ops::search_page with rusqlite trace",
+      "query": "部署",
+      "rows": 10000,
+      "select_statements": 2,
+      "sqlite_internal_statements": 5,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "top_level_statements": 4,
+      "total": 10000,
+      "transaction_statements": 2
+    },
+    {
+      "materialized_items": 20,
+      "measurement_boundary": "production ops::search_page with rusqlite trace",
+      "query": "部署 rust",
+      "rows": 10000,
+      "select_statements": 2,
+      "sqlite_internal_statements": 30005,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "top_level_statements": 4,
+      "total": 10000,
+      "transaction_statements": 2
+    },
+    {
+      "materialized_items": 20,
+      "measurement_boundary": "production ops::search_page with rusqlite trace",
+      "query": "灰度发布",
+      "rows": 10000,
+      "select_statements": 2,
+      "sqlite_internal_statements": 10014,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "top_level_statements": 4,
+      "total": 10000,
+      "transaction_statements": 2
+    },
+    {
+      "materialized_items": 20,
+      "measurement_boundary": "production ops::search_page with rusqlite trace",
+      "query": "",
+      "rows": 10000,
+      "select_statements": 2,
+      "sqlite_internal_statements": 0,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "top_level_statements": 4,
+      "total": 10000,
+      "transaction_statements": 2
+    },
+    {
+      "materialized_items": 20,
+      "measurement_boundary": "production ops::search_page with rusqlite trace",
+      "query": "rust",
+      "rows": 100000,
+      "select_statements": 2,
+      "sqlite_internal_statements": 100012,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "top_level_statements": 4,
+      "total": 100000,
+      "transaction_statements": 2
+    },
+    {
+      "materialized_items": 20,
+      "measurement_boundary": "production ops::search_page with rusqlite trace",
+      "query": "部署",
+      "rows": 100000,
+      "select_statements": 2,
+      "sqlite_internal_statements": 5,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "top_level_statements": 4,
+      "total": 100000,
+      "transaction_statements": 2
+    },
+    {
+      "materialized_items": 20,
+      "measurement_boundary": "production ops::search_page with rusqlite trace",
+      "query": "部署 rust",
+      "rows": 100000,
+      "select_statements": 2,
+      "sqlite_internal_statements": 300011,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "top_level_statements": 4,
+      "total": 100000,
+      "transaction_statements": 2
+    },
+    {
+      "materialized_items": 20,
+      "measurement_boundary": "production ops::search_page with rusqlite trace",
+      "query": "灰度发布",
+      "rows": 100000,
+      "select_statements": 2,
+      "sqlite_internal_statements": 100032,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "top_level_statements": 4,
+      "total": 100000,
+      "transaction_statements": 2
+    },
+    {
+      "materialized_items": 20,
+      "measurement_boundary": "production ops::search_page with rusqlite trace",
+      "query": "",
+      "rows": 100000,
+      "select_statements": 2,
+      "sqlite_internal_statements": 0,
+      "tags": [
+        "backend",
+        "数据库"
+      ],
+      "top_level_statements": 4,
+      "total": 100000,
+      "transaction_statements": 2
+    }
+  ]
+}

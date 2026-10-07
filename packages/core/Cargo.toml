@@ -25,5 +25,6 @@ httpdate = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+rusqlite = { workspace = true, features = ["trace"] }
 tempfile = "3"
 filetime = "0.2"
