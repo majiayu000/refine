@@ -95,6 +95,9 @@ jobs:
         run: bunx @tauri-apps/cli@2 build --bundles dmg
 
       - name: Verify
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
           set -euo pipefail
           dmg_path="$(find apps/desktop/src-tauri/target -type f -name '*.dmg' -print -quit)"
@@ -102,6 +105,11 @@ jobs:
             echo "Signed macOS DMG was not produced" >&2
             exit 1
           fi
+          xcrun notarytool submit "$dmg_path" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" --wait
+          xcrun stapler staple "$dmg_path"
           xcrun stapler validate "$dmg_path"
 
       - name: Remove temporary signing material
