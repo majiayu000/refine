@@ -13,6 +13,8 @@ jobs:
   macos:
     name: Signed Refine desktop
     runs-on: macos-15
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target
     steps:
       - uses: actions/checkout@v4
 
