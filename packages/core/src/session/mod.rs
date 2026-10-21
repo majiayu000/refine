@@ -42,14 +42,15 @@ pub use prescription::{build_prescription_prompt, PRESCRIPTION_SYSTEM_PROMPT};
 pub use project_identity::ProjectIdentityResolver;
 pub use remem_archive::{
     is_missing_remem_executable, is_remem_process_output_overflow, is_remem_process_timeout,
-    load_commit_context, load_remem_document_content, load_remem_session,
+    is_remem_snapshot_drift, load_commit_context, load_remem_document_content, load_remem_session,
     load_remem_session_summaries, remem_hydration_failure_message, remem_snapshot_hash,
     CommitContext, CommitDiscussion, CommitMessage, RememSession, RememSessionSummary,
+    SnapshotDrift,
 };
 pub use report::{
     build_final_prompt, build_final_prompt_with_delta, build_final_prompt_with_delta_and_budget,
-    format_data_quality_stats, merge_route_results, merge_route_results_with_budget, RouteResult,
-    INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
+    extract_experiment_card, format_data_quality_stats, merge_route_results,
+    merge_route_results_with_budget, RouteResult, INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
 };
 pub use source_cohort::{
     cluster_session_observation_windows, cluster_session_observations,

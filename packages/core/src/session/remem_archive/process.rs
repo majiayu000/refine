@@ -7,7 +7,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+// Listing every Remem session takes ~36s on a 2026-10 archive and grows with it.
+const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_MAX_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
 

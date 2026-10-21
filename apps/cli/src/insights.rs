@@ -10,9 +10,9 @@ use chrono::{Duration, Utc};
 use refine_core::infra::{llm_with_retry_policy_for, LlmClient, LlmRetryPolicy};
 use refine_core::knowledge::{Document, DocumentRepository, ItemRepository};
 use refine_core::session::{
-    build_final_prompt_with_delta, cluster_session_observation_windows, format_data_quality_stats,
-    merge_route_results_with_budget, plan_routes, DataQualityStats, RouteResult,
-    INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
+    build_final_prompt_with_delta, cluster_session_observation_windows, extract_experiment_card,
+    format_data_quality_stats, merge_route_results_with_budget, plan_routes, DataQualityStats,
+    RouteResult, INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,7 +20,9 @@ use tokio::sync::Semaphore;
 
 const DEFAULT_LLM_CONCURRENCY: usize = 4;
 const FINAL_REPORT_REQUEST_TIMEOUT_MILLIS: u64 = 300_000;
-const INSIGHTS_PROMPT_IDENTITY: &str = "insights-v2:route-v2:delta-final-v4";
+const INSIGHTS_PROMPT_IDENTITY: &str = "insights-v2:route-v2:hypothesis-loop-v1";
+/// Latest hypothesis + experiment card, overwritten each week and reviewed by the next report.
+const EXPERIMENT_CARD_URL: &str = "insights-v2://experiment/latest";
 const FINAL_ROUTE_CONTEXT_CHARS: usize = 24_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -416,11 +418,21 @@ pub async fn handle_insights(
         FINAL_ROUTE_CONTEXT_CHARS,
         rotation_seed(&quality.cohort_identity),
     );
+    let previous_card = if options.with_prescription {
+        doc_store
+            .find_by_url(EXPERIMENT_CARD_URL)
+            .await
+            .context("读取上周认知假设卡片失败")?
+            .map(|document| document.raw_content().to_string())
+    } else {
+        None
+    };
     let final_prompt = build_final_prompt_with_delta(
         &combined,
         stats,
         quality,
         Some(&delta_summary),
+        previous_card.as_deref(),
         options.with_prescription,
     );
 
@@ -449,7 +461,27 @@ pub async fn handle_insights(
         report_with_metadata(&report, options.period, quality, &manifest, &delta_summary)?;
     println!("{}", persisted_report);
 
-    persist_report(&persisted_report, options.all_snapshot, doc_store.as_ref()).await
+    persist_report(&persisted_report, options.all_snapshot, doc_store.as_ref()).await?;
+    if options.with_prescription {
+        persist_experiment_card(&report, doc_store.as_ref()).await?;
+    }
+    Ok(())
+}
+
+async fn persist_experiment_card(report: &str, doc_store: &dyn DocumentRepository) -> Result<()> {
+    let Some(card) = extract_experiment_card(report) else {
+        eprintln!("警告: 报告缺少「本周认知假设」，下周将无卡片可复查");
+        return Ok(());
+    };
+    let mut doc = Document::new("session-insights-experiment", &card);
+    doc.set_title(&format!(
+        "认知假设卡片 {}",
+        doc.created_at().format("%Y-%m-%d")
+    ));
+    doc.set_url(EXPERIMENT_CARD_URL);
+    doc_store.save(&doc).await.context("保存认知假设卡片失败")?;
+    println!("认知假设卡片已更新，下周复查");
+    Ok(())
 }
 
 #[cfg(test)]
