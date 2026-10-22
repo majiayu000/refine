@@ -2,6 +2,7 @@
 
 use crate::error::{InfraError, InfraResult};
 use crate::infra::llm_budget::{LlmRunBudget, PROVIDER_MAX_OUTPUT_TOKENS};
+use crate::infra::llm_command::CommandLlmClient;
 use crate::infra::llm_usage::{
     default_usage_ledger_path, ClaudeResponse, LlmCompletion, OpenAIResponse,
 };
@@ -9,7 +10,7 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// LLM 客户端接口
 #[async_trait]
@@ -49,18 +50,31 @@ pub trait LlmClient: Send + Sync {
 /// 从环境变量构建 LLM 客户端。
 ///
 /// 优先级：
+/// 0. `REFINE_LLM_COMMAND` 命令行通道（无需 API key）
 /// 1. Refine 显式配置（Anthropic 优先于 OpenAI）
 /// 2. 完整的 BASE OpenAI-compatible 配置
 /// 3. 环境中继承的 provider 配置（Anthropic 优先于 OpenAI）
 ///
 /// 每个优先级只读取自己的 key、model 和 URL，避免跨配置组拼接。
 pub fn build_llm_client_from_env() -> Option<Arc<dyn LlmClient>> {
-    explicit_anthropic_config_from_env()
-        .map(build_anthropic_client)
+    command_client_from_env()
+        .or_else(|| explicit_anthropic_config_from_env().map(build_anthropic_client))
         .or_else(|| explicit_openai_config_from_env().map(build_openai_client))
         .or_else(|| base_openai_config_from_env().map(build_openai_client))
         .or_else(|| ambient_anthropic_config_from_env().map(build_anthropic_client))
         .or_else(|| ambient_openai_config_from_env().map(build_openai_client))
+}
+
+fn command_client_from_env() -> Option<Arc<dyn LlmClient>> {
+    let program = env_var(&["REFINE_LLM_COMMAND"])?;
+    let mut client = CommandLlmClient::new(program);
+    if let Some(timeout_ms) = env_var(&["REFINE_LLM_COMMAND_TIMEOUT_MS"])
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+    {
+        client = client.with_timeout(Duration::from_millis(timeout_ms));
+    }
+    Some(Arc::new(client))
 }
 
 fn build_anthropic_client(config: LlmEnvConfig) -> Arc<dyn LlmClient> {

@@ -65,3 +65,28 @@ if grep -Fxq 'insights --prescription' "$CALLS_FILE"; then
 fi
 
 printf 'PASS weekly insights uses an explicit 7-day delta window\n'
+
+# A weekly LLM command replaces API credentials for this job only.
+COMMAND_ENV_FILE="${TEST_ROOT}/command-env"
+mkdir -p "${TEST_ROOT}/.refine/bin"
+printf '#!/usr/bin/env bash\ncat\n' > "${TEST_ROOT}/.refine/bin/weekly-llm"
+chmod +x "${TEST_ROOT}/.refine/bin/weekly-llm"
+cat > "$FAKE_REFINE" <<'EOF'
+#!/usr/bin/env bash
+printf '%s %s\n' "${REFINE_LLM_COMMAND:-}" "${REFINE_INGEST_CONCURRENCY:-}" > "$REFINE_TEST_COMMAND_ENV"
+EOF
+env -u ANTHROPIC_API_KEY -u BASE_API_KEY -u OPENAI_API_KEY \
+  HOME="$TEST_ROOT" \
+  PATH="/usr/bin:/bin" \
+  REFINE_BIN="$FAKE_REFINE" \
+  REFINE_TEST_COMMAND_ENV="$COMMAND_ENV_FILE" \
+  REFINE_RUNTIME_LOCK_ACTIVE=1 \
+  REFINE_LLM_ENV_FILE="${TEST_ROOT}/missing.env" \
+  bash "${SCRIPT_DIR}/weekly-insights.sh" >/dev/null
+
+[[ "$(cat "$COMMAND_ENV_FILE")" == "${TEST_ROOT}/.refine/bin/weekly-llm 4" ]] || {
+  printf 'FAIL: weekly insights did not route through the weekly LLM command\n' >&2
+  exit 1
+}
+
+printf 'PASS weekly insights prefers the weekly LLM command without API credentials\n'
