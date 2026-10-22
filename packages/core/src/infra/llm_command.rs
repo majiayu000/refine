@@ -99,6 +99,10 @@ impl LlmClient for CommandLlmClient {
         Ok(text.to_string())
     }
 
+    fn min_request_timeout(&self) -> Option<Duration> {
+        Some(self.timeout)
+    }
+
     fn cache_identity(&self) -> String {
         let digest = Sha256::digest(self.program.to_string_lossy().as_bytes());
         format!("command:program-sha256:{digest:x}")
@@ -149,5 +153,27 @@ mod tests {
             CommandLlmClient::new(script(&dir, "sleep 5")).with_timeout(Duration::from_millis(200));
         let error = client.complete("x", None).await.unwrap_err();
         assert!(matches!(error, InfraError::ProcessTimeout { .. }));
+    }
+
+    #[tokio::test]
+    async fn retry_layer_waits_for_a_slow_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let client: std::sync::Arc<dyn LlmClient> =
+            std::sync::Arc::new(CommandLlmClient::new(script(&dir, "sleep 0.5; echo done")));
+        let reply = crate::infra::llm_with_retry_policy_for(
+            &client,
+            "test",
+            "prompt",
+            "system",
+            crate::infra::LlmRetryPolicy {
+                max_retries: 1,
+                base_delay_secs: 0,
+                request_timeout_millis: 100,
+            },
+            |_attempt, _max_retries, _delay_secs, _err| {},
+        )
+        .await
+        .expect("command timeout must override the shorter policy timeout");
+        assert_eq!(reply, "done");
     }
 }

@@ -40,6 +40,12 @@ pub trait LlmClient: Send + Sync {
         None
     }
 
+    /// Clients that are inherently slow (agent CLIs) can raise the per-request
+    /// timeout the retry layer enforces; the larger of the two applies.
+    fn min_request_timeout(&self) -> Option<Duration> {
+        None
+    }
+
     /// Stable identity for cache invalidation. Implementations should include
     /// provider, model, and compatible endpoint identity, but never secrets.
     fn cache_identity(&self) -> String {
