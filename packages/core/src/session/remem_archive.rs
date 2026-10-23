@@ -24,6 +24,18 @@ pub use process::{
     remem_hydration_failure_message,
 };
 
+/// The session gained messages between listing and loading, usually because it
+/// is still being written. A later run sees a consistent snapshot.
+#[derive(Debug, thiserror::Error)]
+#[error("raw messages snapshot hash drifted from the session summary")]
+pub struct SnapshotDrift;
+
+pub fn is_remem_snapshot_drift(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<SnapshotDrift>().is_some())
+}
+
 #[derive(Debug)]
 pub struct RememSession {
     pub session_ref: String,
@@ -502,10 +514,9 @@ fn validate_page(summary: &RememSessionSummary, envelope: &MessagesEnvelope) -> 
             .all(|byte| byte.is_ascii_hexdigit()),
         "raw messages content_hash is not hexadecimal"
     );
-    ensure!(
-        envelope.content_hash == summary.content_hash,
-        "raw messages snapshot hash drifted from the session summary"
-    );
+    if envelope.content_hash != summary.content_hash {
+        return Err(SnapshotDrift.into());
+    }
     Ok(())
 }
 

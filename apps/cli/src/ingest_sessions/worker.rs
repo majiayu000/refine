@@ -237,8 +237,9 @@ pub(super) async fn process_pending_sessions(
                             }
                         }
                     } else {
+                        // `{:#}` keeps the cause chain; the outer context alone hides why it failed.
                         eprintln!(
-                            "  ✗ [{}/{}] 失败: {}",
+                            "  ✗ [{}/{}] 失败: {:#}",
                             session.idx + 1,
                             session.total,
                             error

@@ -139,6 +139,7 @@ pub fn build_final_prompt(
         stats,
         quality,
         None,
+        None,
         with_prescription,
         MAX_FINAL_CONTEXT,
     )
@@ -151,6 +152,7 @@ pub fn build_final_prompt_with_delta(
     stats: &GlobalStats,
     quality: &DataQualityStats,
     delta_summary: Option<&str>,
+    previous_card: Option<&str>,
     with_prescription: bool,
 ) -> String {
     build_final_prompt_with_delta_and_budget(
@@ -158,6 +160,7 @@ pub fn build_final_prompt_with_delta(
         stats,
         quality,
         delta_summary,
+        previous_card,
         with_prescription,
         MAX_FINAL_CONTEXT,
     )
@@ -166,11 +169,16 @@ pub fn build_final_prompt_with_delta(
 /// Every prompt section shares one strict Unicode-character budget. Static
 /// headings, separators, quality text, templates, and truncation markers are
 /// accounted before allocating the remaining budget to dynamic evidence.
+///
+/// `previous_card` is last week's hypothesis + experiment (see
+/// [`extract_experiment_card`]); the prescription section reviews it before
+/// proposing this week's card.
 pub fn build_final_prompt_with_delta_and_budget(
     combined_analysis: &str,
     stats: &GlobalStats,
     quality: &DataQualityStats,
     delta_summary: Option<&str>,
+    previous_card: Option<&str>,
     with_prescription: bool,
     max_chars: usize,
 ) -> String {
@@ -185,23 +193,36 @@ pub fn build_final_prompt_with_delta_and_budget(
     let prescription_section = if with_prescription {
         r#"
 
-## 成长处方
-基于以上所有分析:
-- **技能路线图**: 深耕/突破/放弃/盲区四象限
-- **3 个可立即执行的行动**（具体到文件或命令级别）
-- **季度 OKR**（3 个目标，每个 3-5 个可量化 KR）
-- **可复制到 CLAUDE.md 的具体规则**（至少 5 条）"#
+## 上周假设复查
+逐条对照“上周的认知假设与实验”：实验是否真的做了、假设在本期会话里是成立、被推翻还是证据不足。每个判断引用本期具体会话或决策作证据；没有证据就写“证据不足”，不得补猜。没有上周卡片时只写“首期，无可复查假设”。
+
+## 本周认知假设
+只写一个关于“你如何思考、判断或决策”的假设（不是代码或项目该改什么）。格式:
+- **假设**: 一句话，可被证伪
+- **证据**: 至少 2 条本期具体会话、决策或阻力
+- **反例条件**: 下周看到什么就说明假设不成立
+
+## 本周实验
+只写一个未来 7 天内可做的小行为实验，服务于检验上面的假设。格式:
+- **做法**: 具体到在什么情境下做什么
+- **观察信号**: 下周复查时在会话里看什么来判断是否发生、是否有效"#
     } else {
         ""
     };
+    // Demote the card's headings so they cannot be mistaken for the output structure.
+    let previous_card_raw = previous_card
+        .map(str::trim)
+        .filter(|card| !card.is_empty())
+        .map(|card| card.replace("## ", "### "))
+        .unwrap_or_else(|| "无（首期）".to_string());
 
     let delta_raw = delta_summary
         .unwrap_or("未提供可比较的前一等长窗口。本报告是显式全历史 snapshot，不输出跨期变化。");
     let total_sessions = stats.total_sessions;
-    let render = |delta: &str, stats: &str, analysis: &str| {
+    let render = |delta: &str, stats: &str, analysis: &str, card: &str| {
         format!(
             r#"以下是对一位开发者 {sessions} 个 AI 编程会话的多维度分析结果。
-请综合所有分析，生成一份完整的洞察报告。
+请综合所有分析，生成一份聚焦认知升级的周报。不要恭维，不要评定能力段位或给出专家占比。
 
 ## Delta-first contract
 报告开头必须先写新增、消失、反转和证据缺口；只有完成变化解释后，才写稳定基线。
@@ -214,6 +235,9 @@ pub fn build_final_prompt_with_delta_and_budget(
 {quality}
 {trend_guard}
 
+## 上周的认知假设与实验
+{card}
+
 ## 各维度分析
 {analysis}
 
@@ -224,47 +248,34 @@ pub fn build_final_prompt_with_delta_and_budget(
 # Session Insights Report
 
 ## 本期变化
-依次写新增、消失、反转和证据缺口。没有证据时明确写“不可判定”，不得补猜。
+依次写新增、消失、反转和证据缺口。没有证据时明确写“不可判定”，不得补猜；没有显式时序证据或数据质量不允许时，写“趋势不可判定”。{prescription_section}
 
 ## 稳定基线
 一段话概括仍然成立的整体状态，附关键数字并引用具体项目名。
 
-## 你在做什么（按项目）
-对每个重要项目写一段叙事。用第二人称"你在 xx 中做了 xx"。
-
-## 技术选型与架构偏好
-关键的技术决策倾向和架构模式，引用具体决策。
-
-## 阻力热点与改进方向
-反复出现的问题，用表格展示: | 问题类型 | 频率 | 典型例子 | 预防建议 |
-
-## 认知状态
-Dreyfus 阶段评估（按领域）、学习深度。仅当有显式时序证据且数据质量允许时写成长趋势，否则明确写“趋势不可判定”。
-
-## 技术雷达
-| 环 | 技术/工具 | 说明 |
-用表格展示 Adopt/Trial/Assess/Hold。
-
-## AI 协作效能
-当前模式分析和具体优化建议。{prescription_section}"#,
+## 阻力热点
+最多 3 行表格: | 问题类型 | 频率 | 典型例子 | 背后的判断习惯 |"#,
             sessions = total_sessions,
             delta = delta,
             stats = stats,
             quality = quality_summary,
             trend_guard = trend_guard,
+            card = card,
             analysis = analysis,
         )
     };
 
-    let skeleton = render("", "", "");
+    let skeleton = render("", "", "", "");
     let remaining = max_chars.saturating_sub(skeleton.chars().count());
     let delta_budget = remaining / 4;
     let stats_budget = remaining / 6;
-    let analysis_budget = remaining.saturating_sub(delta_budget + stats_budget);
+    let card_budget = remaining / 10;
+    let analysis_budget = remaining.saturating_sub(delta_budget + stats_budget + card_budget);
     let delta = truncate_component(delta_raw, delta_budget);
     let stats = truncate_component(&stats_summary, stats_budget);
+    let card = truncate_component(&previous_card_raw, card_budget);
     let analysis = truncate_component(combined_analysis, analysis_budget);
-    let prompt = render(&delta, &stats, &analysis);
+    let prompt = render(&delta, &stats, &analysis, &card);
     truncate_component(&prompt, max_chars)
 }
 
@@ -282,8 +293,23 @@ fn truncate_component(text: &str, max_chars: usize) -> String {
     truncated
 }
 
-pub const INSIGHTS_SYSTEM_PROMPT: &str = "你是技术成长分析师。\
-基于开发者的真实编程会话观测数据，生成具体、有实质内容的洞察报告。\
+const CARD_START: &str = "## 本周认知假设";
+const CARD_END: &str = "## 稳定基线";
+
+/// The hypothesis + experiment sections of a weekly report, carried into the
+/// next week's prompt for review. `None` when the report has no card.
+pub fn extract_experiment_card(report: &str) -> Option<String> {
+    let start = report.find(CARD_START)?;
+    let rest = &report[start..];
+    let card = match rest.find(CARD_END) {
+        Some(end) => &rest[..end],
+        None => rest,
+    };
+    Some(card.trim().to_string())
+}
+
+pub const INSIGHTS_SYSTEM_PROMPT: &str = "你是认知教练。\
+基于开发者的真实编程会话观测数据，找出可证伪的思维模式假设并设计小实验。\
 所有判断必须引用具体数据作为证据。禁止泛泛而谈。\
 使用中文。用第二人称'你'。";
 
@@ -379,6 +405,7 @@ mod tests {
             &stats,
             &DataQualityStats::default(),
             Some("新增: refine"),
+            None,
             false,
         );
         assert!(prompt.find("## 本期变化").unwrap() < prompt.find("## 稳定基线").unwrap());
@@ -403,6 +430,7 @@ mod tests {
             &stats,
             &DataQualityStats::default(),
             Some(&"变化证据".repeat(2_000)),
+            Some(&"上周卡片".repeat(2_000)),
             true,
             cap,
         );
@@ -411,5 +439,61 @@ mod tests {
         assert!(prompt.contains("## Cohort 与数据质量"));
         assert!(prompt.contains("# Session Insights Report"));
         assert!(prompt.contains(SECTION_TRUNCATION_MARKER));
+    }
+
+    fn one_session_stats() -> GlobalStats {
+        GlobalStats {
+            total_sessions: 1,
+            total_decisions: 0,
+            total_bugfixes: 0,
+            total_summaries: 1,
+            cognitive_levels: Default::default(),
+            collaboration_modes: Default::default(),
+            tool_frequency: Default::default(),
+            project_ranking: vec![("refine".into(), 1)],
+        }
+    }
+
+    #[test]
+    fn weekly_prompt_reviews_last_card_before_proposing_one() {
+        let prompt = build_final_prompt_with_delta(
+            "analysis",
+            &one_session_stats(),
+            &DataQualityStats::default(),
+            Some("新增: refine"),
+            Some("## 本周认知假设\n- **假设**: 需求模糊时先委托再纠偏"),
+            true,
+        );
+        assert!(prompt.contains("需求模糊时先委托再纠偏"));
+        let review = prompt.find("## 上周假设复查").unwrap();
+        let hypothesis = prompt.find("## 本周认知假设\n只写一个").unwrap();
+        let experiment = prompt.find("## 本周实验").unwrap();
+        assert!(review < hypothesis && hypothesis < experiment);
+        assert!(!prompt.contains("季度 OKR"));
+        assert!(!prompt.contains("Dreyfus"));
+    }
+
+    #[test]
+    fn first_week_prompt_says_there_is_no_card() {
+        let prompt = build_final_prompt_with_delta(
+            "analysis",
+            &one_session_stats(),
+            &DataQualityStats::default(),
+            None,
+            None,
+            true,
+        );
+        assert!(prompt.contains("## 上周的认知假设与实验\n无（首期）"));
+    }
+
+    #[test]
+    fn experiment_card_spans_hypothesis_and_experiment_only() {
+        let report = "# Session Insights Report\n\n## 上周假设复查\n首期\n\n## 本周认知假设\n- **假设**: A\n\n## 本周实验\n- **做法**: B\n\n## 稳定基线\n基线";
+        let card = extract_experiment_card(report).unwrap();
+        assert!(card.starts_with("## 本周认知假设"));
+        assert!(card.contains("**做法**: B"));
+        assert!(!card.contains("稳定基线"));
+        assert!(!card.contains("上周假设复查"));
+        assert!(extract_experiment_card("# 旧格式报告\n## 成长处方").is_none());
     }
 }

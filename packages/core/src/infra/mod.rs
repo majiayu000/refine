@@ -16,6 +16,7 @@ mod document_fk_migration;
 pub mod item_link_repair;
 mod llm;
 mod llm_budget;
+mod llm_command;
 mod llm_retry;
 mod llm_usage;
 mod observation_integrity;
@@ -791,6 +792,7 @@ pub use llm::{
     OpenAIClient,
 };
 pub use llm_budget::{LlmRunBudget, DEFAULT_LLM_MAX_ATTEMPTS, DEFAULT_LLM_MAX_TOKENS};
+pub use llm_command::CommandLlmClient;
 pub use llm_retry::{
     llm_with_retry, llm_with_retry_for, llm_with_retry_policy, llm_with_retry_policy_for,
     LlmRetryPolicy, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BASE_DELAY_SECS,

@@ -1328,6 +1328,62 @@ async fn changed_remem_projection_does_not_delete_its_canonical_document() {
         .is_empty());
 }
 
+#[tokio::test]
+async fn session_still_being_written_is_skipped_until_the_next_run() {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let live = remem_summary("live", 30, 'c');
+    let settled = remem_summary("settled", 20, 'd');
+    let live_url = live.stable_document_url();
+    let settled_url = settled.stable_document_url();
+    let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+        response: r#"{
+            "session_summary": "settled session",
+            "cognitive_level": "proficient",
+            "collaboration_mode": "pair_programming",
+            "decisions": ["keep going"],
+            "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+        .to_string(),
+    });
+    let temp = tempfile::tempdir().expect("temporary quarantine directory");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: Some(1),
+            dry_run: false,
+            retry_quarantined: false,
+            reprocess: None,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![live, settled],
+        Some(quarantine),
+        |summary| {
+            if summary.session_id == "live" {
+                return Err(refine_core::session::SnapshotDrift.into());
+            }
+            Ok(loaded_remem_session(
+                &summary,
+                "ordinary user question with enough useful detail",
+            ))
+        },
+        doc_store.clone(),
+        Some(client),
+    )
+    .await
+    .expect("a session still being written must not abort the batch");
+
+    assert!(doc_store.find_by_url(&live_url).await.unwrap().is_none());
+    assert!(doc_store.find_by_url(&settled_url).await.unwrap().is_some());
+}
+
 fn remem_summary(session_id: &str, last_epoch: i64, hash_byte: char) -> RememSessionSummary {
     RememSessionSummary {
         session_ref: format!("remem://raw-session/v2/codex/local/repo/{session_id}"),
