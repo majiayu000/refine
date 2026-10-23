@@ -71,9 +71,19 @@ impl LlmClient for CommandLlmClient {
             .ok_or_else(|| InfraError::LlmRequest("LLM 命令缺少 stdin".into()))?;
         let input = command_input(prompt, system);
         let run = async move {
-            stdin.write_all(input.as_bytes()).await?;
-            drop(stdin);
-            child.wait_with_output().await
+            // Feed stdin while draining output so a large prompt cannot deadlock
+            // against a command that writes before reading everything.
+            let writer = async move {
+                match stdin.write_all(input.as_bytes()).await {
+                    // A command may exit without reading its input; its exit
+                    // status and stderr explain why, so do not mask them.
+                    Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => Err(error),
+                    _ => Ok(()),
+                }
+            };
+            let (written, output) = tokio::join!(writer, child.wait_with_output());
+            written?;
+            output
         };
         let output = tokio::time::timeout(self.timeout, run)
             .await
@@ -175,5 +185,28 @@ mod tests {
         .await
         .expect("command timeout must override the shorter policy timeout");
         assert_eq!(reply, "done");
+    }
+
+    #[tokio::test]
+    async fn command_that_ignores_stdin_still_reports_its_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = CommandLlmClient::new(script(&dir, "echo quota >&2; exit 3"));
+        // Larger than a pipe buffer, so the write hits a closed pipe on every platform.
+        let prompt = "x".repeat(1 << 20);
+        let error = client.complete(&prompt, None).await.unwrap_err();
+        assert!(
+            matches!(error, InfraError::LlmTransport(ref message) if message.contains("quota"))
+        );
+    }
+
+    #[tokio::test]
+    async fn large_prompt_round_trips_without_deadlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = CommandLlmClient::new(script(&dir, "cat"));
+        let prompt = "y".repeat(1 << 20);
+        assert_eq!(
+            client.complete(&prompt, None).await.unwrap().len(),
+            prompt.len()
+        );
     }
 }
