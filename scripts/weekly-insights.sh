@@ -55,11 +55,18 @@ if ! [[ "$REFINE_INGEST_LATEST" =~ ^[1-9][0-9]*$ ]]; then
   log "ERROR: REFINE_INGEST_LATEST must be a positive integer"
   exit 1
 fi
-if ! "$REFINE_BIN" ingest-sessions --latest "$REFINE_INGEST_LATEST" 2>&1; then
+ingest_output="$(mktemp)"
+trap 'rm -f "$ingest_output"' EXIT
+if "$REFINE_BIN" ingest-sessions --latest "$REFINE_INGEST_LATEST" 2>&1 | tee "$ingest_output"; then
+  log "Step 1: ingest-sessions completed successfully"
+elif grep -q '摄入不完整' "$ingest_output"; then
+  # The run finished; some sessions failed or were quarantined and resume next
+  # time. The rest are stored, so the weekly report still goes out.
+  log "WARNING: ingest-sessions finished incomplete; continuing with stored observations"
+else
   log "ERROR: ingest-sessions failed; refusing to generate derived insights"
   exit 1
 fi
-log "Step 1: ingest-sessions completed successfully"
 
 # Step 2: 生成当前 7 天与前一等长 7 天的 delta 处方报告。
 # 全历史输出只能由人工显式执行 `refine insights --all`。
