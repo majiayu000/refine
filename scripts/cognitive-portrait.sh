@@ -25,6 +25,10 @@ if [[ "${REFINE_RUNTIME_LOCK_ACTIVE:-}" != "1" ]]; then
   status=0
   wait "$supervisor" || status=$?
   trap - HUP INT TERM
+  if [[ "$status" == "75" ]]; then
+    # The scheduled run shares one lock with the ingest and weekly jobs.
+    echo "[refine-portrait] $(date '+%Y-%m-%d %H:%M:%S') SKIPPED: another refine job held the runtime lock for ${REFINE_RUNTIME_JOB_LOCK_WAIT_SECONDS}s"
+  fi
   exit "$status"
 fi
 

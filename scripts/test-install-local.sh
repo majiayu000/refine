@@ -280,7 +280,7 @@ install_output="$(env -i \
   /bin/bash "${SCRIPT_DIR}/install-local.sh" \
     --no-ui-dev --no-start --cognitive-portrait \
     --cognitive-portrait-root "$portrait_root" 2>&1)" \
-  || fail 'installer failed with transient credential inputs'
+  || { printf '%s\n' "$install_output" >&2; fail 'installer failed with transient credential inputs'; }
 assert_contains "$install_output" 'WARNING: LLM credentials are not configured for LaunchAgents' \
   'transient credentials suppressed the LaunchAgent warning'
 assert_not_contains "$install_output" 'custom-path-secret' 'installer leaked a custom-path credential'
