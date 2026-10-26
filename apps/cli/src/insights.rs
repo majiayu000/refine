@@ -10,9 +10,10 @@ use chrono::{Duration, Utc};
 use refine_core::infra::{llm_with_retry_policy_for, LlmClient, LlmRetryPolicy};
 use refine_core::knowledge::{Document, DocumentRepository, ItemRepository};
 use refine_core::session::{
-    build_final_prompt_with_delta, cluster_session_observation_windows, extract_experiment_card,
-    format_data_quality_stats, merge_route_results_with_budget, plan_routes, DataQualityStats,
-    RouteResult, INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
+    build_final_prompt_with_delta, cluster_session_observation_windows, count_raw_phrase,
+    experiment_card_signal, extract_experiment_card, format_data_quality_stats,
+    merge_route_results_with_budget, plan_routes, DataQualityStats, RouteResult,
+    EXPERIMENT_CARD_URL, INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,9 +21,7 @@ use tokio::sync::Semaphore;
 
 const DEFAULT_LLM_CONCURRENCY: usize = 4;
 const FINAL_REPORT_REQUEST_TIMEOUT_MILLIS: u64 = 300_000;
-const INSIGHTS_PROMPT_IDENTITY: &str = "insights-v2:route-v2:hypothesis-loop-v1";
-/// Latest hypothesis + experiment card, overwritten each week and reviewed by the next report.
-const EXPERIMENT_CARD_URL: &str = "insights-v2://experiment/latest";
+const INSIGHTS_PROMPT_IDENTITY: &str = "insights-v2:route-v2:hypothesis-loop-v2";
 const FINAL_ROUTE_CONTEXT_CHARS: usize = 24_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -427,6 +426,10 @@ pub async fn handle_insights(
     } else {
         None
     };
+    let previous_card = match (previous_card, manifest.current_window.event_time.start) {
+        (Some(card), Some(since)) => Some(with_signal_counts(card, since, cutoff).await),
+        (card, _) => card,
+    };
     let final_prompt = build_final_prompt_with_delta(
         &combined,
         stats,
@@ -466,6 +469,34 @@ pub async fn handle_insights(
         persist_experiment_card(&report, doc_store.as_ref()).await?;
     }
     Ok(())
+}
+
+/// Attach a deterministic count of the card's detection phrase in raw sessions,
+/// so the review does not depend on whether LLM summaries kept the behaviour.
+async fn with_signal_counts(
+    card: String,
+    since: chrono::DateTime<Utc>,
+    until: chrono::DateTime<Utc>,
+) -> String {
+    let Some(phrase) = experiment_card_signal(&card) else {
+        return card;
+    };
+    let counted = {
+        let phrase = phrase.clone();
+        tokio::task::spawn_blocking(move || count_raw_phrase(&phrase, since, until)).await
+    };
+    let evidence = match counted {
+        Ok(Ok(hits)) => {
+            println!(
+                "检测信号计数: 「{}」{} 行 / {} 个会话",
+                phrase, hits.rows, hits.sessions
+            );
+            hits.render()
+        }
+        Ok(Err(error)) => format!("计数失败（{error:#}），本期不能用计数判断实验是否执行。"),
+        Err(error) => format!("计数失败（{error}），本期不能用计数判断实验是否执行。"),
+    };
+    format!("{card}\n\n## 确定性计数（refine 直接统计原始会话）\n{evidence}")
 }
 
 async fn persist_experiment_card(report: &str, doc_store: &dyn DocumentRepository) -> Result<()> {

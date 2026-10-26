@@ -194,7 +194,7 @@ pub fn build_final_prompt_with_delta_and_budget(
         r#"
 
 ## 上周假设复查
-逐条对照“上周的认知假设与实验”：实验是否真的做了、假设在本期会话里是成立、被推翻还是证据不足。每个判断引用本期具体会话或决策作证据；没有证据就写“证据不足”，不得补猜。没有上周卡片时只写“首期，无可复查假设”。
+逐条对照“上周的认知假设与实验”：实验是否真的做了、假设在本期会话里是成立、被推翻还是证据不足。若卡片附有“确定性计数”，先用它判断实验是否执行：它是 refine 直接在原始会话里统计检测信号的结果，比各维度摘要更可靠；用样例区分真实执行与只是讨论这句话，并写出计数。每个判断引用本期具体会话或决策作证据；没有证据就写“证据不足”，不得补猜。没有上周卡片时只写“首期，无可复查假设”。
 
 ## 本周认知假设
 只写一个关于“你如何思考、判断或决策”的假设（不是代码或项目该改什么）。格式:
@@ -204,8 +204,9 @@ pub fn build_final_prompt_with_delta_and_budget(
 
 ## 本周实验
 只写一个未来 7 天内可做的小行为实验，服务于检验上面的假设。格式:
-- **做法**: 具体到在什么情境下做什么
-- **观察信号**: 下周复查时在会话里看什么来判断是否发生、是否有效"#
+- **做法**: 一句话、60 字以内，写清在什么情境下做什么（会每天显示在终端）
+- **观察信号**: 下周复查时在会话里看什么来判断是否发生、是否有效
+- **检测信号**: `一个短语`——实验真正执行时会逐字出现在聊天里的固定短语（如约定要写的行首），refine 下周据此直接统计原始会话"#
     } else {
         ""
     };
@@ -293,6 +294,10 @@ fn truncate_component(text: &str, max_chars: usize) -> String {
     truncated
 }
 
+/// Latest hypothesis + experiment card, overwritten each week, reviewed by the
+/// next report and shown by `mirror motd`.
+pub const EXPERIMENT_CARD_URL: &str = "insights-v2://experiment/latest";
+
 const CARD_START: &str = "## 本周认知假设";
 const CARD_END: &str = "## 稳定基线";
 
@@ -306,6 +311,30 @@ pub fn extract_experiment_card(report: &str) -> Option<String> {
         None => rest,
     };
     Some(card.trim().to_string())
+}
+
+/// The value of a `- **label**: value` bullet in an experiment card.
+fn card_field<'a>(card: &'a str, label: &str) -> Option<&'a str> {
+    let marker = format!("**{label}**");
+    card.lines().find_map(|line| {
+        let rest = line.split_once(marker.as_str())?.1;
+        let value = rest.trim_start_matches([':', '：', ' ']).trim();
+        (!value.is_empty()).then_some(value)
+    })
+}
+
+/// The literal phrase the card asks refine to count in raw sessions.
+pub fn experiment_card_signal(card: &str) -> Option<String> {
+    let value = card_field(card, "检测信号")?;
+    let start = value.find('`')? + 1;
+    let len = value[start..].find('`')?;
+    let phrase = value[start..start + len].trim();
+    (!phrase.is_empty()).then(|| phrase.to_string())
+}
+
+/// What to do this week, for a one-line reminder.
+pub fn experiment_card_action(card: &str) -> Option<String> {
+    card_field(card, "做法").map(str::to_string)
 }
 
 pub const INSIGHTS_SYSTEM_PROMPT: &str = "你是认知教练。\
@@ -495,5 +524,31 @@ mod tests {
         assert!(!card.contains("稳定基线"));
         assert!(!card.contains("上周假设复查"));
         assert!(extract_experiment_card("# 旧格式报告\n## 成长处方").is_none());
+    }
+
+    #[test]
+    fn card_fields_feed_counting_and_reminders() {
+        let card = "## 本周认知假设\n- **假设**: A\n\n## 本周实验\n- **做法**: 完成前写一行\n- **观察信号**: 看返工\n- **检测信号**: `已验：`——行首";
+        assert_eq!(experiment_card_signal(card).as_deref(), Some("已验："));
+        assert_eq!(
+            experiment_card_action(card).as_deref(),
+            Some("完成前写一行")
+        );
+        assert_eq!(experiment_card_signal("- **检测信号**: 无反引号"), None);
+        assert_eq!(experiment_card_action("## 本周实验\n"), None);
+    }
+
+    #[test]
+    fn weekly_prompt_asks_for_a_countable_signal_and_uses_counts() {
+        let prompt = build_final_prompt_with_delta(
+            "analysis",
+            &one_session_stats(),
+            &DataQualityStats::default(),
+            None,
+            None,
+            true,
+        );
+        assert!(prompt.contains("**检测信号**"));
+        assert!(prompt.contains("确定性计数"));
     }
 }

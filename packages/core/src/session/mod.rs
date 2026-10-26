@@ -41,16 +41,17 @@ pub use parser::{parse_session_content, parse_session_file};
 pub use prescription::{build_prescription_prompt, PRESCRIPTION_SYSTEM_PROMPT};
 pub use project_identity::ProjectIdentityResolver;
 pub use remem_archive::{
-    is_missing_remem_executable, is_remem_process_output_overflow, is_remem_process_timeout,
-    is_remem_snapshot_drift, load_commit_context, load_remem_document_content, load_remem_session,
-    load_remem_session_summaries, remem_hydration_failure_message, remem_snapshot_hash,
-    CommitContext, CommitDiscussion, CommitMessage, RememSession, RememSessionSummary,
-    SnapshotDrift,
+    count_raw_phrase, is_missing_remem_executable, is_remem_process_output_overflow,
+    is_remem_process_timeout, is_remem_snapshot_drift, load_commit_context,
+    load_remem_document_content, load_remem_session, load_remem_session_summaries,
+    remem_hydration_failure_message, remem_snapshot_hash, CommitContext, CommitDiscussion,
+    CommitMessage, PhraseHits, RememSession, RememSessionSummary, SnapshotDrift,
 };
 pub use report::{
     build_final_prompt, build_final_prompt_with_delta, build_final_prompt_with_delta_and_budget,
-    extract_experiment_card, format_data_quality_stats, merge_route_results,
-    merge_route_results_with_budget, RouteResult, INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
+    experiment_card_action, experiment_card_signal, extract_experiment_card,
+    format_data_quality_stats, merge_route_results, merge_route_results_with_budget, RouteResult,
+    EXPERIMENT_CARD_URL, INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
 };
 pub use source_cohort::{
     cluster_session_observation_windows, cluster_session_observations,
