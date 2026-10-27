@@ -488,8 +488,8 @@ async fn with_signal_counts(
     let evidence = match counted {
         Ok(Ok(hits)) => {
             println!(
-                "检测信号计数: 「{}」{} 行 / {} 个会话",
-                phrase, hits.rows, hits.sessions
+                "检测信号计数: 「{}」{} 行（跨宿主会话数无法可靠计算）",
+                phrase, hits.rows
             );
             hits.render()
         }
@@ -501,7 +501,19 @@ async fn with_signal_counts(
 
 async fn persist_experiment_card(report: &str, doc_store: &dyn DocumentRepository) -> Result<()> {
     let Some(card) = extract_experiment_card(report) else {
-        eprintln!("警告: 报告缺少「本周认知假设」，下周将无卡片可复查");
+        if let Some(previous) = doc_store
+            .find_by_url(EXPERIMENT_CARD_URL)
+            .await
+            .context("读取旧认知假设卡片失败")?
+        {
+            doc_store
+                .delete(previous.id())
+                .await
+                .context("清除旧认知假设卡片失败")?;
+        }
+        eprintln!(
+            "警告: 报告缺少完整的「本周认知假设」与「本周实验」，已清除旧卡片，下周无卡片可复查"
+        );
         return Ok(());
     };
     let mut doc = Document::new("session-insights-experiment", &card);
@@ -518,6 +530,26 @@ async fn persist_experiment_card(report: &str, doc_store: &dyn DocumentRepositor
 #[cfg(test)]
 mod tests {
     use super::{parse_llm_concurrency, window_disposition, WindowDisposition};
+
+    #[tokio::test]
+    async fn invalid_report_removes_previous_experiment_card() {
+        use refine_core::infra::SqliteStore;
+        use refine_core::knowledge::{Document, DocumentRepository};
+        let store = SqliteStore::in_memory().unwrap();
+        for report in ["## 成长处方\n旧格式", "## 本周认知假设\n缺少实验"] {
+            let mut previous = Document::new("session-insights-experiment", "older card");
+            previous.set_url(super::EXPERIMENT_CARD_URL);
+            store.save(&previous).await.unwrap();
+            super::persist_experiment_card(report, &store)
+                .await
+                .unwrap();
+            assert!(store
+                .find_by_url(super::EXPERIMENT_CARD_URL)
+                .await
+                .unwrap()
+                .is_none());
+        }
+    }
 
     #[test]
     fn insights_concurrency_requires_a_positive_integer() {

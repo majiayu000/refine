@@ -304,13 +304,16 @@ const CARD_END: &str = "## 稳定基线";
 /// The hypothesis + experiment sections of a weekly report, carried into the
 /// next week's prompt for review. `None` when the report has no card.
 pub fn extract_experiment_card(report: &str) -> Option<String> {
-    let start = report.find(CARD_START)?;
-    let rest = &report[start..];
-    let card = match rest.find(CARD_END) {
-        Some(end) => &rest[..end],
-        None => rest,
-    };
-    Some(card.trim().to_string())
+    let lines: Vec<&str> = report.lines().collect();
+    let start = lines.iter().position(|line| line.trim() == CARD_START)?;
+    let rest = &lines[start..];
+    let end = rest
+        .iter()
+        .position(|line| line.trim() == CARD_END)
+        .unwrap_or(rest.len());
+    let card = &rest[..end];
+    card.iter().position(|line| line.trim() == "## 本周实验")?;
+    Some(card.join("\n").trim().to_string())
 }
 
 /// The value of a `- **label**: value` bullet in an experiment card.
@@ -536,6 +539,18 @@ mod tests {
         );
         assert_eq!(experiment_card_signal("- **检测信号**: 无反引号"), None);
         assert_eq!(experiment_card_action("## 本周实验\n"), None);
+    }
+
+    #[test]
+    fn experiment_card_requires_ordered_complete_sections() {
+        for report in [
+            "## 本周认知假设\n假设",
+            "## 本周实验\n做法\n## 本周认知假设\n假设",
+            "## 本周认知假设\n假设\n## 稳定基线\n基线\n## 本周实验\n做法",
+            "正文提到 ## 本周认知假设\n假设\n## 本周实验\n做法",
+        ] {
+            assert!(extract_experiment_card(report).is_none(), "{report}");
+        }
     }
 
     #[test]

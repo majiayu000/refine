@@ -2,7 +2,7 @@ use super::{run_json, ProcessRunner, Runner};
 use anyhow::{ensure, Result};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 const PAGE_SIZE: usize = 200;
 /// Bound the scan so a phrase that matches everything cannot stall a report.
@@ -11,12 +11,12 @@ const SAMPLE_COUNT: usize = 5;
 const SAMPLE_CHARS: usize = 160;
 
 /// Verbatim occurrences of a phrase in raw chat turns, counted by Remem rather
-/// than inferred from LLM summaries.
+/// than inferred from LLM summaries. Raw search does not expose a complete
+/// archive identity, so it cannot support a reliable cross-host session count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhraseHits {
     pub phrase: String,
     pub rows: usize,
-    pub sessions: usize,
     pub by_role: BTreeMap<String, usize>,
     /// True when the scan stopped at the row cap before Remem ran out of rows.
     pub truncated: bool,
@@ -33,11 +33,10 @@ impl PhraseHits {
             .collect::<Vec<_>>()
             .join("，");
         let mut out = format!(
-            "短语「{}」在本期原始会话中出现 {}{} 行，跨 {} 个会话（{}）。",
+            "短语「{}」在本期原始会话中出现 {}{} 行（{}）。跨宿主会话数无法可靠计算：raw search 未提供完整会话身份。",
             self.phrase,
             if self.truncated { "至少 " } else { "" },
             self.rows,
-            self.sessions,
             if roles.is_empty() { "无" } else { &roles }
         );
         for sample in &self.samples {
@@ -57,7 +56,6 @@ struct SearchEnvelope {
 
 #[derive(Debug, Deserialize)]
 struct SearchRow {
-    session_id: String,
     role: String,
     content: String,
 }
@@ -78,7 +76,6 @@ fn count_raw_phrase_with_runner<R: Runner>(
 ) -> Result<PhraseHits> {
     ensure!(!phrase.trim().is_empty(), "phrase to count is empty");
     let mut rows = 0usize;
-    let mut sessions = BTreeSet::new();
     let mut by_role = BTreeMap::new();
     let mut samples = Vec::new();
     let mut truncated = false;
@@ -105,7 +102,6 @@ fn count_raw_phrase_with_runner<R: Runner>(
             page.results.len()
         );
         for row in &page.results {
-            sessions.insert(row.session_id.clone());
             *by_role.entry(row.role.clone()).or_insert(0) += 1;
             if samples.len() < SAMPLE_COUNT {
                 samples.push(format!("[{}] {}", row.role, excerpt(&row.content, phrase)));
@@ -123,7 +119,6 @@ fn count_raw_phrase_with_runner<R: Runner>(
     Ok(PhraseHits {
         phrase: phrase.to_string(),
         rows,
-        sessions: sessions.len(),
         by_role,
         truncated,
         samples,
@@ -173,7 +168,7 @@ mod tests {
     }
 
     fn row(session: &str, role: &str, content: &str) -> Value {
-        json!({"session_id": session, "role": role, "content": content})
+        json!({"session_id": session, "project": "/repo", "role": role, "content": content})
     }
 
     fn window() -> (DateTime<Utc>, DateTime<Utc>) {
@@ -184,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn counts_rows_sessions_and_roles_across_pages() {
+    fn counts_rows_and_roles_across_pages_without_claiming_session_count() {
         let runner = PagedRunner {
             pages: RefCell::new(VecDeque::from([
                 json!({"count": 2, "has_more": true, "results": [
@@ -200,7 +195,6 @@ mod tests {
         let (since, until) = window();
         let hits = count_raw_phrase_with_runner(&runner, "已验：", since, until).unwrap();
         assert_eq!(hits.rows, 3);
-        assert_eq!(hits.sessions, 2);
         assert_eq!(hits.by_role.get("assistant"), Some(&2));
         assert_eq!(hits.by_role.get("user"), Some(&1));
         assert!(!hits.truncated);
@@ -212,7 +206,8 @@ mod tests {
             "second page starts at offset 2"
         );
         assert!(calls[0].contains(&since.timestamp().to_string()));
-        assert!(hits.render().contains("出现 3 行，跨 2 个会话"));
+        assert!(hits.render().contains("出现 3 行"));
+        assert!(hits.render().contains("跨宿主会话数无法可靠计算"));
     }
 
     #[test]
@@ -226,7 +221,7 @@ mod tests {
         let (since, until) = window();
         let hits = count_raw_phrase_with_runner(&runner, "已验：", since, until).unwrap();
         assert_eq!(hits.rows, 0);
-        assert!(hits.render().contains("出现 0 行，跨 0 个会话（无）"));
+        assert!(hits.render().contains("出现 0 行（无）"));
     }
 
     #[test]
@@ -237,6 +232,32 @@ mod tests {
         };
         let (since, until) = window();
         assert!(count_raw_phrase_with_runner(&runner, "  ", since, until).is_err());
+    }
+
+    #[test]
+    fn same_session_id_on_two_hosts_does_not_claim_one_session() {
+        // The same complete selectors preserved by the archive summary tests.
+        // raw search currently omits this identity, so do not infer a count.
+        let mut first = row("s1", "assistant", "已验：截图");
+        first["host"] = json!("codex-cli");
+        first["source_root"] = json!("local");
+        first["session_ref"] =
+            json!("remem://raw-session/v2/636f6465782d636c69/6c6f63616c/2f7265706f/7331");
+        let mut second = first.clone();
+        second["host"] = json!("claude-code");
+        second["session_ref"] =
+            json!("remem://raw-session/v2/636c617564652d636f6465/6c6f63616c/2f7265706f/7331");
+        let runner = PagedRunner {
+            pages: RefCell::new(VecDeque::from([json!({
+                "count": 3, "has_more": false, "results": [first.clone(), second, first]
+            })])),
+            calls: RefCell::new(Vec::new()),
+        };
+        let (since, until) = window();
+        let hits = count_raw_phrase_with_runner(&runner, "已验：", since, until).unwrap();
+        assert_eq!(hits.rows, 3);
+        assert!(hits.render().contains("跨宿主会话数无法可靠计算"));
+        assert!(!hits.render().contains("跨 1 个会话"));
     }
 
     /// Live smoke test against the local Remem archive: `cargo test -- --ignored live_remem`.

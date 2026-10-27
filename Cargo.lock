@@ -3053,6 +3053,7 @@ dependencies = [
  "filetime",
  "fs2",
  "httpdate",
+ "libc",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

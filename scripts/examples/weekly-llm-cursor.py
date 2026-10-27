@@ -9,6 +9,8 @@ The agent runs read-only (--mode ask) in an empty directory so it cannot touch
 any project files. Its stream of events is watched: a call that produces no
 event for REFINE_CURSOR_IDLE_SECONDS (default 120) is treated as hung and
 killed, while a long answer that keeps streaming is allowed to finish.
+The wrapper and agent share an isolated process group so timeout and
+cancellation of the Rust command channel terminate the entire group.
 """
 
 import json
@@ -27,6 +29,10 @@ IDLE_SECONDS = float(os.environ.get("REFINE_CURSOR_IDLE_SECONDS", "120"))
 
 def main() -> int:
     prompt = sys.stdin.read()
+    # The Rust command channel already makes us the group leader. Standalone
+    # invocation needs the same isolation before any group-wide cleanup.
+    if os.getpgrp() != os.getpid():
+        os.setpgrp()
     os.makedirs(WORKDIR, exist_ok=True)
     args = [CURSOR_BIN, "-p", "--trust", "--mode", "ask", "--output-format", "stream-json"]
     if os.environ.get("REFINE_CURSOR_MODEL"):
@@ -39,7 +45,6 @@ def main() -> int:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        start_new_session=True,
     )
 
     events: "queue.Queue[str | None]" = queue.Queue()
@@ -62,9 +67,8 @@ def main() -> int:
         try:
             line = events.get(timeout=IDLE_SECONDS)
         except queue.Empty:
-            os.killpg(proc.pid, signal.SIGKILL)
-            print(f"cursor agent idle for {IDLE_SECONDS:.0f}s; killed as hung", file=sys.stderr)
-            return 124
+            print(f"cursor agent idle for {IDLE_SECONDS:.0f}s; killed as hung", file=sys.stderr, flush=True)
+            os.killpg(os.getpgrp(), signal.SIGKILL)
         if line is None:
             break
         try:
