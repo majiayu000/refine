@@ -236,6 +236,50 @@ fn select_tip(tips: &[Tip], dimension: &str) -> String {
 }
 
 pub fn handle_motd(db_path: &std::path::Path) -> Result<()> {
+    let scored = print_score_line(db_path);
+    if let Some(line) = experiment_line(db_path) {
+        println!("{line}");
+    }
+    scored
+}
+
+const EXPERIMENT_LINE_CHARS: usize = 120;
+
+/// The weekly report's current experiment, so it is in front of the user every
+/// day instead of only on report day. Silent when there is no card or the store
+/// is busy: the motd runs at every shell start.
+fn experiment_line(db_path: &std::path::Path) -> Option<String> {
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    conn.busy_timeout(std::time::Duration::from_millis(200))
+        .ok()?;
+    let card: String = conn
+        .query_row(
+            "SELECT raw_content FROM documents WHERE url = ?1",
+            [refine_core::session::EXPERIMENT_CARD_URL],
+            |row| row.get(0),
+        )
+        .ok()?;
+    format_experiment_line(&card)
+}
+
+fn format_experiment_line(card: &str) -> Option<String> {
+    let action = refine_core::session::experiment_card_action(card)?;
+    let mut text: String = action.chars().take(EXPERIMENT_LINE_CHARS).collect();
+    if action.chars().count() > EXPERIMENT_LINE_CHARS {
+        text.push('…');
+    }
+    Some(format!(
+        "🧪 {}：{}",
+        t!("This week's experiment", "本周实验"),
+        text
+    ))
+}
+
+fn print_score_line(db_path: &std::path::Path) -> Result<()> {
     let targets = crate::config::load().targets;
     let scope = ScoreScope::canonical(db_path, &targets, Utc::now(), &Default::default())?;
     let scores = load_recent_scores(2, &scope)?;
@@ -506,6 +550,25 @@ mod tests {
 
         let result = select_tip(&tips, "collaboration");
         assert_eq!(result, "collab tip 1");
+    }
+
+    #[test]
+    fn experiment_line_shows_the_action_and_truncates() {
+        let card = "## 本周实验\n- **做法**: 完成前写一行「已验／没验／相邻情况」\n- **检测信号**: `已验：`";
+        let line = format_experiment_line(card).unwrap();
+        assert!(line.starts_with("🧪 "));
+        assert!(line.ends_with("完成前写一行「已验／没验／相邻情况」"));
+        let long = format!("- **做法**: {}", "长".repeat(200));
+        assert!(format_experiment_line(&long).unwrap().ends_with('…'));
+        assert_eq!(format_experiment_line("没有做法"), None);
+    }
+
+    #[test]
+    fn experiment_line_is_silent_without_a_store() {
+        assert_eq!(
+            experiment_line(std::path::Path::new("/nonexistent/refine.db")),
+            None
+        );
     }
 
     #[test]

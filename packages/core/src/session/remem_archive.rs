@@ -15,14 +15,28 @@ const RAW_MESSAGE_LIMIT: &str = "2000";
 
 mod commit;
 mod document;
+mod phrase;
 mod process;
 pub use commit::{load_commit_context, CommitContext, CommitDiscussion, CommitMessage};
 pub use document::load_document_content as load_remem_document_content;
+pub use phrase::{count_raw_phrase, PhraseHits};
 use process::ProcessRunner;
 pub use process::{
     is_missing_remem_executable, is_remem_process_output_overflow, is_remem_process_timeout,
     remem_hydration_failure_message,
 };
+
+/// The session gained messages between listing and loading, usually because it
+/// is still being written. A later run sees a consistent snapshot.
+#[derive(Debug, thiserror::Error)]
+#[error("raw messages snapshot hash drifted from the session summary")]
+pub struct SnapshotDrift;
+
+pub fn is_remem_snapshot_drift(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<SnapshotDrift>().is_some())
+}
 
 #[derive(Debug)]
 pub struct RememSession {
@@ -502,10 +516,9 @@ fn validate_page(summary: &RememSessionSummary, envelope: &MessagesEnvelope) -> 
             .all(|byte| byte.is_ascii_hexdigit()),
         "raw messages content_hash is not hexadecimal"
     );
-    ensure!(
-        envelope.content_hash == summary.content_hash,
-        "raw messages snapshot hash drifted from the session summary"
-    );
+    if envelope.content_hash != summary.content_hash {
+        return Err(SnapshotDrift.into());
+    }
     Ok(())
 }
 

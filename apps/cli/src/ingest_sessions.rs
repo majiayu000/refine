@@ -2,8 +2,8 @@
 
 use crate::cli::{IngestProvider, ReprocessMode};
 use crate::remem_sessions::{
-    is_missing_remem_executable, load_remem_session, load_remem_session_summaries, RememSession,
-    RememSessionSummary,
+    is_missing_remem_executable, is_remem_snapshot_drift, load_remem_session,
+    load_remem_session_summaries, RememSession, RememSessionSummary,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -279,6 +279,7 @@ where
     let mut stale_refresh = 0usize;
     let mut selected_quarantined_identities = HashSet::new();
     let mut fully_loaded = 0usize;
+    let mut skipped_live = 0usize;
 
     for (idx, summary) in summaries.into_iter().enumerate() {
         if options.latest.is_some_and(|latest| pending.len() >= latest) {
@@ -369,8 +370,17 @@ where
         }
 
         let legacy_identity_is_unique = summary.legacy_identity_is_unique;
-        let remem_session = load_session(summary)
-            .with_context(|| format!("failed to load full remem session for {url}"))?;
+        let remem_session = match load_session(summary) {
+            Ok(session) => session,
+            Err(error) if is_remem_snapshot_drift(&error) => {
+                skipped_live += 1;
+                println!("跳过仍在写入的会话（下次再处理）: {url}");
+                continue;
+            }
+            Err(error) => {
+                return Err(error.context(format!("failed to load full remem session for {url}")))
+            }
+        };
         fully_loaded += 1;
         let raw_content = remem_session.session.to_document_content();
         let mut legacy_documents_to_delete = if legacy_identity_is_unique {
@@ -553,7 +563,9 @@ where
         session.total = selected_total;
     }
 
-    println!("摘要预筛选后拉取了 {fully_loaded}/{total} 个完整会话");
+    println!(
+        "摘要预筛选后拉取了 {fully_loaded}/{total} 个完整会话，跳过仍在写入的 {skipped_live} 个"
+    );
 
     let skipped_quarantined = selected_quarantined_identities.len();
     process_pending_sessions(

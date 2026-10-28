@@ -469,6 +469,8 @@ write_portrait_plist() {
     <string>${portrait_dir_xml}</string>
     <key>REFINE_COGNITIVE_PORTRAIT_REFINE_BIN</key>
     <string>${refine_bin_xml}</string>
+    <key>REFINE_PORTRAIT_LOCK_WAIT_SECONDS</key>
+    <string>14400</string>
   </dict>
   <key>StartCalendarInterval</key>
   <dict>

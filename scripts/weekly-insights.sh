@@ -22,20 +22,31 @@ fi
 
 log "=== Weekly Insights Run Start ==="
 
-# Unattended LLM work uses process credentials or the canonical secure user
-# file. It does not depend on a project checkout or source ~/.zshrc.
-# shellcheck source=scripts/load-llm-env.sh
-source "${SCRIPT_DIR}/load-llm-env.sh"
-if ! load_refine_llm_env; then
-  log "ERROR: unattended LLM credentials are unavailable; refusing to start ingest"
-  exit 1
+# An executable weekly LLM command (for example a wrapper around a local agent
+# CLI) takes precedence over API credentials for this job only. Remove the file
+# to fall back to the API provider.
+WEEKLY_LLM_COMMAND="${REFINE_WEEKLY_LLM_COMMAND:-${HOME}/.refine/bin/weekly-llm}"
+if [[ -x "$WEEKLY_LLM_COMMAND" ]]; then
+  export REFINE_LLM_COMMAND="$WEEKLY_LLM_COMMAND"
+  # Agent CLIs answer slowly; overlap requests to keep the run within hours.
+  export REFINE_INGEST_CONCURRENCY="${REFINE_INGEST_CONCURRENCY:-4}"
+  log "LLM: command ${REFINE_LLM_COMMAND}"
+else
+  # Unattended LLM work uses process credentials or the canonical secure user
+  # file. It does not depend on a project checkout or source ~/.zshrc.
+  # shellcheck source=scripts/load-llm-env.sh
+  source "${SCRIPT_DIR}/load-llm-env.sh"
+  if ! load_refine_llm_env; then
+    log "ERROR: unattended LLM credentials are unavailable; refusing to start ingest"
+    exit 1
+  fi
+  log "Preflight: LLM source=${REFINE_LLM_ENV_SOURCE:-none} $(refine_llm_env_status)"
 fi
 
 # Preflight: environment diagnostics for troubleshooting
 log "Preflight: PATH=$PATH"
 log "Preflight: refine=$(command -v "$REFINE_BIN" 2>/dev/null && echo "$REFINE_BIN" || echo 'NOT FOUND')"
 log "Preflight: cwd=$(pwd)"
-log "Preflight: LLM source=${REFINE_LLM_ENV_SOURCE:-none} $(refine_llm_env_status)"
 
 # Step 1: import a bounded newest-session window from the sole Remem source.
 log "Step 1: ingest-sessions"
@@ -44,11 +55,18 @@ if ! [[ "$REFINE_INGEST_LATEST" =~ ^[1-9][0-9]*$ ]]; then
   log "ERROR: REFINE_INGEST_LATEST must be a positive integer"
   exit 1
 fi
-if ! "$REFINE_BIN" ingest-sessions --latest "$REFINE_INGEST_LATEST" 2>&1; then
+ingest_output="$(mktemp)"
+trap 'rm -f "$ingest_output"' EXIT
+if "$REFINE_BIN" ingest-sessions --latest "$REFINE_INGEST_LATEST" 2>&1 | tee "$ingest_output"; then
+  log "Step 1: ingest-sessions completed successfully"
+elif grep -q '摄入不完整' "$ingest_output"; then
+  # The run finished; some sessions failed or were quarantined and resume next
+  # time. The rest are stored, so the weekly report still goes out.
+  log "WARNING: ingest-sessions finished incomplete; continuing with stored observations"
+else
   log "ERROR: ingest-sessions failed; refusing to generate derived insights"
   exit 1
 fi
-log "Step 1: ingest-sessions completed successfully"
 
 # Step 2: 生成当前 7 天与前一等长 7 天的 delta 处方报告。
 # 全历史输出只能由人工显式执行 `refine insights --all`。

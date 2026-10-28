@@ -10,9 +10,10 @@ use chrono::{Duration, Utc};
 use refine_core::infra::{llm_with_retry_policy_for, LlmClient, LlmRetryPolicy};
 use refine_core::knowledge::{Document, DocumentRepository, ItemRepository};
 use refine_core::session::{
-    build_final_prompt_with_delta, cluster_session_observation_windows, format_data_quality_stats,
+    build_final_prompt_with_delta, cluster_session_observation_windows, count_raw_phrase,
+    experiment_card_signal, extract_experiment_card, format_data_quality_stats,
     merge_route_results_with_budget, plan_routes, DataQualityStats, RouteResult,
-    INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
+    EXPERIMENT_CARD_URL, INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,7 +21,7 @@ use tokio::sync::Semaphore;
 
 const DEFAULT_LLM_CONCURRENCY: usize = 4;
 const FINAL_REPORT_REQUEST_TIMEOUT_MILLIS: u64 = 300_000;
-const INSIGHTS_PROMPT_IDENTITY: &str = "insights-v2:route-v2:delta-final-v4";
+const INSIGHTS_PROMPT_IDENTITY: &str = "insights-v2:route-v2:hypothesis-loop-v2";
 const FINAL_ROUTE_CONTEXT_CHARS: usize = 24_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -416,11 +417,25 @@ pub async fn handle_insights(
         FINAL_ROUTE_CONTEXT_CHARS,
         rotation_seed(&quality.cohort_identity),
     );
+    let previous_card = if options.with_prescription {
+        doc_store
+            .find_by_url(EXPERIMENT_CARD_URL)
+            .await
+            .context("读取上周认知假设卡片失败")?
+            .map(|document| document.raw_content().to_string())
+    } else {
+        None
+    };
+    let previous_card = match (previous_card, manifest.current_window.event_time.start) {
+        (Some(card), Some(since)) => Some(with_signal_counts(card, since, cutoff).await),
+        (card, _) => card,
+    };
     let final_prompt = build_final_prompt_with_delta(
         &combined,
         stats,
         quality,
         Some(&delta_summary),
+        previous_card.as_deref(),
         options.with_prescription,
     );
 
@@ -449,12 +464,92 @@ pub async fn handle_insights(
         report_with_metadata(&report, options.period, quality, &manifest, &delta_summary)?;
     println!("{}", persisted_report);
 
-    persist_report(&persisted_report, options.all_snapshot, doc_store.as_ref()).await
+    persist_report(&persisted_report, options.all_snapshot, doc_store.as_ref()).await?;
+    if options.with_prescription {
+        persist_experiment_card(&report, doc_store.as_ref()).await?;
+    }
+    Ok(())
+}
+
+/// Attach a deterministic count of the card's detection phrase in raw sessions,
+/// so the review does not depend on whether LLM summaries kept the behaviour.
+async fn with_signal_counts(
+    card: String,
+    since: chrono::DateTime<Utc>,
+    until: chrono::DateTime<Utc>,
+) -> String {
+    let Some(phrase) = experiment_card_signal(&card) else {
+        return card;
+    };
+    let counted = {
+        let phrase = phrase.clone();
+        tokio::task::spawn_blocking(move || count_raw_phrase(&phrase, since, until)).await
+    };
+    let evidence = match counted {
+        Ok(Ok(hits)) => {
+            println!(
+                "检测信号计数: 「{}」{} 行（跨宿主会话数无法可靠计算）",
+                phrase, hits.rows
+            );
+            hits.render()
+        }
+        Ok(Err(error)) => format!("计数失败（{error:#}），本期不能用计数判断实验是否执行。"),
+        Err(error) => format!("计数失败（{error}），本期不能用计数判断实验是否执行。"),
+    };
+    format!("{card}\n\n## 确定性计数（refine 直接统计原始会话）\n{evidence}")
+}
+
+async fn persist_experiment_card(report: &str, doc_store: &dyn DocumentRepository) -> Result<()> {
+    let Some(card) = extract_experiment_card(report) else {
+        if let Some(previous) = doc_store
+            .find_by_url(EXPERIMENT_CARD_URL)
+            .await
+            .context("读取旧认知假设卡片失败")?
+        {
+            doc_store
+                .delete(previous.id())
+                .await
+                .context("清除旧认知假设卡片失败")?;
+        }
+        eprintln!(
+            "警告: 报告缺少完整的「本周认知假设」与「本周实验」，已清除旧卡片，下周无卡片可复查"
+        );
+        return Ok(());
+    };
+    let mut doc = Document::new("session-insights-experiment", &card);
+    doc.set_title(&format!(
+        "认知假设卡片 {}",
+        doc.created_at().format("%Y-%m-%d")
+    ));
+    doc.set_url(EXPERIMENT_CARD_URL);
+    doc_store.save(&doc).await.context("保存认知假设卡片失败")?;
+    println!("认知假设卡片已更新，下周复查");
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{parse_llm_concurrency, window_disposition, WindowDisposition};
+
+    #[tokio::test]
+    async fn invalid_report_removes_previous_experiment_card() {
+        use refine_core::infra::SqliteStore;
+        use refine_core::knowledge::{Document, DocumentRepository};
+        let store = SqliteStore::in_memory().unwrap();
+        for report in ["## 成长处方\n旧格式", "## 本周认知假设\n缺少实验"] {
+            let mut previous = Document::new("session-insights-experiment", "older card");
+            previous.set_url(super::EXPERIMENT_CARD_URL);
+            store.save(&previous).await.unwrap();
+            super::persist_experiment_card(report, &store)
+                .await
+                .unwrap();
+            assert!(store
+                .find_by_url(super::EXPERIMENT_CARD_URL)
+                .await
+                .unwrap()
+                .is_none());
+        }
+    }
 
     #[test]
     fn insights_concurrency_requires_a_positive_integer() {

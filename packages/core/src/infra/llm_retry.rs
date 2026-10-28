@@ -151,7 +151,8 @@ where
     F: FnMut(usize, usize, u64, &InfraError),
 {
     let max_retries = policy.max_retries.max(1);
-    let request_timeout = Duration::from_millis(policy.request_timeout_millis.max(1));
+    let request_timeout = Duration::from_millis(policy.request_timeout_millis.max(1))
+        .max(client.min_request_timeout().unwrap_or_default());
     let ledger_path = match client.usage_ledger_path() {
         Ok(path) => path,
         Err(error @ InfraError::UsageLedger(_)) => {

@@ -4,8 +4,13 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use std::time::Duration;
 
+/// The store is shared by refine-server and the ingest CLI. On a multi-GB
+/// database one projection save or job reconcile can hold the write lock for
+/// several seconds, so a short wait turns ordinary contention into failures.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub(crate) fn configure_connection(conn: &Connection, in_memory: bool) -> InfraResult<()> {
-    conn.busy_timeout(Duration::from_secs(5))
+    conn.busy_timeout(BUSY_TIMEOUT)
         .map_err(|e| InfraError::Database(e.to_string()))?;
 
     let pragma_sql = if in_memory {
@@ -25,7 +30,7 @@ pub(crate) fn configure_connection(conn: &Connection, in_memory: bool) -> InfraR
 }
 
 pub(crate) fn configure_read_only_connection(conn: &Connection) -> InfraResult<()> {
-    conn.busy_timeout(Duration::from_secs(5))
+    conn.busy_timeout(BUSY_TIMEOUT)
         .map_err(|e| InfraError::Database(e.to_string()))?;
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
