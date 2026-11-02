@@ -10,8 +10,7 @@ use chrono::{DateTime, Utc};
 use refine_core::infra::LlmClient;
 use refine_core::knowledge::{Document, DocumentRepository};
 use refine_core::session::{
-    chunk_session, discover_sessions, needs_chunking, parse_session_file, FilterConfig,
-    SessionSource,
+    chunk_session, discover_sessions, needs_chunking, parse_session_file, SessionSource,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -20,6 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod cursor;
+mod exclusions;
 mod legacy_convergence;
 mod legacy_migration;
 mod provenance;
@@ -238,7 +238,7 @@ where
         summaries.truncate(limit);
     }
     let total = summaries.len();
-    let filter_config = FilterConfig::default();
+    let filter_config = exclusions::load_filter_config()?;
     let document_count = doc_store.count().await?;
     let existing_documents = doc_store.find_recent(0, document_count).await?;
     let projection_versions = if options.reprocess == Some(ReprocessMode::Stale) {
@@ -335,8 +335,20 @@ where
             legacy_document,
             matching_documents.iter().copied(),
         );
-        let summary_is_looper = summary.is_looper_scheduled();
+        let summary_is_excluded_project = filter_config.is_excluded_project(&summary.project);
+        // Excluded projects reuse the Looper cleanup path so documents ingested
+        // before the rule existed lose their observations.
+        let summary_is_looper = summary.is_looper_scheduled() || summary_is_excluded_project;
         if summary.user_message_count < filter_config.min_user_messages as i64 {
+            skipped_filter += 1;
+            continue;
+        }
+        // The project path is authoritative, so a never-ingested excluded session
+        // needs no full load; only stored documents need the cleanup below.
+        if summary_is_excluded_project
+            && existing_document.is_none()
+            && !might_have_legacy_documents
+        {
             skipped_filter += 1;
             continue;
         }
@@ -642,7 +654,7 @@ async fn handle_legacy_ingest_sessions(
     };
 
     let total = sessions_to_process.len();
-    let filter_config = FilterConfig::default();
+    let filter_config = exclusions::load_filter_config()?;
     let document_count = doc_store.count().await?;
     let existing_documents = doc_store.find_recent(0, document_count).await?;
     let mut claimed_remem_documents = HashSet::new();

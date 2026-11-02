@@ -2891,3 +2891,92 @@ async fn looper_deleted_ids_are_excluded_from_unchanged_session_probe() {
         "unchanged accept session must keep its current projection version"
     );
 }
+
+#[tokio::test]
+async fn excluded_project_sessions_skip_loading_and_lose_stored_observations() {
+    super::exclusions::set_test_patterns(&["/.harness/local/"]);
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store.clone();
+    let mut fresh_bot = remem_summary("fresh-bot", 400, 'a');
+    fresh_bot.project = "/work/harness/.harness/local/queue/slot_000".to_string();
+    let mut stored_bot = remem_summary("stored-bot", 300, 'b');
+    stored_bot.project = "/work/harness/.harness/local/queue/slot_001".to_string();
+    let eligible = remem_summary("eligible", 200, 'c');
+    let eligible_url = eligible.stable_document_url();
+
+    let mut stored = Document::new("codex-session", "");
+    stored.set_url(&stored_bot.stable_document_url());
+    stored.set_source_version(Some(&stored_bot.projection_version()));
+    doc_store.save(&stored).await.unwrap();
+    let mut stored_item = Item::new_observation("bot observation", "bot observation");
+    stored_item.set_document_id(stored.id().clone());
+    item_store.save(&stored_item).await.unwrap();
+
+    let temp = tempfile::tempdir().expect("temporary ingest paths");
+    let quarantine = QuarantineStore::load_from(temp.path().join("quarantine.jsonl")).unwrap();
+    let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_ids = loaded_ids.clone();
+    let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient {
+        response: r#"{
+            "session_summary": "eligible",
+            "cognitive_level": "competent", "collaboration_mode": "review",
+            "decisions": [], "bugs_fixed": [], "patterns": [], "friction": [],
+            "project_progress": [], "questions": [], "knowledge_gained": [],
+            "tools_discovered": [], "architecture": [], "code_artifacts": []
+        }"#
+        .to_string(),
+    });
+
+    handle_remem_ingest_sessions_with_loader(
+        IngestOptions {
+            source: None,
+            provider: IngestProvider::Remem,
+            limit: None,
+            latest: Some(1),
+            dry_run: false,
+            retry_quarantined: false,
+            reprocess: None,
+            backfill_session_metadata: false,
+        },
+        &temp.path().join("refine.db"),
+        vec![fresh_bot, stored_bot, eligible],
+        Some(quarantine),
+        move |summary| {
+            observed_ids
+                .lock()
+                .expect("loaded id lock")
+                .push(summary.session_id.clone());
+            Ok(loaded_remem_session(
+                &summary,
+                "ordinary user question with enough useful detail",
+            ))
+        },
+        doc_store.clone(),
+        Some(client),
+    )
+    .await
+    .expect("excluded projects must not fail ingest");
+    super::exclusions::set_test_patterns(&[]);
+
+    assert_eq!(
+        *loaded_ids.lock().expect("loaded id lock"),
+        vec!["stored-bot".to_string(), "eligible".to_string()],
+        "a never-ingested excluded session needs no full load"
+    );
+    assert!(item_store
+        .find_by_document_id(stored.id())
+        .await
+        .unwrap()
+        .is_empty());
+    let eligible_document = doc_store
+        .find_by_url(&eligible_url)
+        .await
+        .unwrap()
+        .expect("eligible session still fills the --latest bound");
+    assert!(!item_store
+        .find_by_document_id(eligible_document.id())
+        .await
+        .unwrap()
+        .is_empty());
+}
