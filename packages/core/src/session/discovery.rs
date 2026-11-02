@@ -251,7 +251,7 @@ mod tests {
         assert_eq!(discovered.len(), 5);
 
         // Simulate --latest 3
-        discovered.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+        discovered.sort_by_key(|s| std::cmp::Reverse(s.modified_at));
         discovered.truncate(3);
 
         // Newest 3 are e, d, c (offsets 4, 3, 2)
@@ -275,7 +275,7 @@ mod tests {
 
         let mut discovered = discover_sessions_in(home, Some(SessionSource::ClaudeCode), None);
         // --latest 100 on 3 files
-        discovered.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+        discovered.sort_by_key(|s| std::cmp::Reverse(s.modified_at));
         discovered.truncate(100);
         assert_eq!(discovered.len(), 3);
     }

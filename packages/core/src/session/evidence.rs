@@ -36,9 +36,9 @@ pub(super) fn validate_evidence_shape(facets: &FacetResponse) -> Result<(), Stri
     let fields: HashMap<_, _> = fields(facets).into_iter().collect();
     let mut seen = HashSet::new();
     for evidence in &facets.evidence {
-        if !fields
+        if fields
             .get(evidence.field.as_str())
-            .is_some_and(|count| evidence.index < *count)
+            .is_none_or(|count| evidence.index >= *count)
         {
             return Err(format!(
                 "facet evidence refers to an unknown field/index: {}[{}]",

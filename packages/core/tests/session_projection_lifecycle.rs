@@ -310,7 +310,7 @@ async fn unmatched_curation_stays_visible_without_double_counting_the_new_machin
     assert_eq!(portrait.data_quality, full.cluster.data_quality);
     assert_eq!(aggregate_observations(&visible).l2.decision_count, 1);
 
-    let previous = vec![pending];
+    let previous = [pending];
     let windows = [&replacement[..], &previous[..]];
     let full_windows = cluster_session_observation_windows(&windows, &sources);
     let portrait_windows = portrait_session_observation_windows(&windows, &sources);

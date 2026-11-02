@@ -744,7 +744,7 @@ mod tests {
             .await
             .unwrap();
         let temp = tempdir().unwrap();
-        let store = SqliteStore::open(&temp.path().join("refine.db")).unwrap();
+        let store = SqliteStore::open(temp.path().join("refine.db")).unwrap();
 
         let ids = persist_extracted_document(&store, &aggregate)
             .await
@@ -786,7 +786,7 @@ mod tests {
                 .unwrap();
         aggregate.items[1].set_document_id(DocumentId::from("missing-document"));
         let temp = tempdir().unwrap();
-        let store = SqliteStore::open(&temp.path().join("refine.db")).unwrap();
+        let store = SqliteStore::open(temp.path().join("refine.db")).unwrap();
 
         let err = persist_extracted_document(&store, &aggregate)
             .await
@@ -832,7 +832,7 @@ mod tests {
         .unwrap();
         assert_ne!(first.document.id(), second.document.id());
         let temp = tempdir().unwrap();
-        let store = SqliteStore::open(&temp.path().join("refine.db")).unwrap();
+        let store = SqliteStore::open(temp.path().join("refine.db")).unwrap();
 
         persist_extracted_document(&store, &first).await.unwrap();
         persist_extracted_document(&store, &second).await.unwrap();
@@ -882,7 +882,7 @@ mod tests {
         .await
         .unwrap();
         let temp = tempdir().unwrap();
-        let store = SqliteStore::open(&temp.path().join("refine.db")).unwrap();
+        let store = SqliteStore::open(temp.path().join("refine.db")).unwrap();
 
         let (first_result, second_result) = tokio::join!(
             persist_extracted_document(&store, &first),
