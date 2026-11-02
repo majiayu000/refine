@@ -304,7 +304,7 @@ fn test_personal_trends_do_not_override_absolute_signals() {
         ("exploration", 20.0),
         ("deep_invest", 25.0),
         ("fragmentation", 15.0), // lower is better
-        ("delegation", 30.0),    // lower is better
+        ("delegation", 30.0),    // no preferred direction
         ("mode_diversity", 4.0),
         ("bug_decision", 0.20), // lower is better
         ("knowledge_rate", 0.5),
@@ -319,7 +319,7 @@ fn test_personal_trends_do_not_override_absolute_signals() {
         25.0, // exp: 25/20 = 1.25 → green
         30.0, // di: 30/25 = 1.20 → green
         10.0, // frag: 10/15 = 0.667 → green (lower is better, ratio < 0.95)
-        20.0, // del: 20/30 = 0.667 → green (lower is better)
+        20.0, // del: no preferred direction → no trend
         5.0,  // md: 5/4 = 1.25 → green
         0.10, // bug: 0.10/0.20 = 0.50 → green (lower is better)
         0.5,  // fd: 0.5/1.0 = 0.50 → green (lower is better)
@@ -342,6 +342,7 @@ fn test_personal_trends_do_not_override_absolute_signals() {
     assert_eq!(trends.indicator("dreyfus"), Some(Trend::Up));
     assert_eq!(trends.indicator("fragmentation"), Some(Trend::Up));
     assert_eq!(trends.indicator("deep_invest"), None);
+    assert_eq!(trends.indicator("delegation"), None);
     assert_eq!(trends.overall(), Some(Trend::Up));
 }
 

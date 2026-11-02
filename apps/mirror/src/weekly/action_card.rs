@@ -312,6 +312,7 @@ fn localized_signal(signal: Signal) -> &'static str {
         Signal::Yellow => t!("yellow", "黄灯"),
         Signal::Red => t!("red", "红灯"),
         Signal::Unknown => t!("unknown", "证据不足"),
+        Signal::Info => t!("not rated", "不评级"),
     }
 }
 

@@ -22,7 +22,7 @@ fn default_lang_en() -> String {
 fn signal_severity(s: Signal) -> u8 {
     match s {
         Signal::Red => 0,
-        Signal::Unknown => 3,
+        Signal::Unknown | Signal::Info => 3,
         Signal::Yellow => 1,
         Signal::Green => 2,
     }
@@ -32,7 +32,8 @@ fn signal_severity(s: Signal) -> u8 {
 /// Returns "↑" toward green, "↓" away from green, "" if unchanged.
 /// This is a configured preference, not a personal-progress assessment.
 fn trend_signal(current: Signal, previous: Signal) -> &'static str {
-    if current == Signal::Unknown || previous == Signal::Unknown {
+    let unrated = |signal: Signal| matches!(signal, Signal::Unknown | Signal::Info);
+    if unrated(current) || unrated(previous) {
         return "";
     }
     let curr = signal_severity(current);

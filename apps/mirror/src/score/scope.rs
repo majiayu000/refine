@@ -10,7 +10,7 @@ use crate::config::Targets;
 
 const CANONICAL_WINDOW: &str = "rolling-90d";
 const METHOD_VERSION: &str =
-    "mirror-v6;session-start;linked-interactive-session-sources-v1;reviewed-curation-v1";
+    "mirror-v7;session-start;linked-interactive-session-sources-v1;reviewed-curation-v1;delegation-unrated-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScoreScope {

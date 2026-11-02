@@ -219,3 +219,49 @@ fn choice_verbs_do_not_count_as_reasons_and_english_case_is_normalized() {
         assert_eq!(indicator(&depth, "decision_quality").actual, Some(expected));
     }
 }
+
+#[test]
+fn delegation_share_is_shown_but_not_rated() {
+    for delegated in [0, 5, 10] {
+        let modes = [("delegation", delegated), ("review", 10 - delegated)]
+            .into_iter()
+            .map(|(mode, count)| (mode.to_string(), count))
+            .collect();
+        let cluster = make_cluster(HashMap::new(), modes, 0, 7, vec![("project", 4, vec![])]);
+        let collaboration = layer3(&cluster, &crate::config::Targets::default());
+        let delegation = indicator(&collaboration, "delegation");
+        assert_eq!(delegation.signal, Signal::Info, "delegated={delegated}");
+        assert_eq!(delegation.actual, Some(delegated as f64 * 10.0));
+        assert!(delegation.display_value().ends_with('%'));
+    }
+}
+
+#[test]
+fn full_delegation_does_not_turn_collaboration_red() {
+    let modes = [
+        ("delegation", 10),
+        ("review", 0),
+        ("exploration", 0),
+        ("pair_programming", 0),
+    ]
+    .into_iter()
+    .map(|(mode, count)| (mode.to_string(), count))
+    .collect();
+    let targets = crate::config::Targets {
+        mode_diversity_green: 1,
+        mode_diversity_yellow: 1,
+        ..Default::default()
+    };
+    let cluster = make_cluster(HashMap::new(), modes, 10, 1, vec![("project", 4, vec![])]);
+    let collaboration = layer3(&cluster, &targets);
+    assert_eq!(indicator(&collaboration, "delegation").actual, Some(100.0));
+    assert_eq!(collaboration.signal, Signal::Green);
+}
+
+#[test]
+fn worst_ignores_unrated_indicators() {
+    use super::super::types::worst;
+    assert_eq!(worst(&[Signal::Info, Signal::Green]), Signal::Green);
+    assert_eq!(worst(&[Signal::Info, Signal::Yellow]), Signal::Yellow);
+    assert_eq!(worst(&[Signal::Info]), Signal::Unknown);
+}

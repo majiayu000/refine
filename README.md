@@ -194,7 +194,7 @@ that path explicitly to the loader rather than sourcing it automatically.
 ```toml
 # ~/.mirror/config.toml (optional, all have defaults)
 [targets]
-delegation_green = 0.40      # delegation < 40% = green
+fragmentation_green = 0.20  # one-off project share < 20% = green
 exploration_green = 0.15     # exploration > 15% = green
 ```
 

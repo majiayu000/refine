@@ -275,15 +275,18 @@ pub(super) fn layer3(cluster: &ClusterResult, targets: &Targets) -> LayerScore {
     layer(
         "collaboration",
         vec![
+            // Whether more or less delegation is better depends on the task
+            // and its outcome, which this snapshot does not observe. Show the
+            // share without a rating instead of implying "lower is better".
             measured(
                 "delegation",
                 delegation.map(|value| value * 100.0),
-                format!("<{}%", (targets.delegation_green * 100.0) as u32),
-                below(
-                    delegation,
-                    targets.delegation_green,
-                    targets.delegation_yellow,
-                ),
+                t!("not rated", "不评级").into(),
+                if delegation.is_some() {
+                    Signal::Info
+                } else {
+                    Signal::Unknown
+                },
                 collaboration_coverage(cluster),
             ),
             measured(
