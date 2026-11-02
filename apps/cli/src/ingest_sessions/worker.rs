@@ -487,7 +487,7 @@ pub(super) async fn llm_call_with_retry(
     stage: &'static str,
 ) -> Result<String> {
     if quota_hit.load(Ordering::Relaxed) {
-        return Err(anyhow::anyhow!("LLM 配额已耗尽或本次运行预算已耗尽，跳过"));
+        return Err(anyhow::anyhow!("本次运行的 LLM 预算（REFINE_LLM_MAX_ATTEMPTS / REFINE_LLM_MAX_TOKENS）或提供方配额已用完，留到下次运行"));
     }
 
     let prompt = checked_facet_prompt(content, stage)?;

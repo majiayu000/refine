@@ -9,7 +9,8 @@ mkdir -p "$TEST_HOME/.cargo/bin" "$TEST_HOME/.refine"
 cat > "$TEST_HOME/.cargo/bin/refine" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" > "$HOME/refine-args"
-exit 42
+printf '%s\n' "${TEST_INGEST_ERROR:-failed to load sessions from remem}" >&2
+exit "${TEST_INGEST_EXIT:-42}"
 SH
 cat > "$TEST_HOME/.cargo/bin/mirror" <<'SH'
 #!/usr/bin/env bash
@@ -45,3 +46,22 @@ set -e
 grep -q "refusing to refresh derived reports" "$TEST_HOME/output.log"
 
 echo "daily-refresh Remem failure contract: ok"
+
+# Incomplete ingestion may refresh stored observations, but must retain its
+# failure status and the previous complete-refresh timestamp.
+printf 'previous-complete-refresh\n' > "$TEST_HOME/.refine/last-refresh-ok"
+set +e
+HOME="$TEST_HOME" REFINE_RUNTIME_LOCK_ACTIVE=1 \
+  REFINE_OPENAI_API_KEY=test-only-key \
+  TEST_INGEST_ERROR='Error: 摄入不完整: 瞬态失败 5, 本次相关隔离 3' \
+  TEST_INGEST_EXIT=1 \
+  "$SCRIPT_DIR/daily-refresh.sh" > "$TEST_HOME/output.log" 2>&1
+status=$?
+set -e
+[[ "$status" -ne 0 ]] || { echo 'partial ingest reported complete success' >&2; exit 1; }
+[[ -e "$TEST_HOME/mirror-was-called" ]] || { echo 'partial ingest blocked Mirror' >&2; exit 1; }
+[[ "$(cat "$TEST_HOME/.refine/last-refresh-ok")" == 'previous-complete-refresh' ]] \
+  || { echo 'partial ingest overwrote complete-refresh timestamp' >&2; exit 1; }
+grep -q 'WARNING:.*incomplete' "$TEST_HOME/output.log"
+grep -q 'ERROR: run finished with failures: ingest-sessions (incomplete)' "$TEST_HOME/output.log"
+echo 'daily-refresh partial ingestion contract: ok'

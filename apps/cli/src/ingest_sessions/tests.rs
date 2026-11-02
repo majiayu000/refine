@@ -1090,7 +1090,7 @@ async fn quota_hit_short_circuits_before_llm_call() {
         .await
         .expect_err("quota flag should skip the call");
 
-    assert!(err.to_string().contains("LLM 配额已耗尽"));
+    assert!(err.to_string().contains("留到下次运行"));
 }
 
 #[tokio::test]
@@ -1118,7 +1118,7 @@ async fn provider_rate_limit_sets_batch_early_stop_without_retrying() {
     )
     .await
     .expect_err("later batch work must short-circuit");
-    assert!(second.to_string().contains("跳过"));
+    assert!(second.to_string().contains("留到下次运行"));
     assert_eq!(client.calls(), 0);
 }
 

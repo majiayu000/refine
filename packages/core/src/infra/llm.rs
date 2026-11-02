@@ -125,7 +125,7 @@ impl ClaudeClient {
             api_key: api_key.to_string(),
             model: "claude-opus-4-6".to_string(),
             base_url: "https://api.anthropic.com".to_string(),
-            budget: LlmRunBudget::default(),
+            budget: LlmRunBudget::from_env(),
         }
     }
 
@@ -228,7 +228,7 @@ impl OpenAIClient {
             api_key: api_key.to_string(),
             model: "gpt-4o".to_string(),
             base_url: "https://api.openai.com".to_string(),
-            budget: LlmRunBudget::default(),
+            budget: LlmRunBudget::from_env(),
         }
     }
 
