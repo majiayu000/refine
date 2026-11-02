@@ -285,6 +285,7 @@ fn format_score_summary(score: &score::ScoreResult) -> String {
                 Signal::Yellow => "Y",
                 Signal::Red => "R",
                 Signal::Unknown => "?",
+                Signal::Info => "-",
             };
             format!("{} {}", layer_display(&l.name), sig)
         })

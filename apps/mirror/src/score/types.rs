@@ -11,6 +11,9 @@ pub enum Signal {
     Red,
     /// The metric has no usable evidence. This is not a behavioral rating.
     Unknown,
+    /// Measured but deliberately not rated: no direction is established as
+    /// better, so the value is shown without a color and never affects a layer.
+    Info,
 }
 
 impl Signal {
@@ -20,6 +23,7 @@ impl Signal {
             Signal::Yellow => "yellow",
             Signal::Red => "red",
             Signal::Unknown => "unknown",
+            Signal::Info => "info",
         }
     }
 
@@ -29,6 +33,7 @@ impl Signal {
             Signal::Yellow => "🟡",
             Signal::Red => "🔴",
             Signal::Unknown => "⚪",
+            Signal::Info => "○",
         }
     }
 
@@ -38,6 +43,7 @@ impl Signal {
             Signal::Yellow => "\x1b[33m●\x1b[0m",
             Signal::Red => "\x1b[31m●\x1b[0m",
             Signal::Unknown => "\x1b[90m●\x1b[0m",
+            Signal::Info => "\x1b[90m○\x1b[0m",
         }
     }
 
@@ -189,7 +195,13 @@ fn default_layers() -> [LayerScore; 3] {
 }
 
 /// Keep a measured failure visible, but never turn missing evidence green.
+/// Unrated (`Info`) indicators are excluded from the layer rating.
 pub(super) fn worst(signals: &[Signal]) -> Signal {
+    let signals: Vec<Signal> = signals
+        .iter()
+        .copied()
+        .filter(|signal| *signal != Signal::Info)
+        .collect();
     if signals.contains(&Signal::Red) {
         Signal::Red
     } else if signals.is_empty() || signals.contains(&Signal::Unknown) {

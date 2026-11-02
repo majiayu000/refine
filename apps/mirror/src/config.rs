@@ -21,8 +21,6 @@ pub struct Targets {
     pub fragmentation_green: f64,
     pub fragmentation_yellow: f64,
     // 层3 协作效能
-    pub delegation_green: f64,
-    pub delegation_yellow: f64,
     pub mode_diversity_green: usize,
     pub mode_diversity_yellow: usize,
     pub bug_decision_green: f64,
@@ -44,8 +42,6 @@ impl Default for Targets {
             deep_invest_yellow_hi: 0.30,
             fragmentation_green: 0.20,
             fragmentation_yellow: 0.40,
-            delegation_green: 0.40,
-            delegation_yellow: 0.55,
             mode_diversity_green: 4,
             mode_diversity_yellow: 2,
             bug_decision_green: 0.60,
@@ -133,7 +129,6 @@ mod tests {
         let t = Targets::default();
         assert!((t.dreyfus_green - 3.5).abs() < f64::EPSILON);
         assert!((t.decision_quality_green - 0.60).abs() < f64::EPSILON);
-        assert!((t.delegation_green - 0.40).abs() < f64::EPSILON);
         assert_eq!(t.mode_diversity_green, 4);
     }
 
@@ -155,6 +150,18 @@ dreyfus_green = 4.0
         assert!((config.targets.dreyfus_green - 4.0).abs() < f64::EPSILON);
         // 未指定字段使用默认值
         assert!((config.targets.dreyfus_yellow - 2.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn retired_delegation_thresholds_still_parse() {
+        let toml_str = r#"
+[targets]
+dreyfus_green = 4.0
+delegation_green = 0.40
+delegation_yellow = 0.55
+"#;
+        let config: MirrorConfig = toml::from_str(toml_str).unwrap();
+        assert!((config.targets.dreyfus_green - 4.0).abs() < f64::EPSILON);
     }
 
     #[test]

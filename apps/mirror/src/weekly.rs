@@ -204,12 +204,13 @@ fn signal_rank(signal: Signal) -> i8 {
         Signal::Green => 2,
         Signal::Yellow => 1,
         Signal::Red => 0,
-        Signal::Unknown => -1,
+        Signal::Unknown | Signal::Info => -1,
     }
 }
 
 fn signal_delta(current: Signal, previous: Signal) -> &'static str {
-    if current == Signal::Unknown || previous == Signal::Unknown {
+    let unrated = |signal: Signal| matches!(signal, Signal::Unknown | Signal::Info);
+    if unrated(current) || unrated(previous) {
         return "—";
     }
     match signal_rank(current) - signal_rank(previous) {

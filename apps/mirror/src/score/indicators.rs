@@ -82,7 +82,8 @@ const INDICATOR_SPECS: [IndicatorSpec; 8] = [
     IndicatorSpec {
         key: "delegation",
         format: IndicatorFormat::Percent0,
-        direction: Direction::LowerBetter,
+        // No preferred direction: a personal-baseline arrow would imply one.
+        direction: Direction::Band,
         aliases: &["Delegation", "delegation", "委派率", "委派比"],
         display_en: "delegation",
         display_zh: "委派率",
