@@ -1,4 +1,4 @@
-# Authoritative spec: docs/cognitive-portraits/SPEC.md
+# Authoritative spec: docs/SPEC-cognitive-portrait.md
 
 # Cognitive Portrait v4 — single-agent evidence analysis
 
@@ -161,3 +161,6 @@ the wrapper as:
 
 - `docs/cognitive-portraits/evidence/cognitive-portrait-{date}-v4.bundle.json`
 - `docs/cognitive-portraits/evidence/cognitive-portrait-{date}-v4.quality.json`
+
+`docs/cognitive-portraits/` is a local, gitignored archive of personal analysis.
+Create it if missing. Never `git add` portrait reports, evidence or `INDEX.md`.
