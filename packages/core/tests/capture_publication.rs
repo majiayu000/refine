@@ -85,7 +85,7 @@ async fn later_accepted_capture_wins_across_connections_and_replay_retains_recei
                 &new_job.id,
                 "worker",
                 &new_doc,
-                &[new_item.clone()],
+                std::slice::from_ref(&new_item),
                 NOW
             )
             .await
@@ -98,7 +98,7 @@ async fn later_accepted_capture_wins_across_connections_and_replay_retains_recei
                 &old_job.id,
                 "worker",
                 &old_doc,
-                &[old_item.clone()],
+                std::slice::from_ref(&old_item),
                 NOW
             )
             .await
@@ -171,7 +171,7 @@ async fn newer_pending_work_keeps_last_successful_result_until_atomic_publicatio
                 &old_job.id,
                 "worker",
                 &old_doc,
-                &[old_item.clone()],
+                std::slice::from_ref(&old_item),
                 NOW
             )
             .await
@@ -182,7 +182,13 @@ async fn newer_pending_work_keeps_last_successful_result_until_atomic_publicatio
     let conn = Connection::open(&path).unwrap();
     conn.execute_batch("CREATE TRIGGER fail_new_item BEFORE INSERT ON items WHEN NEW.title = 'new' BEGIN SELECT RAISE(ABORT, 'injected publication failure'); END;").unwrap();
     assert!(store
-        .finish_job_claim_with_results(&new_job.id, "worker", &new_doc, &[new_item.clone()], NOW)
+        .finish_job_claim_with_results(
+            &new_job.id,
+            "worker",
+            &new_doc,
+            std::slice::from_ref(&new_item),
+            NOW
+        )
         .await
         .is_err());
     assert_eq!(
@@ -217,7 +223,7 @@ async fn newer_pending_work_keeps_last_successful_result_until_atomic_publicatio
                 &new_job.id,
                 "wrong-owner",
                 &new_doc,
-                &[new_item.clone()],
+                std::slice::from_ref(&new_item),
                 NOW
             )
             .await

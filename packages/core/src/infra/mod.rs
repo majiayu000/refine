@@ -393,6 +393,30 @@ fn migrate_extraction_jobs_add_lease_columns(conn: &Connection) -> InfraResult<(
     Ok(())
 }
 
+// 公共 API
+pub use contract::{
+    contract_incompatible_message, is_contract_compatible, normalize_contract_major,
+    normalize_conversation_input, trim_optional, trim_required_field, validate_contract_version,
+    CreateConversationRequest, DocumentDetailDto, DocumentDto, ItemDto,
+    NormalizedConversationInput, CONTRACT_VERSION, CONTRACT_VERSION_HEADER,
+};
+pub use db_migration::{migrate_stale_dbs, MigrationReport};
+pub use llm::{
+    build_llm_client_from_env, build_required_llm_client_from_env, ClaudeClient, LlmClient,
+    OpenAIClient,
+};
+pub use llm_budget::{LlmRunBudget, DEFAULT_LLM_MAX_ATTEMPTS, DEFAULT_LLM_MAX_TOKENS};
+pub use llm_command::CommandLlmClient;
+pub use llm_retry::{
+    llm_with_retry, llm_with_retry_for, llm_with_retry_policy, llm_with_retry_policy_for,
+    LlmRetryPolicy, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BASE_DELAY_SECS,
+};
+pub(crate) use llm_retry::{llm_with_retry_policy_ref, LlmRetryBehavior};
+pub use llm_usage::{LlmCompletion, LlmTokenUsage};
+pub use paths::{default_db_path, ensure_db_dir, resolve_db_path, stale_db_candidates};
+pub use quota_state::{is_exhausted as is_quota_exhausted, set_exhausted as set_quota_exhausted};
+pub use sqlite::SqliteStore;
+
 #[cfg(test)]
 mod tests {
     use super::{column_exists, migrate_documents_url_unique, prepare_sqlite_db};
@@ -778,27 +802,3 @@ mod tests {
         );
     }
 }
-
-// 公共 API
-pub use contract::{
-    contract_incompatible_message, is_contract_compatible, normalize_contract_major,
-    normalize_conversation_input, trim_optional, trim_required_field, validate_contract_version,
-    CreateConversationRequest, DocumentDetailDto, DocumentDto, ItemDto,
-    NormalizedConversationInput, CONTRACT_VERSION, CONTRACT_VERSION_HEADER,
-};
-pub use db_migration::{migrate_stale_dbs, MigrationReport};
-pub use llm::{
-    build_llm_client_from_env, build_required_llm_client_from_env, ClaudeClient, LlmClient,
-    OpenAIClient,
-};
-pub use llm_budget::{LlmRunBudget, DEFAULT_LLM_MAX_ATTEMPTS, DEFAULT_LLM_MAX_TOKENS};
-pub use llm_command::CommandLlmClient;
-pub use llm_retry::{
-    llm_with_retry, llm_with_retry_for, llm_with_retry_policy, llm_with_retry_policy_for,
-    LlmRetryPolicy, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BASE_DELAY_SECS,
-};
-pub(crate) use llm_retry::{llm_with_retry_policy_ref, LlmRetryBehavior};
-pub use llm_usage::{LlmCompletion, LlmTokenUsage};
-pub use paths::{default_db_path, ensure_db_dir, resolve_db_path, stale_db_candidates};
-pub use quota_state::{is_exhausted as is_quota_exhausted, set_exhausted as set_quota_exhausted};
-pub use sqlite::SqliteStore;
