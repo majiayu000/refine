@@ -13,6 +13,25 @@ pub struct FilterConfig {
     pub min_user_messages: usize,
     /// 最少总字符数
     pub min_char_count: usize,
+    /// 项目路径子串；命中的会话视为自动化任务，不提炼认知观测
+    pub excluded_project_patterns: Vec<String>,
+}
+
+impl FilterConfig {
+    /// Automated jobs (agent queues, batch renders, scoring pipelines) run in
+    /// dedicated workspaces; their transcripts do not describe the user.
+    pub fn is_excluded_project(&self, project: &str) -> bool {
+        self.excluded_project_patterns
+            .iter()
+            .any(|pattern| !pattern.is_empty() && project.contains(pattern.as_str()))
+    }
+
+    fn excludes_session(&self, session: &Session) -> bool {
+        [&session.meta.project_identity, &session.meta.project]
+            .into_iter()
+            .flatten()
+            .any(|project| self.is_excluded_project(project))
+    }
 }
 
 impl Default for FilterConfig {
@@ -20,6 +39,7 @@ impl Default for FilterConfig {
         Self {
             min_user_messages: 1,
             min_char_count: 500,
+            excluded_project_patterns: Vec::new(),
         }
     }
 }
@@ -29,6 +49,7 @@ pub fn passes_filter(session: &Session, config: &FilterConfig) -> bool {
     session.user_message_count() >= config.min_user_messages
         && session.char_count() >= config.min_char_count
         && !is_looper_scheduled_skill_session(session)
+        && !config.excludes_session(session)
 }
 
 /// Looper scheduled jobs declare themselves at the start of the first user
@@ -137,5 +158,21 @@ mod tests {
 
         assert!(!is_looper_scheduled_skill_session(&session));
         assert!(passes_filter(&session, &FilterConfig::default()));
+    }
+
+    #[test]
+    fn filter_rejects_sessions_from_excluded_projects() {
+        let config = FilterConfig {
+            excluded_project_patterns: vec!["/.harness/local/".to_string(), String::new()],
+            ..FilterConfig::default()
+        };
+        let mut session = make_session(3, 200);
+        session.meta.project_identity =
+            Some("/Users/me/harness/.harness/local/owner-queue/slot_000".to_string());
+        assert!(!passes_filter(&session, &config));
+
+        session.meta.project_identity = Some("/Users/me/harness".to_string());
+        assert!(passes_filter(&session, &config));
+        assert!(!config.is_excluded_project("/Users/me/harness"));
     }
 }

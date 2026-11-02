@@ -165,6 +165,13 @@ does not count unchanged, low-signal, explicit Looper scheduled-job, or
 quarantined sessions against N. It stops loading older message bodies as soon
 as N sessions are selected. Omit the option for a manual full-history pass.
 
+Automated jobs that run in dedicated workspaces (agent queues, batch renders,
+scoring pipelines) do not describe the user. List one project-path substring
+per line in `~/.refine/ingest-exclude-projects.txt` (or the file named by
+`REFINE_INGEST_EXCLUDE_FILE`; `#` starts a comment). Matching sessions are
+skipped without loading their bodies and do not count against N; observations
+already stored for them are cleared on the next run, as for Looper jobs.
+
 `refine ingest-sessions` reads exclusively from a compatible `remem` binary on
 `PATH`, or from the binary selected by `REFINE_REMEM_BIN`. Missing executables,
 nonzero exits, malformed JSON, contract drift, and pagination errors fail the
