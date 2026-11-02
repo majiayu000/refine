@@ -17,6 +17,14 @@ Remem raw archive only. Missing executables, subprocess failures, malformed
 JSON, contract drift, and pagination failures fail the command visibly; the
 public CLI has no automatic or explicit local transcript fallback.
 
+Daily refresh continues to local Mirror scoring (and the Sunday Mirror weekly
+report) when ingestion finishes with failed or quarantined sessions. Its log
+reports the coverage gap, the job still exits nonzero, and
+`~/.refine/last-refresh-ok` retains the last fully successful refresh time.
+A failure to read the Remem archive still stops derived reports. A newly
+written Mirror report therefore does not prove that all source sessions were
+ingested; check the same run's ingestion summary and exit status.
+
 The installer is idempotent. It can be used for first install and for upgrades from a newer checkout.
 
 ## What The Installer Does

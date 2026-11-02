@@ -59,12 +59,20 @@ if ! [[ "$REFINE_INGEST_LATEST" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: REFINE_INGEST_LATEST must be a positive integer" >&2
   exit 1
 fi
-if ! refine ingest-sessions --latest "$REFINE_INGEST_LATEST" 2>&1; then
+ingest_output="$(mktemp)"
+trap 'rm -f "$ingest_output"' EXIT
+if refine ingest-sessions --latest "$REFINE_INGEST_LATEST" 2>&1 | tee "$ingest_output"; then
+  echo "Step 1: ingest-sessions completed successfully"
+elif grep -q '^Error: 摄入不完整:' "$ingest_output"; then
+  echo "WARNING: ingest-sessions finished incomplete; refreshing stored observations only; coverage excludes failed/quarantined sessions" >&2
+  FAILED_STEPS+=("ingest-sessions (incomplete)")
+else
   echo "ERROR: ingest-sessions failed; refusing to refresh derived reports" >&2
   exit 1
 fi
 
-# 2. Refresh mirror score + LLM advice only after ingestion succeeds.
+# 2. Refresh local scores and advice after ingestion completes, including a
+# partial batch. Its failure remains visible and prevents a success marker.
 echo "Step 2: mirror score"
 score_rc=0
 mirror score --require-advice 2>&1 || score_rc=$?
