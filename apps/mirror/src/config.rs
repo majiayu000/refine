@@ -23,8 +23,6 @@ pub struct Targets {
     // 层3 协作效能
     pub mode_diversity_green: usize,
     pub mode_diversity_yellow: usize,
-    pub bug_decision_green: f64,
-    pub bug_decision_yellow: f64,
 }
 
 impl Default for Targets {
@@ -44,8 +42,6 @@ impl Default for Targets {
             fragmentation_yellow: 0.40,
             mode_diversity_green: 4,
             mode_diversity_yellow: 2,
-            bug_decision_green: 0.60,
-            bug_decision_yellow: 0.80,
         }
     }
 }
@@ -159,6 +155,8 @@ dreyfus_green = 4.0
 dreyfus_green = 4.0
 delegation_green = 0.40
 delegation_yellow = 0.55
+bug_decision_green = 0.60
+bug_decision_yellow = 0.80
 "#;
         let config: MirrorConfig = toml::from_str(toml_str).unwrap();
         assert!((config.targets.dreyfus_green - 4.0).abs() < f64::EPSILON);

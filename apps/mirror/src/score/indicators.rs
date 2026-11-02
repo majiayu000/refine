@@ -99,7 +99,8 @@ const INDICATOR_SPECS: [IndicatorSpec; 8] = [
     IndicatorSpec {
         key: "bug_decision",
         format: IndicatorFormat::Fixed2,
-        direction: Direction::LowerBetter,
+        // No preferred direction: maintenance phases legitimately raise it.
+        direction: Direction::Band,
         aliases: &["Bug/Decision", "bug/decision", "bug/决策"],
         display_en: "Bug/Decision Extraction Ratio",
         display_zh: "Bug/决策抽取比",

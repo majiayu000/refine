@@ -296,15 +296,17 @@ pub(super) fn layer3(cluster: &ClusterResult, targets: &Targets) -> LayerScore {
                 diversity_signal,
                 collaboration_coverage(cluster),
             ),
+            // A high bug/decision ratio can just mean a maintenance phase; the
+            // snapshot cannot tell that from poor decisions, so it is not rated.
             measured(
                 "bug_decision",
                 bug_ratio,
-                format!("<{}", targets.bug_decision_green),
-                below(
-                    bug_ratio,
-                    targets.bug_decision_green,
-                    targets.bug_decision_yellow,
-                ),
+                t!("not rated", "不评级").into(),
+                if bug_ratio.is_some() {
+                    Signal::Info
+                } else {
+                    Signal::Unknown
+                },
                 EvidenceCoverage::new(
                     cluster.global_stats.total_decisions,
                     cluster.global_stats.total_decisions,
