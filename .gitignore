@@ -1,6 +1,5 @@
 # Rust
 target/
-docs/cognitive-portraits/.failed/
 
 # Node
 node_modules/
@@ -32,3 +31,6 @@ apps/desktop/src-tauri/target/
 .run/*.err.log
 .run/*.out.log
 .run/*.pid
+
+# Personal cognitive portraits (local archive, never commit)
+docs/cognitive-portraits/
