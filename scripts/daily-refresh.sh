@@ -59,6 +59,13 @@ if ! [[ "$REFINE_INGEST_LATEST" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: REFINE_INGEST_LATEST must be a positive integer" >&2
   exit 1
 fi
+# Size the per-run LLM budget to the batch: a session takes about 6–7 calls of
+# ~8k tokens, so the library default (100 calls / 1M tokens) finishes only ~15
+# of 80 sessions. Extraction runs 3-way parallel unless overridden.
+export REFINE_LLM_MAX_ATTEMPTS=${REFINE_LLM_MAX_ATTEMPTS:-$((REFINE_INGEST_LATEST * 8))}
+export REFINE_LLM_MAX_TOKENS=${REFINE_LLM_MAX_TOKENS:-$((REFINE_INGEST_LATEST * 100000))}
+export REFINE_INGEST_CONCURRENCY=${REFINE_INGEST_CONCURRENCY:-3}
+echo "Step 1: budget attempts=$REFINE_LLM_MAX_ATTEMPTS tokens=$REFINE_LLM_MAX_TOKENS concurrency=$REFINE_INGEST_CONCURRENCY"
 ingest_output="$(mktemp)"
 trap 'rm -f "$ingest_output"' EXIT
 if refine ingest-sessions --latest "$REFINE_INGEST_LATEST" 2>&1 | tee "$ingest_output"; then

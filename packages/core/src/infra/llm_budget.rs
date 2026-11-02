@@ -4,6 +4,8 @@ use std::sync::Mutex;
 
 pub const DEFAULT_LLM_MAX_ATTEMPTS: u64 = 100;
 pub const DEFAULT_LLM_MAX_TOKENS: u64 = 1_000_000;
+pub const LLM_MAX_ATTEMPTS_ENV: &str = "REFINE_LLM_MAX_ATTEMPTS";
+pub const LLM_MAX_TOKENS_ENV: &str = "REFINE_LLM_MAX_TOKENS";
 pub(crate) const PROVIDER_MAX_OUTPUT_TOKENS: u64 = 4_096;
 const CHAT_FRAMING_TOKEN_CEILING: u64 = 1_024;
 
@@ -32,6 +34,29 @@ impl Default for LlmRunBudget {
 }
 
 impl LlmRunBudget {
+    /// Per-process ceiling read from `REFINE_LLM_MAX_ATTEMPTS` / `REFINE_LLM_MAX_TOKENS`.
+    /// Batch jobs size it to their workload; unset or invalid values keep the defaults.
+    pub fn from_env() -> Self {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let limit = |name: &str, default: u64| match lookup(name) {
+            None => default,
+            Some(raw) => match raw.trim().parse::<u64>() {
+                Ok(value) if value > 0 => value,
+                _ => {
+                    tracing::warn!(variable = name, value = %raw, default, "ignoring invalid LLM run budget");
+                    default
+                }
+            },
+        };
+        Self::with_limits(
+            limit(LLM_MAX_ATTEMPTS_ENV, DEFAULT_LLM_MAX_ATTEMPTS),
+            limit(LLM_MAX_TOKENS_ENV, DEFAULT_LLM_MAX_TOKENS),
+        )
+    }
+
     fn with_limits(max_attempts: u64, max_tokens: u64) -> Self {
         Self {
             max_attempts,
@@ -94,6 +119,21 @@ fn request_token_ceiling(prompt: &str, system: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn env_overrides_limits_and_rejects_invalid_values() {
+        let budget = LlmRunBudget::from_lookup(|name| match name {
+            LLM_MAX_ATTEMPTS_ENV => Some(" 600 ".to_string()),
+            LLM_MAX_TOKENS_ENV => Some("0".to_string()),
+            _ => None,
+        });
+        assert_eq!(budget.max_attempts, 600);
+        assert_eq!(budget.max_tokens, DEFAULT_LLM_MAX_TOKENS);
+
+        let defaults = LlmRunBudget::from_lookup(|_| Some("many".to_string()));
+        assert_eq!(defaults.max_attempts, DEFAULT_LLM_MAX_ATTEMPTS);
+        assert_eq!(defaults.max_tokens, DEFAULT_LLM_MAX_TOKENS);
+    }
+
     use super::*;
 
     fn usage(total_tokens: u64) -> LlmTokenUsage {

@@ -25,6 +25,13 @@ A failure to read the Remem archive still stops derived reports. A newly
 written Mirror report therefore does not prove that all source sessions were
 ingested; check the same run's ingestion summary and exit status.
 
+Each refine process stops calling the LLM after `REFINE_LLM_MAX_ATTEMPTS`
+attempts or `REFINE_LLM_MAX_TOKENS` tokens (defaults 100 / 1,000,000);
+sessions it did not reach stay pending for the next run. Daily refresh sizes
+the budget to its batch (8 attempts and 100k tokens per `REFINE_INGEST_LATEST`
+session) and extracts 3 sessions in parallel (`REFINE_INGEST_CONCURRENCY`).
+Any of the three can be overridden in the LaunchAgent environment.
+
 The installer is idempotent. It can be used for first install and for upgrades from a newer checkout.
 
 ## What The Installer Does
