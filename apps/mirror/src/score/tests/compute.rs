@@ -177,7 +177,9 @@ fn observed_zero_bugfixes_remains_a_measured_zero() {
     let collaboration = layer3(&cluster, &crate::config::Targets::default());
     let bugs = indicator(&collaboration, "bug_decision");
     assert_eq!(bugs.actual, Some(0.0));
-    assert_eq!(bugs.signal, Signal::Green);
+    // Measured (not missing evidence) but deliberately unrated.
+    assert_eq!(bugs.signal, Signal::Info);
+    assert_eq!(bugs.observed_value(), Some(0.0));
     assert_eq!(bugs.coverage.as_ref().unwrap().observed, 3);
 }
 
@@ -264,4 +266,26 @@ fn worst_ignores_unrated_indicators() {
     assert_eq!(worst(&[Signal::Info, Signal::Green]), Signal::Green);
     assert_eq!(worst(&[Signal::Info, Signal::Yellow]), Signal::Yellow);
     assert_eq!(worst(&[Signal::Info]), Signal::Unknown);
+}
+
+#[test]
+fn high_bug_ratio_does_not_turn_collaboration_red() {
+    let modes = [("review", 5), ("exploration", 5)]
+        .into_iter()
+        .map(|(mode, count)| (mode.to_string(), count))
+        .collect();
+    let targets = crate::config::Targets {
+        mode_diversity_green: 2,
+        mode_diversity_yellow: 1,
+        ..Default::default()
+    };
+    // 9 bugfixes per decision would have been red under the old <0.6 target.
+    let cluster = make_cluster(HashMap::new(), modes, 1, 9, vec![("project", 4, vec![])]);
+    let collaboration = layer3(&cluster, &targets);
+    assert_eq!(indicator(&collaboration, "bug_decision").actual, Some(9.0));
+    assert_eq!(
+        indicator(&collaboration, "bug_decision").signal,
+        Signal::Info
+    );
+    assert_eq!(collaboration.signal, Signal::Green);
 }
