@@ -172,6 +172,17 @@ per line in `~/.refine/ingest-exclude-projects.txt` (or the file named by
 skipped without loading their bodies and do not count against N; observations
 already stored for them are cleared on the next run, as for Looper jobs.
 
+Every facet request stays within 65,536 rendered bytes. Long sessions are
+extracted chunk by chunk; when the chunk results do not fit one final
+reduction, they are reduced in order-preserving groups, level by level (up to
+four levels), and their items carry a `facet_reduction_depth_N` tag. A single
+message that alone exceeds the limit is read in line-aligned pieces that keep
+its message identity; nothing is truncated. Claude Code compaction summaries
+("This session is being continued from a previous conversation…") restate
+earlier messages and are not sent to extraction. Sessions quarantined as
+`facet_request_too_large` before this change can be retried with
+`refine ingest-sessions --retry-quarantined`.
+
 `refine ingest-sessions` reads exclusively from a compatible `remem` binary on
 `PATH`, or from the binary selected by `REFINE_REMEM_BIN`. Missing executables,
 nonzero exits, malformed JSON, contract drift, and pagination errors fail the

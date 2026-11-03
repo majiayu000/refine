@@ -29,9 +29,9 @@ pub use clustering::{
 pub use discovery::{discover_sessions, discover_sessions_in, DiscoveredSession};
 pub use evidence::{session_projection_evidence, validate_facet_evidence, FacetEvidence};
 pub use facets::{
-    build_facet_prompt, facet_recipe_identity, facets_to_items, facets_to_items_with_mode,
-    facets_to_items_with_mode_and_identity, parse_facet_response, FacetResponse,
-    FACET_SYSTEM_PROMPT,
+    build_facet_prompt, facet_recipe_identity, facet_request_bytes, facets_to_items,
+    facets_to_items_with_mode, facets_to_items_with_mode_and_identity, parse_facet_response,
+    FacetResponse, FACET_REQUEST_FRAMING_BYTES, FACET_REQUEST_MAX_BYTES, FACET_SYSTEM_PROMPT,
 };
 pub use filter::{
     filter_sessions, is_looper_scheduled_skill_first_user_message,

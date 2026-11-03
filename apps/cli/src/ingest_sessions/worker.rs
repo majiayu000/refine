@@ -11,9 +11,10 @@ use refine_core::knowledge::{
     SessionProjectionMetadata,
 };
 use refine_core::session::{
-    build_facet_prompt, facets_to_items_with_mode_and_identity, parse_facet_response,
-    session_projection_evidence, validate_facet_evidence, SessionChunk, SessionMode, SessionSource,
-    SourceMessageReference, FACET_SYSTEM_PROMPT,
+    build_facet_prompt, facet_request_bytes, facets_to_items_with_mode_and_identity,
+    parse_facet_response, session_projection_evidence, validate_facet_evidence, FacetResponse,
+    SessionChunk, SessionMode, SessionSource, SourceMessageReference, FACET_REQUEST_MAX_BYTES,
+    FACET_SYSTEM_PROMPT,
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -24,18 +25,9 @@ use tokio::sync::Semaphore;
 const DEFAULT_CONCURRENCY: usize = 1;
 const DEFAULT_FACET_PARSE_ATTEMPTS: usize = 2;
 
-// Separate from the 25,000-byte soft chunk target and the process token budget.
-// Count rendered UTF-8 prompt/system text plus a fixed framing allowance; this
-// is a local input contract, not exact provider tokens or HTTP-body bytes.
-const FACET_REQUEST_MAX_BYTES: usize = 65_536;
-const FACET_REQUEST_FRAMING_BYTES: usize = 1_024;
-
 fn checked_facet_prompt(content: &str, stage: &'static str) -> Result<String, InfraError> {
     let prompt = build_facet_prompt(content);
-    let request_bytes = prompt
-        .len()
-        .saturating_add(FACET_SYSTEM_PROMPT.len())
-        .saturating_add(FACET_REQUEST_FRAMING_BYTES);
+    let request_bytes = facet_request_bytes(content);
     if request_bytes > FACET_REQUEST_MAX_BYTES {
         return Err(InfraError::FacetRequestTooLarge {
             stage,
@@ -164,6 +156,10 @@ pub(super) async fn process_pending_sessions(
     let total_items = Arc::new(AtomicUsize::new(0));
     let quota_hit = Arc::new(AtomicBool::new(false));
     let succeeded_sessions = Arc::new(Mutex::new(HashSet::<(String, Option<String>)>::new()));
+    // Explicitly retried sessions that now fail transiently were not rejected
+    // deterministically; dropping their old record lets the next routine run
+    // resume them instead of skipping them as quarantined forever.
+    let transient_sessions = Arc::new(Mutex::new(HashSet::<String>::new()));
     let rejected_sessions = Arc::new(Mutex::new(
         Vec::<(String, Option<String>, String, String)>::new(),
     ));
@@ -179,6 +175,7 @@ pub(super) async fn process_pending_sessions(
         let quota_hit = quota_hit.clone();
         let succeeded_sessions = succeeded_sessions.clone();
         let rejected_sessions = rejected_sessions.clone();
+        let transient_sessions = transient_sessions.clone();
         handles.push(tokio::spawn(async move {
             let Ok(_permit) = permit_pool.acquire().await else {
                 eprintln!(
@@ -245,6 +242,9 @@ pub(super) async fn process_pending_sessions(
                             error
                         );
                         failed.fetch_add(1, Ordering::Relaxed);
+                        if let Ok(mut transient) = transient_sessions.lock() {
+                            transient.insert(session.url.clone());
+                        }
                     }
                 }
             }
@@ -265,6 +265,13 @@ pub(super) async fn process_pending_sessions(
         quarantine.resolve(url);
     }
     drop(succeeded);
+    let transient = transient_sessions
+        .lock()
+        .map_err(|_| anyhow::anyhow!("transient session lock poisoned"))?;
+    for url in transient.iter() {
+        quarantine.resolve(url);
+    }
+    drop(transient);
     let rejected = rejected_sessions
         .lock()
         .map_err(|_| anyhow::anyhow!("rejected session lock poisoned"))?;
@@ -314,8 +321,7 @@ pub(super) async fn process_single_session(
     doc_store: &Arc<dyn DocumentRepository>,
     quota_hit: &Arc<AtomicBool>,
 ) -> Result<usize> {
-    let mut reduced_sources = Vec::new();
-    let content = if session.needs_chunk {
+    let (facet_response, reduction_depth) = if session.needs_chunk {
         let total_chunks = session.chunks.len();
         // Reject an indivisible oversized message before spending on any chunk.
         // The common call boundary checks the same contract again for reduction
@@ -323,8 +329,7 @@ pub(super) async fn process_single_session(
         for chunk in &session.chunks {
             checked_facet_prompt(&chunk.content, "chunk extraction")?;
         }
-        let mut summaries = Vec::with_capacity(total_chunks);
-        let mut referenced_ids = HashSet::new();
+        let mut chunk_facets = Vec::with_capacity(total_chunks);
         for (idx, chunk) in session.chunks.iter().enumerate() {
             let facets = extract_and_parse_facets_with_retry(
                 &chunk.content,
@@ -341,55 +346,35 @@ pub(super) async fn process_single_session(
                     total_chunks
                 )
             })?;
-            referenced_ids.extend(
-                facets
-                    .evidence
-                    .iter()
-                    .flat_map(|entry| entry.message_ids.iter().copied()),
-            );
-            summaries.push(serde_json::to_string(&facets)?);
+            chunk_facets.push(facets);
         }
-        reduced_sources.extend(
-            session
-                .source_messages
-                .iter()
-                .filter(|message| referenced_ids.contains(&message.id))
-                .cloned(),
-        );
-        summaries.join("\n\n---\n\n")
+        reduce_chunk_facets(chunk_facets, &session.source_messages, client, quota_hit)
+            .await
+            .map_err(|error| {
+                if matches!(error.downcast_ref::<InfraError>(), Some(InfraError::FacetRequestTooLarge { .. })) {
+                    error.context(format!(
+                        "最终汇总失败；已完成 {} 个分块提炼（实际 provider attempts 保留在用量账本中），未发布会话",
+                        total_chunks
+                    ))
+                } else {
+                    error
+                }
+            })?
     } else {
-        session
+        let content = session
             .facet_content
             .as_ref()
-            .unwrap_or(&session.raw_content)
-            .clone()
+            .unwrap_or(&session.raw_content);
+        let facets = extract_and_parse_facets_with_retry(
+            content,
+            client,
+            quota_hit,
+            &session.source_messages,
+            "session extraction",
+        )
+        .await?;
+        (facets, 0)
     };
-
-    let evidence_sources = if session.needs_chunk {
-        &reduced_sources
-    } else {
-        &session.source_messages
-    };
-    let stage = if session.needs_chunk {
-        "final reduction"
-    } else {
-        "session extraction"
-    };
-    let facet_result =
-        extract_and_parse_facets_with_retry(&content, client, quota_hit, evidence_sources, stage)
-            .await;
-    let facet_response = facet_result.map_err(|error| {
-        if session.needs_chunk
-            && matches!(error.downcast_ref::<InfraError>(), Some(InfraError::FacetRequestTooLarge { .. }))
-        {
-            error.context(format!(
-                "最终汇总失败；已完成 {} 个分块提炼（实际 provider attempts 保留在用量账本中），未发布会话",
-                session.chunks.len()
-            ))
-        } else {
-            error
-        }
-    })?;
     let document = build_session_document(session, &facet_response.session_summary);
     let mut items = facets_to_items_with_mode_and_identity(
         &facet_response,
@@ -398,6 +383,7 @@ pub(super) async fn process_single_session(
         session.project_identity.as_deref(),
         session.mode,
     );
+    tag_reduction_depth(&mut items, reduction_depth)?;
     assign_session_observation_ids(&mut items, &session.url)?;
     let evidence = session_projection_evidence(&facet_response, &session.source_messages, &items)
         .map_err(anyhow::Error::msg)?;
@@ -435,6 +421,117 @@ pub(super) async fn process_single_session(
         item_count,
     );
     Ok(item_count)
+}
+
+/// Levels of LLM reduction above chunk extraction. Two levels cover ~10k chunks
+/// at the observed 4–8KB per partial; a level that stops shrinking fails closed.
+const MAX_REDUCTION_DEPTH: usize = 4;
+const REDUCTION_SEPARATOR: &str = "\n\n---\n\n";
+
+fn join_partials(parts: &[FacetResponse]) -> Result<String> {
+    let rendered = parts
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rendered.join(REDUCTION_SEPARATOR))
+}
+
+/// Partials may cite only messages their own inputs already cited, so every
+/// reduced observation still resolves to a validated original message.
+fn cited_sources(
+    all: &[SourceMessageReference],
+    parts: &[FacetResponse],
+) -> Vec<SourceMessageReference> {
+    let cited: HashSet<_> = parts
+        .iter()
+        .flat_map(|part| part.evidence.iter())
+        .flat_map(|entry| entry.message_ids.iter().copied())
+        .collect();
+    all.iter()
+        .filter(|message| cited.contains(&message.id))
+        .cloned()
+        .collect()
+}
+
+/// Greedy, order-preserving packing by the rendered request size.
+fn pack_partials(parts: &[FacetResponse]) -> Result<Vec<std::ops::Range<usize>>> {
+    let mut groups = Vec::new();
+    let mut start = 0;
+    while start < parts.len() {
+        let mut end = start + 1;
+        while end < parts.len()
+            && checked_facet_prompt(&join_partials(&parts[start..=end])?, "group reduction").is_ok()
+        {
+            end += 1;
+        }
+        groups.push(start..end);
+        start = end;
+    }
+    Ok(groups)
+}
+
+/// Returns the session facets and the number of reduction levels used
+/// (1 = the original single reduction; requests are byte-identical then).
+async fn reduce_chunk_facets(
+    chunk_facets: Vec<FacetResponse>,
+    all_sources: &[SourceMessageReference],
+    client: &Arc<dyn LlmClient>,
+    quota_hit: &Arc<AtomicBool>,
+) -> Result<(FacetResponse, usize)> {
+    let mut level = chunk_facets;
+    let mut depth = 1;
+    loop {
+        let content = join_partials(&level)?;
+        let fits = checked_facet_prompt(&content, "final reduction");
+        let groups = match fits {
+            Ok(_) => None,
+            Err(_) if depth >= MAX_REDUCTION_DEPTH => None,
+            Err(_) => Some(pack_partials(&level)?).filter(|groups| groups.len() < level.len()),
+        };
+        let Some(groups) = groups else {
+            // Fits, or cannot shrink further: the boundary check reports the
+            // oversized final request deterministically (quarantine, no publish).
+            let sources = cited_sources(all_sources, &level);
+            let facets = extract_and_parse_facets_with_retry(
+                &content,
+                client,
+                quota_hit,
+                &sources,
+                "final reduction",
+            )
+            .await?;
+            return Ok((facets, depth));
+        };
+        let mut next = Vec::with_capacity(groups.len());
+        for group in groups {
+            let parts = &level[group];
+            let sources = cited_sources(all_sources, parts);
+            next.push(
+                extract_and_parse_facets_with_retry(
+                    &join_partials(parts)?,
+                    client,
+                    quota_hit,
+                    &sources,
+                    "group reduction",
+                )
+                .await?,
+            );
+        }
+        level = next;
+        depth += 1;
+    }
+}
+
+fn tag_reduction_depth(items: &mut [refine_core::knowledge::Item], depth: usize) -> Result<()> {
+    if depth < 2 {
+        return Ok(());
+    }
+    let tag = refine_core::knowledge::Tag::new(&format!("facet_reduction_depth_{depth}"))
+        .context("build reduction depth tag")?;
+    for item in items {
+        item.add_tag(tag.clone()).context("tag reduction depth")?;
+    }
+    Ok(())
 }
 
 pub(super) fn content_rejection(error: &anyhow::Error) -> Option<(String, String)> {
@@ -629,7 +726,7 @@ mod request_limit_tests {
     use async_trait::async_trait;
     use refine_core::error::InfraResult;
     use refine_core::infra::{LlmRunBudget, SqliteStore};
-    use refine_core::knowledge::{Item, ItemRepository};
+    use refine_core::session::FACET_REQUEST_FRAMING_BYTES;
     use refine_core::session::{
         chunk_session, needs_chunking, MessageProvenance, MessageRole, Session, SessionMessage,
         SessionMeta,
@@ -999,75 +1096,114 @@ mod request_limit_tests {
     }
 
     #[tokio::test]
-    async fn facet_request_later_oversized_chunk_preflight_spends_nothing_and_preserves_projection()
-    {
+    async fn oversized_message_is_read_in_pieces_instead_of_rejected() {
         let store = Arc::new(SqliteStore::in_memory().unwrap());
-        let mut old = Document::new("remem-raw-session", "");
-        old.set_url("remem://synthetic/oversized");
-        old.set_title("prior summary");
-        old.set_source_version(Some("prior-version"));
-        DocumentRepository::save(store.as_ref(), &old)
-            .await
-            .unwrap();
-        let mut item = Item::new_observation("prior decision", "prior reason");
-        item.set_document_id(old.id().clone());
-        ItemRepository::save(store.as_ref(), &item).await.unwrap();
+        let doc_store: Arc<dyn DocumentRepository> = store.clone();
         let session = synthetic_session(vec![
             message("x".repeat(25_000)),
-            message("private-synthetic-marker".repeat(3_000)),
+            message("private-synthetic-marker\n".repeat(3_000)),
         ]);
-        let mut pending = pending(&session, old.url());
-        assert_eq!(pending.chunks.len(), 2);
-        pending.existing_document = Some(old.clone());
+        let pending = pending(&session, "remem://synthetic/oversized");
+        assert_eq!(
+            pending.chunks.len(),
+            5,
+            "one whole message plus line-aligned pieces"
+        );
+        for chunk in &pending.chunks {
+            assert!(checked_facet_prompt(&chunk.content, "chunk extraction").is_ok());
+        }
         let client = Arc::new(RecordingClient::new(Vec::new(), None));
         let quota = Arc::new(AtomicBool::new(false));
-        let doc_store: Arc<dyn DocumentRepository> = store.clone();
-        let error = process_single_session(
+        process_single_session(
             &pending,
             &(client.clone() as Arc<dyn LlmClient>),
             &doc_store,
             &quota,
         )
         .await
-        .unwrap_err();
-        assert!(matches!(
-            error.downcast_ref::<InfraError>(),
-            Some(InfraError::FacetRequestTooLarge {
-                stage: "chunk extraction",
-                ..
-            })
-        ));
-        assert_eq!(client.calls(), 0);
-        assert!(!quota.load(Ordering::Relaxed));
-        let saved = store.find_by_url(old.url()).await.unwrap().unwrap();
-        assert_eq!(saved.source_version(), Some("prior-version"));
-        assert_eq!(saved.title(), old.title());
+        .unwrap();
+        assert_eq!(client.calls(), 6, "five chunks and one final reduction");
+        assert!(store.find_by_url(&pending.url).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn oversized_final_reduction_is_reduced_in_levels_within_the_limit() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let doc_store: Arc<dyn DocumentRepository> = store.clone();
+        let chunk_response = valid_response(&"synthetic-private-summary".repeat(1_000));
+        let final_response = serde_json::json!({
+            "session_summary": "reduced",
+            "cognitive_level": "unknown",
+            "collaboration_mode": "unknown",
+            "decisions": ["kept across levels"]
+        })
+        .to_string();
+        let mut responses = vec![chunk_response; 3];
+        responses.extend([
+            valid_response("group one"),
+            valid_response("group two"),
+            final_response,
+        ]);
+        let client = Arc::new(RecordingClient::new(responses, None));
+        let session = synthetic_session((0..3).map(|_| message("x".repeat(20_000))).collect());
+        let pending = pending(&session, "remem://synthetic/levels");
+        assert_eq!(pending.chunks.len(), 3);
+        let quota = Arc::new(AtomicBool::new(false));
+        process_single_session(
+            &pending,
+            &(client.clone() as Arc<dyn LlmClient>),
+            &doc_store,
+            &quota,
+        )
+        .await
+        .unwrap();
+        let requests = client.requests.lock().unwrap().clone();
         assert_eq!(
-            store.find_items_by_document_id(old.id()).await.unwrap()[0].id(),
-            item.id()
+            requests.len(),
+            6,
+            "three chunks, two group reductions, one final"
         );
-        assert!(store
-            .find_session_projection_versions()
+        for (prompt, system) in &requests {
+            assert!(
+                prompt.len() + system.len() + FACET_REQUEST_FRAMING_BYTES
+                    <= FACET_REQUEST_MAX_BYTES
+            );
+        }
+        let first_partial = serde_json::to_string(
+            &parse_facet_response(&valid_response(&"synthetic-private-summary".repeat(1_000)))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            requests[3].0,
+            build_facet_prompt(&[first_partial.clone(), first_partial].join(REDUCTION_SEPARATOR)),
+            "groups pack consecutive partials up to the limit"
+        );
+        let document = store.find_by_url(&pending.url).await.unwrap().unwrap();
+        let items = store
+            .find_items_by_document_id(document.id())
             .await
-            .unwrap()
-            .is_empty());
-        assert!(store
-            .find_session_projection_history(old.id(), 10)
-            .await
-            .unwrap()
-            .is_empty());
-        let rejection = content_rejection(&error.context("synthetic chunk preflight")).unwrap();
-        assert_eq!(rejection.0, "facet_request_too_large");
-        assert!(!rejection.1.contains("private-synthetic-marker"));
+            .unwrap();
+        assert!(!items.is_empty());
+        assert!(items.iter().all(|item| item
+            .tags()
+            .iter()
+            .any(|tag| tag.as_str() == "facet_reduction_depth_2")));
     }
 
     #[tokio::test]
     async fn facet_request_final_reduction_rejects_without_partial_publish_and_keeps_spent_calls() {
         let tmp = tempfile::tempdir().unwrap();
         let ledger = tmp.path().join("usage.jsonl");
-        let response = valid_response(&"synthetic-private-summary".repeat(1_000));
+        // Each partial fits alone but no two fit together: the levels cannot shrink.
+        let response = valid_response(&"synthetic-private-summary".repeat(1_400));
         let normalized = serde_json::to_string(&parse_facet_response(&response).unwrap()).unwrap();
         assert!(checked_facet_prompt(&normalized, "chunk extraction").is_ok());
+        assert!(checked_facet_prompt(
+            &[normalized.clone(), normalized.clone()].join(REDUCTION_SEPARATOR),
+            "group reduction"
+        )
+        .is_err());
         let reduction = [normalized.clone(), normalized.clone(), normalized].join("\n\n---\n\n");
         let expected_bytes = build_facet_prompt(&reduction).len()
             + FACET_SYSTEM_PROMPT.len()
@@ -1113,14 +1249,58 @@ mod request_limit_tests {
     }
 
     #[tokio::test]
+    async fn retried_quarantine_that_fails_transiently_is_released_for_routine_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("quarantine.jsonl");
+        let session = synthetic_session(vec![message("ordinary synthetic input".to_string())]);
+        let pending = pending(&session, "remem://synthetic/retried");
+        let mut quarantine = QuarantineStore::load_from(path.clone()).unwrap();
+        quarantine.record(
+            &pending.url,
+            pending.source_version.as_deref(),
+            "facet_request_too_large",
+            "rejected by an older build",
+        );
+        quarantine.save_if_dirty().unwrap();
+        drop(quarantine);
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let client: Arc<dyn LlmClient> = Arc::new(RecordingClient::new(
+            vec!["not json".to_string(), "still not json".to_string()],
+            None,
+        ));
+        let error = process_pending_sessions(
+            vec![pending],
+            0,
+            0,
+            0,
+            0,
+            HashSet::new(),
+            false,
+            true,
+            Some(QuarantineStore::load_from(path.clone()).unwrap()),
+            store,
+            Some(client),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("瞬态失败 1"));
+        assert_eq!(QuarantineStore::load_from(path).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
     async fn facet_request_quarantine_keeps_batch_incomplete_but_allows_unrelated_session() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("quarantine.jsonl");
         let store = Arc::new(SqliteStore::in_memory().unwrap());
         let doc_store: Arc<dyn DocumentRepository> = store.clone();
-        let client = Arc::new(RecordingClient::new(Vec::new(), None));
+        let big = valid_response(&"private-synthetic-marker".repeat(1_400));
+        let client = Arc::new(RecordingClient::new(vec![big.clone(), big], None));
         let client_dyn: Arc<dyn LlmClient> = client.clone();
-        let oversized = synthetic_session(vec![message("private-synthetic-marker".repeat(3_000))]);
+        // Two chunks whose partials cannot be reduced together within the limit.
+        let oversized = synthetic_session(vec![
+            message("private-synthetic-marker".repeat(1_000)),
+            message("private-synthetic-marker".repeat(1_000)),
+        ]);
         let normal = synthetic_session(vec![message("small synthetic input".to_string())]);
         let error = process_pending_sessions(
             vec![
@@ -1141,7 +1321,11 @@ mod request_limit_tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("摄入不完整"));
-        assert_eq!(client.calls(), 1);
+        assert_eq!(
+            client.calls(),
+            3,
+            "two chunks spent, no reduction sent, one normal session"
+        );
         assert!(store
             .find_by_url("remem://synthetic/normal")
             .await
@@ -1176,7 +1360,7 @@ mod request_limit_tests {
         );
         assert_eq!(
             client.calls(),
-            1,
+            3,
             "unchanged quarantined input is not automatically retried"
         );
     }

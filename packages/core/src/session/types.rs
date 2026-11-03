@@ -95,6 +95,9 @@ impl SessionMode {
     }
 }
 
+const COMPACTION_SUMMARY_MARKER: &str =
+    "This session is being continued from a previous conversation";
+
 /// 会话消息
 #[derive(Debug, Clone)]
 pub struct SessionMessage {
@@ -126,9 +129,23 @@ impl SessionMessage {
     }
 
     pub(super) fn append_facet_content(&self, output: &mut String) {
+        self.append_facet_part(output, &self.content, None);
+    }
+
+    /// Renders one piece of a message. `part` is `(index, total)`, 1-based, for
+    /// a message split across chunks; every piece keeps the message identity.
+    pub(super) fn append_facet_part(
+        &self,
+        output: &mut String,
+        text: &str,
+        part: Option<(usize, usize)>,
+    ) {
         if let Some(provenance) = &self.provenance {
+            let part = part.map_or(String::new(), |(index, total)| {
+                format!(" part={index}/{total}")
+            });
             output.push_str(&format!(
-                "[remem message_id={} role={} event_time={}]\n",
+                "[remem message_id={} role={} event_time={}{part}]\n",
                 provenance.id,
                 self.role.as_str(),
                 provenance.event_time.to_rfc3339()
@@ -141,8 +158,15 @@ impl SessionMessage {
         };
         output.push_str(label);
         output.push_str(": ");
-        output.push_str(&self.content);
+        output.push_str(text);
         output.push('\n');
+    }
+
+    /// Claude Code writes a model summary of the earlier conversation into the
+    /// transcript when it compacts context. It restates messages that are
+    /// already in the session, so extraction skips it to avoid counting twice.
+    pub fn is_compaction_summary(&self) -> bool {
+        self.role == MessageRole::User && self.content.starts_with(COMPACTION_SUMMARY_MARKER)
     }
 }
 
@@ -178,10 +202,18 @@ impl Session {
     /// their previous format. Provenance is data, never inferred from text.
     pub fn to_facet_content(&self) -> String {
         let mut out = String::new();
-        for message in &self.messages {
+        for message in self.facet_messages() {
             message.append_facet_content(&mut out);
         }
         out
+    }
+
+    /// Messages sent to facet extraction: everything except compaction
+    /// summaries. The stored transcript and snapshot hashes keep all messages.
+    pub fn facet_messages(&self) -> impl Iterator<Item = &SessionMessage> {
+        self.messages
+            .iter()
+            .filter(|message| !message.is_compaction_summary())
     }
 
     pub fn source_message_references(&self) -> Vec<SourceMessageReference> {

@@ -84,10 +84,26 @@ impl QuarantineStore {
             );
         }
 
+        // A session only grows, so a rejection of an older snapshot can never be
+        // selected again; keep the newest record per session URL.
+        let before = records.len();
+        let mut newest: BTreeMap<String, (String, DateTime<Utc>)> = BTreeMap::new();
+        for (key, record) in &records {
+            let entry = newest
+                .entry(record.url.clone())
+                .or_insert_with(|| (key.clone(), record.last_seen));
+            if record.last_seen > entry.1 {
+                *entry = (key.clone(), record.last_seen);
+            }
+        }
+        let keep: std::collections::BTreeSet<String> =
+            newest.into_values().map(|(key, _)| key).collect();
+        records.retain(|key, _| keep.contains(key));
+
         Ok(Self {
             path,
+            dirty: records.len() != before,
             records,
-            dirty: false,
             _lock_file: lock_file,
         })
     }
@@ -120,6 +136,8 @@ impl QuarantineStore {
     ) {
         let now = Utc::now();
         let key = record_key(url, source_version);
+        self.records
+            .retain(|existing, record| record.url != url || *existing == key);
         match self.records.get_mut(&key) {
             Some(record) => {
                 record.code = code.to_string();
@@ -339,5 +357,50 @@ mod tests {
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn a_new_snapshot_replaces_the_older_rejection_of_the_same_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("queue.jsonl");
+        let mut store = QuarantineStore::load_from(path.clone()).unwrap();
+        store.record("remem://one", Some("v1"), "facet_request_too_large", "old");
+        store.record(
+            "remem://two",
+            Some("v1"),
+            "facet_request_too_large",
+            "other",
+        );
+        store.record("remem://one", Some("v2"), "facet_request_too_large", "new");
+        assert_eq!(store.len(), 2);
+        assert!(store.contains("remem://one", Some("v2")));
+        assert!(!store.contains("remem://one", Some("v1")));
+        store.save_if_dirty().unwrap();
+    }
+
+    #[test]
+    fn loading_collapses_legacy_duplicates_to_the_newest_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("queue.jsonl");
+        let line = |version: &str, seen: &str| {
+            format!(
+                r#"{{"url":"remem://one","source_version":"{version}","code":"c","message":"m","first_seen":"{seen}","last_seen":"{seen}","attempts":1}}"#
+            )
+        };
+        std::fs::write(
+            &path,
+            [
+                line("v1", "2026-11-01T00:00:00Z"),
+                line("v2", "2026-11-02T00:00:00Z"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let mut store = QuarantineStore::load_from(path.clone()).unwrap();
+        assert_eq!(store.len(), 1);
+        assert!(store.contains("remem://one", Some("v2")));
+        store.save_if_dirty().unwrap();
+        drop(store);
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
     }
 }
