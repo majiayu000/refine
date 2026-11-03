@@ -156,6 +156,10 @@ pub(super) async fn process_pending_sessions(
     let total_items = Arc::new(AtomicUsize::new(0));
     let quota_hit = Arc::new(AtomicBool::new(false));
     let succeeded_sessions = Arc::new(Mutex::new(HashSet::<(String, Option<String>)>::new()));
+    // Explicitly retried sessions that now fail transiently were not rejected
+    // deterministically; dropping their old record lets the next routine run
+    // resume them instead of skipping them as quarantined forever.
+    let transient_sessions = Arc::new(Mutex::new(HashSet::<String>::new()));
     let rejected_sessions = Arc::new(Mutex::new(
         Vec::<(String, Option<String>, String, String)>::new(),
     ));
@@ -171,6 +175,7 @@ pub(super) async fn process_pending_sessions(
         let quota_hit = quota_hit.clone();
         let succeeded_sessions = succeeded_sessions.clone();
         let rejected_sessions = rejected_sessions.clone();
+        let transient_sessions = transient_sessions.clone();
         handles.push(tokio::spawn(async move {
             let Ok(_permit) = permit_pool.acquire().await else {
                 eprintln!(
@@ -237,6 +242,9 @@ pub(super) async fn process_pending_sessions(
                             error
                         );
                         failed.fetch_add(1, Ordering::Relaxed);
+                        if let Ok(mut transient) = transient_sessions.lock() {
+                            transient.insert(session.url.clone());
+                        }
                     }
                 }
             }
@@ -257,6 +265,13 @@ pub(super) async fn process_pending_sessions(
         quarantine.resolve(url);
     }
     drop(succeeded);
+    let transient = transient_sessions
+        .lock()
+        .map_err(|_| anyhow::anyhow!("transient session lock poisoned"))?;
+    for url in transient.iter() {
+        quarantine.resolve(url);
+    }
+    drop(transient);
     let rejected = rejected_sessions
         .lock()
         .map_err(|_| anyhow::anyhow!("rejected session lock poisoned"))?;
@@ -1231,6 +1246,45 @@ mod request_limit_tests {
         assert!(diagnostic.contains("已完成 3 个分块"));
         assert!(diagnostic.contains(&expected_bytes.to_string()));
         assert!(!diagnostic.contains("synthetic-private-summary"));
+    }
+
+    #[tokio::test]
+    async fn retried_quarantine_that_fails_transiently_is_released_for_routine_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("quarantine.jsonl");
+        let session = synthetic_session(vec![message("ordinary synthetic input".to_string())]);
+        let pending = pending(&session, "remem://synthetic/retried");
+        let mut quarantine = QuarantineStore::load_from(path.clone()).unwrap();
+        quarantine.record(
+            &pending.url,
+            pending.source_version.as_deref(),
+            "facet_request_too_large",
+            "rejected by an older build",
+        );
+        quarantine.save_if_dirty().unwrap();
+        drop(quarantine);
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let client: Arc<dyn LlmClient> = Arc::new(RecordingClient::new(
+            vec!["not json".to_string(), "still not json".to_string()],
+            None,
+        ));
+        let error = process_pending_sessions(
+            vec![pending],
+            0,
+            0,
+            0,
+            0,
+            HashSet::new(),
+            false,
+            true,
+            Some(QuarantineStore::load_from(path.clone()).unwrap()),
+            store,
+            Some(client),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("瞬态失败 1"));
+        assert_eq!(QuarantineStore::load_from(path).unwrap().len(), 0);
     }
 
     #[tokio::test]
