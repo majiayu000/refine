@@ -746,16 +746,11 @@ mod process_runner_guards {
         let binary = temp.path().join("fake-remem-huge");
         write_executable(
             &binary,
-            concat!(
-                "#!/bin/sh\n",
-                "i=0\n",
-                "while [ \"$i\" -lt 400 ]; do\n",
-                "  printf 'xxxxxxxxxxxxxxxxxxxx'\n",
-                "  i=$((i + 1))\n",
-                "done\n",
-            ),
+            "#!/bin/sh\nhead -c 8000 /dev/zero | tr '\\000' x\n",
         );
-        let _env = RememProcessEnvGuard::install(&binary, "5000", Some("1024"));
+        // The overflow must win long before the timeout; a generous timeout
+        // keeps a loaded machine from turning this into a timeout failure.
+        let _env = RememProcessEnvGuard::install(&binary, "30000", Some("1024"));
 
         let error = load_remem_session_summaries().expect_err("huge stdout must overflow");
         assert!(
