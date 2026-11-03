@@ -41,6 +41,19 @@ pub struct FacetResponse {
     pub evidence: Vec<FacetEvidence>,
 }
 
+/// Hard bound on one rendered facet request: prompt + system text + framing,
+/// counted in UTF-8 bytes. A local input contract, not provider tokens.
+pub const FACET_REQUEST_MAX_BYTES: usize = 65_536;
+pub const FACET_REQUEST_FRAMING_BYTES: usize = 1_024;
+
+/// Rendered size of a facet request for `session_content`.
+pub fn facet_request_bytes(session_content: &str) -> usize {
+    build_facet_prompt(session_content)
+        .len()
+        .saturating_add(FACET_SYSTEM_PROMPT.len())
+        .saturating_add(FACET_REQUEST_FRAMING_BYTES)
+}
+
 /// 构建 facet 提取的系统 prompt
 pub const FACET_SYSTEM_PROMPT: &str =
     "你是认知分析助手。分析编程会话，提取结构化观测。严格返回 JSON，不要输出额外说明。";
@@ -49,7 +62,7 @@ pub const FACET_SYSTEM_PROMPT: &str =
 pub fn facet_recipe_identity(llm_identity: &str) -> String {
     let mut digest = Sha256::new();
     for value in [
-        "refine-facets-v2:message-boundary-chunks-v2:chunk-evidence-v1",
+        "refine-facets-v2:message-boundary-chunks-v3:chunk-evidence-v1:hierarchical-reduction-v1:skip-compaction-summary-v1",
         FACET_SYSTEM_PROMPT,
         &build_facet_prompt("{session_content}"),
         llm_identity,
