@@ -45,9 +45,11 @@ The response must have a non-empty `session_summary` and supported
 `cognitive_level` / `collaboration_mode` values. Empty facet arrays are valid.
 When evidence is insufficient, use `unknown` for the relevant label and explain
 the absence of observations in the summary. Empty objects, error envelopes,
-unsupported fields/enums, whitespace-only array entries, and over-limit arrays
-are rejected. They use the bounded regeneration path and cannot replace the
-previous valid projection.
+unsupported fields/enums, and whitespace-only array entries are rejected. They
+use the bounded regeneration path and cannot replace the previous valid
+projection. An array longer than its limit is not an error: it keeps its first
+entries up to the limit, evidence that pointed at a removed entry is dropped,
+and a warning records how many entries were cut.
 
 The Document, derived Items, recipe identity, and revision archive commit in one
 SQLite transaction. A failure in any component leaves the previous state intact.

@@ -316,7 +316,7 @@ async fn facet_parse_error_retries_then_succeeds() {
 }
 
 #[tokio::test]
-async fn facet_array_limit_error_uses_bounded_parse_regeneration() {
+async fn facet_array_over_limit_is_cut_without_regeneration() {
     let oversized = serde_json::json!({
         "session_summary": "Oversized",
         "cognitive_level": "unknown",
@@ -324,37 +324,19 @@ async fn facet_array_limit_error_uses_bounded_parse_regeneration() {
         "decisions": ["one", "two", "three", "four", "five", "six"]
     })
     .to_string();
-    let valid = serde_json::json!({
-        "session_summary": "Regenerated",
-        "cognitive_level": "unknown",
-        "collaboration_mode": "unknown",
-        "decisions": ["one", "two"]
-    })
-    .to_string();
-
-    for (responses, expected_success) in [
-        (vec![oversized.clone(), valid], true),
-        (vec![oversized.clone(), oversized], false),
-    ] {
-        let client = Arc::new(SequenceLlmClient::new(responses));
-        let quota_hit = Arc::new(AtomicBool::new(false));
-        let result = extract_and_parse_facets_with_retry_policy(
-            "Synthetic content",
-            &(client.clone() as Arc<dyn LlmClient>),
-            &quota_hit,
-            2,
-            0,
-        )
-        .await;
-        assert_eq!(client.calls(), 2);
-        assert_eq!(result.is_ok(), expected_success);
-        if let Ok(facets) = result {
-            assert_eq!(facets.session_summary, "Regenerated");
-            assert_eq!(facets.decisions, ["one", "two"]);
-        } else {
-            assert!(result.unwrap_err().to_string().contains("decisions"));
-        }
-    }
+    let client = Arc::new(SequenceLlmClient::new(vec![oversized]));
+    let quota_hit = Arc::new(AtomicBool::new(false));
+    let facets = extract_and_parse_facets_with_retry_policy(
+        "Synthetic content",
+        &(client.clone() as Arc<dyn LlmClient>),
+        &quota_hit,
+        2,
+        0,
+    )
+    .await
+    .expect("a surplus entry must not fail the extraction");
+    assert_eq!(client.calls(), 1);
+    assert_eq!(facets.decisions, ["one", "two", "three", "four", "five"]);
 }
 
 #[test]
