@@ -151,7 +151,9 @@ pub fn parse_facet_response(response: &str) -> Result<FacetResponse, String> {
 }
 
 /// Enforce the extraction bounds before the ingestion path accepts a response.
-/// Rejection uses the existing bounded parse retry, without discarding entries.
+/// Malformed values are rejected and use the bounded parse retry. A list that
+/// is only longer than its limit is cut to the first entries the model listed:
+/// rejecting it failed whole multi-chunk sessions over one surplus entry.
 fn validate_facet_limits(mut facets: FacetResponse) -> Result<FacetResponse, String> {
     facets.session_summary = facets.session_summary.trim().to_string();
     if facets.session_summary.is_empty() {
@@ -177,24 +179,7 @@ fn validate_facet_limits(mut facets: FacetResponse) -> Result<FacetResponse, Str
     ) {
         return Err("facet collaboration_mode has an unsupported value".to_string());
     }
-    for (field, count, limit) in [
-        ("decisions", facets.decisions.len(), 5),
-        ("bugs_fixed", facets.bugs_fixed.len(), 5),
-        ("patterns", facets.patterns.len(), 3),
-        ("friction", facets.friction.len(), 3),
-        ("project_progress", facets.project_progress.len(), 3),
-        ("questions", facets.questions.len(), 3),
-        ("knowledge_gained", facets.knowledge_gained.len(), 5),
-        ("tools_discovered", facets.tools_discovered.len(), 3),
-        ("architecture", facets.architecture.len(), 3),
-        ("code_artifacts", facets.code_artifacts.len(), 5),
-    ] {
-        if count > limit {
-            return Err(format!(
-                "facet field {field} has {count} entries; maximum is {limit}"
-            ));
-        }
-    }
+    truncate_overlong_lists(&mut facets);
     for (field, entries) in [
         ("decisions", &facets.decisions),
         ("bugs_fixed", &facets.bugs_fixed),
@@ -213,6 +198,58 @@ fn validate_facet_limits(mut facets: FacetResponse) -> Result<FacetResponse, Str
     }
     validate_evidence_shape(&facets)?;
     Ok(facets)
+}
+
+/// Per-field entry limits shared with the extraction prompt.
+const FACET_LIST_LIMITS: [(&str, usize); 10] = [
+    ("decisions", 5),
+    ("bugs_fixed", 5),
+    ("patterns", 3),
+    ("friction", 3),
+    ("project_progress", 3),
+    ("questions", 3),
+    ("knowledge_gained", 5),
+    ("tools_discovered", 3),
+    ("architecture", 3),
+    ("code_artifacts", 5),
+];
+
+fn facet_list_mut<'a>(facets: &'a mut FacetResponse, field: &str) -> &'a mut Vec<String> {
+    match field {
+        "decisions" => &mut facets.decisions,
+        "bugs_fixed" => &mut facets.bugs_fixed,
+        "patterns" => &mut facets.patterns,
+        "friction" => &mut facets.friction,
+        "project_progress" => &mut facets.project_progress,
+        "questions" => &mut facets.questions,
+        "knowledge_gained" => &mut facets.knowledge_gained,
+        "tools_discovered" => &mut facets.tools_discovered,
+        "architecture" => &mut facets.architecture,
+        "code_artifacts" => &mut facets.code_artifacts,
+        _ => unreachable!("unknown facet list field {field}"),
+    }
+}
+
+/// Keep the first `limit` entries of each list and drop evidence that pointed
+/// at a removed entry, so the remaining evidence still indexes real entries.
+fn truncate_overlong_lists(facets: &mut FacetResponse) {
+    for (field, limit) in FACET_LIST_LIMITS {
+        let list = facet_list_mut(facets, field);
+        if list.len() <= limit {
+            continue;
+        }
+        let dropped = list.len() - limit;
+        list.truncate(limit);
+        facets
+            .evidence
+            .retain(|evidence| evidence.field != field || evidence.index < limit);
+        tracing::warn!(
+            field,
+            dropped,
+            limit,
+            "facet list exceeded its limit; kept the first entries"
+        );
+    }
 }
 
 fn extract_json_from_fence(text: &str) -> Option<String> {
@@ -387,6 +424,50 @@ pub fn facets_to_items_with_mode_and_identity(
 mod tests {
     use super::*;
     use crate::knowledge::ItemType;
+
+    #[test]
+    fn overlong_lists_keep_the_first_entries_and_their_evidence() {
+        let response = serde_json::json!({
+            "session_summary": "s",
+            "cognitive_level": "competent",
+            "collaboration_mode": "delegation",
+            "decisions": ["d0", "d1", "d2", "d3", "d4", "d5", "d6"],
+            "friction": ["f0", "f1", "f2", "f3"],
+            "patterns": ["p0"],
+            "evidence": [
+                {"field": "decisions", "index": 4, "message_ids": [1]},
+                {"field": "decisions", "index": 5, "message_ids": [2]},
+                {"field": "decisions", "index": 6, "message_ids": [3]},
+                {"field": "friction", "index": 3, "message_ids": [4]},
+                {"field": "patterns", "index": 0, "message_ids": [5]}
+            ]
+        });
+        let facets = parse_facet_response(&response.to_string()).expect("surplus entries are cut");
+        assert_eq!(facets.decisions, vec!["d0", "d1", "d2", "d3", "d4"]);
+        assert_eq!(facets.friction, vec!["f0", "f1", "f2"]);
+        assert_eq!(facets.patterns, vec!["p0"]);
+        let kept: Vec<_> = facets
+            .evidence
+            .iter()
+            .map(|e| (e.field.as_str(), e.index, e.message_ids.clone()))
+            .collect();
+        assert_eq!(
+            kept,
+            vec![("decisions", 4, vec![1]), ("patterns", 0, vec![5])]
+        );
+    }
+
+    #[test]
+    fn evidence_past_a_list_within_its_limit_is_still_rejected() {
+        let response = serde_json::json!({
+            "session_summary": "s",
+            "cognitive_level": "competent",
+            "collaboration_mode": "delegation",
+            "decisions": ["d0"],
+            "evidence": [{"field": "decisions", "index": 1, "message_ids": [1]}]
+        });
+        assert!(parse_facet_response(&response.to_string()).is_err());
+    }
 
     #[test]
     fn malformed_semantic_facets_are_rejected_in_every_response_format() {
@@ -575,7 +656,7 @@ mod tests {
             .any(|tag| tag.as_str() == "session_mode_unattended")));
     }
     #[test]
-    fn parse_facet_response_enforces_every_array_cap_in_every_format() {
+    fn parse_facet_response_caps_every_array_in_every_format() {
         for (field, limit) in [
             ("decisions", 5),
             ("bugs_fixed", 5),
@@ -597,15 +678,12 @@ mod tests {
                     format!("```json\n{json}\n```"),
                     format!("Analysis:\n{json}"),
                 ] {
-                    let result = parse_facet_response(&response);
-                    if count <= limit {
-                        assert!(result.is_ok(), "{field}: {count} should be accepted");
-                    } else {
-                        let error = result.expect_err("an over-limit field must be rejected");
-                        assert!(error.contains(field), "{error}");
-                        assert!(error.contains(&limit.to_string()), "{error}");
-                        assert!(!error.contains("Synthetic observation"), "{error}");
-                    }
+                    let facets = parse_facet_response(&response)
+                        .unwrap_or_else(|error| panic!("{field}: {count} rejected: {error}"));
+                    let kept = serde_json::to_value(&facets).unwrap()[field]
+                        .as_array()
+                        .map_or(0, Vec::len);
+                    assert_eq!(kept, count.min(limit), "{field}: {count}");
                 }
             }
         }
