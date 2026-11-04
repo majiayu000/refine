@@ -95,10 +95,12 @@ an authoritative message identity keep missing provenance explicitly unknown.
 
 The optional `evidence` array links a field and zero-based index to real message
 IDs, for example `{"field":"decisions","index":0,"message_ids":[41,42]}`.
-Unknown IDs, nonexistent field positions, duplicate references, and model-supplied
-roles/times are rejected before publication. Chunk results pass the same checks;
-the final reducer may cite only IDs retained by those results. Missing references
-are stored as `unknown`, even when source messages exist.
+A cited ID that is not among the messages sent in that request (a chunk's own
+messages, or for the final reducer the IDs its chunk results kept) is removed
+before publication; evidence left without IDs is dropped, so that entry is
+stored as `unknown` instead of failing the session. Nonexistent field positions,
+duplicate references, and model-supplied roles/times are still rejected.
+Missing references are stored as `unknown`, even when source messages exist.
 
 `session_projections.evidence_json` stores the source ID/role/time ledger and
 reference mapping for machine candidate observations, without message bodies.

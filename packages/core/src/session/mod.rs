@@ -27,7 +27,9 @@ pub use clustering::{
     eligible_observations, ClusterResult, DataQualityStats, GlobalStats, ProjectCluster,
 };
 pub use discovery::{discover_sessions, discover_sessions_in, DiscoveredSession};
-pub use evidence::{session_projection_evidence, validate_facet_evidence, FacetEvidence};
+pub use evidence::{
+    prune_unknown_evidence_ids, session_projection_evidence, validate_facet_evidence, FacetEvidence,
+};
 pub use facets::{
     build_facet_prompt, facet_recipe_identity, facet_request_bytes, facets_to_items,
     facets_to_items_with_mode, facets_to_items_with_mode_and_identity, parse_facet_response,

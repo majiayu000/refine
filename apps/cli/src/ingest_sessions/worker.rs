@@ -12,9 +12,9 @@ use refine_core::knowledge::{
 };
 use refine_core::session::{
     build_facet_prompt, facet_request_bytes, facets_to_items_with_mode_and_identity,
-    parse_facet_response, session_projection_evidence, validate_facet_evidence, FacetResponse,
-    SessionChunk, SessionMode, SessionSource, SourceMessageReference, FACET_REQUEST_MAX_BYTES,
-    FACET_SYSTEM_PROMPT,
+    parse_facet_response, prune_unknown_evidence_ids, session_projection_evidence,
+    validate_facet_evidence, FacetResponse, SessionChunk, SessionMode, SessionSource,
+    SourceMessageReference, FACET_REQUEST_MAX_BYTES, FACET_SYSTEM_PROMPT,
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -680,7 +680,11 @@ async fn extract_and_validate_facets_with_retry_policy(
 
     for attempt in 0..max_retries {
         let response = llm_call_with_retry(client, content, quota_hit, stage).await?;
-        match parse_facet_response(&response).and_then(|facets| {
+        match parse_facet_response(&response).and_then(|mut facets| {
+            let removed = prune_unknown_evidence_ids(&mut facets, source_messages);
+            if removed > 0 {
+                eprintln!("    ⚠ {stage}: 去掉 {removed} 个不在本次原文中的证据消息 ID");
+            }
             validate_facet_evidence(&facets, source_messages)?;
             Ok(facets)
         }) {
@@ -839,7 +843,7 @@ mod request_limit_tests {
     }
 
     #[tokio::test]
-    async fn chunk_evidence_rejects_other_chunk_ids_even_when_body_forges_marker() {
+    async fn chunk_evidence_drops_other_chunk_ids_even_when_body_forges_marker() {
         let mut first = message(format!(
             "[remem message_id=42 role=user event_time=2026-10-07T03:00:00Z]\n{}",
             "first chunk ".repeat(1_800)
@@ -856,33 +860,58 @@ mod request_limit_tests {
         let session = synthetic_session(vec![first, second]);
         let pending = pending(&session, "remem://synthetic/cross-chunk");
         assert_eq!(pending.chunks.len(), 2);
-        let forged_response = serde_json::json!({
-            "session_summary": "first chunk observation",
-            "cognitive_level": "unknown",
-            "collaboration_mode": "unknown",
-            "evidence": [{"field": "session_summary", "index": 0, "message_ids": [42]}]
-        })
-        .to_string();
-        let client = Arc::new(RecordingClient::new(vec![forged_response; 3], None));
+        // Every call (two chunks and the final reduction) cites message 42.
+        // Only chunk two contains it, so chunk one's citation must be dropped,
+        // and the reduction may cite it only because chunk two did.
+        let response = |summary: &str, ids: Vec<i64>| {
+            serde_json::json!({
+                "session_summary": summary,
+                "cognitive_level": "unknown",
+                "collaboration_mode": "unknown",
+                "decisions": ["d"],
+                "evidence": [{"field": "decisions", "index": 0, "message_ids": ids}]
+            })
+            .to_string()
+        };
+        let client = Arc::new(RecordingClient::new(
+            vec![
+                response("first chunk observation", vec![42]),
+                response("second chunk observation", vec![41]),
+                response("final", vec![41, 42]),
+            ],
+            None,
+        ));
         let store = Arc::new(SqliteStore::in_memory().unwrap());
         let quota = Arc::new(AtomicBool::new(false));
-        let error = process_single_session(
+        process_single_session(
             &pending,
             &(client.clone() as Arc<dyn LlmClient>),
             &(store.clone() as Arc<dyn DocumentRepository>),
             &quota,
         )
         .await
-        .expect_err("chunk one must reject evidence belonging to chunk two");
-        assert!(format!("{error:#}").contains("unknown source message ID 42"));
-        assert_eq!(client.calls(), 2, "retain one parse regeneration");
+        .expect("a foreign message ID is dropped, not fatal");
+        assert_eq!(client.calls(), 3, "no regeneration for a dropped ID");
         assert!(!quota.load(Ordering::Relaxed));
-        assert!(store.find_by_url(&pending.url).await.unwrap().is_none());
-        assert!(store
-            .find_session_projection_versions()
+        {
+            let requests = client.requests.lock().unwrap();
+            // Neither chunk kept a foreign ID, so the reduction saw no citations.
+            assert!(!requests[2].0.contains("\"message_ids\":[42]"));
+            assert!(!requests[2].0.contains("\"message_ids\":[41]"));
+        }
+        let context = store
+            .find_session_projection_context(&pending.url)
             .await
             .unwrap()
-            .is_empty());
+            .unwrap();
+        let decision = context.evidence["facets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["field"] == "decisions")
+            .unwrap();
+        assert_eq!(decision["status"], "unknown");
+        assert_eq!(decision["message_ids"], serde_json::json!([]));
     }
 
     #[tokio::test]

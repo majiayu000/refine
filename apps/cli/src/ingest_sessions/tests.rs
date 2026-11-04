@@ -1548,7 +1548,7 @@ async fn invalid_extraction_preserves_the_previous_document_and_items() {
     let doc_store: Arc<dyn DocumentRepository> = store.clone();
     for response in [
         "{}".to_string(),
-        serde_json::json!({"session_summary": "Invented reference", "cognitive_level": "unknown", "collaboration_mode": "unknown", "evidence": [{"field": "session_summary", "index": 0, "message_ids": [999]}]}).to_string(),
+        serde_json::json!({"session_summary": "Dangling reference", "cognitive_level": "unknown", "collaboration_mode": "unknown", "evidence": [{"field": "decisions", "index": 0, "message_ids": [999]}]}).to_string(),
     ] {
         let client: Arc<dyn LlmClient> = Arc::new(StaticLlmClient { response });
         assert!(process_single_session(&pending, &client, &doc_store, &Arc::new(AtomicBool::new(false))).await.is_err());

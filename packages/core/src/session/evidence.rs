@@ -82,6 +82,27 @@ pub fn validate_facet_evidence(
     Ok(())
 }
 
+/// Remove message IDs the model cited that are not in `source_messages`, and
+/// drop evidence left with no IDs, so that entry's provenance becomes unknown.
+/// Returns how many IDs were removed. Nothing is ever added: the remaining IDs
+/// still pass [`validate_facet_evidence`].
+pub fn prune_unknown_evidence_ids(
+    facets: &mut FacetResponse,
+    source_messages: &[SourceMessageReference],
+) -> usize {
+    let ids: HashSet<_> = source_messages.iter().map(|message| message.id).collect();
+    let mut removed = 0;
+    for evidence in &mut facets.evidence {
+        let before = evidence.message_ids.len();
+        evidence.message_ids.retain(|id| ids.contains(id));
+        removed += before - evidence.message_ids.len();
+    }
+    facets
+        .evidence
+        .retain(|evidence| !evidence.message_ids.is_empty());
+    removed
+}
+
 /// Metadata is scoped to machine candidates. A later human override does not
 /// inherit a claim that its changed wording was validated by the extractor.
 pub fn session_projection_evidence(
@@ -198,6 +219,24 @@ mod tests {
         assert!(validate_facet_evidence(&valid, &[]).is_err());
         let malformed = json!({"session_summary": "test", "cognitive_level": "unknown", "collaboration_mode": "unknown", "evidence": [{"field": "session_summary", "index": 0, "message_ids": [41], "role": "user"}]});
         assert!(parse_facet_response(&malformed.to_string()).is_err());
+    }
+
+    #[test]
+    fn unknown_ids_are_pruned_and_emptied_evidence_becomes_unknown() {
+        let mut pruned = facets(json!([
+            {"field": "session_summary", "index": 0, "message_ids": [41, 999]},
+            {"field": "decisions", "index": 0, "message_ids": [998]}
+        ]));
+        assert_eq!(prune_unknown_evidence_ids(&mut pruned, &sources()), 2);
+        assert_eq!(pruned.evidence.len(), 1);
+        assert_eq!(pruned.evidence[0].field, "session_summary");
+        assert_eq!(pruned.evidence[0].message_ids, vec![41]);
+        validate_facet_evidence(&pruned, &sources()).unwrap();
+
+        let mut untouched =
+            facets(json!([{"field": "decisions", "index": 0, "message_ids": [41, 42]}]));
+        assert_eq!(prune_unknown_evidence_ids(&mut untouched, &sources()), 0);
+        assert_eq!(untouched.evidence[0].message_ids, vec![41, 42]);
     }
 
     #[test]
