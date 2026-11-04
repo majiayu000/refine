@@ -286,8 +286,18 @@ check_http() {
     return
   fi
 
-  local health
-  health="$(curl -fsS --max-time 3 "${server_url}/health" 2>/dev/null || true)"
+  # A just-restarted server needs a few seconds to bind; wait up to
+  # REFINE_DOCTOR_HEALTH_WAIT_SECS (default 30) before declaring it down.
+  local health="" waited=0 wait_secs="${REFINE_DOCTOR_HEALTH_WAIT_SECS:-30}"
+  [[ "$wait_secs" =~ ^[0-9]+$ ]] || wait_secs=30
+  while :; do
+    health="$(curl -fsS --max-time 3 "${server_url}/health" 2>/dev/null || true)"
+    if grep -q '"success":true' <<<"$health" || [ "$waited" -ge "$wait_secs" ]; then
+      break
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
   if grep -q '"success":true' <<<"$health"; then
     pass "server health OK: ${server_url}/health"
   else
