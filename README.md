@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> Consolidated into **[remem](https://github.com/majiayu000/remem)** and **[agent-sessions](https://github.com/majiayu000/agent-sessions)**.
+
 <h1 align="center">Refine</h1>
 
 <p align="center">
