@@ -132,9 +132,9 @@ pub(super) async fn process_pending_sessions(
     if pending.is_empty() {
         let selected_quarantine_count = quarantine.count_matching(&selected_identities);
         if selected_quarantine_count > 0 {
+            // Same prefix as a partly failed batch below; the scheduled scripts match it.
             anyhow::bail!(
-                "本次选择中仍有 {} 个会话处于隔离状态；队列: {}；确认上游策略已修复后使用 --retry-quarantined",
-                selected_quarantine_count,
+                "摄入不完整: 瞬态失败 0, 本次相关隔离 {selected_quarantine_count}（没有待处理会话）；队列: {}；确认上游策略已修复后使用 --retry-quarantined",
                 quarantine.path().display()
             );
         }
