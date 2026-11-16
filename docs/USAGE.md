@@ -55,7 +55,7 @@ cargo install --path apps/mirror
 cargo install --path apps/server
 ```
 
-The workspace requires Rust 1.88 or newer. Scheduled insights default to four
+The workspace requires Rust 1.89 or newer. Scheduled insights default to four
 concurrent LLM routes; set `REFINE_INSIGHTS_CONCURRENCY` to a positive integer
 to tune this for your provider capacity.
 

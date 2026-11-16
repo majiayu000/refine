@@ -3,7 +3,7 @@
 <p align="center">
   <a href="https://github.com/majiayu000/refine/actions/workflows/ci.yml"><img src="https://github.com/majiayu000/refine/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
-  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="Rust"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.89%2B-orange.svg" alt="Rust"></a>
 </p>
 
 <p align="center"><strong>Find the decisions. Reuse the lessons.</strong></p>
@@ -21,7 +21,7 @@
 
 ## Quick Start
 
-The macOS local stack requires Git and Rust 1.88+. Bun is optional for the UI
+The macOS local stack requires Git and Rust 1.89+. Bun is optional for the UI
 dev service. Session ingestion also requires a compatible
 [Remem](https://github.com/majiayu000/remem) binary. LLM-backed extraction and
 reports require configured API credentials; review [Local Setup](docs/LOCAL_SETUP.md).

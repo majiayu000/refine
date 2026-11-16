@@ -41,7 +41,7 @@ transcript 回退。匹配的历史 Document/items 收敛与 Remem 引用投影�
 
 ## 快速开始
 
-macOS 本地安装需要 Git、Rust 1.88+；UI 开发服务可选使用 Bun。
+macOS 本地安装需要 Git、Rust 1.89+；UI 开发服务可选使用 Bun。
 会话导入还需要兼容的 [Remem](https://github.com/majiayu000/remem) 二进制。
 LLM 提炼和报告需要配置 API 凭据。安装与配置详情见
 [Local Setup](docs/LOCAL_SETUP.md)。

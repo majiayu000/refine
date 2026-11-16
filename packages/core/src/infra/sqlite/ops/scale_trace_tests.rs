@@ -2,6 +2,7 @@
 use super::{init_schema, search_page};
 use crate::infra::sqlite::rows::configure_connection;
 use crate::knowledge::ItemType;
+use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use rusqlite::Connection;
 use std::cell::RefCell;
 
@@ -15,10 +16,19 @@ fn record_statement(sql: &str) {
 
 fn trace_page(conn: &mut Connection, rows: usize, query: &str, tags: &[String]) {
     STATEMENTS.with(|statements| statements.borrow_mut().clear());
-    conn.trace(Some(record_statement));
+    conn.trace_v2(
+        TraceEventCodes::SQLITE_TRACE_STMT,
+        Some(|event: TraceEvent<'_>| {
+            if let TraceEvent::Stmt(_, sql) = event {
+                record_statement(sql);
+            }
+        }),
+    )
+    .expect("install statement trace");
     let (items, total) = search_page(conn, query, Some(ItemType::Knowledge), tags, 0, 20)
         .expect("actual filtered page");
-    conn.trace(None);
+    conn.trace_v2(TraceEventCodes::empty(), None::<fn(TraceEvent<'_>)>)
+        .expect("remove statement trace");
     assert_eq!(items.len(), 20);
     assert_eq!(total, rows);
     let statements = STATEMENTS.with(|statements| std::mem::take(&mut *statements.borrow_mut()));

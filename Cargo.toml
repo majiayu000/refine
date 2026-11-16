@@ -11,7 +11,7 @@ members = [
 [workspace.package]
 version = "0.1.4"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/majiayu000/refine"
 
@@ -29,7 +29,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Database
-rusqlite = { version = "0.31", features = ["backup", "bundled", "functions"] }
+rusqlite = { version = "0.43", features = ["backup", "bundled", "fallible_uint", "functions"] }
 
 # Logging
 tracing = "0.1"
