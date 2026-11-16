@@ -177,8 +177,9 @@ Automated jobs that run in dedicated workspaces (agent queues, batch renders,
 scoring pipelines) do not describe the user. List one project-path substring
 per line in `~/.refine/ingest-exclude-projects.txt` (or the file named by
 `REFINE_INGEST_EXCLUDE_FILE`; `#` starts a comment). Matching sessions are
-skipped without loading their bodies and do not count against N; observations
-already stored for them are cleared on the next run, as for Looper jobs.
+skipped without loading their bodies and do not count against N. A session
+ingested before its rule existed is loaded once more on the next run, which
+clears its stored observations as for Looper jobs; later runs skip it too.
 
 Every facet request stays within 65,536 rendered bytes. Long sessions are
 extracted chunk by chunk; when the chunk results do not fit one final

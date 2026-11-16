@@ -344,7 +344,7 @@ where
             continue;
         }
         // The project path is authoritative, so a never-ingested excluded session
-        // needs no full load; only stored documents need the cleanup below.
+        // needs no full load; only stored observations need the cleanup below.
         if summary_is_excluded_project
             && existing_document.is_none()
             && !might_have_legacy_documents
@@ -363,8 +363,7 @@ where
             selected_quarantined_identities.insert(quarantine_key(&url, Some(&source_version)));
             continue;
         }
-        if !summary_is_looper
-            && !reprocess_session
+        if !reprocess_session
             && legacy_convergence::skip_unchanged_session(
                 &doc_store,
                 existing_document.as_ref(),
@@ -374,6 +373,7 @@ where
                 session_source.clone(),
                 &url,
                 &source_version,
+                summary_is_looper,
             )
             .await?
         {

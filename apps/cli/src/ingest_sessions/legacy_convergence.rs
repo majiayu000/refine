@@ -113,6 +113,7 @@ pub(super) async fn skip_unchanged_session(
     source: SessionSource,
     url: &str,
     source_version: &str,
+    excluded: bool,
 ) -> refine_core::error::InfraResult<bool> {
     let Some(existing) = existing.filter(|document| {
         !existing_uses_legacy_identity
@@ -121,6 +122,16 @@ pub(super) async fn skip_unchanged_session(
     }) else {
         return Ok(false);
     };
+    // A Looper or excluded-project session is unchanged only once the cleanup
+    // path has cleared its stored observations; until then it must be loaded.
+    if excluded
+        && !doc_store
+            .find_items_by_document_id(existing.id())
+            .await?
+            .is_empty()
+    {
+        return Ok(false);
+    }
     if !dry_run
         && (!existing.raw_content().is_empty()
             || existing.url() != url
