@@ -264,6 +264,25 @@ remem 的扩展路径是 raw archive contract 新增并稳定输出 upstream pla
 Refine provider 校验该字段、保存到 Session Document 的结构化 provenance，再由 manifest
 读取该持久化字段。字段缺失或历史记录不可证明时继续为 unknown，不从消息文本反推。
 
+#### 判断主体与数据覆盖（#264）
+
+周报不把 Agent 的执行错误算作用户的认知习惯。`insights` 在聚类前读取每个会话已存的
+projection evidence（`session_projections.evidence_json`），按条目引用的原始消息角色与
+事件时间，给决策、Bug 修复、阻力、问题条目加 `[主体: …]` 标签：仅用户原话、用户先提出→Agent
+跟进、用户先提出→Agent 执行→用户再纠正、Agent 先提出或执行→用户随后回应、仅 Agent 消息、
+主体不明。标签只说明谁说话、先后顺序，不解读内容；没有引用、没有 evidence 或被人工覆盖的
+条目一律为主体不明。路由与最终 prompt 共用 `ATTRIBUTION_RULES`：只有用户原话或用户先提出的
+条目能作为用户判断的证据；用户先说明、Agent 偏离、用户纠正的阻力归为“用户已说明但 Agent
+违背”；主体不明不用于评价用户。标签不改 item id 与时间戳，cohort identity 与 checkpoint
+签名不受影响；facet 提取 recipe 不变，历史数据无需重抽。
+
+报告元数据新增“数据覆盖（deterministic）”段：报告生成时间、本期/上期事件覆盖时间、各来源
+会话数与最新事件、来源缺口、未纳入观测数，以及上一步导入的失败/隔离数（由
+`--ingest-failed`/`--ingest-quarantined` 传入；周任务从 `摄入不完整` 行解析，未提供时写明
+“不能确认本期采集完整”，有失败或隔离时写“采集不完整”）。两期来源集合不同、会话数相差超过
+2 倍、任一窗口 DEGRADED、本期导入不完整或为全历史 snapshot 时，判定“纵向不可比”，最终
+prompt 禁止输出认知、能力或习惯的升降结论，只写本周表现。
+
 回归 fixture 固定重现问题发现时的口径差异：旧混合口径为 3,786 sessions、
 59,424 decisions、28,538 bugfixes；严格 linked cohort 必须得到 3,786、16,461、
 9,135。该 fixture 仅用于测试，不是生产阈值。

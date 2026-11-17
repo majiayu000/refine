@@ -4,6 +4,7 @@
 
 mod aggregation;
 mod analysis_routes;
+mod attribution;
 mod chunking;
 mod clustering;
 mod discovery;
@@ -21,6 +22,9 @@ mod types;
 
 pub use aggregation::{aggregate_observations, format_report, AggregationReport};
 pub use analysis_routes::{plan_routes, AnalysisRoute};
+pub use attribution::{
+    annotate_observations, SessionAttribution, SpeakerPattern, ATTRIBUTION_RULES,
+};
 pub use chunking::{chunk_session, needs_chunking, SessionChunk};
 pub use clustering::{
     cluster_observation_windows, cluster_observations, cluster_observations_with_resolver,
@@ -52,8 +56,8 @@ pub use remem_archive::{
 pub use report::{
     build_final_prompt, build_final_prompt_with_delta, build_final_prompt_with_delta_and_budget,
     experiment_card_action, experiment_card_signal, extract_experiment_card,
-    format_data_quality_stats, merge_route_results, merge_route_results_with_budget, RouteResult,
-    EXPERIMENT_CARD_URL, INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
+    format_data_quality_stats, merge_route_results, merge_route_results_with_budget, CoverageNote,
+    RouteResult, EXPERIMENT_CARD_URL, INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
 };
 pub use source_cohort::{
     cluster_session_observation_windows, cluster_session_observations,

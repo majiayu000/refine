@@ -57,12 +57,23 @@ if ! [[ "$REFINE_INGEST_LATEST" =~ ^[1-9][0-9]*$ ]]; then
 fi
 ingest_output="$(mktemp)"
 trap 'rm -f "$ingest_output"' EXIT
+# The report states this run's ingest outcome; without it, it cannot claim the
+# collection was complete.
+INGEST_STATUS_ARGS=()
 if "$REFINE_BIN" ingest-sessions --latest "$REFINE_INGEST_LATEST" 2>&1 | tee "$ingest_output"; then
   log "Step 1: ingest-sessions completed successfully"
+  INGEST_STATUS_ARGS=(--ingest-failed 0 --ingest-quarantined 0)
 elif grep -q '摄入不完整' "$ingest_output"; then
   # The run finished; some sessions failed or were quarantined and resume next
-  # time. The rest are stored, so the weekly report still goes out.
+  # time. The rest are stored, so the weekly report still goes out and says
+  # that collection is incomplete.
   log "WARNING: ingest-sessions finished incomplete; continuing with stored observations"
+  incomplete_line="$(grep -o '摄入不完整: 瞬态失败 [0-9][0-9]*, 本次相关隔离 [0-9][0-9]*' "$ingest_output" | tail -n 1 || true)"
+  if [[ "$incomplete_line" =~ 瞬态失败\ ([0-9]+),\ 本次相关隔离\ ([0-9]+) ]]; then
+    INGEST_STATUS_ARGS=(--ingest-failed "${BASH_REMATCH[1]}" --ingest-quarantined "${BASH_REMATCH[2]}")
+  else
+    log "WARNING: could not read ingest failure counts; the report will mark ingest status unknown"
+  fi
 else
   log "ERROR: ingest-sessions failed; refusing to generate derived insights"
   exit 1
@@ -72,7 +83,7 @@ fi
 # 全历史输出只能由人工显式执行 `refine insights --all`。
 log "Step 2: insights --period 7 --prescription"
 insights_rc=0
-"$REFINE_BIN" insights --period 7 --prescription 2>&1 || insights_rc=$?
+"$REFINE_BIN" insights --period 7 --prescription ${INGEST_STATUS_ARGS[@]+"${INGEST_STATUS_ARGS[@]}"} 2>&1 || insights_rc=$?
 if [[ "$insights_rc" -eq 0 ]]; then
   log "Step 2: insights --period 7 --prescription completed successfully"
 else

@@ -1,6 +1,7 @@
 //! insights v2 — 两级分析：本地聚类 + 10 路 LLM 并发
 
 use crate::insights_checkpoint::{DatasetSignature, InsightsCheckpoint, CHECKPOINT_VERSION};
+use crate::insights_coverage::{assess_coverage, CoverageAssessment, IngestRunStatus};
 use crate::insights_manifest::{
     build_delta_summary, build_manifest, build_window_manifest, manifest_identity, render_manifest,
     rotation_seed, route_plan_identity, source_revision, EventTimeWindow, InsightsManifest,
@@ -8,12 +9,14 @@ use crate::insights_manifest::{
 use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
 use refine_core::infra::{llm_with_retry_policy_for, LlmClient, LlmRetryPolicy};
-use refine_core::knowledge::{Document, DocumentRepository, ItemRepository};
+use refine_core::knowledge::{
+    Document, DocumentRepository, ItemRepository, ObservationDocumentMeta,
+};
 use refine_core::session::{
-    build_final_prompt_with_delta, cluster_session_observation_windows, count_raw_phrase,
-    experiment_card_signal, extract_experiment_card, format_data_quality_stats,
-    merge_route_results_with_budget, plan_routes, DataQualityStats, RouteResult,
-    EXPERIMENT_CARD_URL, INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
+    annotate_observations, build_final_prompt_with_delta, cluster_session_observation_windows,
+    count_raw_phrase, experiment_card_signal, extract_experiment_card, format_data_quality_stats,
+    merge_route_results_with_budget, plan_routes, CoverageNote, DataQualityStats, RouteResult,
+    SessionAttribution, EXPERIMENT_CARD_URL, INSIGHTS_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,7 +24,8 @@ use tokio::sync::Semaphore;
 
 const DEFAULT_LLM_CONCURRENCY: usize = 4;
 const FINAL_REPORT_REQUEST_TIMEOUT_MILLIS: u64 = 300_000;
-const INSIGHTS_PROMPT_IDENTITY: &str = "insights-v2:route-v2:hypothesis-loop-v2";
+const INSIGHTS_PROMPT_IDENTITY: &str =
+    "insights-v2:route-v3-attribution:hypothesis-loop-v3-coverage";
 const FINAL_ROUTE_CONTEXT_CHARS: usize = 24_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,16 +61,47 @@ fn report_with_metadata(
     period: Option<usize>,
     quality: &DataQualityStats,
     manifest: &InsightsManifest,
+    coverage: &CoverageAssessment,
     delta_summary: &str,
 ) -> Result<String> {
     Ok(format!(
-        "{}\n\n> Window: {}\n> Cohort: linked observations excluding unattended/subagent documents\n> Data quality: {}\n\n## 本期变化（deterministic）\n\n{}\n\n{}",
+        "{}\n\n> Window: {}\n> Cohort: linked observations excluding unattended/subagent documents\n> Data quality: {}\n\n## 数据覆盖（deterministic）\n\n{}\n\n## 本期变化（deterministic）\n\n{}\n\n{}",
         render_manifest(manifest)?,
         insights_window_label(period),
         format_data_quality_stats(quality),
+        coverage.summary,
         delta_summary,
         report,
     ))
+}
+
+/// Speaker labels per session document, from the stored projection evidence.
+/// A session without readable evidence is left out, so its entries stay unknown.
+async fn load_attributions(
+    documents: &[ObservationDocumentMeta],
+    doc_store: &dyn DocumentRepository,
+) -> Result<HashMap<String, SessionAttribution>> {
+    let mut attributions = HashMap::new();
+    for meta in documents {
+        let Some(document) = doc_store
+            .find_by_id(&meta.id)
+            .await
+            .context("读取会话文档失败")?
+        else {
+            continue;
+        };
+        let Some(context) = doc_store
+            .find_session_projection_context(document.url())
+            .await
+            .context("读取会话证据引用失败")?
+        else {
+            continue;
+        };
+        if let Some(attribution) = SessionAttribution::from_projection_evidence(&context.evidence) {
+            attributions.insert(meta.id.as_str().to_string(), attribution);
+        }
+    }
+    Ok(attributions)
 }
 
 fn llm_concurrency() -> Result<usize> {
@@ -122,6 +157,7 @@ pub struct InsightsOptions {
     pub period: Option<usize>,
     pub all_snapshot: bool,
     pub with_prescription: bool,
+    pub ingest: Option<IngestRunStatus>,
 }
 
 pub async fn handle_insights(
@@ -194,9 +230,19 @@ pub async fn handle_insights(
         .iter()
         .map(|document| (document.id.as_str().to_string(), document.source.clone()))
         .collect();
-    let mut comparison_windows = vec![snapshot.current.as_slice()];
+    // Speaker labels change only titles/content; ids and timestamps, which the
+    // cohort identity and checkpoint signature use, are preserved.
+    let attributions = load_attributions(&snapshot.documents, doc_store.as_ref()).await?;
+    println!(
+        "判断主体: {}/{} 个会话有原始消息引用，其余条目标为主体不明",
+        attributions.len(),
+        snapshot.documents.len()
+    );
+    let current_items = annotate_observations(&snapshot.current, &attributions);
+    let previous_items = annotate_observations(&snapshot.previous, &attributions);
+    let mut comparison_windows = vec![current_items.as_slice()];
     if options.period.is_some() {
-        comparison_windows.push(snapshot.previous.as_slice());
+        comparison_windows.push(previous_items.as_slice());
     }
     let mut cohorts = cluster_session_observation_windows(&comparison_windows, &document_sources);
     let current_cohort = cohorts.remove(0);
@@ -261,6 +307,8 @@ pub async fn handle_insights(
         previous_cluster,
         manifest.previous_window.as_ref(),
     );
+    let coverage = assess_coverage(&manifest, Utc::now(), options.ingest);
+    println!("数据覆盖:\n{}\n", coverage.summary);
     if disposition == WindowDisposition::PersistDeterministic {
         let deterministic = "# Session Insights Report\n\n## 稳定基线\n\n当前窗口没有可用于 LLM 路由分析的 eligible sessions；本报告仅保存可复现 manifest 与跨窗 inactivity/evidence-gap 事实。";
         let persisted = report_with_metadata(
@@ -268,6 +316,7 @@ pub async fn handle_insights(
             options.period,
             quality,
             &manifest,
+            &coverage,
             &delta_summary,
         )?;
         println!("{}", persisted);
@@ -435,6 +484,10 @@ pub async fn handle_insights(
         stats,
         quality,
         Some(&delta_summary),
+        Some(CoverageNote {
+            summary: &coverage.summary,
+            trend_comparable: coverage.trend_comparable,
+        }),
         previous_card.as_deref(),
         options.with_prescription,
     );
@@ -460,8 +513,14 @@ pub async fn handle_insights(
         )
     })?;
 
-    let persisted_report =
-        report_with_metadata(&report, options.period, quality, &manifest, &delta_summary)?;
+    let persisted_report = report_with_metadata(
+        &report,
+        options.period,
+        quality,
+        &manifest,
+        &coverage,
+        &delta_summary,
+    )?;
     println!("{}", persisted_report);
 
     persist_report(&persisted_report, options.all_snapshot, doc_store.as_ref()).await?;
@@ -549,6 +608,92 @@ mod tests {
                 .unwrap()
                 .is_none());
         }
+    }
+
+    /// Issue #264 regression through the stored evidence path: the vertical
+    /// cut was requested before the landscape delivery and corrected after it.
+    #[tokio::test]
+    async fn stored_evidence_labels_the_vertical_screen_friction_in_order() {
+        use chrono::{TimeZone, Utc};
+        use refine_core::infra::SqliteStore;
+        use refine_core::knowledge::{
+            assign_session_observation_ids, Document, DocumentId, DocumentRepository,
+            ObservationDocumentMeta, SessionProjectionMetadata,
+        };
+        use refine_core::session::{
+            annotate_observations, facets_to_items, parse_facet_response,
+            session_projection_evidence, MessageRole, SourceMessageReference,
+        };
+        let store = SqliteStore::in_memory().unwrap();
+        let facets = parse_facet_response(
+            &serde_json::json!({
+                "session_summary": "MV 竖屏交付",
+                "cognitive_level": "unknown",
+                "collaboration_mode": "delegation",
+                "friction": ["竖屏需求交付成了横屏"],
+                "evidence": [{"field": "friction", "index": 0, "message_ids": [13, 12, 11, 10]}],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let time = |minute: i64| Utc.timestamp_opt(1_760_594_280 + minute * 60, 0).unwrap();
+        let sources = [
+            (10, MessageRole::User, time(0)),
+            (11, MessageRole::User, time(7)),
+            (12, MessageRole::Assistant, time(30)),
+            (13, MessageRole::User, time(326)),
+        ]
+        .map(|(id, role, event_time)| SourceMessageReference {
+            id,
+            role,
+            event_time,
+        });
+        let url = "remem://raw-session/v2/test/local/mv/vertical";
+        let mut document = Document::new("codex-session", "");
+        document.set_url(url);
+        document.set_source_version(Some("sha256:vertical"));
+        let mut items = facets_to_items(&facets, document.id(), Some("mv"));
+        assign_session_observation_ids(&mut items, url).unwrap();
+        let evidence = session_projection_evidence(&facets, &sources, &items).unwrap();
+        store
+            .save_session_projection(
+                &document,
+                &items,
+                &[],
+                &[],
+                &SessionProjectionMetadata {
+                    recipe_id: "test".into(),
+                    evidence,
+                },
+            )
+            .await
+            .unwrap();
+        let metas = [document.id().clone(), DocumentId::from("no-projection")].map(|id| {
+            ObservationDocumentMeta {
+                id,
+                source: "codex-session".into(),
+                captured_at: time(0),
+            }
+        });
+        let attributions = super::load_attributions(&metas, &store).await.unwrap();
+        assert_eq!(attributions.len(), 1);
+        let stored = store
+            .find_items_by_document_id(document.id())
+            .await
+            .unwrap();
+        let annotated = annotate_observations(&stored, &attributions);
+        let summary = annotated
+            .iter()
+            .find(|item| item.content().contains("阻力:"))
+            .unwrap();
+        assert!(
+            summary
+                .content()
+                .contains("- [主体: 用户先提出→Agent 执行→用户再纠正｜用户 "),
+            "{}",
+            summary.content()
+        );
+        assert!(!summary.content().contains("主体不明"));
     }
 
     #[test]

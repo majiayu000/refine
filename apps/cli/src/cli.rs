@@ -170,6 +170,12 @@ pub enum Commands {
         /// 生成 L4 处方（需要 LLM）
         #[arg(long)]
         prescription: bool,
+        /// 上一步导入的瞬态失败数，写入报告的数据覆盖说明
+        #[arg(long, requires = "ingest_quarantined")]
+        ingest_failed: Option<usize>,
+        /// 上一步导入中本次相关的隔离数，写入报告的数据覆盖说明
+        #[arg(long, requires = "ingest_failed")]
+        ingest_quarantined: Option<usize>,
     },
     /// Deterministic cognitive portrait data and quality operations.
     CognitivePortrait {
@@ -325,6 +331,29 @@ mod tests {
         };
         assert!(all);
         assert!(Cli::try_parse_from(["refine", "insights", "--all", "--period", "7"]).is_err());
+    }
+
+    #[test]
+    fn insights_ingest_counts_come_as_a_pair() {
+        let cli = Cli::try_parse_from([
+            "refine",
+            "insights",
+            "--ingest-failed",
+            "5",
+            "--ingest-quarantined",
+            "3",
+        ])
+        .unwrap();
+        let Commands::Insights {
+            ingest_failed,
+            ingest_quarantined,
+            ..
+        } = cli.command
+        else {
+            panic!("expected insights");
+        };
+        assert_eq!((ingest_failed, ingest_quarantined), (Some(5), Some(3)));
+        assert!(Cli::try_parse_from(["refine", "insights", "--ingest-failed", "5"]).is_err());
     }
 
     #[test]

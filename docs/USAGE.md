@@ -159,6 +159,12 @@ mirror dashboard
 mirror score
 ```
 
+`refine insights --ingest-failed F --ingest-quarantined Q` records the preceding
+ingest run's failure and quarantine counts in the report's coverage section; the
+weekly job passes them automatically. Without them the report says it cannot
+confirm complete collection. Any failure or quarantine is reported as
+incomplete collection, and the report then draws no rise/fall conclusion.
+
 `--latest N` bounds the final eligible pending set. Refine still requests the
 complete Remem summary collection for identity checks, scans newest-first, and
 does not count unchanged, low-signal, explicit Looper scheduled-job, or
