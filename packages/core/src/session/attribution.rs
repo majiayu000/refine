@@ -18,8 +18,9 @@ use std::collections::HashMap;
 /// what order, not what was said, so the order alone never settles whether a
 /// requirement had been stated before a correction.
 pub const ATTRIBUTION_RULES: &str = "归因规则（条目前的 [主体: …] 由 refine 按原始消息角色与时间标注，只说明谁说话、先后顺序，不说明内容）:
-- 决策、问题等判断类条目：「仅一条用户原话」「多条用户原话…」「用户先提出→Agent 跟进」可作为用户主动判断的证据。
-- 「Agent 先提出或执行→用户随后回应」只能写成 Agent 提出、用户接受或否定（以原话为准）；看不出接受还是否定时写“用户态度不明”。
+- 决策、问题等判断类条目：角色与时间不证明谁提出选择或谁接受选择。仅引用用户消息时，也须条目内容明确表达用户的选择才能作为用户判断证据；提问本身不等于决策。
+- 当前输入不含被引用的完整原话；混合用户与 Agent 消息的判断条目一律标为“判断归属未确认”，不得用于评价用户判断或习惯，不把 Agent 的建议算作用户选择。
+- 用户后续回应可能是确认、补充要求、回答澄清或纠正；没有内容证据不得称为纠正、接受或否定。
 - 「仅 Agent 消息」「主体不明」不得用于评价用户的认知、判断或习惯，只能写成 Agent 执行情况或证据缺口。
 - 阻力、返工条目：标签顺序不决定归因，要对照条目内容与引用的原话。较早的用户消息已提出纠正里的同一要求 → “用户已说明但 Agent 违背”，属 Agent 执行问题；内容明确显示该要求在 Agent 执行之后、纠正时才第一次提出 → “用户事前未说明”；看不出较早消息是否已提出 → “主体不明”。阻力条目不得默认写成用户没说清；只有归为“用户事前未说明”的阻力才可作为用户习惯的证据。";
 
@@ -37,8 +38,8 @@ pub enum SpeakerPattern {
     UserRepeated,
     /// A user message comes first; the Agent follows.
     UserFirst,
-    /// User first, then the Agent, then the user again (typically a correction).
-    UserFirstThenCorrected,
+    /// User first, then the Agent, then the user again; content is not inspected.
+    UserFirstThenFollowedUp,
     /// The Agent comes first; a user message follows.
     AgentFirst,
 }
@@ -50,9 +51,9 @@ impl SpeakerPattern {
             Self::AgentOnly => "仅 Agent 消息，用户是否接受不明",
             Self::UserOnly => "仅一条用户原话",
             Self::UserRepeated => "多条用户原话，较早一条是否已提出同一要求见内容",
-            Self::UserFirst => "用户先提出→Agent 跟进",
-            Self::UserFirstThenCorrected => "用户先提出→Agent 执行→用户再纠正",
-            Self::AgentFirst => "Agent 先提出或执行→用户随后回应（接受/否定见原话）",
+            Self::UserFirst => "用户消息在先→Agent 消息在后（判断归属未确认）",
+            Self::UserFirstThenFollowedUp => "用户消息→Agent 消息→用户后续回应（内容性质未确认）",
+            Self::AgentFirst => "Agent 消息在先→用户随后回应（接受/否定见原话）",
         }
     }
 }
@@ -86,7 +87,7 @@ fn speaker_pattern(messages: &[CitedMessage]) -> SpeakerPattern {
         (Speaker::Agent, _) => SpeakerPattern::AgentFirst,
         (Speaker::User, Some(agent)) => {
             if messages[agent..].iter().any(|m| m.role == Speaker::User) {
-                SpeakerPattern::UserFirstThenCorrected
+                SpeakerPattern::UserFirstThenFollowedUp
             } else {
                 SpeakerPattern::UserFirst
             }
