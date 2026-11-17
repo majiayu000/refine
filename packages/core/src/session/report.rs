@@ -2,6 +2,7 @@
 //!
 //! 将 10 路 LLM 分析结果合并为最终报告
 
+use super::attribution::ATTRIBUTION_RULES;
 use super::clustering::{DataQualityStats, GlobalStats};
 use serde::{Deserialize, Serialize};
 
@@ -127,6 +128,16 @@ pub fn format_data_quality_stats(quality: &DataQualityStats) -> String {
     )
 }
 
+/// Deterministic coverage of the analysed windows: when the report was made,
+/// which event time and sources it covers, and whether ingest was complete.
+/// `trend_comparable` is false when the two windows' coverage differs too much
+/// for any rise/fall conclusion.
+#[derive(Debug, Clone, Copy)]
+pub struct CoverageNote<'a> {
+    pub summary: &'a str,
+    pub trend_comparable: bool,
+}
+
 /// 构建最终报告的 LLM prompt
 pub fn build_final_prompt(
     combined_analysis: &str,
@@ -138,6 +149,7 @@ pub fn build_final_prompt(
         combined_analysis,
         stats,
         quality,
+        None,
         None,
         None,
         with_prescription,
@@ -152,6 +164,7 @@ pub fn build_final_prompt_with_delta(
     stats: &GlobalStats,
     quality: &DataQualityStats,
     delta_summary: Option<&str>,
+    coverage: Option<CoverageNote<'_>>,
     previous_card: Option<&str>,
     with_prescription: bool,
 ) -> String {
@@ -160,6 +173,7 @@ pub fn build_final_prompt_with_delta(
         stats,
         quality,
         delta_summary,
+        coverage,
         previous_card,
         with_prescription,
         MAX_FINAL_CONTEXT,
@@ -173,11 +187,13 @@ pub fn build_final_prompt_with_delta(
 /// `previous_card` is last week's hypothesis + experiment (see
 /// [`extract_experiment_card`]); the prescription section reviews it before
 /// proposing this week's card.
+#[allow(clippy::too_many_arguments)]
 pub fn build_final_prompt_with_delta_and_budget(
     combined_analysis: &str,
     stats: &GlobalStats,
     quality: &DataQualityStats,
     delta_summary: Option<&str>,
+    coverage: Option<CoverageNote<'_>>,
     previous_card: Option<&str>,
     with_prescription: bool,
     max_chars: usize,
@@ -189,17 +205,25 @@ pub fn build_final_prompt_with_delta_and_budget(
     } else {
         "当前输入是单一窗口聚合；只有各维度分析提供显式时序证据时，才可输出趋势结论。"
     };
+    let coverage_guard = match coverage {
+        Some(note) if !note.trend_comparable => "前后两期覆盖不可比：不得输出任何认知、能力或习惯的升降、改善或退化结论；只写“本周表现”，并在本期变化中写明覆盖差异。",
+        Some(_) => "覆盖可比；仍只有同类任务的前后证据才能写变化，否则写“本周表现”。",
+        None => "未提供覆盖说明：不能声称采集完整，不得输出认知升降结论。",
+    };
+    let coverage_raw = coverage
+        .map(|note| note.summary)
+        .unwrap_or("未提供覆盖说明。");
 
     let prescription_section = if with_prescription {
         r#"
 
 ## 上周假设复查
-逐条对照“上周的认知假设与实验”：实验是否真的做了、假设在本期会话里是成立、被推翻还是证据不足。若卡片附有“确定性计数”，先用它判断实验是否执行：它是 refine 直接在原始会话里统计检测信号的结果，比各维度摘要更可靠；用样例区分真实执行与只是讨论这句话，并写出计数。每个判断引用本期具体会话或决策作证据；没有证据就写“证据不足”，不得补猜。没有上周卡片时只写“首期，无可复查假设”。
+逐条对照“上周的认知假设与实验”：实验是否真的做了、假设在本期会话里是成立、被推翻还是证据不足。实验未执行不能推出你没有进步；干预后的成功也不能自动否定此前的习惯。若卡片附有“确定性计数”，先用它判断实验是否执行：它是 refine 直接在原始会话里统计检测信号的结果，比各维度摘要更可靠；用样例区分真实执行与只是讨论这句话，并写出计数。每个判断引用本期具体会话或决策作证据；没有证据就写“证据不足”，不得补猜。没有上周卡片时只写“首期，无可复查假设”。
 
 ## 本周认知假设
 只写一个关于“你如何思考、判断或决策”的假设（不是代码或项目该改什么）。格式:
 - **假设**: 一句话，可被证伪
-- **证据**: 至少 2 条本期具体会话、决策或阻力
+- **证据**: 至少 2 条可归到你的本期观测（按归因规则，注明 [主体] 标签与原话）；不足 2 条时写“证据不足”，假设仅作待验证问题
 - **反例条件**: 下周看到什么就说明假设不成立
 
 ## 本周实验
@@ -217,10 +241,11 @@ pub fn build_final_prompt_with_delta_and_budget(
         .map(|card| card.replace("## ", "### "))
         .unwrap_or_else(|| "无（首期）".to_string());
 
+    let attribution_rules = ATTRIBUTION_RULES;
     let delta_raw = delta_summary
         .unwrap_or("未提供可比较的前一等长窗口。本报告是显式全历史 snapshot，不输出跨期变化。");
     let total_sessions = stats.total_sessions;
-    let render = |delta: &str, stats: &str, analysis: &str, card: &str| {
+    let render = |delta: &str, coverage: &str, stats: &str, analysis: &str, card: &str| {
         format!(
             r#"以下是对一位开发者 {sessions} 个 AI 编程会话的多维度分析结果。
 请综合所有分析，生成一份聚焦认知升级的周报。不要恭维，不要评定能力段位或给出专家占比。
@@ -229,12 +254,19 @@ pub fn build_final_prompt_with_delta_and_budget(
 报告开头必须先写新增、消失、反转和证据缺口；只有完成变化解释后，才写稳定基线。
 {delta}
 
+## 数据覆盖
+{coverage}
+{coverage_guard}
+
 ## 全局数据
 {stats}
 
 ## Cohort 与数据质量
 {quality}
 {trend_guard}
+
+## 判断主体
+{attribution_rules}
 
 ## 上周的认知假设与实验
 {card}
@@ -249,34 +281,44 @@ pub fn build_final_prompt_with_delta_and_budget(
 # Session Insights Report
 
 ## 本期变化
-依次写新增、消失、反转和证据缺口。没有证据时明确写“不可判定”，不得补猜；没有显式时序证据或数据质量不允许时，写“趋势不可判定”。{prescription_section}
+依次写新增、消失、反转和证据缺口。没有证据时明确写“不可判定”，不得补猜；没有显式时序证据、数据质量或覆盖不允许时，写“趋势不可判定”。采集不完整时照写“采集不完整”。
+
+## 本周你作出的判断
+最多 3 条，只用可归到你的观测：写原话要点、所在项目和后续结果。没有时写“本周无可归到你的判断证据”。会话数、认知水平标签、项目数或 bug/decision 数量不代表能力、工时、缺陷率或回报。{prescription_section}
 
 ## 稳定基线
 一段话概括仍然成立的整体状态，附关键数字并引用具体项目名。
 
 ## 阻力热点
-最多 3 行表格: | 问题类型 | 频率 | 典型例子 | 背后的判断习惯 |"#,
+最多 3 行表格: | 问题类型 | 频率 | 典型例子 | 归因 |
+归因只能填：用户事前未说明 / 用户已说明但 Agent 违背 / Agent 执行问题 / 主体不明，依据判断主体规则。"#,
             sessions = total_sessions,
             delta = delta,
+            coverage = coverage,
+            coverage_guard = coverage_guard,
             stats = stats,
             quality = quality_summary,
             trend_guard = trend_guard,
+            attribution_rules = attribution_rules,
             card = card,
             analysis = analysis,
         )
     };
 
-    let skeleton = render("", "", "", "");
+    let skeleton = render("", "", "", "", "");
     let remaining = max_chars.saturating_sub(skeleton.chars().count());
-    let delta_budget = remaining / 4;
-    let stats_budget = remaining / 6;
+    let delta_budget = remaining / 5;
+    let coverage_budget = remaining / 10;
+    let stats_budget = remaining / 8;
     let card_budget = remaining / 10;
-    let analysis_budget = remaining.saturating_sub(delta_budget + stats_budget + card_budget);
+    let analysis_budget =
+        remaining.saturating_sub(delta_budget + coverage_budget + stats_budget + card_budget);
     let delta = truncate_component(delta_raw, delta_budget);
+    let coverage = truncate_component(coverage_raw, coverage_budget);
     let stats = truncate_component(&stats_summary, stats_budget);
     let card = truncate_component(&previous_card_raw, card_budget);
     let analysis = truncate_component(combined_analysis, analysis_budget);
-    let prompt = render(&delta, &stats, &analysis, &card);
+    let prompt = render(&delta, &coverage, &stats, &analysis, &card);
     truncate_component(&prompt, max_chars)
 }
 
@@ -343,11 +385,13 @@ pub fn experiment_card_action(card: &str) -> Option<String> {
 pub const INSIGHTS_SYSTEM_PROMPT: &str = "你是认知教练。\
 基于开发者的真实编程会话观测数据，找出可证伪的思维模式假设并设计小实验。\
 所有判断必须引用具体数据作为证据。禁止泛泛而谈。\
+Agent 的执行错误不得算作用户的认知习惯；判断主体不明时保留未知，不据此评价用户。\
 使用中文。用第二人称'你'。";
 
 pub const ROUTE_SYSTEM_PROMPT: &str = "你是技术成长分析师。\
 基于开发者的编程会话数据分析特定维度。\
-所有判断必须引用具体数据。控制在 3000 字以内。使用中文。";
+所有判断必须引用具体数据。Agent 的执行错误不得归因于开发者；主体不明时写未知。\
+控制在 3000 字以内。使用中文。";
 
 #[cfg(test)]
 mod tests {
@@ -438,6 +482,7 @@ mod tests {
             &DataQualityStats::default(),
             Some("新增: refine"),
             None,
+            None,
             false,
         );
         assert!(prompt.find("## 本期变化").unwrap() < prompt.find("## 稳定基线").unwrap());
@@ -462,6 +507,7 @@ mod tests {
             &stats,
             &DataQualityStats::default(),
             Some(&"变化证据".repeat(2_000)),
+            None,
             Some(&"上周卡片".repeat(2_000)),
             true,
             cap,
@@ -493,6 +539,7 @@ mod tests {
             &one_session_stats(),
             &DataQualityStats::default(),
             Some("新增: refine"),
+            None,
             Some("## 本周认知假设\n- **假设**: 需求模糊时先委托再纠偏"),
             true,
         );
@@ -511,6 +558,7 @@ mod tests {
             "analysis",
             &one_session_stats(),
             &DataQualityStats::default(),
+            None,
             None,
             None,
             true,
@@ -561,9 +609,75 @@ mod tests {
             &DataQualityStats::default(),
             None,
             None,
+            None,
             true,
         );
         assert!(prompt.contains("**检测信号**"));
         assert!(prompt.contains("确定性计数"));
+    }
+
+    #[test]
+    fn incomparable_coverage_forbids_rise_and_fall_conclusions() {
+        // Issue #264: 47 sessions from two sources against 2 from one.
+        let summary =
+            "- 来源: 本期 claude 30 会话 / codex 17 会话；上期 codex 2 会话\n- 纵向可比: 不可比";
+        let prompt = build_final_prompt_with_delta(
+            "analysis",
+            &one_session_stats(),
+            &DataQualityStats::default(),
+            Some("可比总量: sessions 2→47"),
+            Some(CoverageNote {
+                summary,
+                trend_comparable: false,
+            }),
+            None,
+            true,
+        );
+        assert!(prompt.contains(summary));
+        assert!(prompt.contains("前后两期覆盖不可比：不得输出任何认知、能力或习惯的升降"));
+        assert!(prompt.contains("只写“本周表现”"));
+        assert!(prompt.find("## 数据覆盖").unwrap() < prompt.find("## 全局数据").unwrap());
+
+        let comparable = build_final_prompt_with_delta(
+            "analysis",
+            &one_session_stats(),
+            &DataQualityStats::default(),
+            None,
+            Some(CoverageNote {
+                summary: "- 纵向可比: 可比",
+                trend_comparable: true,
+            }),
+            None,
+            true,
+        );
+        assert!(!comparable.contains("前后两期覆盖不可比"));
+        assert!(comparable.contains("同类任务的前后证据"));
+    }
+
+    #[test]
+    fn final_prompt_carries_attribution_rules_and_drops_habit_column() {
+        let prompt = build_final_prompt_with_delta(
+            "analysis",
+            &one_session_stats(),
+            &DataQualityStats::default(),
+            None,
+            None,
+            None,
+            true,
+        );
+        assert!(prompt.contains(ATTRIBUTION_RULES));
+        assert!(prompt.contains("| 问题类型 | 频率 | 典型例子 | 归因 |"));
+        assert!(
+            prompt.contains("用户事前未说明 / 用户已说明但 Agent 违背 / Agent 执行问题 / 主体不明")
+        );
+        assert!(!prompt.contains("背后的判断习惯"));
+        assert!(prompt.contains("## 本周你作出的判断"));
+        // Without a coverage note nothing may claim complete collection.
+        assert!(prompt.contains("未提供覆盖说明：不能声称采集完整"));
+        // The judgement section sits before the card, so the card stays intact.
+        assert!(
+            prompt.find("## 本周你作出的判断").unwrap() < prompt.find("## 上周假设复查").unwrap()
+        );
+        assert!(INSIGHTS_SYSTEM_PROMPT.contains("Agent 的执行错误不得算作用户的认知习惯"));
     }
 }

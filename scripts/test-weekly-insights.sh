@@ -54,8 +54,8 @@ esac
   exit 1
 }
 
-grep -Fxq 'insights --period 7 --prescription' "$CALLS_FILE" || {
-  printf 'FAIL: weekly insights did not use an explicit 7-day delta window\n' >&2
+grep -Fxq 'insights --period 7 --prescription --ingest-failed 0 --ingest-quarantined 0' "$CALLS_FILE" || {
+  printf 'FAIL: weekly insights did not use an explicit 7-day delta window with a clean ingest status\n' >&2
   exit 1
 }
 
@@ -108,8 +108,16 @@ FAKE
 }
 
 run_with_ingest "Error: 摄入不完整: 瞬态失败 5, 本次相关隔离 3"
+grep -Fxq 'insights --period 7 --prescription --ingest-failed 5 --ingest-quarantined 3' "$CALLS_FILE" || {
+  printf 'FAIL: weekly insights skipped the report or dropped ingest counts after a partial ingest\n' >&2
+  cat "$CALLS_FILE" >&2
+  exit 1
+}
+
+run_with_ingest "Error: 摄入不完整（格式变化）"
 grep -Fxq 'insights --period 7 --prescription' "$CALLS_FILE" || {
-  printf 'FAIL: weekly insights skipped the report after a partial ingest\n' >&2
+  printf 'FAIL: weekly insights did not fall back to an unknown ingest status\n' >&2
+  cat "$CALLS_FILE" >&2
   exit 1
 }
 

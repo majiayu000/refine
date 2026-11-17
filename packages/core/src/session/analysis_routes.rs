@@ -2,6 +2,7 @@
 //!
 //! 每路专注一个维度，构建 ≤25K 的压缩上下文
 
+use super::attribution::ATTRIBUTION_RULES;
 use super::clustering::{ClusterResult, ProjectCluster};
 
 const MAX_ROUTE_CONTEXT: usize = 25_000;
@@ -60,7 +61,7 @@ pub fn plan_routes(cluster: &ClusterResult) -> Vec<AnalysisRoute> {
         "这是单一 cohort 聚合；没有显式时序证据时，不得推断趋势。"
     };
     let cohort_header = format!(
-        "## Cohort contract\neligible linked observations: {} | detached excluded: {} | mode excluded: {} | source excluded: {} | pending curation excluded: {} | linked ratio: {:.1}%\n{}\n\n",
+        "## Cohort contract\neligible linked observations: {} | detached excluded: {} | mode excluded: {} | source excluded: {} | pending curation excluded: {} | linked ratio: {:.1}%\n{}\n\n{}\n\n",
         quality.eligible_observations,
         quality.detached_observations,
         quality.mode_excluded_observations,
@@ -68,6 +69,7 @@ pub fn plan_routes(cluster: &ClusterResult) -> Vec<AnalysisRoute> {
         quality.curation_excluded_observations,
         quality.linked_ratio() * 100.0,
         trend_guard,
+        ATTRIBUTION_RULES,
     );
     for route in &mut routes {
         route.prompt.insert_str(0, &cohort_header);
@@ -249,8 +251,8 @@ fn build_cognitive_evolution(id: usize, cluster: &ClusterResult) -> AnalysisRout
         prompt: format!(
             r#"## 分析任务: 认知演进 (Dreyfus/Bloom)
 
-基于认知水平分布和知识获取数据:
-1. 评估当前 Dreyfus 阶段（按领域分别评估）
+基于认知水平分布和知识获取数据。认知水平是模型对单个会话的粗标注：只描述分布，不得据此评定能力、段位或升降。
+1. 标签分布集中在哪些领域（不是能力评估）
 2. Bloom 认知层级: 活动集中在哪个层（应用/分析/评估/创造）
 3. 双环学习: 是否有质疑底层假设的迹象
 4. 学习曲线: 知识获取主题是否在变深
