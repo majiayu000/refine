@@ -25,7 +25,7 @@ use tokio::sync::Semaphore;
 const DEFAULT_LLM_CONCURRENCY: usize = 4;
 const FINAL_REPORT_REQUEST_TIMEOUT_MILLIS: u64 = 300_000;
 const INSIGHTS_PROMPT_IDENTITY: &str =
-    "insights-v2:route-v3-attribution:hypothesis-loop-v3-coverage";
+    "insights-v2:route-v4-attribution:hypothesis-loop-v4-coverage";
 const FINAL_ROUTE_CONTEXT_CHARS: usize = 24_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -686,10 +686,23 @@ mod tests {
             .iter()
             .find(|item| item.content().contains("阻力:"))
             .unwrap();
+        // Model output cited 13, 12, 11, 10; the label lists event-time order:
+        // both requests, then the delivery, then the correction.
+        let shown = |minute: i64| {
+            time(minute)
+                .with_timezone(&chrono::Local)
+                .format("%m-%d %H:%M")
+                .to_string()
+        };
+        let expected = format!(
+            "- [主体: 用户先提出→Agent 执行→用户再纠正｜用户 {}, {}, {}｜Agent {}] 竖屏需求交付成了横屏",
+            shown(0),
+            shown(7),
+            shown(326),
+            shown(30)
+        );
         assert!(
-            summary
-                .content()
-                .contains("- [主体: 用户先提出→Agent 执行→用户再纠正｜用户 "),
+            summary.content().contains(&expected),
             "{}",
             summary.content()
         );

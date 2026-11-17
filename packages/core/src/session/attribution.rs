@@ -14,13 +14,14 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 /// Shared by route and final prompts. The bracketed labels are written by
-/// refine from message roles, never by a model.
-pub const ATTRIBUTION_RULES: &str = "归因规则（条目前的 [主体: …] 由 refine 按原始消息角色与时间标注，不是模型推断）:
-- 只有「仅用户原话」「用户先提出…」可作为用户主动判断或用户习惯的证据。
+/// refine from message roles, never by a model. They record who spoke and in
+/// what order, not what was said, so the order alone never settles whether a
+/// requirement had been stated before a correction.
+pub const ATTRIBUTION_RULES: &str = "归因规则（条目前的 [主体: …] 由 refine 按原始消息角色与时间标注，只说明谁说话、先后顺序，不说明内容）:
+- 决策、问题等判断类条目：「仅一条用户原话」「多条用户原话…」「用户先提出→Agent 跟进」可作为用户主动判断的证据。
 - 「Agent 先提出或执行→用户随后回应」只能写成 Agent 提出、用户接受或否定（以原话为准）；看不出接受还是否定时写“用户态度不明”。
 - 「仅 Agent 消息」「主体不明」不得用于评价用户的认知、判断或习惯，只能写成 Agent 执行情况或证据缺口。
-- 阻力或返工若为「用户先提出→Agent 执行→用户再纠正」，或多条用户原话中较早一条已提出同一要求：归为“用户已说明但 Agent 违背”，是 Agent 执行问题，不得写成用户没说清。
-- 只有要求首次出现在 Agent 执行之后，才可写“用户事前未说明”。";
+- 阻力、返工条目：标签顺序不决定归因，要对照条目内容与引用的原话。较早的用户消息已提出纠正里的同一要求 → “用户已说明但 Agent 违背”，属 Agent 执行问题；内容明确显示该要求在 Agent 执行之后、纠正时才第一次提出 → “用户事前未说明”；看不出较早消息是否已提出 → “主体不明”。阻力条目不得默认写成用户没说清；只有归为“用户事前未说明”的阻力才可作为用户习惯的证据。";
 
 /// Speaker order of the messages one facet entry cites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,8 +30,11 @@ pub enum SpeakerPattern {
     Unknown,
     /// Only Assistant messages: whether the user accepted is not recorded.
     AgentOnly,
-    /// Only user messages.
+    /// Exactly one user message.
     UserOnly,
+    /// Several user messages and no Agent message: an earlier one may already
+    /// state what a later one asks again.
+    UserRepeated,
     /// A user message comes first; the Agent follows.
     UserFirst,
     /// User first, then the Agent, then the user again (typically a correction).
@@ -44,7 +48,8 @@ impl SpeakerPattern {
         match self {
             Self::Unknown => "主体不明",
             Self::AgentOnly => "仅 Agent 消息，用户是否接受不明",
-            Self::UserOnly => "仅用户原话",
+            Self::UserOnly => "仅一条用户原话",
+            Self::UserRepeated => "多条用户原话，较早一条是否已提出同一要求见内容",
             Self::UserFirst => "用户先提出→Agent 跟进",
             Self::UserFirstThenCorrected => "用户先提出→Agent 执行→用户再纠正",
             Self::AgentFirst => "Agent 先提出或执行→用户随后回应（接受/否定见原话）",
@@ -73,7 +78,8 @@ fn speaker_pattern(messages: &[CitedMessage]) -> SpeakerPattern {
     };
     let first_agent = messages.iter().position(|m| m.role == Speaker::Agent);
     match (first.role, first_agent) {
-        (Speaker::User, None) => SpeakerPattern::UserOnly,
+        (Speaker::User, None) if messages.len() == 1 => SpeakerPattern::UserOnly,
+        (Speaker::User, None) => SpeakerPattern::UserRepeated,
         (Speaker::Agent, _) if messages.iter().all(|m| m.role == Speaker::Agent) => {
             SpeakerPattern::AgentOnly
         }

@@ -70,7 +70,7 @@ fn issue_264_coverage_gap_is_incomparable_and_incomplete() {
         window(16, 23, &[("claude", 30), ("codex", 17)]),
         Some(window(9, 16, &[("codex", 2)])),
     );
-    let ingest = IngestRunStatus {
+    let ingest = IngestRunStatus::Counted {
         failed: 5,
         quarantined: 3,
     };
@@ -97,7 +97,7 @@ fn similar_windows_with_complete_ingest_are_comparable() {
         window(16, 23, &[("claude", 12), ("codex", 8)]),
         Some(window(9, 16, &[("claude", 9), ("codex", 6)])),
     );
-    let clean = IngestRunStatus {
+    let clean = IngestRunStatus::Counted {
         failed: 0,
         quarantined: 0,
     };
@@ -110,24 +110,64 @@ fn similar_windows_with_complete_ingest_are_comparable() {
 }
 
 #[test]
-fn partial_ingest_alone_blocks_comparison_and_unknown_ingest_is_disclosed() {
+fn partial_ingest_alone_blocks_comparison() {
     let report = manifest(
         window(16, 23, &[("codex", 10)]),
         Some(window(9, 16, &[("codex", 10)])),
     );
-    let partial = IngestRunStatus {
+    let partial = IngestRunStatus::Counted {
         failed: 1,
         quarantined: 0,
     };
     let coverage = assess_coverage(&report, at(23, 14), Some(partial));
     assert!(!coverage.trend_comparable);
-    assert!(coverage.summary.contains("采集不完整"));
+    assert!(coverage
+        .summary
+        .contains("采集不完整——本次导入失败 1、隔离 0"));
+    assert!(coverage
+        .summary
+        .contains("纵向可比: 不可比（本期采集不完整）"));
+}
 
+/// Ingest reported incomplete collection but its counts could not be parsed:
+/// the report still says collection is incomplete.
+#[test]
+fn incomplete_ingest_without_counts_is_still_incomplete() {
+    let report = manifest(
+        window(16, 23, &[("codex", 10)]),
+        Some(window(9, 16, &[("codex", 10)])),
+    );
+    let coverage = assess_coverage(
+        &report,
+        at(23, 14),
+        Some(IngestRunStatus::IncompleteUncounted),
+    );
+    assert!(!coverage.trend_comparable);
+    assert!(coverage
+        .summary
+        .contains("采集不完整——本次导入未完成，失败/隔离数未能读取"));
+    assert!(coverage
+        .summary
+        .contains("纵向可比: 不可比（本期采集不完整）"));
+}
+
+/// A manual `refine insights` run carries no ingest outcome: completeness is
+/// unknown, so the windows are not compared.
+#[test]
+fn unknown_ingest_is_disclosed_and_not_comparable() {
+    let report = manifest(
+        window(16, 23, &[("codex", 10)]),
+        Some(window(9, 16, &[("codex", 10)])),
+    );
     let unknown = assess_coverage(&report, at(23, 14), None);
-    assert!(unknown.trend_comparable);
+    assert!(!unknown.trend_comparable);
     assert!(unknown
         .summary
         .contains("未附带导入运行结果，不能确认本期采集完整"));
+    assert!(unknown
+        .summary
+        .contains("纵向可比: 不可比（本期导入状态未知，不能确认采集完整）"));
+    assert!(!unknown.summary.contains("本次导入无失败"));
 }
 
 #[test]

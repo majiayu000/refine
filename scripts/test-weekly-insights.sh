@@ -115,8 +115,8 @@ grep -Fxq 'insights --period 7 --prescription --ingest-failed 5 --ingest-quarant
 }
 
 run_with_ingest "Error: 摄入不完整（格式变化）"
-grep -Fxq 'insights --period 7 --prescription' "$CALLS_FILE" || {
-  printf 'FAIL: weekly insights did not fall back to an unknown ingest status\n' >&2
+grep -Fxq 'insights --period 7 --prescription --ingest-incomplete' "$CALLS_FILE" || {
+  printf 'FAIL: weekly insights did not keep incomplete collection when counts were unreadable\n' >&2
   cat "$CALLS_FILE" >&2
   exit 1
 }

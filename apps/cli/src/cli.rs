@@ -176,6 +176,9 @@ pub enum Commands {
         /// 上一步导入中本次相关的隔离数，写入报告的数据覆盖说明
         #[arg(long, requires = "ingest_failed")]
         ingest_quarantined: Option<usize>,
+        /// 上一步导入报告未完成但计数读不出；报告写明采集不完整
+        #[arg(long, conflicts_with_all = ["ingest_failed", "ingest_quarantined"])]
+        ingest_incomplete: bool,
     },
     /// Deterministic cognitive portrait data and quality operations.
     CognitivePortrait {
@@ -354,6 +357,28 @@ mod tests {
         };
         assert_eq!((ingest_failed, ingest_quarantined), (Some(5), Some(3)));
         assert!(Cli::try_parse_from(["refine", "insights", "--ingest-failed", "5"]).is_err());
+    }
+
+    #[test]
+    fn insights_ingest_incomplete_excludes_counts() {
+        let cli = Cli::try_parse_from(["refine", "insights", "--ingest-incomplete"]).unwrap();
+        let Commands::Insights {
+            ingest_incomplete, ..
+        } = cli.command
+        else {
+            panic!("expected insights");
+        };
+        assert!(ingest_incomplete);
+        assert!(Cli::try_parse_from([
+            "refine",
+            "insights",
+            "--ingest-incomplete",
+            "--ingest-failed",
+            "1",
+            "--ingest-quarantined",
+            "0",
+        ])
+        .is_err());
     }
 
     #[test]

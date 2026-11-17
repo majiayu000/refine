@@ -223,7 +223,7 @@ env -i HOME="$daily_home" PATH="/usr/bin:/bin" \
   || fail 'weekly insights failed with healthy bounded Remem ingestion'
 [[ "$(sed -n '1p' "$weekly_refine_log")" == 'ingest-sessions --latest 37' ]] \
   || fail 'weekly insights did not use bounded Remem-only ingestion'
-[[ "$(sed -n '2p' "$weekly_refine_log")" == 'insights --period 7 --prescription' ]] \
+[[ "$(sed -n '2p' "$weekly_refine_log")" == 'insights --period 7 --prescription --ingest-failed 0 --ingest-quarantined 0' ]] \
   || fail 'weekly insights omitted the explicit 7-day derived report'
 
 : > "$weekly_refine_log"

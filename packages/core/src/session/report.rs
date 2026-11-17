@@ -284,7 +284,10 @@ pub fn build_final_prompt_with_delta_and_budget(
 依次写新增、消失、反转和证据缺口。没有证据时明确写“不可判定”，不得补猜；没有显式时序证据、数据质量或覆盖不允许时，写“趋势不可判定”。采集不完整时照写“采集不完整”。
 
 ## 本周你作出的判断
-最多 3 条，只用可归到你的观测：写原话要点、所在项目和后续结果。没有时写“本周无可归到你的判断证据”。会话数、认知水平标签、项目数或 bug/decision 数量不代表能力、工时、缺陷率或回报。{prescription_section}
+最多 3 条，只用可归到你的观测：写原话要点、所在项目和后续结果。没有时写“本周无可归到你的判断证据”。会话数、认知水平标签、项目数或 bug/decision 数量不代表能力、工时、缺陷率或回报。
+
+## 重复纠正与返工
+同类问题是否更早被识别（在 Agent 执行前就说明）、同一要求的重复纠正或返工是否减少：只拿本期与上期的同类任务对照，各引用一条具体会话或阻力及其 [主体] 标签。Agent 违背已说明要求造成的返工记为 Agent 执行问题，不算你的退步；主体不明的返工不计入。覆盖不可比或缺少前后同类任务时写“本周表现：…”，不写更早、更少或改善。{prescription_section}
 
 ## 稳定基线
 一段话概括仍然成立的整体状态，附关键数字并引用具体项目名。
@@ -672,6 +675,15 @@ mod tests {
         );
         assert!(!prompt.contains("背后的判断习惯"));
         assert!(prompt.contains("## 本周你作出的判断"));
+        // Issue #264 question 2: earlier recognition and repeated corrections,
+        // compared only across like tasks.
+        assert!(prompt.contains("## 重复纠正与返工"));
+        assert!(prompt.contains("同一要求的重复纠正或返工是否减少"));
+        assert!(prompt.contains("Agent 违背已说明要求造成的返工记为 Agent 执行问题"));
+        assert!(prompt.contains("缺少前后同类任务时写“本周表现：…”"));
+        assert!(
+            prompt.find("## 本周你作出的判断").unwrap() < prompt.find("## 重复纠正与返工").unwrap()
+        );
         // Without a coverage note nothing may claim complete collection.
         assert!(prompt.contains("未提供覆盖说明：不能声称采集完整"));
         // The judgement section sits before the card, so the card stays intact.

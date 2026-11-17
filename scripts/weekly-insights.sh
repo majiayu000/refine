@@ -72,7 +72,8 @@ elif grep -q '摄入不完整' "$ingest_output"; then
   if [[ "$incomplete_line" =~ 瞬态失败\ ([0-9]+),\ 本次相关隔离\ ([0-9]+) ]]; then
     INGEST_STATUS_ARGS=(--ingest-failed "${BASH_REMATCH[1]}" --ingest-quarantined "${BASH_REMATCH[2]}")
   else
-    log "WARNING: could not read ingest failure counts; the report will mark ingest status unknown"
+    log "WARNING: could not read ingest failure counts; the report will still state incomplete collection"
+    INGEST_STATUS_ARGS=(--ingest-incomplete)
   fi
 else
   log "ERROR: ingest-sessions failed; refusing to generate derived insights"

@@ -161,9 +161,11 @@ mirror score
 
 `refine insights --ingest-failed F --ingest-quarantined Q` records the preceding
 ingest run's failure and quarantine counts in the report's coverage section; the
-weekly job passes them automatically. Without them the report says it cannot
-confirm complete collection. Any failure or quarantine is reported as
-incomplete collection, and the report then draws no rise/fall conclusion.
+weekly job passes them automatically, or `--ingest-incomplete` when ingest
+reported incomplete collection but its counts could not be read. Any failure,
+quarantine or `--ingest-incomplete` is reported as incomplete collection.
+Without any of these flags the report says it cannot confirm complete
+collection. In both cases the report draws no rise/fall conclusion.
 
 `--latest N` bounds the final eligible pending set. Refine still requests the
 complete Remem summary collection for identity checks, scans newest-first, and

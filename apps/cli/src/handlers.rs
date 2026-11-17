@@ -75,6 +75,7 @@ pub async fn run(
             prescription,
             ingest_failed,
             ingest_quarantined,
+            ingest_incomplete,
         } => {
             let llm_client = Some(build_llm_client_from_env()?);
             let item_store: Arc<dyn ItemRepository> = store.clone();
@@ -84,14 +85,11 @@ pub async fn run(
                     period: if all { None } else { Some(period.unwrap_or(7)) },
                     all_snapshot: all,
                     with_prescription: prescription,
-                    ingest: ingest_failed
-                        .zip(ingest_quarantined)
-                        .map(
-                            |(failed, quarantined)| crate::insights_coverage::IngestRunStatus {
-                                failed,
-                                quarantined,
-                            },
-                        ),
+                    ingest: crate::insights_coverage::IngestRunStatus::from_flags(
+                        ingest_failed,
+                        ingest_quarantined,
+                        ingest_incomplete,
+                    ),
                 },
                 item_store,
                 doc_store,

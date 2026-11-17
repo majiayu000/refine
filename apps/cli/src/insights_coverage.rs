@@ -13,16 +13,43 @@ use std::collections::BTreeSet;
 /// compared. One fixed ratio, not a scoring system.
 const MAX_COMPARABLE_SESSION_RATIO: usize = 2;
 
-/// Outcome of the ingest run that preceded this report, when the caller knows it.
+/// Outcome of the ingest run that preceded this report, when the caller knows
+/// it. A caller that knows nothing passes `None`: the report then cannot claim
+/// complete collection and draws no rise/fall conclusion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct IngestRunStatus {
-    pub failed: usize,
-    pub quarantined: usize,
+pub(crate) enum IngestRunStatus {
+    /// The run finished with these failure and quarantine counts.
+    Counted { failed: usize, quarantined: usize },
+    /// The run reported incomplete collection but its counts could not be read.
+    IncompleteUncounted,
 }
 
 impl IngestRunStatus {
+    /// Map the `refine insights` ingest flags; no flags means unknown.
+    pub(crate) fn from_flags(
+        failed: Option<usize>,
+        quarantined: Option<usize>,
+        incomplete: bool,
+    ) -> Option<Self> {
+        if incomplete {
+            return Some(Self::IncompleteUncounted);
+        }
+        failed
+            .zip(quarantined)
+            .map(|(failed, quarantined)| Self::Counted {
+                failed,
+                quarantined,
+            })
+    }
+
     fn is_incomplete(self) -> bool {
-        self.failed > 0 || self.quarantined > 0
+        match self {
+            Self::Counted {
+                failed,
+                quarantined,
+            } => failed > 0 || quarantined > 0,
+            Self::IncompleteUncounted => true,
+        }
     }
 }
 
@@ -101,11 +128,20 @@ fn freshest(window: &WindowManifest) -> String {
 fn ingest_line(ingest: Option<IngestRunStatus>) -> String {
     match ingest {
         None => "导入: 本报告未附带导入运行结果，不能确认本期采集完整".to_string(),
-        Some(status) if status.is_incomplete() => format!(
-            "导入: 采集不完整——本次导入失败 {}、隔离 {}；报告只基于已入库数据",
-            status.failed, status.quarantined
+        Some(IngestRunStatus::IncompleteUncounted) => {
+            "导入: 采集不完整——本次导入未完成，失败/隔离数未能读取；报告只基于已入库数据"
+                .to_string()
+        }
+        Some(IngestRunStatus::Counted {
+            failed: 0,
+            quarantined: 0,
+        }) => "导入: 本次导入无失败、无隔离（只说明本次运行，不代表历史全部覆盖）".to_string(),
+        Some(IngestRunStatus::Counted {
+            failed,
+            quarantined,
+        }) => format!(
+            "导入: 采集不完整——本次导入失败 {failed}、隔离 {quarantined}；报告只基于已入库数据"
         ),
-        Some(_) => "导入: 本次导入无失败、无隔离（只说明本次运行，不代表历史全部覆盖）".to_string(),
     }
 }
 
@@ -147,8 +183,10 @@ fn incomparable_reasons(
             "会话数 {before}→{now} 相差超过 {MAX_COMPARABLE_SESSION_RATIO} 倍"
         ));
     }
-    if ingest.is_some_and(IngestRunStatus::is_incomplete) {
-        reasons.push("本期采集不完整".to_string());
+    match ingest {
+        None => reasons.push("本期导入状态未知，不能确认采集完整".to_string()),
+        Some(status) if status.is_incomplete() => reasons.push("本期采集不完整".to_string()),
+        Some(_) => {}
     }
     reasons
 }
