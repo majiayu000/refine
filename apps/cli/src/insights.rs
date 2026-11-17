@@ -25,7 +25,7 @@ use tokio::sync::Semaphore;
 const DEFAULT_LLM_CONCURRENCY: usize = 4;
 const FINAL_REPORT_REQUEST_TIMEOUT_MILLIS: u64 = 300_000;
 const INSIGHTS_PROMPT_IDENTITY: &str =
-    "insights-v2:route-v4-attribution:hypothesis-loop-v4-coverage";
+    "insights-v2:route-v4-attribution:hypothesis-loop-v5-neutral-attribution";
 const FINAL_ROUTE_CONTEXT_CHARS: usize = 24_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -695,7 +695,7 @@ mod tests {
                 .to_string()
         };
         let expected = format!(
-            "- [主体: 用户先提出→Agent 执行→用户再纠正｜用户 {}, {}, {}｜Agent {}] 竖屏需求交付成了横屏",
+            "- [主体: 用户消息→Agent 消息→用户后续回应（内容性质未确认）｜用户 {}, {}, {}｜Agent {}] 竖屏需求交付成了横屏",
             shown(0),
             shown(7),
             shown(326),

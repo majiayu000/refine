@@ -72,7 +72,10 @@ fn vertical_screen_case_keeps_request_before_deviation_order() {
     );
     let annotated = annotate_observations(&items, &attributions);
     let line = friction_line(&annotated);
-    assert!(line.contains("用户先提出→Agent 执行→用户再纠正"), "{line}");
+    assert!(
+        line.contains("用户消息→Agent 消息→用户后续回应（内容性质未确认）"),
+        "{line}"
+    );
     assert!(
         line.contains("用户 10-16 14:18, 10-16 14:25, 10-16 19:44"),
         "{line}"
@@ -132,7 +135,7 @@ fn vague_request_then_new_requirement_has_the_same_label_as_a_violation() {
     let line = friction_line(&annotate_observations(&items, &attributions));
     assert!(
         line.starts_with(
-            "- [主体: 用户先提出→Agent 执行→用户再纠正｜用户 10-20 10:00, 10-20 11:00｜Agent 10-20 10:30]"
+            "- [主体: 用户消息→Agent 消息→用户后续回应（内容性质未确认）｜用户 10-20 10:00, 10-20 11:00｜Agent 10-20 10:30]"
         ),
         "{line}"
     );
@@ -153,11 +156,11 @@ fn labels_never_assign_responsibility() {
         SpeakerPattern::UserOnly,
         SpeakerPattern::UserRepeated,
         SpeakerPattern::UserFirst,
-        SpeakerPattern::UserFirstThenCorrected,
+        SpeakerPattern::UserFirstThenFollowedUp,
         SpeakerPattern::AgentFirst,
     ] {
         let label = pattern.label();
-        for verdict in ["违背", "未说明", "没说清", "习惯"] {
+        for verdict in ["违背", "未说明", "没说清", "习惯", "纠正", "执行"] {
             assert!(!label.contains(verdict), "{label}");
         }
     }
@@ -180,7 +183,7 @@ fn requirement_first_seen_after_agent_execution_is_agent_first() {
         &sources,
     );
     let line = friction_line(&annotate_observations(&items, &attributions));
-    assert!(line.contains("Agent 先提出或执行→用户随后回应"), "{line}");
+    assert!(line.contains("Agent 消息在先→用户随后回应"), "{line}");
     assert!(ATTRIBUTION_RULES.contains("阻力、返工条目：标签顺序不决定归因"));
 }
 
@@ -268,7 +271,8 @@ fn sessions_without_evidence_or_mapping_are_unknown_and_keep_timestamps() {
 }
 
 #[test]
-fn user_first_decision_is_user_judgment() {
+fn user_first_question_does_not_establish_user_judgment() {
+    assert!(ATTRIBUTION_RULES.contains("混合用户与 Agent 消息的判断条目一律标为“判断归属未确认”"));
     let sources = vec![
         message(40, MessageRole::User, at(19, 8, 0)),
         message(41, MessageRole::Assistant, at(19, 8, 3)),
@@ -276,7 +280,7 @@ fn user_first_decision_is_user_judgment() {
     ];
     let (items, attributions) = project(
         json!({
-            "session_summary": "选择存储",
+            "session_summary": "用户问用什么数据库，Agent 建议 SQLite；用户尚未表态",
             "cognitive_level": "unknown",
             "collaboration_mode": "pair_programming",
             "decisions": ["用 SQLite 而不是 Postgres"],
@@ -287,8 +291,8 @@ fn user_first_decision_is_user_judgment() {
     let annotated = annotate_observations(&items, &attributions);
     assert!(annotated[1]
         .title()
-        .starts_with("[主体: 用户先提出→Agent 跟进｜用户 10-19 08:00｜Agent 10-19 08:03]"));
+        .starts_with("[主体: 用户消息在先→Agent 消息在后（判断归属未确认）｜用户 10-19 08:00｜Agent 10-19 08:03]"));
     assert!(annotated[0].content().contains(
-        "- [主体: 用户先提出→Agent 跟进｜用户 10-19 08:00｜Agent 10-19 08:03] 用 SQLite"
+        "- [主体: 用户消息在先→Agent 消息在后（判断归属未确认）｜用户 10-19 08:00｜Agent 10-19 08:03] 用 SQLite"
     ));
 }
