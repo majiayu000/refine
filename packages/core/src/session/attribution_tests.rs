@@ -95,14 +95,72 @@ fn vertical_screen_case_with_only_user_quotes_stays_in_time_order() {
         &vertical_screen_sources(),
     );
     let line = friction_line(&annotate_observations(&items, &attributions));
-    // Two earlier user messages precede the correction: the rules then call it
-    // a stated requirement the Agent violated, not an unstated one.
+    // Only the user's messages are cited. Several user quotes are not "one
+    // user quote", so this friction is not user-habit evidence by its label.
     assert!(
-        line.contains("[主体: 仅用户原话｜用户 10-16 14:18, 10-16 14:25, 10-16 19:44]"),
+        line.contains(
+            "[主体: 多条用户原话，较早一条是否已提出同一要求见内容｜用户 10-16 14:18, 10-16 14:25, 10-16 19:44]"
+        ),
         "{line}"
     );
-    assert!(ATTRIBUTION_RULES.contains("较早一条已提出同一要求"));
-    assert!(ATTRIBUTION_RULES.contains("不得写成用户没说清"));
+    assert!(!line.contains("仅一条用户原话"), "{line}");
+    assert!(ATTRIBUTION_RULES.contains("阻力条目不得默认写成用户没说清"));
+    assert!(ATTRIBUTION_RULES.contains("只有归为“用户事前未说明”的阻力才可作为用户习惯的证据"));
+}
+
+/// "用户未说明" with the initial vague request cited: the user asked for an MV,
+/// the Agent delivered landscape, and only then the user asked for vertical.
+/// Its speaker order equals the vertical-screen case, so the label cannot and
+/// does not decide that the Agent violated a stated requirement.
+#[test]
+fn vague_request_then_new_requirement_has_the_same_label_as_a_violation() {
+    let sources = vec![
+        message(50, MessageRole::User, at(20, 10, 0)),
+        message(51, MessageRole::Assistant, at(20, 10, 30)),
+        message(52, MessageRole::User, at(20, 11, 0)),
+    ];
+    let (items, attributions) = project(
+        json!({
+            "session_summary": "做个 MV",
+            "cognitive_level": "unknown",
+            "collaboration_mode": "delegation",
+            "friction": ["交付横屏后才提出要竖屏"],
+            "evidence": [{"field": "friction", "index": 0, "message_ids": [52, 51, 50]}],
+        }),
+        &sources,
+    );
+    let line = friction_line(&annotate_observations(&items, &attributions));
+    assert!(
+        line.starts_with(
+            "- [主体: 用户先提出→Agent 执行→用户再纠正｜用户 10-20 10:00, 10-20 11:00｜Agent 10-20 10:30]"
+        ),
+        "{line}"
+    );
+    // The rules send this pattern to the entry content, with unknown as the
+    // fallback, instead of mapping it to "Agent 违背".
+    assert!(ATTRIBUTION_RULES.contains("标签顺序不决定归因"));
+    assert!(ATTRIBUTION_RULES
+        .contains("内容明确显示该要求在 Agent 执行之后、纠正时才第一次提出 → “用户事前未说明”"));
+    assert!(ATTRIBUTION_RULES.contains("看不出较早消息是否已提出 → “主体不明”"));
+}
+
+/// A label states speaker order only; no label may itself assign blame.
+#[test]
+fn labels_never_assign_responsibility() {
+    for pattern in [
+        SpeakerPattern::Unknown,
+        SpeakerPattern::AgentOnly,
+        SpeakerPattern::UserOnly,
+        SpeakerPattern::UserRepeated,
+        SpeakerPattern::UserFirst,
+        SpeakerPattern::UserFirstThenCorrected,
+        SpeakerPattern::AgentFirst,
+    ] {
+        let label = pattern.label();
+        for verdict in ["违背", "未说明", "没说清", "习惯"] {
+            assert!(!label.contains(verdict), "{label}");
+        }
+    }
 }
 
 #[test]
@@ -123,7 +181,29 @@ fn requirement_first_seen_after_agent_execution_is_agent_first() {
     );
     let line = friction_line(&annotate_observations(&items, &attributions));
     assert!(line.contains("Agent 先提出或执行→用户随后回应"), "{line}");
-    assert!(ATTRIBUTION_RULES.contains("只有要求首次出现在 Agent 执行之后，才可写“用户事前未说明”"));
+    assert!(ATTRIBUTION_RULES.contains("阻力、返工条目：标签顺序不决定归因"));
+}
+
+#[test]
+fn single_user_quote_is_user_only() {
+    let sources = vec![message(60, MessageRole::User, at(21, 9, 0))];
+    let (items, attributions) = project(
+        json!({
+            "session_summary": "选型",
+            "cognitive_level": "unknown",
+            "collaboration_mode": "pair_programming",
+            "questions": ["是否需要单独服务"],
+            "evidence": [{"field": "questions", "index": 0, "message_ids": [60]}],
+        }),
+        &sources,
+    );
+    let content = annotate_observations(&items, &attributions)[0]
+        .content()
+        .to_string();
+    assert!(
+        content.contains("- [主体: 仅一条用户原话｜用户 10-21 09:00] 是否需要单独服务"),
+        "{content}"
+    );
 }
 
 #[test]
