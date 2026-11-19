@@ -65,6 +65,10 @@ impl LlmRunBudget {
         }
     }
 
+    pub fn max_attempts(&self) -> u64 {
+        self.max_attempts
+    }
+
     pub(crate) fn reserve(&self, prompt: &str, system: &str) -> InfraResult<LlmBudgetReservation> {
         let token_ceiling = request_token_ceiling(prompt, system);
         let mut state = self.state.lock().map_err(|_| {
