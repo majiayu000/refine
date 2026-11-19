@@ -242,11 +242,60 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    /// Linux fails exec with ETXTBSY while any process holds the file open for
+    /// writing, and a child forked by a concurrently running test keeps a copy
+    /// of this process's descriptors until it execs. `cp` creates the
+    /// executable, so its write descriptor never exists in the test process.
+    fn write_executable(path: &std::path::Path, contents: &str) {
+        let staged = path.with_extension("staged");
+        std::fs::write(&staged, contents).unwrap();
+        let copied = std::process::Command::new("cp")
+            .arg(&staged)
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(copied.success(), "cp to {} failed", path.display());
+        std::fs::remove_file(&staged).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     fn script(dir: &tempfile::TempDir, body: &str) -> PathBuf {
         let path = dir.path().join("llm");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(&path, &format!("#!/bin/sh\n{body}\n"));
         path
+    }
+
+    /// Only Linux refuses to exec a file that is open for writing, so only
+    /// there can this catch a helper that writes through its own descriptor.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn written_executable_runs_while_other_threads_fork() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let done = std::sync::Arc::new(AtomicBool::new(false));
+        let forkers: Vec<_> = (0..2)
+            .map(|_| {
+                let done = done.clone();
+                std::thread::spawn(move || {
+                    while !done.load(Ordering::Relaxed) {
+                        std::process::Command::new("true").status().unwrap();
+                    }
+                })
+            })
+            .collect();
+        let failure = (0..300).find_map(|round| {
+            let path = dir.path().join(format!("script-{round}"));
+            write_executable(&path, "#!/bin/sh\n");
+            std::process::Command::new(&path).status().err()
+        });
+        done.store(true, Ordering::Relaxed);
+        for forker in forkers {
+            forker.join().unwrap();
+        }
+        assert!(
+            failure.is_none(),
+            "a freshly written script failed to start: {failure:?}"
+        );
     }
 
     #[test]
@@ -369,9 +418,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let agent = dir.path().join("agent");
         let pid_file = dir.path().join("agent.pid");
-        std::fs::write(
+        write_executable(
             &agent,
-            format!(
+            &format!(
                 r#"#!/bin/sh
 sleep 60 &
 printf '%s,%s' "$$" "$!" > {:?}
@@ -384,9 +433,7 @@ done
 "#,
                 pid_file.to_str().unwrap()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let wrapper = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../scripts/examples/weekly-llm-cursor.py");
         let program = script(

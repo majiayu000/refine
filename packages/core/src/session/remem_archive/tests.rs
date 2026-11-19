@@ -712,8 +712,19 @@ mod process_runner_guards {
         }
     }
 
+    /// `cp` creates the executable so that no write descriptor for it exists in
+    /// this process: a child forked by another test would keep a copy until it
+    /// execs, and Linux fails exec with ETXTBSY while a file is open for writing.
     fn write_executable(path: &Path, body: &str) {
-        std::fs::write(path, body).expect("write fake remem");
+        let staged = path.with_extension("staged");
+        std::fs::write(&staged, body).expect("stage fake remem");
+        let copied = std::process::Command::new("cp")
+            .arg(&staged)
+            .arg(path)
+            .status()
+            .expect("copy fake remem");
+        assert!(copied.success(), "cp to {} failed", path.display());
+        std::fs::remove_file(&staged).expect("remove staged fake remem");
         let mut permissions = std::fs::metadata(path).unwrap().permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(path, permissions).expect("chmod fake remem");

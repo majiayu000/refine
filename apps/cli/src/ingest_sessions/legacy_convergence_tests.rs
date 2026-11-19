@@ -438,6 +438,65 @@ async fn unrelated_legacy_document_does_not_pull_unchanged_v2_body() {
     assert!(!marker.exists(), "full Remem body command was invoked");
 }
 
+/// Ingests twice a stored session that its summary alone marks for cleanup.
+async fn assert_cleared_session_is_not_loaded_again(summary: RememSessionSummary) {
+    let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));
+    let doc_store: Arc<dyn DocumentRepository> = store.clone();
+    let item_store: Arc<dyn ItemRepository> = store;
+    let mut stable = Document::new("codex-session", "");
+    stable.set_url(&summary.stable_document_url());
+    stable.set_source_version(Some(&summary.projection_version()));
+    doc_store.save(&stable).await.expect("seed stable document");
+    let observation = tagged_observation(&stable, "bot", "bot content", "bot-tag");
+    item_store
+        .save(&observation)
+        .await
+        .expect("seed stored observation");
+
+    let temp = tempfile::tempdir().expect("temporary remem and lock directory");
+    {
+        // The run that clears the stored observations still loads the body.
+        let _remem_bin = install_remem_messages(&temp);
+        handle_test_summaries(&temp, vec![summary.clone()], doc_store.clone())
+            .await
+            .expect("stored observations are cleared");
+    }
+    assert!(item_ids(&item_store).await.is_empty());
+
+    let (_remem_bin, marker) = install_forbidden_remem(&temp);
+    let rerun = handle_test_summaries(&temp, vec![summary], doc_store).await;
+
+    assert!(
+        !marker.exists(),
+        "full Remem body command was invoked again"
+    );
+    rerun.expect("a cleared session must not fail the run");
+}
+
+#[tokio::test]
+async fn cleared_excluded_project_session_is_not_loaded_again() {
+    super::exclusions::set_test_patterns(&["/repo"]);
+    let summary = test_summary(
+        "codex-cli",
+        "remem://raw-session/v2/636f6465782d636c69/6c6f63616c/2f7265706f/7331",
+        true,
+    );
+    assert_cleared_session_is_not_loaded_again(summary).await;
+    super::exclusions::set_test_patterns(&[]);
+}
+
+#[tokio::test]
+async fn cleared_looper_session_is_not_loaded_again() {
+    let mut summary = test_summary(
+        "codex-cli",
+        "remem://raw-session/v2/636f6465782d636c69/6c6f63616c/2f7265706f/7331",
+        true,
+    );
+    summary.user_message_samples =
+        vec!["You are executing Looper scheduled skill \"daily\". Follow the spec.".to_string()];
+    assert_cleared_session_is_not_loaded_again(summary).await;
+}
+
 #[tokio::test]
 async fn unchanged_stable_v2_converges_coexisting_v1_and_local_copies() {
     let store = Arc::new(SqliteStore::in_memory().expect("in-memory sqlite store"));

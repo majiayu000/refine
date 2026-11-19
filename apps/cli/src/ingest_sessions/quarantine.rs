@@ -335,6 +335,40 @@ mod tests {
         assert_eq!(store.len(), 2);
     }
 
+    #[tokio::test]
+    async fn quarantine_only_selection_reports_incomplete_ingestion() {
+        use refine_core::knowledge::DocumentRepository;
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = QuarantineStore::load_from(temp.path().join("queue.jsonl")).unwrap();
+        store.record("remem://selected", Some("v1"), "blocked", "selected");
+        let selected = HashSet::from([record_key("remem://selected", Some("v1"))]);
+        let doc_store: std::sync::Arc<dyn DocumentRepository> =
+            std::sync::Arc::new(refine_core::infra::SqliteStore::in_memory().unwrap());
+
+        // Nothing is pending: the quarantined session is the whole selection.
+        let error = super::super::worker::process_pending_sessions(
+            Vec::new(),
+            0,
+            0,
+            0,
+            selected.len(),
+            selected,
+            false,
+            false,
+            Some(store),
+            doc_store,
+            None,
+        )
+        .await
+        .expect_err("a selected quarantined session keeps ingestion incomplete");
+
+        // daily-refresh.sh and weekly-insights.sh match this prefix to tell an
+        // unfinished run, which still refreshes reports, from a failed one.
+        let message = error.to_string();
+        assert!(message.starts_with("摄入不完整: "), "{message}");
+        assert!(message.contains("本次相关隔离 1"), "{message}");
+    }
+
     #[test]
     fn changed_snapshot_is_not_blocked_by_old_rejection() {
         let temp = tempfile::tempdir().unwrap();
